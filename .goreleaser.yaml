@@ -1,0 +1,44 @@
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - 386
+      - arm
+      - mips
+      - amd64
+      - arm64
+    goarm:
+      - 5
+      - 6
+      - 7
+    gomips:
+      - softfloat
+    main: ./cmd/ctrld
+archives:
+  - format_overrides:
+      - goos: windows
+        format: zip
+    strip_parent_binary_folder: true
+    wrap_in_directory: true
+    files:
+      - README.md
+checksum:
+  name_template: 'checksums.txt'
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
