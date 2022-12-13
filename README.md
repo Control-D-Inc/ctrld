@@ -15,29 +15,29 @@ All DNS protocols are supported, including:
 ## Use Cases
 1. Use secure DNS protocols on networks and devices that don't natively support them (legacy routers, legacy OSes, TVs, smart toasters).
 2. Create source IP based DNS routing policies with variable secure DNS upstreams. Subnet 1 (admin) uses upstream resolver A, while Subnet 2 (employee) uses upstream resolver B.
-3. Create destination IP based DNS routing policies with variable secure DNS upstreams. Listener 1 uses upstream resolver C, while Listener 2 uses upstream resolver D. 
+3. Create destination IP based DNS routing policies with variable secure DNS upstreams. Listener 1 uses upstream resolver C, while Listener 2 uses upstream resolver D.
 4. Create domain level "split horizon" DNS routing policies to send internal domains (*.company.int) to a local DNS server, while everything else goes to another upstream.
 
 
 ## OS Support
 - Windows (386, amd64, arm)
-- Mac (amd64, arm)
+- Mac (amd64, arm64)
 - Linux (386, amd64, arm, mips)
 
 ## Download
-Download pre-compiled binaries from the [Releases](#) section.
+Download pre-compiled binaries from the [Releases](https://github.com/Control-D-Inc/ctrld/releases) section.
 
 ## Build
 `ctrld` requires `go1.19+`:
 
 ```shell
-$ go build
+$ go build ./cmd/ctrld
 ```
 
-or 
+or
 
 ```shell
-$ go install <path_to_repo>
+$ go install github.com/Control-D-Inc/ctrld/cmd/ctrld@latest
 ```
 
 ## Arguments
@@ -59,7 +59,7 @@ Flags:
 Use "ctrld [command] --help" for more information about a command.
 ```
 ## Usage
-To start the server with default configuration, simply run: `ctrld run`. This will create a generic `config.toml` file in the working directory and start the service. 
+To start the server with default configuration, simply run: `ctrld run`. This will create a generic `config.toml` file in the working directory and start the service.
 1. Start the server
   ```
   $ sudo ./ctrld run
@@ -76,13 +76,13 @@ If `verify.controld.com` resolves, you're successfully using the default Control
 
 
 ## Configuration
-### Example 
+### Example
 - Start `listener.0` on 127.0.0.1:53
 - Accept queries from any source address
 - Send all queries to `upstream.0` via DoH protocol
 
 ### Default Config
-```toml                                               
+```toml
 [listener]
 
   [listener.0]
@@ -118,15 +118,15 @@ If `verify.controld.com` resolves, you're successfully using the default Control
 
 ```
 
-### Advanced 
-The above is the most basic example, which will work out of the box. If you're looking to do advanced configurations using policies, see [Configuration Docs](docs/config.md) for complete documentation of the config file. 
+### Advanced
+The above is the most basic example, which will work out of the box. If you're looking to do advanced configurations using policies, see [Configuration Docs](docs/config.md) for complete documentation of the config file.
 
 ## Contributing
 
 See [Contribution Guideline](./docs/contributing.md)
 
 ## Roadmap
-The following functionality is on the roadmap and will be available in future releases. 
-- Prometheus metrics exporter 
+The following functionality is on the roadmap and will be available in future releases.
+- Prometheus metrics exporter
 - Local caching
-- Service self-installation 
+- Service self-installation
