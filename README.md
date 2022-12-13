@@ -47,17 +47,16 @@ Usage:
 
 Available Commands:
   help        Help about any command
-  interfaces  Manage Interface DNS settings
   run         Run the DNS proxy server
 
 Flags:
   -h, --help      help for ctrld
-  -j, --json      json output
   -v, --verbose   verbose log output
       --version   version for ctrld
 
 Use "ctrld [command] --help" for more information about a command.
 ```
+
 ## Usage
 To start the server with default configuration, simply run: `ctrld run`. This will create a generic `config.toml` file in the working directory and start the service.
 1. Start the server
