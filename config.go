@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	"github.com/go-playground/validator/v10"
 	"github.com/spf13/viper"
 )
@@ -92,9 +93,11 @@ type ListenerConfig struct {
 
 // ListenerPolicyConfig specifies the policy rules for ctrld to filter incoming requests.
 type ListenerPolicyConfig struct {
-	Name     string `mapstructure:"name" toml:"name"`
-	Networks []Rule `mapstructure:"networks" toml:"networks" validate:"dive,len=1"`
-	Rules    []Rule `mapstructure:"rules" toml:"rules" validate:"dive,len=1"`
+	Name                 string   `mapstructure:"name" toml:"name"`
+	Networks             []Rule   `mapstructure:"networks" toml:"networks" validate:"dive,len=1"`
+	Rules                []Rule   `mapstructure:"rules" toml:"rules" validate:"dive,len=1"`
+	FailoverRcodes       []string `mapstructure:"failover_rcodes" toml:"failover_rcodes" validate:"dive,dnsrcode"`
+	FailoverRcodeNumbers []int    `mapstructure:"-" toml:"-"`
 }
 
 // Rule is a map from source to list of upstreams.
@@ -122,9 +125,24 @@ func (uc *UpstreamConfig) Init() {
 	}
 }
 
+// Init initialized necessary values for an ListenerConfig.
+func (lc *ListenerConfig) Init() {
+	if lc.Policy != nil {
+		lc.Policy.FailoverRcodeNumbers = make([]int, len(lc.Policy.FailoverRcodes))
+		for i, rcode := range lc.Policy.FailoverRcodes {
+			lc.Policy.FailoverRcodeNumbers[i] = dnsrcode.FromString(rcode)
+		}
+	}
+}
+
 // ValidateConfig validates the given config.
 func ValidateConfig(validate *validator.Validate, cfg *Config) error {
+	_ = validate.RegisterValidation("dnsrcode", validateDnsRcode)
 	return validate.Struct(cfg)
+}
+
+func validateDnsRcode(fl validator.FieldLevel) bool {
+	return dnsrcode.FromString(fl.Field().String()) != -1
 }
 
 func defaultPortFor(typ string) string {

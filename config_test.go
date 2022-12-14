@@ -69,6 +69,7 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid listener port", invalidListenerPort(t), true},
 		{"os upstream", configWithOsUpstream(t), false},
 		{"invalid rules", configWithInvalidRules(t), true},
+		{"invalid dns rcodes", configWithInvalidRcodes(t), true},
 	}
 
 	for _, tc := range tests {
@@ -151,6 +152,16 @@ func configWithInvalidRules(t *testing.T) *ctrld.Config {
 		Name:     "Invalid Policy",
 		Networks: []ctrld.Rule{{"*.com": []string{"upstream.1"}, "*.net": []string{"upstream.0"}}},
 		Rules:    nil,
+	}
+	return cfg
+}
+
+func configWithInvalidRcodes(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Listener["0"].Policy = &ctrld.ListenerPolicyConfig{
+		Name:           "Policy with invalid Rcodes",
+		Networks:       []ctrld.Rule{{"*.com": []string{"upstream.0"}}},
+		FailoverRcodes: []string{"foo"},
 	}
 	return cfg
 }
