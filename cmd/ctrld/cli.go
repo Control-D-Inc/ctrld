@@ -7,10 +7,13 @@ import (
 	"os/exec"
 	"runtime"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/pelletier/go-toml"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/Control-D-Inc/ctrld"
 )
 
 var (
@@ -51,6 +54,9 @@ func initCLI() {
 			}
 			if err := v.Unmarshal(&cfg); err != nil {
 				log.Fatalf("failed to unmarshal config: %v", err)
+			}
+			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
+				log.Fatalf("invalid config: %v", err)
 			}
 			initLogging()
 			if daemon {

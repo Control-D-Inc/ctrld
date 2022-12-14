@@ -59,6 +59,7 @@ port = 1337
 
 [listener.0.policy]
 name = "My Policy"
+failover_rcodes = ["NXDOMAIN", "SERVFAIL"]
 networks = [
     {"network.0" = ["upstream.1", "upstream.0"]},
     {"network.1" = ["upstream.0"]},

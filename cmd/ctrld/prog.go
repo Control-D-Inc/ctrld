@@ -74,6 +74,7 @@ func (p *prog) run() {
 	}
 
 	for listenerNum := range p.cfg.Listener {
+		p.cfg.Listener[listenerNum].Init()
 		go func(listenerNum string) {
 			defer wg.Done()
 			listenerConfig := p.cfg.Listener[listenerNum]
