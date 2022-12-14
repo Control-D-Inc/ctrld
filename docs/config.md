@@ -300,4 +300,21 @@ Above policy will:
 
 - type: array of rule
 
+### failover_rcodes
+For non success response, `failover_rcodes` allows the request to be forwarded to next upstream, if the response `RCODE` matches any value defined in `failover_rcodes`. For example:
+
+```toml
+[listener.0.policy]
+name = "My Policy"
+failover_rcodes = ["NXDOMAIN", "SERVFAIL"]
+networks = [
+	{"network.0" = ["upstream.0", "upstream.1"]},
+]
+```
+
+If `upstream.0` returns a NXDOMAIN response, the request will be forwarded to `upstream.1` instead of returning immediately to the client.
+
+See all available DNS Rcodes value [here](rcode_link).
+
 [toml_link]: https://toml.io/en
+[rcode_link]: https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml#dns-parameters-6
