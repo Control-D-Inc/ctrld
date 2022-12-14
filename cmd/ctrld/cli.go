@@ -29,7 +29,7 @@ func initCLI() {
 	rootCmd := &cobra.Command{
 		Use:     "ctrld",
 		Short:   "Running Control-D DNS proxy server",
-		Version: "1.0.0",
+		Version: "1.0.1",
 	}
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose log output")
 
