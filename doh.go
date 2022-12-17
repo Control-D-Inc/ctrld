@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"time"
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/http3"
@@ -16,20 +15,11 @@ import (
 )
 
 func newDohResolver(uc *UpstreamConfig) *dohResolver {
-	http.DefaultTransport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		dialer := &net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 10 * time.Second,
-		}
-		Log(ctx, ProxyLog.Debug(), "debug dial context %s - %s - %s", addr, network, bootstrapDNS)
-		// if we have a bootstrap ip set, use it to avoid DNS lookup
-		if uc.BootstrapIP != "" && addr == fmt.Sprintf("%s:443", uc.Domain) {
-			addr = fmt.Sprintf("%s:443", uc.BootstrapIP)
-			Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
-		}
-		return dialer.DialContext(ctx, network, addr)
+	r := &dohResolver{
+		endpoint:  uc.Endpoint,
+		isDoH3:    uc.Type == resolverTypeDOH3,
+		transport: uc.transport,
 	}
-	r := &dohResolver{endpoint: uc.Endpoint, isDoH3: uc.Type == resolverTypeDOH3}
 	if r.isDoH3 {
 		r.doh3DialFunc = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			host := addr
@@ -57,6 +47,7 @@ type dohResolver struct {
 	endpoint     string
 	isDoH3       bool
 	doh3DialFunc func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error)
+	transport    *http.Transport
 }
 
 func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
@@ -73,7 +64,7 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("Accept", "application/dns-message")
 
-	c := http.Client{}
+	c := http.Client{Transport: r.transport}
 	if r.isDoH3 {
 		c.Transport = &http3.RoundTripper{}
 		c.Transport.(*http3.RoundTripper).Dial = r.doh3DialFunc

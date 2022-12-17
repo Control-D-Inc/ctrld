@@ -48,7 +48,6 @@ func (p *prog) run() {
 	for n := range p.cfg.Upstream {
 		uc := p.cfg.Upstream[n]
 		uc.Init()
-
 		if uc.BootstrapIP == "" {
 			// resolve it manually and set the bootstrap ip
 			c := new(dns.Client)
@@ -71,6 +70,7 @@ func (p *prog) run() {
 				}
 			}
 		}
+		uc.SetupTransport()
 	}
 
 	for listenerNum := range p.cfg.Listener {

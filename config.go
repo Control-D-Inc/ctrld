@@ -1,12 +1,17 @@
 package ctrld
 
 import (
+	"context"
+	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	"github.com/go-playground/validator/v10"
+	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
@@ -75,12 +80,13 @@ type NetworkConfig struct {
 
 // UpstreamConfig specifies configuration for upstreams that ctrld will forward requests to.
 type UpstreamConfig struct {
-	Name        string `mapstructure:"name" toml:"name"`
-	Type        string `mapstructure:"type" toml:"type" validate:"oneof=doh doh3 dot doq os legacy"`
-	Endpoint    string `mapstructure:"endpoint" toml:"endpoint" validate:"required_unless=Type os"`
-	BootstrapIP string `mapstructure:"bootstrap_ip" toml:"bootstrap_ip"`
-	Domain      string `mapstructure:"-" toml:"-"`
-	Timeout     int    `mapstructure:"timeout" toml:"timeout" validate:"gte=0"`
+	Name        string          `mapstructure:"name" toml:"name"`
+	Type        string          `mapstructure:"type" toml:"type" validate:"oneof=doh doh3 dot doq os legacy"`
+	Endpoint    string          `mapstructure:"endpoint" toml:"endpoint" validate:"required_unless=Type os"`
+	BootstrapIP string          `mapstructure:"bootstrap_ip" toml:"bootstrap_ip"`
+	Domain      string          `mapstructure:"-" toml:"-"`
+	Timeout     int             `mapstructure:"timeout" toml:"timeout" validate:"gte=0"`
+	transport   *http.Transport `mapstructure:"-" toml:"-"`
 }
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
@@ -123,6 +129,41 @@ func (uc *UpstreamConfig) Init() {
 	if net.ParseIP(uc.Domain) != nil {
 		uc.BootstrapIP = uc.Domain
 	}
+}
+
+// SetupTransport initializes the network transport used to connect to upstream server.
+// For now, only DoH upstream is supported.
+func (uc *UpstreamConfig) SetupTransport() {
+	if uc.Type != resolverTypeDOH {
+		return
+	}
+	uc.transport = http.DefaultTransport.(*http.Transport).Clone()
+	uc.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialer := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 10 * time.Second,
+		}
+		Log(ctx, ProxyLog.Debug(), "debug dial context %s - %s - %s", addr, network, bootstrapDNS)
+		// if we have a bootstrap ip set, use it to avoid DNS lookup
+		if uc.BootstrapIP != "" && addr == fmt.Sprintf("%s:443", uc.Domain) {
+			addr = fmt.Sprintf("%s:443", uc.BootstrapIP)
+			Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
+
+	// Warming up the transport by querying a test packet.
+	dnsResolver, err := NewResolver(uc)
+	if err != nil {
+		ProxyLog.Error().Err(err).Msgf("failed to create resolver for upstream: %s", uc.Name)
+		return
+	}
+	msg := new(dns.Msg)
+	msg.SetQuestion(".", dns.TypeNS)
+	msg.MsgHdr.RecursionDesired = true
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = dnsResolver.Resolve(ctx, msg)
 }
 
 // Init initialized necessary values for an ListenerConfig.
