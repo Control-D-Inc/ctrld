@@ -2,7 +2,6 @@ package ctrld
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -145,8 +144,10 @@ func (uc *UpstreamConfig) SetupTransport() {
 		}
 		Log(ctx, ProxyLog.Debug(), "debug dial context %s - %s - %s", addr, network, bootstrapDNS)
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
-		if uc.BootstrapIP != "" && addr == fmt.Sprintf("%s:443", uc.Domain) {
-			addr = fmt.Sprintf("%s:443", uc.BootstrapIP)
+		if uc.BootstrapIP != "" {
+			if _, port, _ := net.SplitHostPort(addr); port != "" {
+				addr = net.JoinHostPort(uc.BootstrapIP, port)
+			}
 			Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
 		}
 		return dialer.DialContext(ctx, network, addr)

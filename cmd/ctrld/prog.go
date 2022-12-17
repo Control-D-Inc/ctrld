@@ -51,23 +51,40 @@ func (p *prog) run() {
 		if uc.BootstrapIP == "" {
 			// resolve it manually and set the bootstrap ip
 			c := new(dns.Client)
-			m := new(dns.Msg)
-			m.SetQuestion(uc.Domain+".", dns.TypeA)
-			m.RecursionDesired = true
-			r, _, err := c.Exchange(m, net.JoinHostPort(bootstrapDNS, "53"))
-			if err != nil {
-				proxyLog.Error().Err(err).Msgf("could not resolve domain %s for upstream.%s", uc.Domain, n)
-			} else {
+			for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
+				if !supportsIPv6() && dnsType == dns.TypeAAAA {
+					continue
+				}
+				m := new(dns.Msg)
+				m.SetQuestion(uc.Domain+".", dnsType)
+				m.RecursionDesired = true
+				r, _, err := c.Exchange(m, net.JoinHostPort(bootstrapDNS, "53"))
+				if err != nil {
+					proxyLog.Error().Err(err).Msgf("could not resolve domain %s for upstream.%s", uc.Domain, n)
+					continue
+				}
 				if r.Rcode != dns.RcodeSuccess {
 					proxyLog.Error().Msgf("could not resolve domain return code: %d, upstream.%s", r.Rcode, n)
-				} else {
-					for _, a := range r.Answer {
-						if ar, ok := a.(*dns.A); ok {
-							uc.BootstrapIP = ar.A.String()
-							proxyLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
-						}
-					}
+					continue
 				}
+				if len(r.Answer) == 0 {
+					continue
+				}
+				for _, a := range r.Answer {
+					switch ar := a.(type) {
+					case *dns.A:
+						uc.BootstrapIP = ar.A.String()
+					case *dns.AAAA:
+						uc.BootstrapIP = ar.AAAA.String()
+					default:
+						continue
+					}
+					proxyLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
+					// Stop if we reached here, because we got the bootstrap IP from r.Answer.
+					break
+				}
+				// If we reached here, uc.BootstrapIP was set, nothing to do anymore.
+				break
 			}
 		}
 		uc.SetupTransport()
