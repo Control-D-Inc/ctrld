@@ -24,9 +24,6 @@ func InitConfig(v *viper.Viper, name string) {
 	v.AddConfigPath("$HOME/.ctrld")
 	v.AddConfigPath(".")
 
-	v.SetDefault("service", ServiceConfig{
-		LogLevel: "info",
-	})
 	v.SetDefault("listener", map[string]*ListenerConfig{
 		"0": {
 			IP:   "127.0.0.1",
