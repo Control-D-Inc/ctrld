@@ -31,7 +31,12 @@ func initCLI() {
 		Short:   "Running Control-D DNS proxy server",
 		Version: "1.0.1",
 	}
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose log output")
+	rootCmd.PersistentFlags().CountVarP(
+		&verbose,
+		"verbose",
+		"v",
+		`verbose log output, "-v" means query logging enabled, "-vv" means debug level logging enabled`,
+	)
 
 	runCmd := &cobra.Command{
 		Use:   "run",

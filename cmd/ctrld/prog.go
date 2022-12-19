@@ -79,7 +79,7 @@ func (p *prog) run() {
 					default:
 						continue
 					}
-					proxyLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
+					mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
 					// Stop if we reached here, because we got the bootstrap IP from r.Answer.
 					break
 				}
@@ -101,7 +101,7 @@ func (p *prog) run() {
 				return
 			}
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
-			proxyLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, addr)
+			mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, addr)
 			err := p.serveUDP(listenerNum)
 			if err != nil && !defaultConfigWritten {
 				proxyLog.Error().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
@@ -130,7 +130,7 @@ func (p *prog) run() {
 						},
 					})
 					writeConfigFile()
-					proxyLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, pc.LocalAddr())
+					mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, pc.LocalAddr())
 					// There can be a race between closing the listener and start our own UDP server, but it's
 					// rare, and we only do this once, so let conservative here.
 					if err := pc.Close(); err != nil {

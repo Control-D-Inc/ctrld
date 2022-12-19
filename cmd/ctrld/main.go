@@ -15,7 +15,7 @@ var (
 	configPath string
 	daemon     bool
 	cfg        ctrld.Config
-	verbose    bool
+	verbose    int
 
 	bootstrapDNS = "76.76.2.0"
 
@@ -42,21 +42,27 @@ func initLogging() {
 		writers = append(writers, logFile)
 	}
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
-	if verbose || isLog {
-		consoleWriter := zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
-			w.TimeFormat = time.StampMilli
-		})
-		writers = append(writers, consoleWriter)
-		multi := zerolog.MultiLevelWriter(writers...)
-		mainLog = mainLog.Output(multi).With().Timestamp().Str("prefix", "main").Logger()
+	consoleWriter := zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
+		w.TimeFormat = time.StampMilli
+	})
+	writers = append(writers, consoleWriter)
+	multi := zerolog.MultiLevelWriter(writers...)
+	mainLog = mainLog.Output(multi).With().Timestamp().Str("prefix", "main").Logger()
+	if verbose > 0 || isLog {
 		proxyLog = proxyLog.Output(multi).With().Timestamp().Logger()
 		// TODO: find a better way.
 		ctrld.ProxyLog = proxyLog
 	}
-	if cfg.Service.LogLevel == "" {
+
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	logLevel := cfg.Service.LogLevel
+	if verbose > 1 {
+		logLevel = "debug"
+	}
+	if logLevel == "" {
 		return
 	}
-	level, err := zerolog.ParseLevel(cfg.Service.LogLevel)
+	level, err := zerolog.ParseLevel(logLevel)
 	if err != nil {
 		mainLog.Warn().Err(err).Msg("could not set log level")
 		return
