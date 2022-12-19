@@ -2,52 +2,30 @@ package ctrld
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 
-	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/miekg/dns"
 )
 
 func newDohResolver(uc *UpstreamConfig) *dohResolver {
 	r := &dohResolver{
-		endpoint:  uc.Endpoint,
-		isDoH3:    uc.Type == resolverTypeDOH3,
-		transport: uc.transport,
-	}
-	if r.isDoH3 {
-		r.doh3DialFunc = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
-			host := addr
-			Log(ctx, ProxyLog.Debug(), "debug dial context D0H3 %s - %s", addr, bootstrapDNS)
-			// if we have a bootstrap ip set, use it to avoid DNS lookup
-			if uc.BootstrapIP != "" && addr == fmt.Sprintf("%s:443", uc.Domain) {
-				addr = fmt.Sprintf("%s:443", uc.BootstrapIP)
-				Log(ctx, ProxyLog.Debug(), "sending doh3 request to: %s", addr)
-			}
-			remoteAddr, err := net.ResolveUDPAddr("udp", addr)
-			if err != nil {
-				return nil, err
-			}
-			udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-			if err != nil {
-				return nil, err
-			}
-			return quic.DialEarlyContext(ctx, udpConn, remoteAddr, host, tlsCfg, cfg)
-		}
+		endpoint:          uc.Endpoint,
+		isDoH3:            uc.Type == resolverTypeDOH3,
+		transport:         uc.transport,
+		http3RoundTripper: uc.http3RoundTripper,
 	}
 	return r
 }
 
 type dohResolver struct {
-	endpoint     string
-	isDoH3       bool
-	doh3DialFunc func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error)
-	transport    *http.Transport
+	endpoint          string
+	isDoH3            bool
+	transport         *http.Transport
+	http3RoundTripper *http3.RoundTripper
 }
 
 func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
@@ -66,9 +44,7 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 
 	c := http.Client{Transport: r.transport}
 	if r.isDoH3 {
-		c.Transport = &http3.RoundTripper{}
-		c.Transport.(*http3.RoundTripper).Dial = r.doh3DialFunc
-		defer c.Transport.(*http3.RoundTripper).Close()
+		c.Transport = r.http3RoundTripper
 	}
 	resp, err := c.Do(req)
 	if err != nil {
