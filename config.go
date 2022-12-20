@@ -64,10 +64,14 @@ type Config struct {
 
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
-	LogLevel   string `mapstructure:"log_level" toml:"log_level"`
-	LogPath    string `mapstructure:"log_path" toml:"log_path"`
-	Daemon     bool   `mapstructure:"-" toml:"-"`
-	AllocateIP bool   `mapstructure:"-" toml:"-"`
+	LogLevel         string `mapstructure:"log_level" toml:"log_level"`
+	LogPath          string `mapstructure:"log_path" toml:"log_path"`
+	CacheEnable      bool   `mapstructure:"cache_enable" toml:"cache_enable"`
+	CacheSize        int    `mapstructure:"cache_size" toml:"cache_size"`
+	CacheTTLOverride int    `mapstructure:"cache_ttl_override" toml:"cache_ttl_override"`
+	CacheServeStale  bool   `mapstructure:"cache_serve_stale" toml:"cache_serve_stale"`
+	Daemon           bool   `mapstructure:"-" toml:"-"`
+	AllocateIP       bool   `mapstructure:"-" toml:"-"`
 }
 
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.
@@ -179,11 +183,8 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 		if err != nil {
 			return nil, err
 		}
-		localAddr := &net.UDPAddr{IP: net.IPv4zero, Port: 0}
-		if strings.Index(uc.BootstrapIP, ":") > -1 {
-			localAddr = &net.UDPAddr{IP: net.IPv6zero, Port: 0}
-		}
-		udpConn, err := net.ListenUDP("udp", localAddr)
+
+		udpConn, err := net.ListenUDP("udp", nil)
 		if err != nil {
 			return nil, err
 		}

@@ -13,7 +13,10 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 )
+
+const staleTTL = 60 * time.Second
 
 func (p *prog) serveUDP(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
@@ -123,6 +126,22 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 }
 
 func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []int, msg *dns.Msg) *dns.Msg {
+	var staleAnswer *dns.Msg
+	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
+	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
+	if p.cache != nil && msg.Question[0].Qtype != dns.TypePTR {
+		if cachedValue := p.cache.Get(dnscache.NewKey(msg)); cachedValue != nil {
+			answer := cachedValue.Msg.Copy()
+			answer.SetReply(msg)
+			now := time.Now()
+			if cachedValue.Expire.After(now) {
+				ctrld.Log(ctx, proxyLog.Debug(), "hit cached response")
+				setCachedAnswerTTL(answer, now, cachedValue.Expire)
+				return answer
+			}
+			staleAnswer = answer
+		}
+	}
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		ctrld.Log(ctx, proxyLog.Debug(), "sending query to %s: %s", upstreams[n], upstreamConfig.Name)
@@ -148,11 +167,28 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 	for n, upstreamConfig := range upstreamConfigs {
 		answer := resolve(n, upstreamConfig, msg)
 		if answer == nil {
+			if serveStaleCache && staleAnswer != nil {
+				ctrld.Log(ctx, proxyLog.Debug(), "serving stale cached response")
+				now := time.Now()
+				setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
+				return staleAnswer
+			}
 			continue
 		}
 		if answer.Rcode != dns.RcodeSuccess && len(upstreamConfigs) > 1 && containRcode(failoverRcodes, answer.Rcode) {
 			ctrld.Log(ctx, proxyLog.Debug(), "failover rcode matched, process to next upstream")
 			continue
+		}
+		if p.cache != nil {
+			ttl := ttlFromMsg(answer)
+			now := time.Now()
+			expired := now.Add(time.Duration(ttl) * time.Second)
+			if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
+				expired = now.Add(time.Duration(cachedTTL) * time.Second)
+			}
+			setCachedAnswerTTL(answer, now, expired)
+			p.cache.Add(dnscache.NewKey(msg), dnscache.NewValue(answer, expired))
+			ctrld.Log(ctx, proxyLog.Debug(), "add cached response")
 		}
 		return answer
 	}
@@ -227,6 +263,35 @@ func containRcode(rcodes []int, rcode int) bool {
 		}
 	}
 	return false
+}
+
+func setCachedAnswerTTL(answer *dns.Msg, now, expiredTime time.Time) {
+	ttl := uint32(expiredTime.Sub(now).Seconds())
+	if ttl < 0 {
+		return
+	}
+
+	for _, rr := range answer.Answer {
+		rr.Header().Ttl = ttl
+	}
+	for _, rr := range answer.Ns {
+		rr.Header().Ttl = ttl
+	}
+	for _, rr := range answer.Extra {
+		if rr.Header().Rrtype != dns.TypeOPT {
+			rr.Header().Ttl = ttl
+		}
+	}
+}
+
+func ttlFromMsg(msg *dns.Msg) uint32 {
+	for _, rr := range msg.Answer {
+		return rr.Header().Ttl
+	}
+	for _, rr := range msg.Ns {
+		return rr.Header().Ttl
+	}
+	return 0
 }
 
 var osUpstreamConfig = &ctrld.UpstreamConfig{

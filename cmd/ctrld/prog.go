@@ -12,6 +12,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 )
 
 var errWindowsAddrInUse = syscall.Errno(0x2740)
@@ -22,7 +23,8 @@ var svcConfig = &service.Config{
 }
 
 type prog struct {
-	cfg *ctrld.Config
+	cfg   *ctrld.Config
+	cache dnscache.Cacher
 }
 
 func (p *prog) Start(s service.Service) error {
@@ -32,6 +34,14 @@ func (p *prog) Start(s service.Service) error {
 }
 
 func (p *prog) run() {
+	if p.cfg.Service.CacheEnable {
+		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
+		if err != nil {
+			mainLog.Error().Err(err).Msg("failed to create cacher, caching is disabled")
+		} else {
+			p.cache = cacher
+		}
+	}
 	var wg sync.WaitGroup
 	wg.Add(len(p.cfg.Listener))
 

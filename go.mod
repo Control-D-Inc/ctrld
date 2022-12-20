@@ -4,6 +4,7 @@ go 1.19
 
 require (
 	github.com/go-playground/validator/v10 v10.11.1
+	github.com/hashicorp/golang-lru/v2 v2.0.1
 	github.com/kardianos/service v1.2.1
 	github.com/lucas-clemente/quic-go v0.29.1
 	github.com/miekg/dns v1.1.50
