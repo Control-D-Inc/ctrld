@@ -48,6 +48,9 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	}
 	resp, err := c.Do(req)
 	if err != nil {
+		if r.isDoH3 {
+			r.http3RoundTripper.Close()
+		}
 		return nil, fmt.Errorf("could not perform request: %w", err)
 	}
 	defer resp.Body.Close()
