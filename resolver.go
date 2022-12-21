@@ -11,12 +11,12 @@ import (
 )
 
 const (
-	resolverTypeDOH    = "doh"
-	resolverTypeDOH3   = "doh3"
-	resolverTypeDOT    = "dot"
-	resolverTypeDOQ    = "doq"
-	resolverTypeOS     = "os"
-	resolverTypeLegacy = "legacy"
+	ResolverTypeDOH    = "doh"
+	ResolverTypeDOH3   = "doh3"
+	ResolverTypeDOT    = "dot"
+	ResolverTypeDOQ    = "doq"
+	ResolverTypeOS     = "os"
+	ResolverTypeLegacy = "legacy"
 )
 
 var bootstrapDNS = "76.76.2.0"
@@ -34,15 +34,15 @@ var errUnknownResolver = errors.New("unknown resolver")
 func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 	typ, endpoint := uc.Type, uc.Endpoint
 	switch typ {
-	case resolverTypeDOH, resolverTypeDOH3:
+	case ResolverTypeDOH, ResolverTypeDOH3:
 		return newDohResolver(uc), nil
-	case resolverTypeDOT:
+	case ResolverTypeDOT:
 		return &dotResolver{uc: uc}, nil
-	case resolverTypeDOQ:
+	case ResolverTypeDOQ:
 		return &doqResolver{uc: uc}, nil
-	case resolverTypeOS:
+	case ResolverTypeOS:
 		return &osResolver{}, nil
-	case resolverTypeLegacy:
+	case ResolverTypeLegacy:
 		return &legacyResolver{endpoint: endpoint}, nil
 	}
 	return nil, fmt.Errorf("%w: %s", errUnknownResolver, typ)

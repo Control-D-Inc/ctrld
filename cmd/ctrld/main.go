@@ -12,10 +12,16 @@ import (
 )
 
 var (
-	configPath string
-	daemon     bool
-	cfg        ctrld.Config
-	verbose    int
+	configPath        string
+	configBase64      string
+	daemon            bool
+	listenAddress     string
+	primaryUpstream   string
+	secondaryUpstream string
+	domains           []string
+	logPath           string
+	cfg               ctrld.Config
+	verbose           int
 
 	bootstrapDNS = "76.76.2.0"
 

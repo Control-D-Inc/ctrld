@@ -40,14 +40,14 @@ func InitConfig(v *viper.Viper, name string) {
 		"0": {
 			BootstrapIP: "76.76.2.11",
 			Name:        "Control D - Anti-Malware",
-			Type:        "doh",
+			Type:        ResolverTypeDOH,
 			Endpoint:    "https://freedns.controld.com/p1",
 			Timeout:     5000,
 		},
 		"1": {
 			BootstrapIP: "76.76.2.11",
 			Name:        "Control D - No Ads",
-			Type:        "doq",
+			Type:        ResolverTypeDOQ,
 			Endpoint:    "p2.freedns.controld.com",
 			Timeout:     3000,
 		},
@@ -139,9 +139,9 @@ func (uc *UpstreamConfig) Init() {
 // For now, only DoH upstream is supported.
 func (uc *UpstreamConfig) SetupTransport() {
 	switch uc.Type {
-	case resolverTypeDOH:
+	case ResolverTypeDOH:
 		uc.setupDOHTransport()
-	case resolverTypeDOH3:
+	case ResolverTypeDOH3:
 		uc.setupDOH3Transport()
 	}
 }
@@ -231,11 +231,11 @@ func validateDnsRcode(fl validator.FieldLevel) bool {
 
 func defaultPortFor(typ string) string {
 	switch typ {
-	case resolverTypeDOH, resolverTypeDOH3:
+	case ResolverTypeDOH, ResolverTypeDOH3:
 		return "443"
-	case resolverTypeDOQ, resolverTypeDOT:
+	case ResolverTypeDOQ, ResolverTypeDOT:
 		return "853"
-	case resolverTypeLegacy:
+	case ResolverTypeLegacy:
 		return "53"
 	}
 	return "53"

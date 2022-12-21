@@ -14,7 +14,7 @@ import (
 func newDohResolver(uc *UpstreamConfig) *dohResolver {
 	r := &dohResolver{
 		endpoint:          uc.Endpoint,
-		isDoH3:            uc.Type == resolverTypeDOH3,
+		isDoH3:            uc.Type == ResolverTypeDOH3,
 		transport:         uc.transport,
 		http3RoundTripper: uc.http3RoundTripper,
 	}
