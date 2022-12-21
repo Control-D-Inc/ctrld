@@ -296,5 +296,5 @@ func ttlFromMsg(msg *dns.Msg) uint32 {
 
 var osUpstreamConfig = &ctrld.UpstreamConfig{
 	Name: "OS resolver",
-	Type: "os",
+	Type: ctrld.ResolverTypeOS,
 }

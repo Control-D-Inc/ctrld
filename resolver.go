@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 
 	"github.com/miekg/dns"
 )
@@ -20,6 +21,7 @@ const (
 )
 
 var bootstrapDNS = "76.76.2.0"
+var or = &osResolver{nameservers: nameservers()}
 
 // Resolver is the interface that wraps the basic DNS operations.
 //
@@ -41,37 +43,31 @@ func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 	case ResolverTypeDOQ:
 		return &doqResolver{uc: uc}, nil
 	case ResolverTypeOS:
-		return &osResolver{}, nil
+		return or, nil
 	case ResolverTypeLegacy:
 		return &legacyResolver{endpoint: endpoint}, nil
 	}
 	return nil, fmt.Errorf("%w: %s", errUnknownResolver, typ)
 }
 
-type osResolver struct{}
+type osResolver struct {
+	nameservers []string
+	next        atomic.Uint32
+}
 
+// Resolve performs DNS resolvers using OS default nameservers. Nameserver is chosen from
+// available nameservers with a roundrobin algorithm.
 func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	domain := canonicalName(msg.Question[0].Name)
-	addrs, err := net.DefaultResolver.LookupHost(ctx, domain)
-	if err != nil {
-		return nil, err
+	numServers := uint32(len(o.nameservers))
+	if numServers == 0 {
+		return nil, errors.New("no nameservers available")
 	}
-	if len(addrs) == 0 {
-		return nil, errors.New("no answer")
-	}
-	answer := new(dns.Msg)
-	answer.SetReply(msg)
-	ip := net.ParseIP(addrs[0])
-	a := &dns.A{
-		A:   ip,
-		Hdr: dns.RR_Header{Name: msg.Question[0].Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 10},
-	}
-	if ip.To4() != nil {
-		a.Hdr.Rrtype = dns.TypeA
-	}
+	next := o.next.Add(1)
+	server := o.nameservers[(next-1)%numServers]
+	dnsClient := &dns.Client{Net: "udp"}
+	answer, _, err := dnsClient.ExchangeContext(ctx, msg, server)
 
-	msg.Answer = append(msg.Answer, a)
-	return msg, nil
+	return answer, err
 }
 
 func newDialer(dnsAddress string) *net.Dialer {
