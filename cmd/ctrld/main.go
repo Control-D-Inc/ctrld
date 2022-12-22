@@ -20,6 +20,7 @@ var (
 	secondaryUpstream string
 	domains           []string
 	logPath           string
+	cacheSize         int
 	cfg               ctrld.Config
 	verbose           int
 
@@ -74,4 +75,13 @@ func initLogging() {
 		return
 	}
 	zerolog.SetGlobalLevel(level)
+}
+
+func initCache() {
+	if !cfg.Service.CacheEnable {
+		return
+	}
+	if cfg.Service.CacheSize == 0 {
+		cfg.Service.CacheSize = 4096
+	}
 }

@@ -42,7 +42,7 @@ func initCLI() {
 		`verbose log output, "-v" means query logging enabled, "-vv" means debug level logging enabled`,
 	)
 
-	basicModeFlags := []string{"listen", "primary_upstream", "secondary_upstream", "domains", "log"}
+	basicModeFlags := []string{"listen", "primary_upstream", "secondary_upstream", "domains", "log", "cache_size"}
 	runCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the DNS proxy server",
@@ -73,6 +73,7 @@ func initCLI() {
 				log.Fatalf("invalid config: %v", err)
 			}
 			initLogging()
+			initCache()
 			if daemon {
 				exe, err := os.Executable()
 				if err != nil {
@@ -121,6 +122,7 @@ func initCLI() {
 	runCmd.Flags().StringVarP(&secondaryUpstream, "secondary_upstream", "", "", "secondary upstream endpoint")
 	runCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "list of domain to apply in a split DNS policy")
 	runCmd.Flags().StringVarP(&logPath, "log", "", "", "path to log file")
+	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 
 	rootCmd.AddCommand(runCmd)
 
@@ -211,7 +213,15 @@ func processNoConfigFlags(noConfigStart bool) {
 	}
 	v.Set("upstream", upstream)
 
+	sc := ctrld.ServiceConfig{}
 	if logPath != "" {
-		v.Set("service", ctrld.ServiceConfig{LogLevel: "debug", LogPath: logPath})
+		sc.LogLevel = "debug"
+		sc.LogPath = logPath
 	}
+
+	if cacheSize != 0 {
+		sc.CacheEnable = true
+		sc.CacheSize = cacheSize
+	}
+	v.Set("service", sc)
 }
