@@ -25,6 +25,8 @@ Usage:
 
 Flags:
       --base64_config string        base64 encoded config
+      --cache_size int              Enable cache with size items
+      --cd string                   Control D resolver uid
   -c, --config string               Path to config file
   -d, --daemon                      Run as daemon
       --domains strings             list of domain to apply in a split DNS policy

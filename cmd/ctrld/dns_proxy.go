@@ -143,6 +143,10 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		}
 	}
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
+	if len(upstreamConfigs) == 0 {
+		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+		upstreams = []string{"upstream.os"}
+	}
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		ctrld.Log(ctx, proxyLog.Debug(), "sending query to %s: %s", upstreams[n], upstreamConfig.Name)
 		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
@@ -203,9 +207,6 @@ func (p *prog) upstreamConfigsFromUpstreamNumbers(upstreams []string) []*ctrld.U
 	for _, upstream := range upstreams {
 		upstreamNum := strings.TrimPrefix(upstream, "upstream.")
 		upstreamConfigs = append(upstreamConfigs, p.cfg.Upstream[upstreamNum])
-	}
-	if len(upstreamConfigs) == 0 {
-		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 	}
 	return upstreamConfigs
 }

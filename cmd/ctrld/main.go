@@ -31,6 +31,8 @@ var (
 	rootLogger = zerolog.New(io.Discard)
 	mainLog    = rootLogger
 	proxyLog   = rootLogger
+
+	cdUID string
 )
 
 func main() {
