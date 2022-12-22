@@ -3,6 +3,8 @@ package main
 import (
 	"net"
 	"sync"
+
+	"golang.org/x/net/nettest"
 )
 
 var (
@@ -11,8 +13,8 @@ var (
 )
 
 func probeStack() {
-	if ln, err := net.Listen("tcp6", "[::]:0"); err == nil {
-		ln.Close()
+	// TODO(cuonglm): use nettest.SupportsIPv6 once https://github.com/golang/go/issues/57386 fixed.
+	if _, err := nettest.RoutedInterface("ip6", net.FlagUp); err == nil {
 		ipv6Enabled = true
 	}
 }
