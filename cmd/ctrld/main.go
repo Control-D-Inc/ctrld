@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/kardianos/service"
 	"github.com/rs/zerolog"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -32,17 +34,33 @@ var (
 )
 
 func main() {
-	ctrld.InitConfig(v, "config")
+	ctrld.InitConfig(v, "ctrld")
 	initCLI()
+}
+
+func normalizeLogFilePath(logFilePath string) string {
+	if logFilePath == "" || filepath.IsAbs(logFilePath) || service.Interactive() {
+		return logFilePath
+	}
+	dir, _ := os.UserHomeDir()
+	if dir == "" {
+		return logFilePath
+	}
+	return filepath.Join(dir, logFilePath)
 }
 
 func initLogging() {
 	writers := []io.Writer{io.Discard}
 	isLog := cfg.Service.LogLevel != ""
-	if logPath := cfg.Service.LogPath; logPath != "" {
-		logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
+	if logFilePath := normalizeLogFilePath(cfg.Service.LogPath); logFilePath != "" {
+		// Create parent directory if necessary.
+		if err := os.MkdirAll(filepath.Dir(logFilePath), 0750); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create log path: %v", err)
+			os.Exit(1)
+		}
+		logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to creating log file: %v", err)
+			fmt.Fprintf(os.Stderr, "failed to create log file: %v", err)
 			os.Exit(1)
 		}
 		isLog = true

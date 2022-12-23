@@ -25,7 +25,10 @@ The user can choose to override default value using command line `--config` or `
 ctrld run --config /path/to/myconfig.toml
 ```
 
-If no configuration files found, a default `config.toml` file will be created in the current directory.
+If no configuration files found, a default `ctrld.toml` file will be created in the current directory.
+
+In pre v1.1.0, `config.toml` file was used, so for compatibility, `ctrld` will still read `config.toml`
+if it's existed.
 
 # Example Config
 

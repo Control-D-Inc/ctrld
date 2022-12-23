@@ -12,6 +12,7 @@ import (
 func SampleConfig(t *testing.T) *ctrld.Config {
 	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
 	ctrld.InitConfig(v, "test_load_config")
+	v.SetConfigType("toml")
 	require.NoError(t, v.ReadConfig(strings.NewReader(sampleConfigContent)))
 	var cfg ctrld.Config
 	require.NoError(t, v.Unmarshal(&cfg))

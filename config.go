@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -17,12 +18,23 @@ import (
 	"github.com/spf13/viper"
 )
 
+// SetConfigName set the config name that ctrld will look for.
+func SetConfigName(v *viper.Viper, name string) {
+	v.SetConfigName(name)
+
+	configPath := "$HOME"
+	// viper has its own way to get user home directory:  https://github.com/spf13/viper/blob/v1.14.0/util.go#L134
+	// To be consistent, we prefer os.UserHomeDir instead.
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		configPath = homeDir
+	}
+	v.AddConfigPath(configPath)
+	v.AddConfigPath(".")
+}
+
 // InitConfig initializes default config values for given *viper.Viper instance.
 func InitConfig(v *viper.Viper, name string) {
-	v.SetConfigName(name)
-	v.SetConfigType("toml")
-	v.AddConfigPath("$HOME/.ctrld")
-	v.AddConfigPath(".")
+	SetConfigName(v, name)
 
 	v.SetDefault("listener", map[string]*ListenerConfig{
 		"0": {
