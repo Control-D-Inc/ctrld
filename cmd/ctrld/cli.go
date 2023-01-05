@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 
@@ -23,6 +24,7 @@ import (
 var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	defaultConfigWritten = false
+	defaultConfigFile    = "ctrld.toml"
 )
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains", "log", "cache_size"}
@@ -161,6 +163,7 @@ func initCLI() {
 				cfg.WorkingDirectory = dir
 				// No config path, generating config in HOME directory.
 				if configPath == "" && !isNoConfigStart(cmd) && configBase64 == "" {
+					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
 					readConfigFile(true)
 				}
 			}
@@ -311,7 +314,7 @@ func writeConfigFile() {
 	if err != nil {
 		log.Fatalf("unable to marshal config to toml: %v", err)
 	}
-	if err := os.WriteFile("ctrld.toml", bs, 0600); err != nil {
+	if err := os.WriteFile(defaultConfigFile, bs, 0600); err != nil {
 		log.Printf("failed to write config file: %v\n", err)
 	}
 }
