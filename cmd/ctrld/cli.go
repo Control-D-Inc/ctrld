@@ -151,7 +151,11 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, args []string) {
 			cfg := &service.Config{}
 			*cfg = *svcConfig
-			cfg.Arguments = append([]string{"run"}, os.Args[3:]...)
+			osArgs := os.Args[2:]
+			if os.Args[1] == "service" {
+				osArgs = os.Args[3:]
+			}
+			cfg.Arguments = append([]string{"run"}, osArgs...)
 			if dir, err := os.UserHomeDir(); err == nil {
 				// WorkingDirectory is not supported on Windows.
 				cfg.WorkingDirectory = dir
