@@ -1,4 +1,4 @@
-package ctrld
+package resolvconffile
 
 import (
 	"testing"
@@ -6,8 +6,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func Test_nameservers(t *testing.T) {
-	ns := nameservers()
+func TestNameServers(t *testing.T) {
+	ns := NameServers("")
 	require.NotNil(t, ns)
 	t.Log(ns)
 }

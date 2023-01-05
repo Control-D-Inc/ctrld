@@ -22,3 +22,9 @@ func supportsIPv6() bool {
 	stackOnce.Do(probeStack)
 	return ipv6Enabled
 }
+
+// isIPv6 checks if the provided IP is v6.
+func isIPv6(ip string) bool {
+	parsedIP := net.ParseIP(ip)
+	return parsedIP != nil && parsedIP.To4() == nil && parsedIP.To16() != nil
+}

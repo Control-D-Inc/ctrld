@@ -23,8 +23,9 @@ var svcConfig = &service.Config{
 }
 
 type prog struct {
-	cfg   *ctrld.Config
-	cache dnscache.Cacher
+	cfg     *ctrld.Config
+	cache   dnscache.Cacher
+	origDNS []string
 }
 
 func (p *prog) Start(s service.Service) error {
@@ -34,6 +35,24 @@ func (p *prog) Start(s service.Service) error {
 }
 
 func (p *prog) run() {
+	if iface != "" {
+		netIface, err := netIfaceFromName(iface)
+		if err != nil {
+			mainLog.Error().Err(err).Msg("could not get interface")
+		} else {
+			p.origDNS = currentDNS(netIface)
+			if err := setDNS(netIface, []string{cfg.Listener["0"].IP}); err != nil {
+				mainLog.Error().Err(err).Str("iface", iface).Msgf("could not set DNS for interface")
+			}
+		}
+	}
+	// Sorry, tailscale!
+	if tailscaleIface != nil {
+		if err := setDNS(tailscaleIface, []string{cfg.Listener["0"].IP}); err != nil {
+			mainLog.Warn().Err(err).Msg("could not set DNS for tailscale interface")
+		}
+	}
+
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -163,6 +182,15 @@ func (p *prog) Stop(s service.Service) error {
 	if err := p.deAllocateIP(); err != nil {
 		mainLog.Error().Err(err).Msg("de-allocate ip failed")
 		return err
+	}
+	if iface != "" {
+		if netIface, err := netIfaceFromName(iface); err == nil {
+			if err := resetDNS(netIface, p.origDNS); err != nil {
+				mainLog.Error().Err(err).Str("iface", iface).Msgf("could not reset DNS")
+			}
+		} else {
+			mainLog.Error().Err(err).Msg("could not get interface")
+		}
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
@@ -24,10 +26,16 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
 
+const (
+	tailscaleDevName = "tailscale0"
+	tailscaleDNS     = "100.100.100.100"
+)
+
 var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	defaultConfigWritten = false
 	defaultConfigFile    = "ctrld.toml"
+	tailscaleIface       *net.Interface
 )
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains", "log", "cache_size"}
@@ -41,6 +49,15 @@ func isNoConfigStart(cmd *cobra.Command) bool {
 	return false
 }
 
+const rootShortDesc = `
+        __         .__       .___
+  _____/  |________|  |    __| _/
+_/ ___\   __\_  __ \  |   / __ |
+\  \___|  |  |  | \/  |__/ /_/ |
+ \___  >__|  |__|  |____/\____ |
+     \/ dns forwarding proxy  \/
+`
+
 func initCLI() {
 	// Enable opening via explorer.exe on Windows.
 	// See: https://github.com/spf13/cobra/issues/844.
@@ -48,15 +65,17 @@ func initCLI() {
 
 	rootCmd := &cobra.Command{
 		Use:     "ctrld",
-		Short:   "Running Control-D DNS proxy server",
+		Short:   strings.TrimLeft(rootShortDesc, "\n"),
 		Version: "1.0.1",
 	}
 	rootCmd.PersistentFlags().CountVarP(
 		&verbose,
 		"verbose",
 		"v",
-		`verbose log output, "-v" means query logging enabled, "-vv" means debug level logging enabled`,
+		`verbose log output, "-v" basic logging, "-vv" debug level logging`,
 	)
+	rootCmd.SetHelpCommand(&cobra.Command{Hidden: true})
+	rootCmd.CompletionOptions.HiddenDefaultCmd = true
 
 	runCmd := &cobra.Command{
 		Use:   "run",
@@ -96,6 +115,15 @@ func initCLI() {
 			}
 			initLogging()
 			initCache()
+
+			if iface == "auto" {
+				dri, err := interfaces.DefaultRouteInterface()
+				if err != nil {
+					mainLog.Error().Err(err).Msg("failed to get default route interface")
+				}
+				iface = dri
+			}
+
 			if daemon {
 				exe, err := os.Executable()
 				if err != nil {
@@ -138,16 +166,18 @@ func initCLI() {
 	}
 	runCmd.Flags().BoolVarP(&daemon, "daemon", "d", false, "Run as daemon")
 	runCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
-	runCmd.Flags().StringVarP(&configBase64, "base64_config", "", "", "base64 encoded config")
-	runCmd.Flags().StringVarP(&listenAddress, "listen", "", "", "listener address and port, in format: address:port")
-	runCmd.Flags().StringVarP(&primaryUpstream, "primary_upstream", "", "", "primary upstream endpoint")
-	runCmd.Flags().StringVarP(&secondaryUpstream, "secondary_upstream", "", "", "secondary upstream endpoint")
-	runCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "list of domain to apply in a split DNS policy")
-	runCmd.Flags().StringVarP(&logPath, "log", "", "", "path to log file")
+	runCmd.Flags().StringVarP(&configBase64, "base64_config", "", "", "Base64 encoded config")
+	runCmd.Flags().StringVarP(&listenAddress, "listen", "", "", "Listener address and port, in format: address:port")
+	runCmd.Flags().StringVarP(&primaryUpstream, "primary_upstream", "", "", "Primary upstream endpoint")
+	runCmd.Flags().StringVarP(&secondaryUpstream, "secondary_upstream", "", "", "Secondary upstream endpoint")
+	runCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "List of domain to apply in a split DNS policy")
+	runCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	runCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
 	_ = runCmd.Flags().MarkHidden("homedir")
+	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
+	_ = runCmd.Flags().MarkHidden("iface")
 
 	rootCmd.AddCommand(runCmd)
 
@@ -204,14 +234,15 @@ func initCLI() {
 	}
 	// Keep these flags in sync with runCmd above, except for "-d".
 	startCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
-	startCmd.Flags().StringVarP(&configBase64, "base64_config", "", "", "base64 encoded config")
-	startCmd.Flags().StringVarP(&listenAddress, "listen", "", "", "listener address and port, in format: address:port")
-	startCmd.Flags().StringVarP(&primaryUpstream, "primary_upstream", "", "", "primary upstream endpoint")
-	startCmd.Flags().StringVarP(&secondaryUpstream, "secondary_upstream", "", "", "secondary upstream endpoint")
-	startCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "list of domain to apply in a split DNS policy")
-	startCmd.Flags().StringVarP(&logPath, "log", "", "", "path to log file")
+	startCmd.Flags().StringVarP(&configBase64, "base64_config", "", "", "Base64 encoded config")
+	startCmd.Flags().StringVarP(&listenAddress, "listen", "", "", "Listener address and port, in format: address:port")
+	startCmd.Flags().StringVarP(&primaryUpstream, "primary_upstream", "", "", "Primary upstream endpoint")
+	startCmd.Flags().StringVarP(&secondaryUpstream, "secondary_upstream", "", "", "Secondary upstream endpoint")
+	startCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "List of domain to apply in a split DNS policy")
+	startCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
+	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 
 	stopCmd := &cobra.Command{
 		Use:   "stop",
@@ -228,6 +259,7 @@ func initCLI() {
 			}
 		},
 	}
+	stopCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, "auto" means the default interface gateway`)
 
 	restartCmd := &cobra.Command{
 		Use:   "restart",
@@ -347,13 +379,24 @@ func initCLI() {
 	rootCmd.AddCommand(serviceCmd)
 	startCmdAlias := &cobra.Command{
 		Use:   "start",
-		Short: "Alias for service start",
+		Short: "Quick start service and configure DNS on interface",
 		Run: func(cmd *cobra.Command, args []string) {
 			startCmd.Run(cmd, args)
 		},
 	}
+	startCmdAlias.Flags().StringVarP(&iface, "iface", "", "auto", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmdAlias.Flags().AddFlagSet(startCmd.Flags())
 	rootCmd.AddCommand(startCmdAlias)
+	stopCmdAlias := &cobra.Command{
+		Use:   "stop",
+		Short: "Quick stop service and remove DNS from interface",
+		Run: func(cmd *cobra.Command, args []string) {
+			startCmd.Run(cmd, args)
+		},
+	}
+	stopCmdAlias.Flags().StringVarP(&iface, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
+	stopCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
+	rootCmd.AddCommand(stopCmdAlias)
 
 	if err := rootCmd.Execute(); err != nil {
 		stderrMsg(err.Error())
@@ -461,6 +504,9 @@ func processCDFlags() {
 	if cdUID == "" {
 		return
 	}
+	if iface == "" {
+		iface = "auto"
+	}
 	resolverConfig, err := controld.FetchResolverConfig(cdUID)
 	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
 		s, err := service.New(&prog{}, svcConfig)
@@ -545,4 +591,20 @@ func processLogAndCacheFlags() {
 		sc.CacheSize = cacheSize
 	}
 	v.Set("service", sc)
+}
+
+func netIfaceFromName(ifaceName string) (*net.Interface, error) {
+	var iface *net.Interface
+	err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+		if i.Name == ifaceName {
+			iface = i.Interface
+		}
+		if i.Name == tailscaleDevName {
+			tailscaleIface = i.Interface
+		}
+	})
+	if iface == nil {
+		return nil, errors.New("interface not found")
+	}
+	return iface, err
 }
