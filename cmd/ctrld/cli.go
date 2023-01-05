@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"tailscale.com/net/interfaces"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
@@ -290,6 +292,39 @@ func initCLI() {
 		},
 	}
 
+	listIfacesCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List network interfaces of the host",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+				fmt.Printf("Index : %d\n", i.Index)
+				fmt.Printf("Name  : %s\n", i.Name)
+				addrs, _ := i.Addrs()
+				for i, ipaddr := range addrs {
+					if i == 0 {
+						fmt.Printf("Addrs : %v\n", ipaddr)
+						continue
+					}
+					fmt.Printf("        %v\n", ipaddr)
+				}
+				println()
+			})
+			if err != nil {
+				stderrMsg(err.Error())
+			}
+		},
+	}
+	interfacesCmd := &cobra.Command{
+		Use:   "interfaces",
+		Short: "Manage network interfaces",
+		Args:  cobra.OnlyValidArgs,
+		ValidArgs: []string{
+			listIfacesCmd.Use,
+		},
+	}
+	interfacesCmd.AddCommand(listIfacesCmd)
+
 	serviceCmd := &cobra.Command{
 		Use:   "service",
 		Short: "Manage ctrld service",
@@ -300,6 +335,7 @@ func initCLI() {
 			restartCmd.Use,
 			statusCmd.Use,
 			uninstallCmd.Use,
+			interfacesCmd.Use,
 		},
 	}
 	serviceCmd.AddCommand(startCmd)
@@ -307,6 +343,7 @@ func initCLI() {
 	serviceCmd.AddCommand(restartCmd)
 	serviceCmd.AddCommand(statusCmd)
 	serviceCmd.AddCommand(uninstallCmd)
+	serviceCmd.AddCommand(interfacesCmd)
 	rootCmd.AddCommand(serviceCmd)
 	startCmdAlias := &cobra.Command{
 		Use:   "start",
