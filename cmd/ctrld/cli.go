@@ -63,7 +63,7 @@ func initCLI() {
 			}
 
 			noConfigStart := isNoConfigStart(cmd) && cdUID != ""
-			writeDefaultConfig := !noConfigStart && configBase64 == ""
+			writeDefaultConfig := !noConfigStart && configBase64 == "" && cdUID == ""
 			configs := []struct {
 				name    string
 				written bool
