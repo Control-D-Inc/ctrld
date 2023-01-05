@@ -162,7 +162,9 @@ func initCLI() {
 				// WorkingDirectory is not supported on Windows.
 				cfg.WorkingDirectory = dir
 				// No config path, generating config in HOME directory.
-				if configPath == "" && !isNoConfigStart(cmd) && configBase64 == "" {
+				noConfigStart := isNoConfigStart(cmd) && cdUID != ""
+				writeDefaultConfig := !noConfigStart && configBase64 == "" && cdUID == ""
+				if configPath == "" && writeDefaultConfig {
 					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
 					readConfigFile(true)
 				}
