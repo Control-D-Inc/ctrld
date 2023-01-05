@@ -396,10 +396,9 @@ func processCDFlags() {
 
 	upstream := map[string]*ctrld.UpstreamConfig{
 		"0": {
-			BootstrapIP: resolverConfig.IP(supportsIPv6()),
-			Name:        resolverConfig.DOH,
-			Endpoint:    resolverConfig.DOH,
-			Type:        ctrld.ResolverTypeDOH,
+			Name:     resolverConfig.DOH,
+			Endpoint: resolverConfig.DOH,
+			Type:     ctrld.ResolverTypeDOH,
 		},
 	}
 	v.Set("upstream", upstream)

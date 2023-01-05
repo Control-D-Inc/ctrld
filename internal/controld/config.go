@@ -13,33 +13,8 @@ const resolverDataURL = "https://api.controld.com/utility"
 
 // ResolverConfig represents Control D resolver data.
 type ResolverConfig struct {
-	V4      []string `json:"v4"`
-	V6      []string `json:"v6"`
 	DOH     string   `json:"doh"`
 	Exclude []string `json:"exclude"`
-}
-
-func (r *ResolverConfig) IP(v6 bool) string {
-	ip4 := r.v4()
-	ip6 := r.v6()
-	if v6 && ip6 != "" {
-		return ip6
-	}
-	return ip4
-}
-
-func (r *ResolverConfig) v4() string {
-	for _, ip := range r.V4 {
-		return ip
-	}
-	return ""
-}
-
-func (r *ResolverConfig) v6() string {
-	for _, ip := range r.V6 {
-		return ip
-	}
-	return ""
 }
 
 type utilityResponse struct {
