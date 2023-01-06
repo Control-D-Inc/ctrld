@@ -314,6 +314,17 @@ Above policy will:
 - Forward requests on `listener.0` for `test.com` to `upstream.2`. If timeout is reached, retry on `upstream.1`.
 - All other requests on `listener.0` that do not match above conditions will be forwarded to `upstream.0`.
 
+An empty upstream would not route the request to any defined upstreams, and use the OS default resolver.
+
+```toml
+[listener.0.policy]
+name = "OS Resolver"
+
+rules = [
+    {"*.local" = []},
+]
+```
+
 #### name
 `name` is the name for the policy.
 

@@ -41,6 +41,9 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("http.NewRequest: %w", err)
 	}
+	q := req.URL.Query()
+	q.Set("platform", "ctrld")
+	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/json")
 	client := http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
