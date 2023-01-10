@@ -449,6 +449,7 @@ func processCDFlags() {
 		},
 	}
 
+	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	v.Set("network", cfg.Network)
 	v.Set("upstream", cfg.Upstream)
 	v.Set("listener", cfg.Listener)

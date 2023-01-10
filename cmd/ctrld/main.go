@@ -60,7 +60,7 @@ func initLogging() {
 			fmt.Fprintf(os.Stderr, "failed to create log path: %v", err)
 			os.Exit(1)
 		}
-		logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
+		logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_RDWR, os.FileMode(0o600))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to create log file: %v", err)
 			os.Exit(1)
