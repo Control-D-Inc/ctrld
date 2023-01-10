@@ -68,7 +68,7 @@ func InitConfig(v *viper.Viper, name string) {
 
 // Config represents ctrld supported configuration.
 type Config struct {
-	Service  ServiceConfig              `mapstructure:"service"`
+	Service  ServiceConfig              `mapstructure:"service" toml:"service,omitempty"`
 	Network  map[string]*NetworkConfig  `mapstructure:"network" toml:"network" validate:"min=1,dive"`
 	Upstream map[string]*UpstreamConfig `mapstructure:"upstream" toml:"upstream" validate:"min=1,dive"`
 	Listener map[string]*ListenerConfig `mapstructure:"listener" toml:"listener" validate:"min=1,dive"`
@@ -76,49 +76,49 @@ type Config struct {
 
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
-	LogLevel         string `mapstructure:"log_level" toml:"log_level"`
-	LogPath          string `mapstructure:"log_path" toml:"log_path"`
-	CacheEnable      bool   `mapstructure:"cache_enable" toml:"cache_enable"`
-	CacheSize        int    `mapstructure:"cache_size" toml:"cache_size"`
-	CacheTTLOverride int    `mapstructure:"cache_ttl_override" toml:"cache_ttl_override"`
-	CacheServeStale  bool   `mapstructure:"cache_serve_stale" toml:"cache_serve_stale"`
+	LogLevel         string `mapstructure:"log_level" toml:"log_level,omitempty"`
+	LogPath          string `mapstructure:"log_path" toml:"log_path,omitempty"`
+	CacheEnable      bool   `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
+	CacheSize        int    `mapstructure:"cache_size" toml:"cache_size,omitempty"`
+	CacheTTLOverride int    `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
+	CacheServeStale  bool   `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
 	Daemon           bool   `mapstructure:"-" toml:"-"`
 	AllocateIP       bool   `mapstructure:"-" toml:"-"`
 }
 
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.
 type NetworkConfig struct {
-	Name   string       `mapstructure:"name" toml:"name"`
-	Cidrs  []string     `mapstructure:"cidrs" toml:"cidrs" validate:"dive,cidr"`
+	Name   string       `mapstructure:"name" toml:"name,omitempty"`
+	Cidrs  []string     `mapstructure:"cidrs" toml:"cidrs,omitempty" validate:"dive,cidr"`
 	IPNets []*net.IPNet `mapstructure:"-" toml:"-"`
 }
 
 // UpstreamConfig specifies configuration for upstreams that ctrld will forward requests to.
 type UpstreamConfig struct {
-	Name              string              `mapstructure:"name" toml:"name"`
-	Type              string              `mapstructure:"type" toml:"type" validate:"oneof=doh doh3 dot doq os legacy"`
-	Endpoint          string              `mapstructure:"endpoint" toml:"endpoint" validate:"required_unless=Type os"`
-	BootstrapIP       string              `mapstructure:"bootstrap_ip" toml:"bootstrap_ip"`
+	Name              string              `mapstructure:"name" toml:"name,omitempty"`
+	Type              string              `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy"`
+	Endpoint          string              `mapstructure:"endpoint" toml:"endpoint,omitempty" validate:"required_unless=Type os"`
+	BootstrapIP       string              `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
 	Domain            string              `mapstructure:"-" toml:"-"`
-	Timeout           int                 `mapstructure:"timeout" toml:"timeout" validate:"gte=0"`
+	Timeout           int                 `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
 	transport         *http.Transport     `mapstructure:"-" toml:"-"`
 	http3RoundTripper *http3.RoundTripper `mapstructure:"-" toml:"-"`
 }
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
 type ListenerConfig struct {
-	IP         string                `mapstructure:"ip" toml:"ip" validate:"ip"`
-	Port       int                   `mapstructure:"port" toml:"port" validate:"gt=0"`
-	Restricted bool                  `mapstructure:"restricted" toml:"restricted"`
-	Policy     *ListenerPolicyConfig `mapstructure:"policy" toml:"policy"`
+	IP         string                `mapstructure:"ip" toml:"ip,omitempty" validate:"ip"`
+	Port       int                   `mapstructure:"port" toml:"port,omitempty" validate:"gt=0"`
+	Restricted bool                  `mapstructure:"restricted" toml:"restricted,omitempty"`
+	Policy     *ListenerPolicyConfig `mapstructure:"policy" toml:"policy,omitempty"`
 }
 
 // ListenerPolicyConfig specifies the policy rules for ctrld to filter incoming requests.
 type ListenerPolicyConfig struct {
-	Name                 string   `mapstructure:"name" toml:"name"`
-	Networks             []Rule   `mapstructure:"networks" toml:"networks" validate:"dive,len=1"`
-	Rules                []Rule   `mapstructure:"rules" toml:"rules" validate:"dive,len=1"`
-	FailoverRcodes       []string `mapstructure:"failover_rcodes" toml:"failover_rcodes" validate:"dive,dnsrcode"`
+	Name                 string   `mapstructure:"name" toml:"name,omitempty"`
+	Networks             []Rule   `mapstructure:"networks" toml:"networks,omitempty,inline,multiline" validate:"dive,len=1"`
+	Rules                []Rule   `mapstructure:"rules" toml:"rules,omitempty,inline,multiline" validate:"dive,len=1"`
+	FailoverRcodes       []string `mapstructure:"failover_rcodes" toml:"failover_rcodes,omitempty" validate:"dive,dnsrcode"`
 	FailoverRcodeNumbers []int    `mapstructure:"-" toml:"-"`
 }
 

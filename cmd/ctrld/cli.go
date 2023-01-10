@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
+	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
@@ -87,7 +88,7 @@ func initCLI() {
 			if err := v.Unmarshal(&cfg); err != nil {
 				log.Fatalf("failed to unmarshal config: %v", err)
 			}
-			processCDFlags(writeDefaultConfig)
+			processCDFlags()
 			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
 				log.Fatalf("invalid config: %v", err)
 			}
@@ -173,10 +174,7 @@ func initCLI() {
 				// the written config won't be writable by SYSTEM account, we have to update
 				// the config here when "--cd" is supplied.
 				if runtime.GOOS == "windows" && cdUID != "" {
-					if err := v.Unmarshal(&cfg); err != nil {
-						log.Fatalf("failed to unmarshal config: %v", err)
-					}
-					processCDFlags(writeDefaultConfig)
+					processCDFlags()
 				}
 			}
 			s, err := service.New(&prog{}, sc)
@@ -324,7 +322,24 @@ func writeConfigFile() {
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
 	}
-	if err := v.WriteConfigAs(defaultConfigFile); err != nil {
+	f, err := os.OpenFile(defaultConfigFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(0o644))
+	if err != nil {
+		log.Printf("failed to open config file: %v\n", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+	if cdUID != "" {
+		if _, err := f.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n"); err != nil {
+			log.Printf("failed to write header to config file: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	enc := toml.NewEncoder(f).SetIndentTables(true)
+	if err := enc.Encode(v.AllSettings()); err != nil {
+		log.Printf("failed to encode config file: %v\n", err)
+		os.Exit(1)
+	}
+	if err := f.Close(); err != nil {
 		log.Printf("failed to write config file: %v\n", err)
 	}
 }
@@ -399,7 +414,7 @@ func processNoConfigFlags(noConfigStart bool) {
 	processLogAndCacheFlags()
 }
 
-func processCDFlags(writeConfig bool) {
+func processCDFlags() {
 	if cdUID == "" {
 		return
 	}
@@ -408,22 +423,36 @@ func processCDFlags(writeConfig bool) {
 		log.Fatalf("failed to fetch resolver config: %v", err)
 	}
 
-	u0 := cfg.Upstream["0"]
-	u0.Name = resolverConfig.DOH
-	u0.Endpoint = resolverConfig.DOH
-	u0.Type = ctrld.ResolverTypeDOH
-
+	cfg = ctrld.Config{}
+	cfg.Network = make(map[string]*ctrld.NetworkConfig)
+	cfg.Network["0"] = &ctrld.NetworkConfig{
+		Name:  "Netowrk 0",
+		Cidrs: []string{"0.0.0.0/0"},
+	}
+	cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
+	cfg.Upstream["0"] = &ctrld.UpstreamConfig{
+		Endpoint: resolverConfig.DOH,
+		Type:     ctrld.ResolverTypeDOH,
+		Timeout:  5000,
+	}
 	rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
 	for _, domain := range resolverConfig.Exclude {
 		rules = append(rules, ctrld.Rule{domain: []string{}})
 	}
-	cfg.Listener["0"].Policy = &ctrld.ListenerPolicyConfig{Name: "My Policy", Rules: rules}
-
-	if writeConfig {
-		v.Set("listener", cfg.Listener)
-		v.Set("upstream", cfg.Upstream)
-		writeConfigFile()
+	cfg.Listener = make(map[string]*ctrld.ListenerConfig)
+	cfg.Listener["0"] = &ctrld.ListenerConfig{
+		IP:   "127.0.0.1",
+		Port: 53,
+		Policy: &ctrld.ListenerPolicyConfig{
+			Name:  "My Policy",
+			Rules: rules,
+		},
 	}
+
+	v.Set("network", cfg.Network)
+	v.Set("upstream", cfg.Upstream)
+	v.Set("listener", cfg.Listener)
+	writeConfigFile()
 }
 
 func processListenFlag() {

@@ -3,9 +3,9 @@ package main
 import (
 	"net"
 	"sync"
-
-	"golang.org/x/net/nettest"
 )
+
+const controldIPv6Test = "ipv6.controld.io"
 
 var (
 	stackOnce   sync.Once
@@ -13,8 +13,7 @@ var (
 )
 
 func probeStack() {
-	// TODO(cuonglm): use nettest.SupportsIPv6 once https://github.com/golang/go/issues/57386 fixed.
-	if _, err := nettest.RoutedInterface("ip6", net.FlagUp); err == nil {
+	if _, err := net.Dial("tcp6", controldIPv6Test); err == nil {
 		ipv6Enabled = true
 	}
 }
