@@ -3,13 +3,15 @@ package controld
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
 )
 
-const resolverDataURL = "https://api.controld.com/utility"
+const (
+	resolverDataURL   = "https://api.controld.com/utility"
+	InvalidConfigCode = 40401
+)
 
 // ResolverConfig represents Control D resolver data.
 type ResolverConfig struct {
@@ -24,10 +26,15 @@ type utilityResponse struct {
 	} `json:"body"`
 }
 
-type utilityErrorResponse struct {
-	Error struct {
+type UtilityErrorResponse struct {
+	ErrorField struct {
 		Message string `json:"message"`
+		Code    int    `json:"code"`
 	} `json:"error"`
+}
+
+func (u UtilityErrorResponse) Error() string {
+	return u.ErrorField.Message
 }
 
 type utilityRequest struct {
@@ -53,11 +60,11 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 	defer resp.Body.Close()
 	d := json.NewDecoder(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		errResp := &utilityErrorResponse{}
+		errResp := &UtilityErrorResponse{}
 		if err := d.Decode(errResp); err != nil {
 			return nil, err
 		}
-		return nil, errors.New(errResp.Error.Message)
+		return nil, errResp
 	}
 
 	ur := &utilityResponse{}

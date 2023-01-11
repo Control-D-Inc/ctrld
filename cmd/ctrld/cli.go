@@ -348,7 +348,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	// If err == nil, there's a config supplied via `--config`, no default config written.
 	err := v.ReadInConfig()
 	if err == nil {
-		fmt.Println("loading config file from: ", v.ConfigFileUsed())
+		fmt.Println("loading config file from:", v.ConfigFileUsed())
 		return true
 	}
 
@@ -419,8 +419,21 @@ func processCDFlags() {
 		return
 	}
 	resolverConfig, err := controld.FetchResolverConfig(cdUID)
+	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
+		s, err := service.New(&prog{}, svcConfig)
+		if err != nil {
+			stderrMsg(err.Error())
+			return
+		}
+		tasks := []task{{s.Uninstall, true}}
+		if doTasks(tasks) {
+			log.Println("uninstalled service")
+		}
+		log.Fatalf("failed to fetch resolver config: %v", uer)
+	}
 	if err != nil {
-		log.Fatalf("failed to fetch resolver config: %v", err)
+		log.Printf("could not fetch resolver config: %v", err)
+		return
 	}
 
 	cfg = ctrld.Config{}
