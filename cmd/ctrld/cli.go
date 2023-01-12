@@ -144,6 +144,8 @@ func initCLI() {
 	runCmd.Flags().StringVarP(&logPath, "log", "", "", "path to log file")
 	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	runCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
+	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
+	_ = runCmd.Flags().MarkHidden("homedir")
 
 	rootCmd.AddCommand(runCmd)
 
@@ -169,14 +171,18 @@ func initCLI() {
 					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
 					readConfigFile(true)
 				}
+				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
+			}
 
-				// On Windows, the service will be run as SYSTEM, so if ctrld start as Admin,
-				// the written config won't be writable by SYSTEM account, we have to update
-				// the config here when "--cd" is supplied.
-				if runtime.GOOS == "windows" && cdUID != "" {
-					processCDFlags()
+			// On Windows, the service will be run as SYSTEM, so if ctrld start as Admin,
+			// the user home dir is different, so pass specific arguments that relevant here.
+			if runtime.GOOS == "windows" {
+				processCDFlags()
+				if configPath == "" {
+					sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
 				}
 			}
+
 			s, err := service.New(&prog{}, sc)
 			if err != nil {
 				stderrMsg(err.Error())

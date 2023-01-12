@@ -22,6 +22,7 @@ var (
 	secondaryUpstream string
 	domains           []string
 	logPath           string
+	homedir           string
 	cacheSize         int
 	cfg               ctrld.Config
 	verbose           int
@@ -43,6 +44,9 @@ func main() {
 func normalizeLogFilePath(logFilePath string) string {
 	if logFilePath == "" || filepath.IsAbs(logFilePath) || service.Interactive() {
 		return logFilePath
+	}
+	if homedir != "" {
+		return filepath.Join(homedir, logFilePath)
 	}
 	dir, _ := os.UserHomeDir()
 	if dir == "" {
