@@ -27,6 +27,22 @@ func (r *doqResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 }
 
 func resolve(ctx context.Context, msg *dns.Msg, endpoint string, tlsConfig *tls.Config) (*dns.Msg, error) {
+	// DoQ quic-go server returns io.EOF error after running for a long time,
+	// even for a good stream. So retrying the query for 5 times before giving up.
+	for i := 0; i < 5; i++ {
+		answer, err := doResolve(ctx, msg, endpoint, tlsConfig)
+		if err == io.EOF {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return answer, nil
+	}
+	return nil, &quic.ApplicationError{ErrorCode: quic.ApplicationErrorCode(quic.InternalError), ErrorMessage: quic.InternalError.Message()}
+}
+
+func doResolve(ctx context.Context, msg *dns.Msg, endpoint string, tlsConfig *tls.Config) (*dns.Msg, error) {
 	session, err := quic.DialAddr(endpoint, tlsConfig, nil)
 	if err != nil {
 		return nil, err
@@ -65,6 +81,14 @@ func resolve(ctx context.Context, msg *dns.Msg, endpoint string, tlsConfig *tls.
 	}
 
 	_ = stream.Close()
+
+	// io.ReadAll hide the io.EOF error returned by quic-go server.
+	// Once we figure out why quic-go server sends io.EOF after running
+	// for a long time, we can have a better way to handle this. For now,
+	// make sure io.EOF error returned, so the caller can handle it cleanly.
+	if len(buf) == 0 {
+		return nil, io.EOF
+	}
 
 	answer := new(dns.Msg)
 	if err := answer.Unpack(buf[2:]); err != nil {
