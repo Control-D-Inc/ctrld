@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,20 @@ func (p *prog) serveUDP(listenerNum string) error {
 			ctrld.Log(ctx, mainLog.Error().Err(err), "serveUDP: failed to send DNS response to client")
 		}
 	})
+
+	// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
+	// listen on ::1, then spawn a listener for receiving DNS requests.
+	if runtime.GOOS == "windows" && supportsIPv6ListenLocal() {
+		go func() {
+			s := &dns.Server{
+				Addr:    net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)),
+				Net:     "udp",
+				Handler: handler,
+			}
+			_ = s.ListenAndServe()
+		}()
+	}
+
 	s := &dns.Server{
 		Addr:    net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port)),
 		Net:     "udp",
