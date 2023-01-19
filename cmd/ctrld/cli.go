@@ -388,7 +388,9 @@ func initCLI() {
 		Use:   "start",
 		Short: "Quick start service and configure DNS on interface",
 		Run: func(cmd *cobra.Command, args []string) {
-			os.Args = append(os.Args, "--iface="+ifaceStartStop)
+			if !cmd.Flags().Changed("iface") {
+				os.Args = append(os.Args, "--iface="+ifaceStartStop)
+			}
 			startCmd.Run(cmd, args)
 		},
 	}
@@ -399,7 +401,9 @@ func initCLI() {
 		Use:   "stop",
 		Short: "Quick stop service and remove DNS from interface",
 		Run: func(cmd *cobra.Command, args []string) {
-			os.Args = append(os.Args, "--iface="+ifaceStartStop)
+			if !cmd.Flags().Changed("iface") {
+				os.Args = append(os.Args, "--iface="+ifaceStartStop)
+			}
 			stopCmd.Run(cmd, args)
 		},
 	}
