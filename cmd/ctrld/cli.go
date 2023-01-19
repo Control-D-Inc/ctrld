@@ -535,7 +535,7 @@ func processCDFlags() {
 	cfg = ctrld.Config{}
 	cfg.Network = make(map[string]*ctrld.NetworkConfig)
 	cfg.Network["0"] = &ctrld.NetworkConfig{
-		Name:  "Netowrk 0",
+		Name:  "Network 0",
 		Cidrs: []string{"0.0.0.0/0"},
 	}
 	cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
