@@ -391,7 +391,7 @@ func initCLI() {
 		Use:   "stop",
 		Short: "Quick stop service and remove DNS from interface",
 		Run: func(cmd *cobra.Command, args []string) {
-			startCmd.Run(cmd, args)
+			stopCmd.Run(cmd, args)
 		},
 	}
 	stopCmdAlias.Flags().StringVarP(&iface, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
