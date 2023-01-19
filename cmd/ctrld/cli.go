@@ -26,16 +26,10 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
 
-const (
-	tailscaleDevName = "tailscale0"
-	tailscaleDNS     = "100.100.100.100"
-)
-
 var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	defaultConfigWritten = false
 	defaultConfigFile    = "ctrld.toml"
-	tailscaleIface       *net.Interface
 )
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains", "log", "cache_size"}
@@ -611,9 +605,6 @@ func netIfaceFromName(ifaceName string) (*net.Interface, error) {
 	err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
 		if i.Name == ifaceName {
 			iface = i.Interface
-		}
-		if i.Name == tailscaleDevName {
-			tailscaleIface = i.Interface
 		}
 	})
 	if iface == nil {

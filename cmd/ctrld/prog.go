@@ -46,12 +46,6 @@ func (p *prog) run() {
 			}
 		}
 	}
-	// Sorry, tailscale!
-	if tailscaleIface != nil {
-		if err := setDNS(tailscaleIface, []string{cfg.Listener["0"].IP}); err != nil {
-			mainLog.Warn().Err(err).Msg("could not set DNS for tailscale interface")
-		}
-	}
 
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
