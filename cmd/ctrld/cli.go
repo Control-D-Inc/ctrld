@@ -340,6 +340,13 @@ func initCLI() {
 					}
 					fmt.Printf("        %v\n", ipaddr)
 				}
+				for i, dns := range currentDNS(i.Interface) {
+					if i == 0 {
+						fmt.Printf("DNS   : %s\n", dns)
+						continue
+					}
+					fmt.Printf("      : %s\n", dns)
+				}
 				println()
 			})
 			if err != nil {

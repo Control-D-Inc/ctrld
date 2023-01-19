@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"net"
 	"net/netip"
 	"os/exec"
@@ -85,7 +84,6 @@ func getDNSByResolvectl(iface string) []string {
 	}
 	parts = strings.Fields(parts[0])
 	if len(parts) > 2 {
-		fmt.Println(parts)
 		return parts[3:]
 	}
 	return nil
