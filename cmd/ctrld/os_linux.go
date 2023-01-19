@@ -78,11 +78,8 @@ func getDNSByResolvectl(iface string) []string {
 	if err != nil {
 		return nil
 	}
-	parts := strings.SplitN(string(b), "%", 2)
-	if len(parts) != 2 {
-		return nil
-	}
-	parts = strings.Fields(parts[0])
+
+	parts := strings.Fields(strings.SplitN(string(b), "%", 2)[0])
 	if len(parts) > 2 {
 		return parts[3:]
 	}

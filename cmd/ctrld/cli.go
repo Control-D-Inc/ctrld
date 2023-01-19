@@ -388,20 +388,22 @@ func initCLI() {
 		Use:   "start",
 		Short: "Quick start service and configure DNS on interface",
 		Run: func(cmd *cobra.Command, args []string) {
+			os.Args = append(os.Args, "--iface="+ifaceStartStop)
 			startCmd.Run(cmd, args)
 		},
 	}
-	startCmdAlias.Flags().StringVarP(&iface, "iface", "", "auto", `Update DNS setting for iface, "auto" means the default interface gateway`)
+	startCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmdAlias.Flags().AddFlagSet(startCmd.Flags())
 	rootCmd.AddCommand(startCmdAlias)
 	stopCmdAlias := &cobra.Command{
 		Use:   "stop",
 		Short: "Quick stop service and remove DNS from interface",
 		Run: func(cmd *cobra.Command, args []string) {
+			os.Args = append(os.Args, "--iface="+ifaceStartStop)
 			stopCmd.Run(cmd, args)
 		},
 	}
-	stopCmdAlias.Flags().StringVarP(&iface, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
+	stopCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
 	stopCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
 	rootCmd.AddCommand(stopCmdAlias)
 

@@ -33,8 +33,9 @@ var (
 	mainLog    = rootLogger
 	proxyLog   = rootLogger
 
-	cdUID string
-	iface string
+	cdUID          string
+	iface          string
+	ifaceStartStop string
 )
 
 func main() {
