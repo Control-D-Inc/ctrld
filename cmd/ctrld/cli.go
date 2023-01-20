@@ -195,7 +195,7 @@ func initCLI() {
 				writeDefaultConfig := !noConfigStart && configBase64 == ""
 				if configPath == "" && writeDefaultConfig {
 					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
-					readConfigFile(true)
+					readConfigFile(writeDefaultConfig && cdUID == "")
 				}
 				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
 			}

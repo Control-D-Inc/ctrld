@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"os/exec"
@@ -42,6 +43,9 @@ func resetDNS(iface *net.Interface, nameservers []string) error {
 	if err := resetDNSUseDHCP(iface); err != nil {
 		mainLog.Debug().Err(err).Msg("could not reset DNS using DHCP")
 	}
+	if len(nameservers) == 0 {
+		return nil
+	}
 	return setDNS(iface, nameservers)
 }
 
@@ -77,7 +81,7 @@ func addSecondaryDNS(iface *net.Interface, dns string) error {
 }
 
 func resetDNSUseDHCP(iface *net.Interface) error {
-	if supportsIPv6() {
+	if supportsIPv6ListenLocal() {
 		if output, err := netsh("interface", "ipv6", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp"); err != nil {
 			mainLog.Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))
 		}
@@ -95,6 +99,9 @@ func netsh(args ...string) ([]byte, error) {
 }
 
 func currentDNS(iface *net.Interface) []string {
+	if hasDNSFromDHCP(iface, "ipv4") || hasDNSFromDHCP(iface, "ipv6") {
+		return nil
+	}
 	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {
 		mainLog.Error().Err(err).Msg("failed to get interface LUID")
@@ -110,4 +117,10 @@ func currentDNS(iface *net.Interface) []string {
 		ns = append(ns, nameserver.String())
 	}
 	return ns
+}
+
+func hasDNSFromDHCP(iface *net.Interface, ipVer string) bool {
+	idx := strconv.Itoa(iface.Index)
+	output, _ := netsh("interface", ipVer, "show", "dnsservers", idx)
+	return bytes.Contains(output, []byte(" through DHCP:"))
 }
