@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"net"
 	"os/exec"
@@ -39,14 +38,18 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 }
 
 // TODO(cuonglm): should we use system API?
-func resetDNS(iface *net.Interface, nameservers []string) error {
-	if err := resetDNSUseDHCP(iface); err != nil {
-		mainLog.Debug().Err(err).Msg("could not reset DNS using DHCP")
+func resetDNS(iface *net.Interface) error {
+	if supportsIPv6ListenLocal() {
+		if output, err := netsh("interface", "ipv6", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp"); err != nil {
+			mainLog.Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))
+		}
 	}
-	if len(nameservers) == 0 {
-		return nil
+	output, err := netsh("interface", "ipv4", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp")
+	if err != nil {
+		mainLog.Error().Err(err).Msgf("failed to reset ipv4 DNS: %s", string(output))
+		return err
 	}
-	return setDNS(iface, nameservers)
+	return nil
 }
 
 func setPrimaryDNS(iface *net.Interface, dns string) error {
@@ -80,28 +83,11 @@ func addSecondaryDNS(iface *net.Interface, dns string) error {
 	return nil
 }
 
-func resetDNSUseDHCP(iface *net.Interface) error {
-	if supportsIPv6ListenLocal() {
-		if output, err := netsh("interface", "ipv6", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp"); err != nil {
-			mainLog.Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))
-		}
-	}
-	output, err := netsh("interface", "ipv4", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp")
-	if err != nil {
-		mainLog.Error().Err(err).Msgf("failed to reset ipv4 DNS: %s", string(output))
-		return err
-	}
-	return nil
-}
-
 func netsh(args ...string) ([]byte, error) {
 	return exec.Command("netsh", args...).Output()
 }
 
 func currentDNS(iface *net.Interface) []string {
-	if hasDNSFromDHCP(iface, "ipv4") || hasDNSFromDHCP(iface, "ipv6") {
-		return nil
-	}
 	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {
 		mainLog.Error().Err(err).Msg("failed to get interface LUID")
@@ -117,10 +103,4 @@ func currentDNS(iface *net.Interface) []string {
 		ns = append(ns, nameserver.String())
 	}
 	return ns
-}
-
-func hasDNSFromDHCP(iface *net.Interface, ipVer string) bool {
-	idx := strconv.Itoa(iface.Index)
-	output, _ := netsh("interface", ipVer, "show", "dnsservers", idx)
-	return bytes.Contains(output, []byte(" through DHCP:"))
 }

@@ -6,6 +6,8 @@ package main
 import (
 	"net"
 	"os/exec"
+
+	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
 // allocate loopback ip
@@ -44,7 +46,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 }
 
 // TODO(cuonglm): use system API
-func resetDNS(iface *net.Interface, _ []string) error {
+func resetDNS(iface *net.Interface) error {
 	cmd := "networksetup"
 	args := []string{"-setdnsservers", iface.Name, "empty"}
 
@@ -56,5 +58,5 @@ func resetDNS(iface *net.Interface, _ []string) error {
 }
 
 func currentDNS(_ *net.Interface) []string {
-	return nil
+	return resolvconffile.NameServers("")
 }

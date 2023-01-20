@@ -23,9 +23,8 @@ var svcConfig = &service.Config{
 }
 
 type prog struct {
-	cfg     *ctrld.Config
-	cache   dnscache.Cacher
-	origDNS []string
+	cfg   *ctrld.Config
+	cache dnscache.Cacher
 }
 
 func (p *prog) Start(s service.Service) error {
@@ -40,7 +39,6 @@ func (p *prog) run() {
 		if err != nil {
 			mainLog.Error().Err(err).Msg("could not get interface")
 		} else {
-			p.origDNS = currentDNS(netIface)
 			if err := setDNS(netIface, []string{cfg.Listener["0"].IP}); err != nil {
 				mainLog.Error().Err(err).Str("iface", iface).Msgf("could not set DNS for interface")
 			}
@@ -179,7 +177,7 @@ func (p *prog) Stop(s service.Service) error {
 	}
 	if iface != "" {
 		if netIface, err := netIfaceFromName(iface); err == nil {
-			if err := resetDNS(netIface, p.origDNS); err != nil {
+			if err := resetDNS(netIface); err != nil {
 				mainLog.Error().Err(err).Str("iface", iface).Msgf("could not reset DNS")
 			}
 		} else {

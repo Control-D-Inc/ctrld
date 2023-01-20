@@ -8,6 +8,10 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/dhcpv4/client4"
+	"github.com/insomniacslk/dhcp/dhcpv6"
+	"github.com/insomniacslk/dhcp/dhcpv6/client6"
 	"tailscale.com/net/dns"
 	"tailscale.com/util/dnsname"
 
@@ -45,7 +49,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		mainLog.Error().Err(err).Msg("failed to create DNS OS configurator")
 		return err
 	}
-
+	defer r.Close()
 	ns := make([]netip.Addr, 0, len(nameservers))
 	for _, nameserver := range nameservers {
 		ns = append(ns, netip.MustParseAddr(nameserver))
@@ -56,10 +60,43 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	})
 }
 
-func resetDNS(iface *net.Interface, nameservers []string) error {
-	if err := setDNS(iface, nameservers); err != nil {
-		mainLog.Error().Err(err).Msg("resetDNS failed.")
+func resetDNS(iface *net.Interface) error {
+	c := client4.NewClient()
+	conversation, err := c.Exchange(iface.Name)
+	if err != nil {
 		return err
+	}
+	for _, packet := range conversation {
+		if packet.MessageType() == dhcpv4.MessageTypeAck {
+			nameservers := packet.DNS()
+			ns := make([]string, 0, len(nameservers))
+			for _, nameserver := range nameservers {
+				ns = append(ns, nameserver.String())
+			}
+			_ = setDNS(iface, ns)
+		}
+	}
+
+	if supportsIPv6() {
+		c := client6.NewClient()
+		conversation, err := c.Exchange(iface.Name)
+		if err != nil {
+			return err
+		}
+		for _, packet := range conversation {
+			if packet.Type() == dhcpv6.MessageTypeReply {
+				msg, err := packet.GetInnerMessage()
+				if err != nil {
+					return err
+				}
+				nameservers := msg.Options.DNS()
+				ns := make([]string, 0, len(nameservers))
+				for _, nameserver := range nameservers {
+					ns = append(ns, nameserver.String())
+				}
+				_ = setDNS(iface, ns)
+			}
+		}
 	}
 	return nil
 }

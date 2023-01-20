@@ -111,11 +111,7 @@ func initCLI() {
 			initCache()
 
 			if iface == "auto" {
-				dri, err := interfaces.DefaultRouteInterface()
-				if err != nil {
-					mainLog.Error().Err(err).Msg("failed to get default route interface")
-				}
-				iface = dri
+				iface = defaultIfaceName()
 			}
 
 			if daemon {
@@ -450,6 +446,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	err := v.ReadInConfig()
 	if err == nil {
 		fmt.Println("loading config file from:", v.ConfigFileUsed())
+		defaultConfigFile = v.ConfigFileUsed()
 		return true
 	}
 
@@ -528,6 +525,12 @@ func processCDFlags() {
 		if err != nil {
 			stderrMsg(err.Error())
 			return
+		}
+		if iface == "auto" {
+			iface = defaultIfaceName()
+		}
+		if netIface, _ := netIfaceFromName(iface); netIface != nil {
+			_ = resetDNS(netIface)
 		}
 		tasks := []task{{s.Uninstall, true}}
 		if doTasks(tasks) {
@@ -622,4 +625,12 @@ func netIfaceFromName(ifaceName string) (*net.Interface, error) {
 		return nil, err
 	}
 	return iface, err
+}
+
+func defaultIfaceName() string {
+	dri, err := interfaces.DefaultRouteInterface()
+	if err != nil {
+		mainLog.Error().Err(err).Msg("failed to get default route interface")
+	}
+	return dri
 }
