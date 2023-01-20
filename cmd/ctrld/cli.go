@@ -176,9 +176,10 @@ func initCLI() {
 	rootCmd.AddCommand(runCmd)
 
 	startCmd := &cobra.Command{
-		Use:   "start",
-		Short: "Start the ctrld service",
-		Args:  cobra.NoArgs,
+		PreRun: checkHasElevatedPrivilege,
+		Use:    "start",
+		Short:  "Start the ctrld service",
+		Args:   cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			sc := &service.Config{}
 			*sc = *svcConfig
@@ -239,9 +240,10 @@ func initCLI() {
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 
 	stopCmd := &cobra.Command{
-		Use:   "stop",
-		Short: "Stop the ctrld service",
-		Args:  cobra.NoArgs,
+		PreRun: checkHasElevatedPrivilege,
+		Use:    "stop",
+		Short:  "Stop the ctrld service",
+		Args:   cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := service.New(&prog{}, svcConfig)
 			if err != nil {
@@ -256,9 +258,10 @@ func initCLI() {
 	stopCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, "auto" means the default interface gateway`)
 
 	restartCmd := &cobra.Command{
-		Use:   "restart",
-		Short: "Restart the ctrld service",
-		Args:  cobra.NoArgs,
+		PreRun: checkHasElevatedPrivilege,
+		Use:    "restart",
+		Short:  "Restart the ctrld service",
+		Args:   cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := service.New(&prog{}, svcConfig)
 			if err != nil {
@@ -298,9 +301,10 @@ func initCLI() {
 	}
 
 	uninstallCmd := &cobra.Command{
-		Use:   "uninstall",
-		Short: "Uninstall the ctrld service",
-		Args:  cobra.NoArgs,
+		PreRun: checkHasElevatedPrivilege,
+		Use:    "uninstall",
+		Short:  "Uninstall the ctrld service",
+		Args:   cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := service.New(&prog{}, svcConfig)
 			if err != nil {
@@ -379,8 +383,9 @@ func initCLI() {
 	serviceCmd.AddCommand(interfacesCmd)
 	rootCmd.AddCommand(serviceCmd)
 	startCmdAlias := &cobra.Command{
-		Use:   "start",
-		Short: "Quick start service and configure DNS on interface",
+		PreRun: checkHasElevatedPrivilege,
+		Use:    "start",
+		Short:  "Quick start service and configure DNS on interface",
 		Run: func(cmd *cobra.Command, args []string) {
 			if !cmd.Flags().Changed("iface") {
 				os.Args = append(os.Args, "--iface="+ifaceStartStop)
@@ -392,8 +397,9 @@ func initCLI() {
 	startCmdAlias.Flags().AddFlagSet(startCmd.Flags())
 	rootCmd.AddCommand(startCmdAlias)
 	stopCmdAlias := &cobra.Command{
-		Use:   "stop",
-		Short: "Quick stop service and remove DNS from interface",
+		PreRun: checkHasElevatedPrivilege,
+		Use:    "stop",
+		Short:  "Quick stop service and remove DNS from interface",
 		Run: func(cmd *cobra.Command, args []string) {
 			if !cmd.Flags().Changed("iface") {
 				os.Args = append(os.Args, "--iface="+ifaceStartStop)

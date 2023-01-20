@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/spf13/cobra"
 )
 
 func stderrMsg(msg string) {
@@ -28,4 +30,16 @@ func doTasks(tasks []task) bool {
 		}
 	}
 	return true
+}
+
+func checkHasElevatedPrivilege(cmd *cobra.Command, args []string) {
+	ok, err := hasElevatedPrivilege()
+	if err != nil {
+		fmt.Printf("could not detect user privilege: %v", err)
+		return
+	}
+	if !ok {
+		fmt.Println("Please relaunch process with admin/root privilege.")
+		os.Exit(1)
+	}
 }
