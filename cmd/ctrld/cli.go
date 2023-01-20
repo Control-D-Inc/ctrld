@@ -187,6 +187,7 @@ func initCLI() {
 				osArgs = os.Args[3:]
 			}
 			sc.Arguments = append([]string{"run"}, osArgs...)
+			isWindows := runtime.GOOS == "windows"
 			if dir, err := os.UserHomeDir(); err == nil {
 				// WorkingDirectory is not supported on Windows.
 				sc.WorkingDirectory = dir
@@ -195,14 +196,14 @@ func initCLI() {
 				writeDefaultConfig := !noConfigStart && configBase64 == ""
 				if configPath == "" && writeDefaultConfig {
 					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
-					readConfigFile(writeDefaultConfig && cdUID == "")
+					readConfigFile(writeDefaultConfig && (cdUID == "" || !isWindows))
 				}
 				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
 			}
 
 			// On Windows, the service will be run as SYSTEM, so if ctrld start as Admin,
 			// the user home dir is different, so pass specific arguments that relevant here.
-			if runtime.GOOS == "windows" {
+			if isWindows {
 				processCDFlags()
 				if configPath == "" {
 					sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
