@@ -434,7 +434,9 @@ func writeConfigFile() {
 	}
 	if err := f.Close(); err != nil {
 		log.Printf("failed to write config file: %v\n", err)
+		os.Exit(1)
 	}
+	fmt.Println("writing config file to:", defaultConfigFile)
 }
 
 func readConfigFile(writeDefaultConfig bool) bool {
