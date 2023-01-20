@@ -34,6 +34,8 @@ func supportsIPv6ListenLocal() bool {
 }
 
 // isIPv6 checks if the provided IP is v6.
+//
+//lint:ignore U1000 use in os_windows.go
 func isIPv6(ip string) bool {
 	parsedIP := net.ParseIP(ip)
 	return parsedIP != nil && parsedIP.To4() == nil && parsedIP.To16() != nil

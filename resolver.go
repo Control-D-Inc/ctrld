@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"sync/atomic"
 
 	"github.com/miekg/dns"
@@ -95,14 +94,4 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 	}
 	answer, _, err := dnsClient.ExchangeContext(ctx, msg, r.endpoint)
 	return answer, err
-}
-
-// canonicalName returns canonical name from FQDN with "." trimmed.
-func canonicalName(fqdn string) string {
-	q := strings.TrimSpace(fqdn)
-	q = strings.TrimSuffix(q, ".")
-	// https://datatracker.ietf.org/doc/html/rfc4343
-	q = strings.ToLower(q)
-
-	return q
 }

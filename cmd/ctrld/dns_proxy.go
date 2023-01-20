@@ -282,11 +282,12 @@ func containRcode(rcodes []int, rcode int) bool {
 }
 
 func setCachedAnswerTTL(answer *dns.Msg, now, expiredTime time.Time) {
-	ttl := uint32(expiredTime.Sub(now).Seconds())
-	if ttl < 0 {
+	ttlSecs := expiredTime.Sub(now).Seconds()
+	if ttlSecs < 0 {
 		return
 	}
 
+	ttl := uint32(ttlSecs)
 	for _, rr := range answer.Answer {
 		rr.Header().Ttl = ttl
 	}
