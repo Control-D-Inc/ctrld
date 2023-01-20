@@ -1,3 +1,5 @@
+//go:build !js && !windows
+
 package resolvconffile
 
 import (
