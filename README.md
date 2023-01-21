@@ -179,12 +179,14 @@ Once you run the above command, the following things will happen:
 ### Advanced
 The above is the most basic example, which will work out of the box. If you're looking to do advanced configurations using policies, see [Configuration Docs](docs/config.md) for complete documentation of the config file.
 
+You can also supply configuration via launch argeuments, in [Ephemeral Mode](docs/ephemeral_mode.md).
+
 ## Contributing
 
 See [Contribution Guideline](./docs/contributing.md)
 
 ## Roadmap
-The following functionality is on the roadmap and will be available in future releases.
-- Prometheus metrics exporter
-- Local caching
-- Service self-installation
+The following functionality is on the roadmap and will be available in future releases. 
+- Router self-installation
+- Client hostname/MAC passthrough
+- Prometheus metrics exporter 
