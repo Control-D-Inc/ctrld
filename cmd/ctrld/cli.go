@@ -103,6 +103,10 @@ func initCLI() {
 			if err := v.Unmarshal(&cfg); err != nil {
 				log.Fatalf("failed to unmarshal config: %v", err)
 			}
+			// Wait for network up.
+			if !netUp() {
+				log.Fatal("network is not up yet")
+			}
 			processCDFlags()
 			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
 				log.Fatalf("invalid config: %v", err)

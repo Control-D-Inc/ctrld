@@ -2,8 +2,10 @@ package controld
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 )
@@ -12,6 +14,20 @@ const (
 	resolverDataURL   = "https://api.controld.com/utility"
 	InvalidConfigCode = 40401
 )
+
+const bootstrapDNS = "76.76.2.0:53"
+
+var dialer = &net.Dialer{
+	Resolver: &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{
+				Timeout: 10 * time.Second,
+			}
+			return d.DialContext(ctx, "udp", bootstrapDNS)
+		},
+	},
+}
 
 // ResolverConfig represents Control D resolver data.
 type ResolverConfig struct {
@@ -52,7 +68,14 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 	q.Set("platform", "ctrld")
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/json")
-	client := http.Client{Timeout: 5 * time.Second}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	client := http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("client.Do: %w", err)
