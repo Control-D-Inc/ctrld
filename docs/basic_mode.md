@@ -1,21 +1,7 @@
-# basic mode
-
-`ctrld` can operate in `basic` mode, which requires no configuration file. All necessary information is provided
-via command line flags, and be translated to corresponding config. `ctrld` will start with that config but do not
-write anything to disk.
-
-## Base64 encoded config
-
-`ctrld` can read a base64 encoded config via command line flag:
-
-```shell
-ctrld run --base64_config="CltsaXN0ZW5lcl0KCiAgW2xpc3RlbmVyLjBdCiAgICBpcCA9ICIxMjcuMC4wLjEiCiAgICBwb3J0ID0gNTMKICAgIHJlc3RyaWN0ZWQgPSBmYWxzZQoKW25ldHdvcmtdCgogIFtuZXR3b3JrLjBdCiAgICBjaWRycyA9IFsiMC4wLjAuMC8wIl0KICAgIG5hbWUgPSAiTmV0d29yayAwIgoKW3Vwc3RyZWFtXQoKICBbdXBzdHJlYW0uMF0KICAgIGJvb3RzdHJhcF9pcCA9ICI3Ni43Ni4yLjExIgogICAgZW5kcG9pbnQgPSAiaHR0cHM6Ly9mcmVlZG5zLmNvbnRyb2xkLmNvbS9wMSIKICAgIG5hbWUgPSAiQ29udHJvbCBEIC0gQW50aS1NYWx3YXJlIgogICAgdGltZW91dCA9IDUwMDAKICAgIHR5cGUgPSAiZG9oIgoKICBbdXBzdHJlYW0uMV0KICAgIGJvb3RzdHJhcF9pcCA9ICI3Ni43Ni4yLjExIgogICAgZW5kcG9pbnQgPSAicDIuZnJlZWRucy5jb250cm9sZC5jb20iCiAgICBuYW1lID0gIkNvbnRyb2wgRCAtIE5vIEFkcyIKICAgIHRpbWVvdXQgPSAzMDAwCiAgICB0eXBlID0gImRvcSIK"
-```
+# Ephemeral Mode
+`ctrld` can operate in ephemeral mode which won't attempt to read or write any config file to disk. All necessary information is provided via command line flags.
 
 ## Launch arguments
-
-A set of arguments can be provided via command line flags.
-
 ```shell
 $ ctrld run --help
 Run the DNS proxy server
@@ -25,7 +11,7 @@ Usage:
 
 Flags:
       --base64_config string        base64 encoded config
-      --cache_size int              Enable cache with size items
+      --cache_size int              Enable cache defined amount of slots
       --cd string                   Control D resolver uid
   -c, --config string               Path to config file
   -d, --daemon                      Run as daemon
@@ -78,4 +64,11 @@ Above command will be translated roughly to this config:
         ]
 ```
 
-`secondary_upstream`, `domains`, and `log` flags are optional.
+Only `listen` and `primary_upstream` flags are required. 
+
+## Base64 encoded config
+`ctrld` can read a complete base64 encoded config via command line flag. This allows you to supply complex configurations. 
+
+```shell
+ctrld run --base64_config="CltsaXN0ZW5lcl0KCiAgW2xpc3RlbmVyLjBdCiAgICBpcCA9ICIxMjcuMC4wLjEiCiAgICBwb3J0ID0gNTMKICAgIHJlc3RyaWN0ZWQgPSBmYWxzZQoKW25ldHdvcmtdCgogIFtuZXR3b3JrLjBdCiAgICBjaWRycyA9IFsiMC4wLjAuMC8wIl0KICAgIG5hbWUgPSAiTmV0d29yayAwIgoKW3Vwc3RyZWFtXQoKICBbdXBzdHJlYW0uMF0KICAgIGJvb3RzdHJhcF9pcCA9ICI3Ni43Ni4yLjExIgogICAgZW5kcG9pbnQgPSAiaHR0cHM6Ly9mcmVlZG5zLmNvbnRyb2xkLmNvbS9wMSIKICAgIG5hbWUgPSAiQ29udHJvbCBEIC0gQW50aS1NYWx3YXJlIgogICAgdGltZW91dCA9IDUwMDAKICAgIHR5cGUgPSAiZG9oIgoKICBbdXBzdHJlYW0uMV0KICAgIGJvb3RzdHJhcF9pcCA9ICI3Ni43Ni4yLjExIgogICAgZW5kcG9pbnQgPSAicDIuZnJlZWRucy5jb250cm9sZC5jb20iCiAgICBuYW1lID0gIkNvbnRyb2wgRCAtIE5vIEFkcyIKICAgIHRpbWVvdXQgPSAzMDAwCiAgICB0eXBlID0gImRvcSIK"
+```
