@@ -17,7 +17,7 @@ const (
 
 const bootstrapDNS = "76.76.2.0:53"
 
-var dialer = &net.Dialer{
+var Dialer = &net.Dialer{
 	Resolver: &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -70,7 +70,7 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 	req.Header.Add("Content-Type", "application/json")
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return dialer.DialContext(ctx, network, addr)
+		return Dialer.DialContext(ctx, network, addr)
 	}
 	client := http.Client{
 		Timeout:   10 * time.Second,

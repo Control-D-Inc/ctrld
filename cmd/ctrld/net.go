@@ -8,11 +8,12 @@ import (
 	"time"
 
 	"tailscale.com/logtail/backoff"
+
+	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
 
 const (
 	controldIPv6Test = "ipv6.controld.io"
-	controldIPv4Test = "ipv4.controld.io"
 )
 
 var (
@@ -28,14 +29,14 @@ func probeStack() {
 	}
 	b := backoff.NewBackoff("probeStack", logf, time.Minute)
 	for {
-		if _, err := net.Dial("tcp", net.JoinHostPort(controldIPv4Test, "80")); err == nil {
+		if _, err := controld.Dialer.Dial("udp", net.JoinHostPort(bootstrapDNS, "53")); err == nil {
 			hasNetworkUp = true
 			break
 		} else {
 			b.BackOff(context.Background(), err)
 		}
 	}
-	if _, err := net.Dial("tcp6", net.JoinHostPort(controldIPv6Test, "80")); err == nil {
+	if _, err := controld.Dialer.Dial("tcp6", net.JoinHostPort(controldIPv6Test, "80")); err == nil {
 		ipv6Enabled = true
 	}
 	if ln, err := net.Listen("tcp6", "[::1]:53"); err == nil {
