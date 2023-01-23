@@ -32,7 +32,7 @@ var (
 	defaultConfigFile    = "ctrld.toml"
 )
 
-var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains", "log", "cache_size"}
+var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains"}
 
 func isNoConfigStart(cmd *cobra.Command) bool {
 	for _, flagName := range basicModeFlags {
@@ -108,6 +108,7 @@ func initCLI() {
 				log.Fatal("network is not up yet")
 			}
 			processCDFlags()
+			processLogAndCacheFlags()
 			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
 				log.Fatalf("invalid config: %v", err)
 			}
@@ -512,8 +513,6 @@ func processNoConfigFlags(noConfigStart bool) {
 		lc.Policy = &ctrld.ListenerPolicyConfig{Name: "My Policy", Rules: rules}
 	}
 	v.Set("upstream", upstream)
-
-	processLogAndCacheFlags()
 }
 
 func processCDFlags() {
@@ -577,6 +576,7 @@ func processCDFlags() {
 	v.Set("network", cfg.Network)
 	v.Set("upstream", cfg.Upstream)
 	v.Set("listener", cfg.Listener)
+	processLogAndCacheFlags()
 	writeConfigFile()
 }
 
@@ -602,17 +602,15 @@ func processListenFlag() {
 }
 
 func processLogAndCacheFlags() {
-	sc := ctrld.ServiceConfig{}
 	if logPath != "" {
-		sc.LogLevel = "debug"
-		sc.LogPath = logPath
+		cfg.Service.LogPath = logPath
 	}
 
 	if cacheSize != 0 {
-		sc.CacheEnable = true
-		sc.CacheSize = cacheSize
+		cfg.Service.CacheEnable = true
+		cfg.Service.CacheSize = cacheSize
 	}
-	v.Set("service", sc)
+	v.Set("service", cfg.Service)
 }
 
 func netIfaceFromName(ifaceName string) (*net.Interface, error) {
