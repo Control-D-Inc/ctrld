@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"strings"
+	"syscall"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv4/client4"
@@ -61,6 +62,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 }
 
 func resetDNS(iface *net.Interface) error {
+	var ns []string
 	c := client4.NewClient()
 	conversation, err := c.Exchange(iface.Name)
 	if err != nil {
@@ -69,11 +71,9 @@ func resetDNS(iface *net.Interface) error {
 	for _, packet := range conversation {
 		if packet.MessageType() == dhcpv4.MessageTypeAck {
 			nameservers := packet.DNS()
-			ns := make([]string, 0, len(nameservers))
 			for _, nameserver := range nameservers {
 				ns = append(ns, nameserver.String())
 			}
-			_ = setDNS(iface, ns)
 		}
 	}
 
@@ -81,7 +81,7 @@ func resetDNS(iface *net.Interface) error {
 		c := client6.NewClient()
 		conversation, err := c.Exchange(iface.Name)
 		if err != nil {
-			return err
+			mainLog.Warn().Err(err).Msg("failed to exchange DHCPv6")
 		}
 		for _, packet := range conversation {
 			if packet.Type() == dhcpv6.MessageTypeReply {
@@ -90,15 +90,16 @@ func resetDNS(iface *net.Interface) error {
 					return err
 				}
 				nameservers := msg.Options.DNS()
-				ns := make([]string, 0, len(nameservers))
 				for _, nameserver := range nameservers {
 					ns = append(ns, nameserver.String())
 				}
-				_ = setDNS(iface, ns)
 			}
 		}
 	}
-	return nil
+
+	return ignoringEINTR(func() error {
+		return setDNS(iface, ns)
+	})
 }
 
 func currentDNS(iface *net.Interface) []string {
@@ -146,4 +147,13 @@ func getDNSByNmcli(iface string) []string {
 		}
 	}
 	return dns
+}
+
+func ignoringEINTR(fn func() error) error {
+	for {
+		err := fn()
+		if err != syscall.EINTR {
+			return err
+		}
+	}
 }
