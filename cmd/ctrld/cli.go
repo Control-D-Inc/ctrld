@@ -107,12 +107,14 @@ func initCLI() {
 			if !netUp() {
 				log.Fatal("network is not up yet")
 			}
-			processCDFlags()
 			processLogAndCacheFlags()
+			// Log config do not have thing to validate, so it's safe to init log here,
+			// so it's able to log information in processCDFlags.
+			initLogging()
+			processCDFlags()
 			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
 				log.Fatalf("invalid config: %v", err)
 			}
-			initLogging()
 			initCache()
 
 			if iface == "auto" {
@@ -202,6 +204,7 @@ func initCLI() {
 				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
 			}
 
+			initLogging()
 			processCDFlags()
 			// On Windows, the service will be run as SYSTEM, so if ctrld start as Admin,
 			// the user home dir is different, so pass specific arguments that relevant here.
@@ -522,27 +525,30 @@ func processCDFlags() {
 	if iface == "" {
 		iface = "auto"
 	}
+	logger := mainLog.With().Str("mode", "cd").Logger()
 	resolverConfig, err := controld.FetchResolverConfig(cdUID)
 	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
 		s, err := service.New(&prog{}, svcConfig)
 		if err != nil {
-			stderrMsg(err.Error())
+			logger.Warn().Err(err).Msg("failed to create new service")
 			return
 		}
 		if iface == "auto" {
 			iface = defaultIfaceName()
 		}
 		if netIface, _ := netIfaceFromName(iface); netIface != nil {
-			_ = resetDNS(netIface)
+			if err := resetDNS(netIface); err != nil {
+				logger.Warn().Err(err).Msg("something went wrong while restoring DNS")
+			}
 		}
 		tasks := []task{{s.Uninstall, true}}
 		if doTasks(tasks) {
-			log.Println("uninstalled service")
+			logger.Info().Msg("uninstalled service")
 		}
-		log.Fatalf("failed to fetch resolver config: %v", uer)
+		logger.Fatal().Err(uer).Msg("failed to fetch resolver config")
 	}
 	if err != nil {
-		log.Printf("could not fetch resolver config: %v", err)
+		logger.Warn().Err(err).Msg("could not fetch resolver config")
 		return
 	}
 
