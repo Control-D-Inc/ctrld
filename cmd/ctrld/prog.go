@@ -34,17 +34,7 @@ func (p *prog) Start(s service.Service) error {
 }
 
 func (p *prog) run() {
-	if iface != "" {
-		netIface, err := netIfaceFromName(iface)
-		if err != nil {
-			mainLog.Error().Err(err).Msg("could not get interface")
-		} else {
-			if err := setDNS(netIface, []string{cfg.Listener["0"].IP}); err != nil {
-				mainLog.Error().Err(err).Str("iface", iface).Msgf("could not set DNS for interface")
-			}
-		}
-	}
-
+	p.setDNS()
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -150,7 +140,11 @@ func (p *prog) run() {
 							Port: port,
 						},
 					})
-					writeConfigFile()
+					if err := writeConfigFile(); err != nil {
+						proxyLog.Fatal().Err(err).Msg("failed to write config file")
+					} else {
+						mainLog.Info().Msg("writing config file to: " + defaultConfigFile)
+					}
 					mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, pc.LocalAddr())
 					// There can be a race between closing the listener and start our own UDP server, but it's
 					// rare, and we only do this once, so let conservative here.
@@ -175,15 +169,7 @@ func (p *prog) Stop(s service.Service) error {
 		mainLog.Error().Err(err).Msg("de-allocate ip failed")
 		return err
 	}
-	if iface != "" {
-		if netIface, err := netIfaceFromName(iface); err == nil {
-			if err := resetDNS(netIface); err != nil {
-				mainLog.Error().Err(err).Str("iface", iface).Msgf("could not reset DNS")
-			}
-		} else {
-			mainLog.Error().Err(err).Msg("could not get interface")
-		}
-	}
+	p.resetDNS()
 	return nil
 }
 
@@ -204,4 +190,36 @@ func (p *prog) deAllocateIP() error {
 		}
 	}
 	return nil
+}
+
+func (p *prog) setDNS() {
+	if iface == "" {
+		return
+	}
+	logger := mainLog.With().Str("iface", iface).Logger()
+	var err error
+	netIface, err = netInterface(iface)
+	if err != nil {
+		logger.Error().Err(err).Msg("could not get interface")
+		return
+	}
+	logger.Debug().Msg("setting DNS for interface")
+	if err := setDNS(netIface, []string{p.cfg.Listener["0"].IP}); err != nil {
+		logger.Error().Err(err).Msgf("could not set DNS for interface")
+		return
+	}
+	logger.Debug().Msg("setting DNS successfully")
+}
+
+func (p *prog) resetDNS() {
+	if netIface == nil {
+		return
+	}
+	logger := mainLog.With().Str("iface", iface).Logger()
+	logger.Debug().Msg("Restoring DNS for interface")
+	if err := resetDNS(netIface); err != nil {
+		logger.Error().Err(err).Msgf("could not reset DNS")
+		return
+	}
+	logger.Debug().Msg("Restoring DNS successfully")
 }

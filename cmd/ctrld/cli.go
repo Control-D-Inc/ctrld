@@ -421,32 +421,28 @@ func initCLI() {
 	}
 }
 
-func writeConfigFile() {
+func writeConfigFile() error {
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
 	}
 	f, err := os.OpenFile(defaultConfigFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(0o644))
 	if err != nil {
-		log.Printf("failed to open config file: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	defer f.Close()
 	if cdUID != "" {
 		if _, err := f.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n"); err != nil {
-			log.Printf("failed to write header to config file: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 	}
 	enc := toml.NewEncoder(f).SetIndentTables(true)
 	if err := enc.Encode(v.AllSettings()); err != nil {
-		log.Printf("failed to encode config file: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	if err := f.Close(); err != nil {
-		log.Printf("failed to write config file: %v\n", err)
-		os.Exit(1)
+		return err
 	}
-	fmt.Println("writing config file to:", defaultConfigFile)
+	return nil
 }
 
 func readConfigFile(writeDefaultConfig bool) bool {
@@ -464,7 +460,11 @@ func readConfigFile(writeDefaultConfig bool) bool {
 
 	// If error is viper.ConfigFileNotFoundError, write default config.
 	if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-		writeConfigFile()
+		if err := writeConfigFile(); err != nil {
+			log.Fatalf("failed to write default config file: %v", err)
+		} else {
+			fmt.Println("writing default config file to: " + defaultConfigFile)
+		}
 		defaultConfigWritten = true
 		return false
 	}
@@ -526,6 +526,7 @@ func processCDFlags() {
 		iface = "auto"
 	}
 	logger := mainLog.With().Str("mode", "cd").Logger()
+	logger.Info().Msg("fetching Controld-D configuration")
 	resolverConfig, err := controld.FetchResolverConfig(cdUID)
 	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
 		s, err := service.New(&prog{}, svcConfig)
@@ -533,10 +534,8 @@ func processCDFlags() {
 			logger.Warn().Err(err).Msg("failed to create new service")
 			return
 		}
-		if iface == "auto" {
-			iface = defaultIfaceName()
-		}
-		if netIface, _ := netIfaceFromName(iface); netIface != nil {
+
+		if netIface, _ := netInterface(iface); netIface != nil {
 			if err := resetDNS(netIface); err != nil {
 				logger.Warn().Err(err).Msg("something went wrong while restoring DNS")
 			}
@@ -552,6 +551,7 @@ func processCDFlags() {
 		return
 	}
 
+	logger.Info().Msg("generating ctrld config from Controld-D configuration")
 	cfg = ctrld.Config{}
 	cfg.Network = make(map[string]*ctrld.NetworkConfig)
 	cfg.Network["0"] = &ctrld.NetworkConfig{
@@ -583,7 +583,11 @@ func processCDFlags() {
 	v.Set("upstream", cfg.Upstream)
 	v.Set("listener", cfg.Listener)
 	processLogAndCacheFlags()
-	writeConfigFile()
+	if err := writeConfigFile(); err != nil {
+		logger.Fatal().Err(err).Msg("failed to write config file")
+	} else {
+		logger.Info().Msg("writing config file to: " + defaultConfigFile)
+	}
 }
 
 func processListenFlag() {
@@ -620,7 +624,10 @@ func processLogAndCacheFlags() {
 	v.Set("service", cfg.Service)
 }
 
-func netIfaceFromName(ifaceName string) (*net.Interface, error) {
+func netInterface(ifaceName string) (*net.Interface, error) {
+	if ifaceName == "auto" {
+		ifaceName = defaultIfaceName()
+	}
 	var iface *net.Interface
 	err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
 		if i.Name == ifaceName {
