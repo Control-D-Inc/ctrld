@@ -609,6 +609,7 @@ func processListenFlag() {
 
 func processLogAndCacheFlags() {
 	if logPath != "" {
+		cfg.Service.LogLevel = "debug"
 		cfg.Service.LogPath = logPath
 	}
 
