@@ -143,11 +143,20 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []int, msg *dns.Msg) *dns.Msg {
 	var staleAnswer *dns.Msg
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
+	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
+	if len(upstreamConfigs) == 0 {
+		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+		upstreams = []string{"upstream.os"}
+	}
 	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
 	if p.cache != nil && msg.Question[0].Qtype != dns.TypePTR {
-		if cachedValue := p.cache.Get(dnscache.NewKey(msg)); cachedValue != nil {
+		for _, upstream := range upstreams {
+			cachedValue := p.cache.Get(dnscache.NewKey(msg, upstream))
+			if cachedValue == nil {
+				continue
+			}
 			answer := cachedValue.Msg.Copy()
-			answer.SetReply(msg)
+			answer.SetRcode(msg, answer.Rcode)
 			now := time.Now()
 			if cachedValue.Expire.After(now) {
 				ctrld.Log(ctx, proxyLog.Debug(), "hit cached response")
@@ -156,11 +165,6 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			}
 			staleAnswer = answer
 		}
-	}
-	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
-	if len(upstreamConfigs) == 0 {
-		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
-		upstreams = []string{"upstream.os"}
 	}
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		ctrld.Log(ctx, proxyLog.Debug(), "sending query to %s: %s", upstreams[n], upstreamConfig.Name)
@@ -206,7 +210,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 				expired = now.Add(time.Duration(cachedTTL) * time.Second)
 			}
 			setCachedAnswerTTL(answer, now, expired)
-			p.cache.Add(dnscache.NewKey(msg), dnscache.NewValue(answer, expired))
+			p.cache.Add(dnscache.NewKey(msg, upstreams[n]), dnscache.NewValue(answer, expired))
 			ctrld.Log(ctx, proxyLog.Debug(), "add cached response")
 		}
 		return answer

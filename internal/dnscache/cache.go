@@ -16,9 +16,10 @@ type Cacher interface {
 
 // Key is the caching key for DNS message.
 type Key struct {
-	Qtype  uint16
-	Qclass uint16
-	Name   string
+	Qtype    uint16
+	Qclass   uint16
+	Name     string
+	Upstream string
 }
 
 type Value struct {
@@ -49,9 +50,9 @@ func NewLRUCache(size int) (*LRUCache, error) {
 }
 
 // NewKey creates a new cache key for given DNS message.
-func NewKey(msg *dns.Msg) Key {
+func NewKey(msg *dns.Msg, upstream string) Key {
 	q := msg.Question[0]
-	return Key{Qtype: q.Qtype, Qclass: q.Qclass, Name: normalizeQname(q.Name)}
+	return Key{Qtype: q.Qtype, Qclass: q.Qclass, Name: normalizeQname(q.Name), Upstream: upstream}
 }
 
 // NewValue creates a new cache value for given DNS message.
