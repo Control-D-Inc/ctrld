@@ -30,6 +30,7 @@ type prog struct {
 func (p *prog) Start(s service.Service) error {
 	p.cfg = &cfg
 	go p.run()
+	mainLog.Info().Msg("Service started")
 	return nil
 }
 
@@ -170,6 +171,7 @@ func (p *prog) Stop(s service.Service) error {
 		return err
 	}
 	p.resetDNS()
+	mainLog.Info().Msg("Service stopped")
 	return nil
 }
 

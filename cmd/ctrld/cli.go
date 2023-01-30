@@ -536,8 +536,11 @@ func processCDFlags() {
 		}
 
 		if netIface, _ := netInterface(iface); netIface != nil {
+			logger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS for interface")
 			if err := resetDNS(netIface); err != nil {
 				logger.Warn().Err(err).Msg("something went wrong while restoring DNS")
+			} else {
+				logger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS successfully")
 			}
 		}
 		tasks := []task{{s.Uninstall, true}}
