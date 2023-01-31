@@ -14,7 +14,7 @@ import (
 
 	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
-	"github.com/insomniacslk/dhcp/dhcpv6/nclient6"
+	"github.com/insomniacslk/dhcp/dhcpv6/client6"
 	"tailscale.com/net/dns"
 	"tailscale.com/util/dnsname"
 
@@ -84,37 +84,29 @@ func resetDNS(iface *net.Interface) error {
 		ns = append(ns, nameserver.String())
 	}
 
+	// TODO(cuonglm): handle DHCPv6 properly.
 	if supportsIPv6() {
-		c, err := nclient6.New(iface.Name)
+		c := client6.NewClient()
+		conversation, err := c.Exchange(iface.Name)
 		if err != nil {
-			mainLog.Warn().Err(err).Msg("could not create DHCPv6 client")
+			mainLog.Debug().Err(err).Msg("could not exchange DHCPv6")
 			return nil
 		}
-		defer c.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-		defer cancel()
-
-		solicit, err := dhcpv6.NewSolicit(iface.HardwareAddr)
-		if err != nil {
-			return fmt.Errorf("dhcpv6.NewSolicit: %w", err)
-		}
-		advertise, err := dhcpv6.NewAdvertiseFromSolicit(solicit)
-		if err != nil {
-			return fmt.Errorf("dhcpv6.NewAdvertiseFromSolicit: %w", err)
-		}
-		msg, err := c.Request(ctx, advertise)
-		if err != nil {
-			return fmt.Errorf("nclient6.Request: %w", err)
-		}
-		nameservers := msg.Options.DNS()
-		for _, nameserver := range nameservers {
-			if nameserver.Equal(net.IPv6zero) {
-				continue
+		for _, packet := range conversation {
+			if packet.Type() == dhcpv6.MessageTypeReply {
+				msg, err := packet.GetInnerMessage()
+				if err != nil {
+					mainLog.Debug().Err(err).Msg("could not get inner DHCPv6 message")
+					return nil
+				}
+				nameservers := msg.Options.DNS()
+				for _, nameserver := range nameservers {
+					ns = append(ns, nameserver.String())
+				}
 			}
-			ns = append(ns, nameserver.String())
 		}
-
 	}
+
 	return ignoringEINTR(func() error {
 		return setDNS(iface, ns)
 	})
