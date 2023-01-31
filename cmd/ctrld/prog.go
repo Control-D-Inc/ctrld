@@ -35,7 +35,6 @@ func (p *prog) Start(s service.Service) error {
 }
 
 func (p *prog) run() {
-	p.setDNS()
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -170,7 +169,6 @@ func (p *prog) Stop(s service.Service) error {
 		mainLog.Error().Err(err).Msg("de-allocate ip failed")
 		return err
 	}
-	p.resetDNS()
 	mainLog.Info().Msg("Service stopped")
 	return nil
 }
@@ -195,18 +193,23 @@ func (p *prog) deAllocateIP() error {
 }
 
 func (p *prog) setDNS() {
+	if cfg.Listener == nil || cfg.Listener["0"] == nil {
+		return
+	}
 	if iface == "" {
 		return
 	}
+	if iface == "auto" {
+		iface = defaultIfaceName()
+	}
 	logger := mainLog.With().Str("iface", iface).Logger()
-	var err error
-	netIface, err = netInterface(iface)
+	netIface, err := netInterface(iface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
 	}
 	logger.Debug().Msg("setting DNS for interface")
-	if err := setDNS(netIface, []string{p.cfg.Listener["0"].IP}); err != nil {
+	if err := setDNS(netIface, []string{cfg.Listener["0"].IP}); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return
 	}
@@ -214,10 +217,18 @@ func (p *prog) setDNS() {
 }
 
 func (p *prog) resetDNS() {
-	if netIface == nil {
+	if iface == "" {
 		return
 	}
+	if iface == "auto" {
+		iface = defaultIfaceName()
+	}
 	logger := mainLog.With().Str("iface", iface).Logger()
+	netIface, err := netInterface(iface)
+	if err != nil {
+		logger.Error().Err(err).Msg("could not get interface")
+		return
+	}
 	logger.Debug().Msg("Restoring DNS for interface")
 	if err := resetDNS(netIface); err != nil {
 		logger.Error().Err(err).Msgf("could not reset DNS")

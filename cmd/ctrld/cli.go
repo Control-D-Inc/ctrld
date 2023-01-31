@@ -117,10 +117,6 @@ func initCLI() {
 			}
 			initCache()
 
-			if iface == "auto" {
-				iface = defaultIfaceName()
-			}
-
 			if daemon {
 				exe, err := os.Executable()
 				if err != nil {
@@ -173,8 +169,6 @@ func initCLI() {
 	runCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
 	_ = runCmd.Flags().MarkHidden("homedir")
-	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
-	_ = runCmd.Flags().MarkHidden("iface")
 
 	rootCmd.AddCommand(runCmd)
 
@@ -214,7 +208,8 @@ func initCLI() {
 				}
 			}
 
-			s, err := service.New(&prog{}, sc)
+			prog := &prog{}
+			s, err := service.New(prog, sc)
 			if err != nil {
 				stderrMsg(err.Error())
 				return
@@ -226,12 +221,12 @@ func initCLI() {
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
-				stdoutMsg("Service started")
-				return
+				mainLog.Info().Msg("Service started")
+				prog.setDNS()
 			}
 		},
 	}
-	// Keep these flags in sync with runCmd above, except for "-d".
+	// Keep these flags in sync with runCmd above, except for "-d", "--iface".
 	startCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
 	startCmd.Flags().StringVarP(&configBase64, "base64_config", "", "", "Base64 encoded config")
 	startCmd.Flags().StringVarP(&listenAddress, "listen", "", "", "Listener address and port, in format: address:port")
@@ -249,13 +244,16 @@ func initCLI() {
 		Short:  "Stop the ctrld service",
 		Args:   cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			s, err := service.New(&prog{}, svcConfig)
+			prog := &prog{}
+			s, err := service.New(prog, svcConfig)
 			if err != nil {
 				stderrMsg(err.Error())
 				return
 			}
+			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
-				stdoutMsg("Service stopped")
+				mainLog.Info().Msg("Service stopped")
+				prog.resetDNS()
 			}
 		},
 	}
@@ -272,6 +270,7 @@ func initCLI() {
 				stderrMsg(err.Error())
 				return
 			}
+			initLogging()
 			if doTasks([]task{{s.Restart, true}}) {
 				stdoutMsg("Service restarted")
 			}
@@ -310,7 +309,8 @@ func initCLI() {
 		Short:  "Uninstall the ctrld service",
 		Args:   cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			s, err := service.New(&prog{}, svcConfig)
+			prog := &prog{}
+			s, err := service.New(prog, svcConfig)
 			if err != nil {
 				stderrMsg(err.Error())
 				return
@@ -319,8 +319,10 @@ func initCLI() {
 				{s.Stop, false},
 				{s.Uninstall, true},
 			}
+			initLogging()
 			if doTasks(tasks) {
-				stdoutMsg("Service uninstalled")
+				mainLog.Info().Msg("Service uninstalled")
+				prog.resetDNS()
 				return
 			}
 		},
@@ -391,9 +393,7 @@ func initCLI() {
 		Use:    "start",
 		Short:  "Quick start service and configure DNS on interface",
 		Run: func(cmd *cobra.Command, args []string) {
-			if !cmd.Flags().Changed("iface") {
-				os.Args = append(os.Args, "--iface="+ifaceStartStop)
-			}
+			iface = ifaceStartStop
 			startCmd.Run(cmd, args)
 		},
 	}
@@ -405,9 +405,7 @@ func initCLI() {
 		Use:    "stop",
 		Short:  "Quick stop service and remove DNS from interface",
 		Run: func(cmd *cobra.Command, args []string) {
-			if !cmd.Flags().Changed("iface") {
-				os.Args = append(os.Args, "--iface="+ifaceStartStop)
-			}
+			iface = ifaceStartStop
 			stopCmd.Run(cmd, args)
 		},
 	}

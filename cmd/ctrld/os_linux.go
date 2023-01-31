@@ -3,16 +3,18 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 
-	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/insomniacslk/dhcp/dhcpv4/client4"
+	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
-	"github.com/insomniacslk/dhcp/dhcpv6/client6"
+	"github.com/insomniacslk/dhcp/dhcpv6/nclient6"
 	"tailscale.com/net/dns"
 	"tailscale.com/util/dnsname"
 
@@ -63,40 +65,56 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 
 func resetDNS(iface *net.Interface) error {
 	var ns []string
-	c := client4.NewClient()
-	conversation, err := c.Exchange(iface.Name)
+	c, err := nclient4.New(iface.Name)
 	if err != nil {
-		return err
+		return fmt.Errorf("nclient4.New: %w", err)
 	}
-	for _, packet := range conversation {
-		if packet.MessageType() == dhcpv4.MessageTypeAck {
-			nameservers := packet.DNS()
-			for _, nameserver := range nameservers {
-				ns = append(ns, nameserver.String())
-			}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+	lease, err := c.Request(ctx)
+	if err != nil {
+		return fmt.Errorf("nclient4.Request: %w", err)
+	}
+	for _, nameserver := range lease.ACK.DNS() {
+		if nameserver.Equal(net.IPv4zero) {
+			continue
 		}
+		ns = append(ns, nameserver.String())
 	}
 
 	if supportsIPv6() {
-		c := client6.NewClient()
-		conversation, err := c.Exchange(iface.Name)
+		c, err := nclient6.New(iface.Name)
 		if err != nil {
-			mainLog.Warn().Err(err).Msg("could not exchange DHCPv6")
+			mainLog.Warn().Err(err).Msg("could not create DHCPv6 client")
+			return nil
 		}
-		for _, packet := range conversation {
-			if packet.Type() == dhcpv6.MessageTypeReply {
-				msg, err := packet.GetInnerMessage()
-				if err != nil {
-					return err
-				}
-				nameservers := msg.Options.DNS()
-				for _, nameserver := range nameservers {
-					ns = append(ns, nameserver.String())
-				}
-			}
-		}
-	}
+		defer c.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+		defer cancel()
 
+		solicit, err := dhcpv6.NewSolicit(iface.HardwareAddr)
+		if err != nil {
+			return fmt.Errorf("dhcpv6.NewSolicit: %w", err)
+		}
+		advertise, err := dhcpv6.NewAdvertiseFromSolicit(solicit)
+		if err != nil {
+			return fmt.Errorf("dhcpv6.NewAdvertiseFromSolicit: %w", err)
+		}
+		msg, err := c.Request(ctx, advertise)
+		if err != nil {
+			return fmt.Errorf("nclient6.Request: %w", err)
+		}
+		nameservers := msg.Options.DNS()
+		for _, nameserver := range nameservers {
+			if nameserver.Equal(net.IPv6zero) {
+				continue
+			}
+			ns = append(ns, nameserver.String())
+		}
+
+	}
 	return ignoringEINTR(func() error {
 		return setDNS(iface, ns)
 	})

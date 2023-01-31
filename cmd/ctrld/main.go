@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -36,7 +35,6 @@ var (
 
 	cdUID          string
 	iface          string
-	netIface       *net.Interface
 	ifaceStartStop string
 )
 
