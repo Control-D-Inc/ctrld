@@ -60,3 +60,9 @@ func resetDNS(iface *net.Interface) error {
 func currentDNS(_ *net.Interface) []string {
 	return resolvconffile.NameServers("")
 }
+
+func disableAutoDNS(iface string) {
+}
+
+func enableAutoDNS(iface string) {
+}

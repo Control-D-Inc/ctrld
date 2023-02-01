@@ -104,3 +104,9 @@ func currentDNS(iface *net.Interface) []string {
 	}
 	return ns
 }
+
+func disableAutoDNS(iface string) {
+}
+
+func enableAutoDNS(iface string) {
+}
