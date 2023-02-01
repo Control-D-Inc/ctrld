@@ -323,11 +323,13 @@ func initCLI() {
 			}
 			initLogging()
 			if doTasks(tasks) {
+				prog.resetDNS()
 				mainLog.Info().Msg("Service uninstalled")
 				return
 			}
 		},
 	}
+	uninstallCmd.Flags().StringVarP(&iface, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
 
 	listIfacesCmd := &cobra.Command{
 		Use:   "list",

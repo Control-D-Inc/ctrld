@@ -72,9 +72,10 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		}
 		currentNS := currentDNS(iface)
 		if reflect.DeepEqual(currentNS, nameservers) {
-			break
+			return nil
 		}
 	}
+	mainLog.Debug().Msg("DNS was not set for some reason")
 	return nil
 }
 
@@ -105,7 +106,6 @@ func resetDNS(iface *net.Interface) error {
 		conversation, err := c.Exchange(iface.Name)
 		if err != nil {
 			mainLog.Debug().Err(err).Msg("could not exchange DHCPv6")
-			return nil
 		}
 		for _, packet := range conversation {
 			if packet.Type() == dhcpv6.MessageTypeReply {

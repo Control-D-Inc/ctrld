@@ -174,11 +174,6 @@ func (p *prog) Stop(s service.Service) error {
 	return nil
 }
 
-func (p *prog) Uninstall(s service.Service) error {
-	p.resetDNS()
-	return nil
-}
-
 func (p *prog) allocateIP(ip string) error {
 	if !p.cfg.Service.AllocateIP {
 		return nil
