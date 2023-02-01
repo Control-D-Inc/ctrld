@@ -186,6 +186,11 @@ func initCLI() {
 			if os.Args[1] == "service" {
 				osArgs = os.Args[3:]
 			}
+			if runtime.GOOS == "linux" {
+				sc.Dependencies = []string{
+					"After=NetworkManager-wait-online.service",
+				}
+			}
 			sc.Arguments = append([]string{"run"}, osArgs...)
 			if dir, err := os.UserHomeDir(); err == nil {
 				// WorkingDirectory is not supported on Windows.
