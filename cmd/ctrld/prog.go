@@ -35,6 +35,7 @@ func (p *prog) Start(s service.Service) error {
 }
 
 func (p *prog) run() {
+	p.preRun()
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -170,6 +171,11 @@ func (p *prog) Stop(s service.Service) error {
 		return err
 	}
 	mainLog.Info().Msg("Service stopped")
+	return nil
+}
+
+func (p *prog) Uninstall(s service.Service) error {
+	p.resetDNS()
 	return nil
 }
 

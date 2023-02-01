@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os/exec"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +42,8 @@ func deAllocateIP(ip string) error {
 	return nil
 }
 
+const maxSetDNSAttempts = 5
+
 // set the dns server for the provided network interface
 func setDNS(iface *net.Interface, nameservers []string) error {
 	logf := func(format string, args ...any) {
@@ -57,10 +60,22 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	for _, nameserver := range nameservers {
 		ns = append(ns, netip.MustParseAddr(nameserver))
 	}
-	return r.SetDNS(dns.OSConfig{
+
+	osConfig := dns.OSConfig{
 		Nameservers:   ns,
 		SearchDomains: []dnsname.FQDN{},
-	})
+	}
+
+	for i := 0; i < maxSetDNSAttempts; i++ {
+		if err := r.SetDNS(osConfig); err != nil {
+			return err
+		}
+		currentNS := currentDNS(iface)
+		if reflect.DeepEqual(currentNS, nameservers) {
+			break
+		}
+	}
+	return nil
 }
 
 func resetDNS(iface *net.Interface) error {

@@ -169,6 +169,8 @@ func initCLI() {
 	runCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
 	_ = runCmd.Flags().MarkHidden("homedir")
+	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
+	_ = runCmd.Flags().MarkHidden("iface")
 
 	rootCmd.AddCommand(runCmd)
 
@@ -226,7 +228,7 @@ func initCLI() {
 			}
 		},
 	}
-	// Keep these flags in sync with runCmd above, except for "-d", "--iface".
+	// Keep these flags in sync with runCmd above, except for "-d".
 	startCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
 	startCmd.Flags().StringVarP(&configBase64, "base64_config", "", "", "Base64 encoded config")
 	startCmd.Flags().StringVarP(&listenAddress, "listen", "", "", "Listener address and port, in format: address:port")
@@ -321,7 +323,6 @@ func initCLI() {
 			}
 			initLogging()
 			if doTasks(tasks) {
-				prog.resetDNS()
 				mainLog.Info().Msg("Service uninstalled")
 				return
 			}
@@ -393,6 +394,9 @@ func initCLI() {
 		Use:    "start",
 		Short:  "Quick start service and configure DNS on interface",
 		Run: func(cmd *cobra.Command, args []string) {
+			if !cmd.Flags().Changed("iface") {
+				os.Args = append(os.Args, "--iface="+ifaceStartStop)
+			}
 			iface = ifaceStartStop
 			startCmd.Run(cmd, args)
 		},
@@ -405,6 +409,9 @@ func initCLI() {
 		Use:    "stop",
 		Short:  "Quick stop service and remove DNS from interface",
 		Run: func(cmd *cobra.Command, args []string) {
+			if !cmd.Flags().Changed("iface") {
+				os.Args = append(os.Args, "--iface="+ifaceStartStop)
+			}
 			iface = ifaceStartStop
 			stopCmd.Run(cmd, args)
 		},
