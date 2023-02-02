@@ -16,11 +16,15 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/dhcpv6/client6"
-	"tailscale.com/net/dns"
 	"tailscale.com/util/dnsname"
 
+	"github.com/Control-D-Inc/ctrld/internal/dns"
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
+
+var logf = func(format string, args ...any) {
+	mainLog.Debug().Msgf(format, args...)
+}
 
 // allocate loopback ip
 // sudo ip a add 127.0.0.2/24 dev lo
@@ -46,16 +50,12 @@ const maxSetDNSAttempts = 5
 
 // set the dns server for the provided network interface
 func setDNS(iface *net.Interface, nameservers []string) error {
-	logf := func(format string, args ...any) {
-		mainLog.Debug().Msgf(format, args...)
-	}
-
 	r, err := dns.NewOSConfigurator(logf, iface.Name)
 	if err != nil {
 		mainLog.Error().Err(err).Msg("failed to create DNS OS configurator")
 		return err
 	}
-	defer r.Close()
+
 	ns := make([]netip.Addr, 0, len(nameservers))
 	for _, nameserver := range nameservers {
 		ns = append(ns, netip.MustParseAddr(nameserver))
@@ -80,6 +80,16 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 }
 
 func resetDNS(iface *net.Interface) error {
+	if r, err := dns.NewOSConfigurator(logf, iface.Name); err == nil {
+		if err := r.Close(); err != nil {
+			mainLog.Error().Err(err).Msg("failed to rollback DNS setting")
+			return err
+		}
+		if r.Mode() == "direct" {
+			return nil
+		}
+	}
+
 	var ns []string
 	c, err := nclient4.New(iface.Name)
 	if err != nil {
