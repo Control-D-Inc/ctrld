@@ -228,7 +228,6 @@ func initCLI() {
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
-				disableAutoDNS(iface)
 				prog.setDNS()
 				mainLog.Info().Msg("Service started")
 			}
@@ -260,7 +259,6 @@ func initCLI() {
 			}
 			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
-				enableAutoDNS(iface)
 				prog.resetDNS()
 				mainLog.Info().Msg("Service stopped")
 			}
@@ -330,7 +328,6 @@ func initCLI() {
 			}
 			initLogging()
 			if doTasks(tasks) {
-				enableAutoDNS(iface)
 				prog.resetDNS()
 				mainLog.Info().Msg("Service uninstalled")
 				return
@@ -551,6 +548,10 @@ func processCDFlags() {
 		}
 
 		if netIface, _ := netInterface(iface); netIface != nil {
+			if err := restoreNetworkManager(); err != nil {
+				logger.Error().Err(err).Msg("could not restore NetworkManager")
+				return
+			}
 			logger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS for interface")
 			if err := resetDNS(netIface); err != nil {
 				logger.Warn().Err(err).Msg("something went wrong while restoring DNS")
@@ -558,6 +559,7 @@ func processCDFlags() {
 				logger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS successfully")
 			}
 		}
+
 		tasks := []task{{s.Uninstall, true}}
 		if doTasks(tasks) {
 			logger.Info().Msg("uninstalled service")

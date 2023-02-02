@@ -3,6 +3,7 @@ module github.com/Control-D-Inc/ctrld
 go 1.19
 
 require (
+	github.com/coreos/go-systemd/v22 v22.3.3-0.20220203105225-a9a7ef127534
 	github.com/go-playground/validator/v10 v10.11.1
 	github.com/hashicorp/golang-lru/v2 v2.0.1
 	github.com/insomniacslk/dhcp v0.0.0-20211209223715-7d93572ebe8e

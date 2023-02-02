@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"os/exec"
 	"reflect"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -175,49 +174,11 @@ func getDNSByNmcli(iface string) []string {
 	return dns
 }
 
-func getConnByNmcli(iface string) string {
-	if iface == "auto" {
-		iface = defaultIfaceName()
-	}
-	b, err := exec.Command("nmcli", "dev", "show", iface).Output()
-	if err != nil {
-		return ""
-	}
-	s := bufio.NewScanner(bytes.NewReader(b))
-	for s.Scan() {
-		line := s.Text()
-		if _, connName, found := strings.Cut(line, "GENERAL.CONNECTION:"); found {
-			return strings.TrimSpace(connName)
-		}
-
-	}
-	return ""
-}
-
 func ignoringEINTR(fn func() error) error {
 	for {
 		err := fn()
 		if err != syscall.EINTR {
 			return err
 		}
-	}
-}
-
-func disableAutoDNS(iface string) {
-	networkManagerIgnoreAutoDNS(iface, "yes")
-}
-
-func enableAutoDNS(iface string) {
-	networkManagerIgnoreAutoDNS(iface, "no")
-}
-
-func networkManagerIgnoreAutoDNS(iface, answer string) {
-	if runtime.GOOS != "linux" {
-		return
-	}
-	if connName := getConnByNmcli(iface); connName != "" {
-		mainLog.Debug().Msg("enable auto DNS from network manager")
-		_ = exec.Command("nmcli", "con", "mod", connName, "ipv4.ignore-auto-dns", answer).Run()
-		_ = exec.Command("nmcli", "con", "mod", connName, "ipv6.ignore-auto-dns", answer).Run()
 	}
 }

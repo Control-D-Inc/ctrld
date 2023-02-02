@@ -209,6 +209,10 @@ func (p *prog) setDNS() {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
 	}
+	if err := setupNetworkManager(); err != nil {
+		logger.Error().Err(err).Msg("could not patch NetworkManager")
+		return
+	}
 	logger.Debug().Msg("setting DNS for interface")
 	if err := setDNS(netIface, []string{cfg.Listener["0"].IP}); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
@@ -228,6 +232,10 @@ func (p *prog) resetDNS() {
 	netIface, err := netInterface(iface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
+		return
+	}
+	if err := restoreNetworkManager(); err != nil {
+		logger.Error().Err(err).Msg("could not restore NetworkManager")
 		return
 	}
 	logger.Debug().Msg("Restoring DNS for interface")
