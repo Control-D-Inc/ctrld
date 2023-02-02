@@ -116,7 +116,7 @@ func (p *prog) run() {
 			mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, addr)
 			err := p.serveUDP(listenerNum)
 			if err != nil && !defaultConfigWritten {
-				proxyLog.Error().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
+				proxyLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 				return
 			}
 
@@ -125,13 +125,13 @@ func (p *prog) run() {
 					proxyLog.Warn().Msgf("Address %s already in used, pick a random one", addr)
 					pc, err := net.ListenPacket("udp", net.JoinHostPort(listenerConfig.IP, "0"))
 					if err != nil {
-						proxyLog.Error().Err(err).Msg("failed to listen packet")
+						proxyLog.Fatal().Err(err).Msg("failed to listen packet")
 						return
 					}
 					_, portStr, _ := net.SplitHostPort(pc.LocalAddr().String())
 					port, err := strconv.Atoi(portStr)
 					if err != nil {
-						proxyLog.Error().Err(err).Msg("malformed port")
+						proxyLog.Fatal().Err(err).Msg("malformed port")
 						return
 					}
 					listenerConfig.Port = port
@@ -150,11 +150,11 @@ func (p *prog) run() {
 					// There can be a race between closing the listener and start our own UDP server, but it's
 					// rare, and we only do this once, so let conservative here.
 					if err := pc.Close(); err != nil {
-						proxyLog.Error().Err(err).Msg("failed to close packet conn")
+						proxyLog.Fatal().Err(err).Msg("failed to close packet conn")
 						return
 					}
 					if err := p.serveUDP(listenerNum); err != nil {
-						proxyLog.Error().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
+						proxyLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 						return
 					}
 				}
