@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -24,10 +23,7 @@ var (
 )
 
 func probeStack() {
-	logf := func(format string, args ...any) {
-		fmt.Printf(format, args...)
-	}
-	b := backoff.NewBackoff("probeStack", logf, time.Minute)
+	b := backoff.NewBackoff("probeStack", func(format string, args ...any) {}, time.Minute)
 	for {
 		if _, err := controld.Dialer.Dial("udp", net.JoinHostPort(bootstrapDNS, "53")); err == nil {
 			hasNetworkUp = true
