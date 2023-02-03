@@ -119,6 +119,9 @@ func (p *prog) run() {
 				proxyLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 				return
 			}
+			if err == nil {
+				return
+			}
 
 			if opErr, ok := err.(*net.OpError); ok {
 				if sErr, ok := opErr.Err.(*os.SyscallError); ok && errors.Is(opErr.Err, syscall.EADDRINUSE) || errors.Is(sErr.Err, errWindowsAddrInUse) {
@@ -159,6 +162,7 @@ func (p *prog) run() {
 					}
 				}
 			}
+			proxyLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 		}(listenerNum)
 	}
 
