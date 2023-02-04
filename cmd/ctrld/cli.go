@@ -662,7 +662,7 @@ func netInterface(ifaceName string) (*net.Interface, error) {
 func defaultIfaceName() string {
 	dri, err := interfaces.DefaultRouteInterface()
 	if err != nil {
-		mainLog.Error().Err(err).Msg("failed to get default route interface")
+		mainLog.Fatal().Err(err).Msg("failed to get default route interface")
 	}
 	return dri
 }
