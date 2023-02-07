@@ -137,7 +137,6 @@ Once you run the above command, the following things will happen:
 See [Configuration Docs](docs/config.md).
 
 ### Example 
->>>>>>> ed393c1 (Update README.md)
 - Start `listener.0` on 127.0.0.1:53
 - Accept queries from any source address
 - Send all queries to `upstream.0` via DoH protocol
