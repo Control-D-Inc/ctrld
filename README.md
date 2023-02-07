@@ -42,23 +42,32 @@ $ go install github.com/Control-D-Inc/ctrld/cmd/ctrld@latest
 
 ## Arguments
 ```
+        __         .__       .___
+  _____/  |________|  |    __| _/
+_/ ___\   __\_  __ \  |   / __ |
+\  \___|  |  |  | \/  |__/ /_/ |
+ \___  >__|  |__|  |____/\____ |
+     \/ dns forwarding proxy  \/
+
 Usage:
   ctrld [command]
 
 Available Commands:
-  help        Help about any command
   run         Run the DNS proxy server
+  service     Manage ctrld service
+  start       Quick start service and configure DNS on default interface
+  stop        Quick stop service and remove DNS from default interface
 
 Flags:
-  -h, --help      help for ctrld
-  -v, --verbose   verbose log output
-      --version   version for ctrld
+  -h, --help            help for ctrld
+  -v, --verbose count   verbose log output, "-v" basic logging, "-vv" debug level logging
+      --version         version for ctrld
 
 Use "ctrld [command] --help" for more information about a command.
 ```
 
 ## Usage
-To start the server with default configuration, simply run: `ctrld run`. This will create a generic `config.toml` file in the working directory and start the service.
+To start the server with default configuration, simply run: `./ctrld run`. This will create a generic `ctrld.toml` file in the **working directory** and start the application in foreground. 
 1. Start the server
   ```
   $ sudo ./ctrld run
@@ -73,9 +82,62 @@ To start the server with default configuration, simply run: `ctrld run`. This wi
 
 If `verify.controld.com` resolves, you're successfully using the default Control D upstream.
 
+### Service Mode
+To run the application in service mode, simply run: `./ctrld start` as system/root user. This will create a generic `ctrld.toml` file in the **user home** directory, start the system service, and configure the listener on the default interface. Service will start on OS boot.
+
+In order to stop the service, and restore your DNS to original state, simply run `./ctrld stop`.
+
+For granular control of the service, run the `service` command. Each sub-command has its own help section so you can see what arguments you can supply.
+
+```
+  Manage ctrld service
+
+  Usage:
+    ctrld service [command]
+
+  Available Commands:
+    interfaces  Manage network interfaces
+    restart     Restart the ctrld service
+    start       Start the ctrld service
+    status      Show status of the ctrld service
+    stop        Stop the ctrld service
+    uninstall   Uninstall the ctrld service
+
+  Flags:
+    -h, --help   help for service
+
+  Global Flags:
+    -v, --verbose count   verbose log output, "-v" basic logging, "-vv" debug level logging
+
+  Use "ctrld service [command] --help" for more information about a command.
+```
+
+### Control D Auto Configuration
+Application can be started with a specific resolver config, instead of the default one. Simply supply your resolver ID with a `--cd` flag, when using the `run` (foreground) or `start` (service) modes. 
+
+The following command will start the application in foreground mode, using the free "p2" resolver, which blocks Ads & Trackers. 
+
+```shell
+./ctrld run --cd p2
+```
+
+Alternatively, you can use your own personal Control D Device resolver, and start the application in service mode. Your resolver ID is the part after the slash of your DNS-over-HTTPS resolver. ie. https://dns.controld.com/abcd1234
+
+```shell
+./ctrld start --cd abcd1234
+```
+
+Once you run the above command, the following things will happen:
+- You resolver configuration will be fetched from the API, and config file templated with the resolver data
+- Application will start as a service, and keep running (even after reboot) until you run the `stop` or `service uninstall` sub-commands
+- Your default network interface will be updated to use the listener started by the service
+- All OS DNS queries will be sent to the listener
 
 ## Configuration
-### Example
+See [Configuration Docs](docs/config.md).
+
+### Example 
+>>>>>>> ed393c1 (Update README.md)
 - Start `listener.0` on 127.0.0.1:53
 - Accept queries from any source address
 - Send all queries to `upstream.0` via DoH protocol
@@ -120,12 +182,14 @@ If `verify.controld.com` resolves, you're successfully using the default Control
 ### Advanced
 The above is the most basic example, which will work out of the box. If you're looking to do advanced configurations using policies, see [Configuration Docs](docs/config.md) for complete documentation of the config file.
 
+You can also supply configuration via launch argeuments, in [Ephemeral Mode](docs/ephemeral_mode.md).
+
 ## Contributing
 
 See [Contribution Guideline](./docs/contributing.md)
 
 ## Roadmap
-The following functionality is on the roadmap and will be available in future releases.
-- Prometheus metrics exporter
-- Local caching
-- Service self-installation
+The following functionality is on the roadmap and will be available in future releases. 
+- Router self-installation
+- Client hostname/MAC passthrough
+- Prometheus metrics exporter 

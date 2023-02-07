@@ -5,21 +5,22 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
+	"sync/atomic"
 
 	"github.com/miekg/dns"
 )
 
 const (
-	resolverTypeDOH    = "doh"
-	resolverTypeDOH3   = "doh3"
-	resolverTypeDOT    = "dot"
-	resolverTypeDOQ    = "doq"
-	resolverTypeOS     = "os"
-	resolverTypeLegacy = "legacy"
+	ResolverTypeDOH    = "doh"
+	ResolverTypeDOH3   = "doh3"
+	ResolverTypeDOT    = "dot"
+	ResolverTypeDOQ    = "doq"
+	ResolverTypeOS     = "os"
+	ResolverTypeLegacy = "legacy"
 )
 
 var bootstrapDNS = "76.76.2.0"
+var or = &osResolver{nameservers: nameservers()}
 
 // Resolver is the interface that wraps the basic DNS operations.
 //
@@ -34,44 +35,38 @@ var errUnknownResolver = errors.New("unknown resolver")
 func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 	typ, endpoint := uc.Type, uc.Endpoint
 	switch typ {
-	case resolverTypeDOH, resolverTypeDOH3:
+	case ResolverTypeDOH, ResolverTypeDOH3:
 		return newDohResolver(uc), nil
-	case resolverTypeDOT:
+	case ResolverTypeDOT:
 		return &dotResolver{uc: uc}, nil
-	case resolverTypeDOQ:
+	case ResolverTypeDOQ:
 		return &doqResolver{uc: uc}, nil
-	case resolverTypeOS:
-		return &osResolver{}, nil
-	case resolverTypeLegacy:
+	case ResolverTypeOS:
+		return or, nil
+	case ResolverTypeLegacy:
 		return &legacyResolver{endpoint: endpoint}, nil
 	}
 	return nil, fmt.Errorf("%w: %s", errUnknownResolver, typ)
 }
 
-type osResolver struct{}
+type osResolver struct {
+	nameservers []string
+	next        atomic.Uint32
+}
 
+// Resolve performs DNS resolvers using OS default nameservers. Nameserver is chosen from
+// available nameservers with a roundrobin algorithm.
 func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	domain := canonicalName(msg.Question[0].Name)
-	addrs, err := net.DefaultResolver.LookupHost(ctx, domain)
-	if err != nil {
-		return nil, err
+	numServers := uint32(len(o.nameservers))
+	if numServers == 0 {
+		return nil, errors.New("no nameservers available")
 	}
-	if len(addrs) == 0 {
-		return nil, errors.New("no answer")
-	}
-	answer := new(dns.Msg)
-	answer.SetReply(msg)
-	ip := net.ParseIP(addrs[0])
-	a := &dns.A{
-		A:   ip,
-		Hdr: dns.RR_Header{Name: msg.Question[0].Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 10},
-	}
-	if ip.To4() != nil {
-		a.Hdr.Rrtype = dns.TypeA
-	}
+	next := o.next.Add(1)
+	server := o.nameservers[(next-1)%numServers]
+	dnsClient := &dns.Client{Net: "udp"}
+	answer, _, err := dnsClient.ExchangeContext(ctx, msg, server)
 
-	msg.Answer = append(msg.Answer, a)
-	return msg, nil
+	return answer, err
 }
 
 func newDialer(dnsAddress string) *net.Dialer {
@@ -99,14 +94,4 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 	}
 	answer, _, err := dnsClient.ExchangeContext(ctx, msg, r.endpoint)
 	return answer, err
-}
-
-// canonicalName returns canonical name from FQDN with "." trimmed.
-func canonicalName(fqdn string) string {
-	q := strings.TrimSpace(fqdn)
-	q = strings.TrimSuffix(q, ".")
-	// https://datatracker.ietf.org/doc/html/rfc4343
-	q = strings.ToLower(q)
-
-	return q
 }

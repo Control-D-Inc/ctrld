@@ -25,7 +25,10 @@ The user can choose to override default value using command line `--config` or `
 ctrld run --config /path/to/myconfig.toml
 ```
 
-If no configuration files found, a default `config.toml` file will be created in the current directory.
+If no configuration files found, a default `ctrld.toml` file will be created in the current directory.
+
+In pre v1.1.0, `config.toml` file was used, so for compatibility, `ctrld` will still read `config.toml`
+if it's existed.
 
 # Example Config
 
@@ -33,6 +36,8 @@ If no configuration files found, a default `config.toml` file will be created in
 [service]
     log_level = "info"
     log_path = ""
+    cache_enable = true
+    cache_size = 4096
 
 [network.0]
     cidrs = ["0.0.0.0/0"]
@@ -108,6 +113,31 @@ Relative or absolute path of the log file.
 
 - Type: string
 - Required: no
+
+### cache_enable
+When `cache_enable = true`, all resolved DNS query responses will be cached for duration of the upstream record TTLs.
+
+- Type: boolean
+- Required: no
+
+### cache_size
+The number of cached records, must be a positive integer. Tweaking this value with care depends on your available RAM. 
+A minimum value `4096` should be enough for most use cases.
+
+An invalid `cache_size` value will disable the cache, regardless of `cache_enable` value.
+
+- Type: int
+- Required: no
+
+### cache_ttl_override
+When `cache_ttl_override` is set to a positive value (in seconds), TTLs are overridden to this value and cached for this long.
+
+- Type: int
+- Required: no
+
+### cache_serve_stale
+When `cache_serve_stale = true`, in cases of upstream failures (upstreams not reachable), `ctrld` will keep serving
+stale cached records (regardless of their TTLs) until upstream comes online.
 
 The above config will look like this at query time.
 
@@ -283,6 +313,17 @@ Above policy will:
 - Forward requests on `listener.0` for `.local` suffixed domains to `upstream.1`.
 - Forward requests on `listener.0` for `test.com` to `upstream.2`. If timeout is reached, retry on `upstream.1`.
 - All other requests on `listener.0` that do not match above conditions will be forwarded to `upstream.0`.
+
+An empty upstream would not route the request to any defined upstreams, and use the OS default resolver.
+
+```toml
+[listener.0.policy]
+name = "OS Resolver"
+
+rules = [
+    {"*.local" = []},
+]
+```
 
 #### name
 `name` is the name for the policy.

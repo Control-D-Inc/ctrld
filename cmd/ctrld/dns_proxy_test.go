@@ -4,11 +4,14 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
+	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/testhelper"
 )
 
@@ -114,4 +117,38 @@ func Test_prog_upstreamFor(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCache(t *testing.T) {
+	cfg := testhelper.SampleConfig(t)
+	prog := &prog{cfg: cfg}
+	for _, nc := range prog.cfg.Network {
+		for _, cidr := range nc.Cidrs {
+			_, ipNet, err := net.ParseCIDR(cidr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nc.IPNets = append(nc.IPNets, ipNet)
+		}
+	}
+	cacher, err := dnscache.NewLRUCache(4096)
+	require.NoError(t, err)
+	prog.cache = cacher
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("example.com", dns.TypeA)
+	msg.MsgHdr.RecursionDesired = true
+	answer1 := new(dns.Msg)
+	answer1.SetRcode(msg, dns.RcodeSuccess)
+
+	prog.cache.Add(dnscache.NewKey(msg, "upstream.1"), dnscache.NewValue(answer1, time.Now().Add(time.Minute)))
+	answer2 := new(dns.Msg)
+	answer2.SetRcode(msg, dns.RcodeRefused)
+	prog.cache.Add(dnscache.NewKey(msg, "upstream.0"), dnscache.NewValue(answer2, time.Now().Add(time.Minute)))
+
+	got1 := prog.proxy(context.Background(), []string{"upstream.1"}, nil, msg)
+	got2 := prog.proxy(context.Background(), []string{"upstream.0"}, nil, msg)
+	assert.NotSame(t, got1, got2)
+	assert.Equal(t, answer1.Rcode, got1.Rcode)
+	assert.Equal(t, answer2.Rcode, got2.Rcode)
 }

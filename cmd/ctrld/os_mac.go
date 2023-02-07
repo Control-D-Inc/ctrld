@@ -4,7 +4,10 @@
 package main
 
 import (
+	"net"
 	"os/exec"
+
+	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
 // allocate loopback ip
@@ -25,4 +28,35 @@ func deAllocateIP(ip string) error {
 		return err
 	}
 	return nil
+}
+
+// set the dns server for the provided network interface
+// networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
+// TODO(cuonglm): use system API
+func setDNS(iface *net.Interface, nameservers []string) error {
+	cmd := "networksetup"
+	args := []string{"-setdnsservers", iface.Name}
+	args = append(args, nameservers...)
+
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		mainLog.Error().Err(err).Msgf("setDNS failed, ips = %q", nameservers)
+		return err
+	}
+	return nil
+}
+
+// TODO(cuonglm): use system API
+func resetDNS(iface *net.Interface) error {
+	cmd := "networksetup"
+	args := []string{"-setdnsservers", iface.Name, "empty"}
+
+	if err := exec.Command(cmd, args...).Run(); err != nil {
+		mainLog.Error().Err(err).Msgf("resetDNS failed")
+		return err
+	}
+	return nil
+}
+
+func currentDNS(_ *net.Interface) []string {
+	return resolvconffile.NameServers("")
 }

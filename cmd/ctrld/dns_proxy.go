@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -13,7 +14,10 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 )
+
+const staleTTL = 60 * time.Second
 
 func (p *prog) serveUDP(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
@@ -48,6 +52,20 @@ func (p *prog) serveUDP(listenerNum string) error {
 			ctrld.Log(ctx, mainLog.Error().Err(err), "serveUDP: failed to send DNS response to client")
 		}
 	})
+
+	// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
+	// listen on ::1, then spawn a listener for receiving DNS requests.
+	if runtime.GOOS == "windows" && supportsIPv6ListenLocal() {
+		go func() {
+			s := &dns.Server{
+				Addr:    net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)),
+				Net:     "udp",
+				Handler: handler,
+			}
+			_ = s.ListenAndServe()
+		}()
+	}
+
 	s := &dns.Server{
 		Addr:    net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port)),
 		Net:     "udp",
@@ -123,7 +141,31 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 }
 
 func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []int, msg *dns.Msg) *dns.Msg {
+	var staleAnswer *dns.Msg
+	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
+	if len(upstreamConfigs) == 0 {
+		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+		upstreams = []string{"upstream.os"}
+	}
+	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
+	if p.cache != nil && msg.Question[0].Qtype != dns.TypePTR {
+		for _, upstream := range upstreams {
+			cachedValue := p.cache.Get(dnscache.NewKey(msg, upstream))
+			if cachedValue == nil {
+				continue
+			}
+			answer := cachedValue.Msg.Copy()
+			answer.SetRcode(msg, answer.Rcode)
+			now := time.Now()
+			if cachedValue.Expire.After(now) {
+				ctrld.Log(ctx, proxyLog.Debug(), "hit cached response")
+				setCachedAnswerTTL(answer, now, cachedValue.Expire)
+				return answer
+			}
+			staleAnswer = answer
+		}
+	}
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		ctrld.Log(ctx, proxyLog.Debug(), "sending query to %s: %s", upstreams[n], upstreamConfig.Name)
 		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
@@ -148,11 +190,28 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 	for n, upstreamConfig := range upstreamConfigs {
 		answer := resolve(n, upstreamConfig, msg)
 		if answer == nil {
+			if serveStaleCache && staleAnswer != nil {
+				ctrld.Log(ctx, proxyLog.Debug(), "serving stale cached response")
+				now := time.Now()
+				setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
+				return staleAnswer
+			}
 			continue
 		}
 		if answer.Rcode != dns.RcodeSuccess && len(upstreamConfigs) > 1 && containRcode(failoverRcodes, answer.Rcode) {
 			ctrld.Log(ctx, proxyLog.Debug(), "failover rcode matched, process to next upstream")
 			continue
+		}
+		if p.cache != nil {
+			ttl := ttlFromMsg(answer)
+			now := time.Now()
+			expired := now.Add(time.Duration(ttl) * time.Second)
+			if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
+				expired = now.Add(time.Duration(cachedTTL) * time.Second)
+			}
+			setCachedAnswerTTL(answer, now, expired)
+			p.cache.Add(dnscache.NewKey(msg, upstreams[n]), dnscache.NewValue(answer, expired))
+			ctrld.Log(ctx, proxyLog.Debug(), "add cached response")
 		}
 		return answer
 	}
@@ -167,9 +226,6 @@ func (p *prog) upstreamConfigsFromUpstreamNumbers(upstreams []string) []*ctrld.U
 	for _, upstream := range upstreams {
 		upstreamNum := strings.TrimPrefix(upstream, "upstream.")
 		upstreamConfigs = append(upstreamConfigs, p.cfg.Upstream[upstreamNum])
-	}
-	if len(upstreamConfigs) == 0 {
-		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 	}
 	return upstreamConfigs
 }
@@ -229,7 +285,37 @@ func containRcode(rcodes []int, rcode int) bool {
 	return false
 }
 
+func setCachedAnswerTTL(answer *dns.Msg, now, expiredTime time.Time) {
+	ttlSecs := expiredTime.Sub(now).Seconds()
+	if ttlSecs < 0 {
+		return
+	}
+
+	ttl := uint32(ttlSecs)
+	for _, rr := range answer.Answer {
+		rr.Header().Ttl = ttl
+	}
+	for _, rr := range answer.Ns {
+		rr.Header().Ttl = ttl
+	}
+	for _, rr := range answer.Extra {
+		if rr.Header().Rrtype != dns.TypeOPT {
+			rr.Header().Ttl = ttl
+		}
+	}
+}
+
+func ttlFromMsg(msg *dns.Msg) uint32 {
+	for _, rr := range msg.Answer {
+		return rr.Header().Ttl
+	}
+	for _, rr := range msg.Ns {
+		return rr.Header().Ttl
+	}
+	return 0
+}
+
 var osUpstreamConfig = &ctrld.UpstreamConfig{
 	Name: "OS resolver",
-	Type: "os",
+	Type: ctrld.ResolverTypeOS,
 }
