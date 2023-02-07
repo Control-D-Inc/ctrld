@@ -2,7 +2,7 @@ before:
   hooks:
     - go mod tidy
 builds:
-  - id: ctrld
+  - id: ctrld-darwin
     env:
       - CGO_ENABLED=0
     flags:
@@ -10,26 +10,15 @@ builds:
     ldflags:
       - -s -w
     goos:
-      - linux
-      - windows
+      - darwin
     goarch:
-      - 386
-      - arm
-      - mips
       - amd64
       - arm64
-    goarm:
-      - 5
-      - 6
-      - 7
-    gomips:
-      - softfloat
     main: ./cmd/ctrld
+    hooks:
+      post: gon gon.hcl
 archives:
-  - format_overrides:
-      - goos: windows
-        format: zip
-    strip_parent_binary_folder: true
+  - strip_parent_binary_folder: true
     wrap_in_directory: true
     files:
       - README.md
