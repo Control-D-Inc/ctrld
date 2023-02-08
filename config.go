@@ -2,7 +2,6 @@ package ctrld
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,8 +12,6 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	"github.com/go-playground/validator/v10"
 	"github.com/miekg/dns"
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
 	"github.com/spf13/viper"
 )
 
@@ -95,14 +92,14 @@ type NetworkConfig struct {
 
 // UpstreamConfig specifies configuration for upstreams that ctrld will forward requests to.
 type UpstreamConfig struct {
-	Name              string              `mapstructure:"name" toml:"name,omitempty"`
-	Type              string              `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy"`
-	Endpoint          string              `mapstructure:"endpoint" toml:"endpoint,omitempty" validate:"required_unless=Type os"`
-	BootstrapIP       string              `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
-	Domain            string              `mapstructure:"-" toml:"-"`
-	Timeout           int                 `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
-	transport         *http.Transport     `mapstructure:"-" toml:"-"`
-	http3RoundTripper *http3.RoundTripper `mapstructure:"-" toml:"-"`
+	Name              string            `mapstructure:"name" toml:"name,omitempty"`
+	Type              string            `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy"`
+	Endpoint          string            `mapstructure:"endpoint" toml:"endpoint,omitempty" validate:"required_unless=Type os"`
+	BootstrapIP       string            `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
+	Domain            string            `mapstructure:"-" toml:"-"`
+	Timeout           int               `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
+	transport         *http.Transport   `mapstructure:"-" toml:"-"`
+	http3RoundTripper http.RoundTripper `mapstructure:"-" toml:"-"`
 }
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
@@ -174,33 +171,6 @@ func (uc *UpstreamConfig) setupDOHTransport() {
 			Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
 		}
 		return dialer.DialContext(ctx, network, addr)
-	}
-
-	uc.pingUpstream()
-}
-
-func (uc *UpstreamConfig) setupDOH3Transport() {
-	uc.http3RoundTripper = &http3.RoundTripper{}
-	uc.http3RoundTripper.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
-		host := addr
-		ProxyLog.Debug().Msgf("debug dial context D0H3 %s - %s", addr, bootstrapDNS)
-		// if we have a bootstrap ip set, use it to avoid DNS lookup
-		if uc.BootstrapIP != "" {
-			if _, port, _ := net.SplitHostPort(addr); port != "" {
-				addr = net.JoinHostPort(uc.BootstrapIP, port)
-			}
-			ProxyLog.Debug().Msgf("sending doh3 request to: %s", addr)
-		}
-		remoteAddr, err := net.ResolveUDPAddr("udp", addr)
-		if err != nil {
-			return nil, err
-		}
-
-		udpConn, err := net.ListenUDP("udp", nil)
-		if err != nil {
-			return nil, err
-		}
-		return quic.DialEarlyContext(ctx, udpConn, remoteAddr, host, tlsCfg, cfg)
 	}
 
 	uc.pingUpstream()
