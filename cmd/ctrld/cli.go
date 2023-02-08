@@ -56,6 +56,7 @@ func initCLI() {
 	// Enable opening via explorer.exe on Windows.
 	// See: https://github.com/spf13/cobra/issues/844.
 	cobra.MousetrapHelpText = ""
+	cobra.EnableCommandSorting = false
 
 	rootCmd := &cobra.Command{
 		Use:     "ctrld",
@@ -177,7 +178,7 @@ func initCLI() {
 	startCmd := &cobra.Command{
 		PreRun: checkHasElevatedPrivilege,
 		Use:    "start",
-		Short:  "Start the ctrld service",
+		Short:  "Install and start the ctrld service",
 		Args:   cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			sc := &service.Config{}
@@ -293,15 +294,18 @@ func initCLI() {
 			status, err := s.Status()
 			if err != nil {
 				stderrMsg(err.Error())
-				return
+				os.Exit(1)
 			}
 			switch status {
 			case service.StatusUnknown:
 				stdoutMsg("Unknown status")
+				os.Exit(2)
 			case service.StatusRunning:
 				stdoutMsg("Service is running")
+				os.Exit(0)
 			case service.StatusStopped:
 				stdoutMsg("Service is stopped")
+				os.Exit(1)
 			}
 		},
 	}
@@ -309,7 +313,7 @@ func initCLI() {
 	uninstallCmd := &cobra.Command{
 		PreRun: checkHasElevatedPrivilege,
 		Use:    "uninstall",
-		Short:  "Uninstall the ctrld service",
+		Short:  "Stop and uninstall the ctrld service",
 		Args:   cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			prog := &prog{}
