@@ -7,8 +7,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/miekg/dns"
+	"github.com/quic-go/quic-go/http3"
 )
 
 func newDohResolver(uc *UpstreamConfig) *dohResolver {

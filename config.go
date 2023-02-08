@@ -12,9 +12,9 @@ import (
 
 	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	"github.com/go-playground/validator/v10"
-	"github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/miekg/dns"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/spf13/viper"
 )
 
