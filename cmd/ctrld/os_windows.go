@@ -10,6 +10,8 @@ import (
 	"strconv"
 
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
+
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 // TODO(cuonglm): implement.
@@ -39,7 +41,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 
 // TODO(cuonglm): should we use system API?
 func resetDNS(iface *net.Interface) error {
-	if supportsIPv6ListenLocal() {
+	if ctrldnet.SupportsIPv6ListenLocal() {
 		if output, err := netsh("interface", "ipv6", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp"); err != nil {
 			mainLog.Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))
 		}
@@ -54,7 +56,7 @@ func resetDNS(iface *net.Interface) error {
 
 func setPrimaryDNS(iface *net.Interface, dns string) error {
 	ipVer := "ipv4"
-	if isIPv6(dns) {
+	if ctrldnet.IsIPv6(dns) {
 		ipVer = "ipv6"
 	}
 	idx := strconv.Itoa(iface.Index)
@@ -73,7 +75,7 @@ func setPrimaryDNS(iface *net.Interface, dns string) error {
 
 func addSecondaryDNS(iface *net.Interface, dns string) error {
 	ipVer := "ipv4"
-	if isIPv6(dns) {
+	if ctrldnet.IsIPv6(dns) {
 		ipVer = "ipv6"
 	}
 	output, err := netsh("interface", ipVer, "add", "dns", strconv.Itoa(iface.Index), dns, "index=2")

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 var errWindowsAddrInUse = syscall.Errno(0x2740)
@@ -64,7 +65,7 @@ func (p *prog) run() {
 			// resolve it manually and set the bootstrap ip
 			c := new(dns.Client)
 			for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
-				if !supportsIPv6() && dnsType == dns.TypeAAAA {
+				if !ctrldnet.SupportsIPv6() && dnsType == dns.TypeAAAA {
 					continue
 				}
 				m := new(dns.Msg)

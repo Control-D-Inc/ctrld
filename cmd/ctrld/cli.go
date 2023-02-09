@@ -24,6 +24,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 var (
@@ -105,7 +106,7 @@ func initCLI() {
 				log.Fatalf("failed to unmarshal config: %v", err)
 			}
 			// Wait for network up.
-			if !netUp() {
+			if !ctrldnet.Up() {
 				log.Fatal("network is not up yet")
 			}
 			processLogAndCacheFlags()

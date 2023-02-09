@@ -19,6 +19,7 @@ import (
 	"tailscale.com/util/dnsname"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
@@ -111,7 +112,7 @@ func resetDNS(iface *net.Interface) error {
 	}
 
 	// TODO(cuonglm): handle DHCPv6 properly.
-	if supportsIPv6() {
+	if ctrldnet.SupportsIPv6() {
 		c := client6.NewClient()
 		conversation, err := c.Exchange(iface.Name)
 		if err != nil {

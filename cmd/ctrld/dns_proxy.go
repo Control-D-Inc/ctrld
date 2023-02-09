@@ -15,6 +15,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 const staleTTL = 60 * time.Second
@@ -55,7 +56,7 @@ func (p *prog) serveUDP(listenerNum string) error {
 
 	// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
 	// listen on ::1, then spawn a listener for receiving DNS requests.
-	if runtime.GOOS == "windows" && supportsIPv6ListenLocal() {
+	if runtime.GOOS == "windows" && ctrldnet.SupportsIPv6() {
 		go func() {
 			s := &dns.Server{
 				Addr:    net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)),
