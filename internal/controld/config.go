@@ -70,7 +70,7 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 	req.Header.Add("Content-Type", "application/json")
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return Dialer.DialContext(ctx, network, addr)
+		return Dialer.DialContext(ctx, "tcp4", addr)
 	}
 	client := http.Client{
 		Timeout:   10 * time.Second,
