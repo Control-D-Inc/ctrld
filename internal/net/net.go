@@ -38,7 +38,7 @@ var (
 func probeStack() {
 	b := backoff.NewBackoff("probeStack", func(format string, args ...any) {}, time.Minute)
 	for {
-		if _, err := Dialer.Dial("udp", net.JoinHostPort(bootstrapDNS, "53")); err == nil {
+		if _, err := Dialer.Dial("udp", bootstrapDNS); err == nil {
 			hasNetworkUp = true
 			break
 		} else {
