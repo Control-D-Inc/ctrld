@@ -25,6 +25,8 @@ builds:
     gomips:
       - softfloat
     main: ./cmd/ctrld
+    hooks:
+      post: /bin/sh ./scripts/upx.sh
 archives:
   - format_overrides:
       - goos: windows
