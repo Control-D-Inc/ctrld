@@ -203,6 +203,10 @@ func initCLI() {
 				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
 			}
 
+			if err := v.Unmarshal(&cfg); err != nil {
+				log.Fatalf("failed to unmarshal config: %v", err)
+			}
+
 			initLogging()
 			processCDFlags()
 			// On Windows, the service will be run as SYSTEM, so if ctrld start as Admin,
