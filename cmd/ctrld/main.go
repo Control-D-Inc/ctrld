@@ -80,7 +80,7 @@ func initLogging() {
 	})
 	writers = append(writers, consoleWriter)
 	multi := zerolog.MultiLevelWriter(writers...)
-	mainLog = mainLog.Output(multi).With().Timestamp().Str("prefix", "main").Logger()
+	mainLog = mainLog.Output(multi).With().Timestamp().Logger()
 	if verbose > 0 || isLog {
 		proxyLog = proxyLog.Output(multi).With().Timestamp().Logger()
 		// TODO: find a better way.

@@ -207,7 +207,11 @@ func initCLI() {
 				log.Fatalf("failed to unmarshal config: %v", err)
 			}
 
+			logPath := cfg.Service.LogPath
+			cfg.Service.LogPath = ""
 			initLogging()
+			cfg.Service.LogPath = logPath
+
 			processCDFlags()
 			// On Windows, the service will be run as SYSTEM, so if ctrld start as Admin,
 			// the user home dir is different, so pass specific arguments that relevant here.
