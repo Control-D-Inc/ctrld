@@ -80,16 +80,20 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	return nil
 }
 
-func resetDNS(iface *net.Interface) error {
-	if r, err := dns.NewOSConfigurator(logf, iface.Name); err == nil {
-		if err := r.Close(); err != nil {
-			mainLog.Error().Err(err).Msg("failed to rollback DNS setting")
-			return err
+func resetDNS(iface *net.Interface) (err error) {
+	defer func() {
+		if err == nil {
+			return
 		}
-		if r.Mode() == "direct" {
-			return nil
+		if r, oerr := dns.NewOSConfigurator(logf, iface.Name); oerr == nil {
+			_ = r.SetDNS(dns.OSConfig{})
+			if err := r.Close(); err != nil {
+				mainLog.Error().Err(err).Msg("failed to rollback DNS setting")
+				return
+			}
+			err = nil
 		}
-	}
+	}()
 
 	var ns []string
 	c, err := nclient4.New(iface.Name)
