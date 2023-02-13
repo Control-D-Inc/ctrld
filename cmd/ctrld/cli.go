@@ -445,6 +445,8 @@ func initCLI() {
 func writeConfigFile() error {
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
+	} else if configPath != "" {
+		defaultConfigFile = configPath
 	}
 	f, err := os.OpenFile(defaultConfigFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(0o644))
 	if err != nil {
