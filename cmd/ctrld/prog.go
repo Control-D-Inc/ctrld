@@ -16,6 +16,10 @@ import (
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
+var logf = func(format string, args ...any) {
+	mainLog.Debug().Msgf(format, args...)
+}
+
 var errWindowsAddrInUse = syscall.Errno(0x2740)
 
 var svcConfig = &service.Config{
