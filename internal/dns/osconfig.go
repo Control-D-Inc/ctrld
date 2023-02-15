@@ -13,6 +13,8 @@ import (
 	"tailscale.com/util/dnsname"
 )
 
+var _ OSConfigurator = (*directManager)(nil)
+
 // An OSConfigurator applies DNS settings to the operating system.
 type OSConfigurator interface {
 	// SetDNS updates the OS's DNS configuration to match cfg.

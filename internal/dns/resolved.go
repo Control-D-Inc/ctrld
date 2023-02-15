@@ -105,6 +105,8 @@ type resolvedManager struct {
 	newManager func(conn *dbus.Conn) dbus.BusObject
 }
 
+var _ OSConfigurator = (*resolvedManager)(nil)
+
 func newResolvedManager(logf logger.Logf, interfaceName string) (*resolvedManager, error) {
 	iface, err := net.InterfaceByName(interfaceName)
 	if err != nil {

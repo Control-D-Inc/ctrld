@@ -197,8 +197,7 @@ func initCLI() {
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
 			if dir, err := os.UserHomeDir(); err == nil {
-				// WorkingDirectory is not supported on Windows.
-				sc.WorkingDirectory = dir
+				setWorkingDirectory(sc, dir)
 				// No config path, generating config in HOME directory.
 				noConfigStart := isNoConfigStart(cmd)
 				writeDefaultConfig := !noConfigStart && configBase64 == ""

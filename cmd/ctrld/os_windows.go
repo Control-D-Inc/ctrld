@@ -1,6 +1,3 @@
-//go:build windows
-// +build windows
-
 package main
 
 import (
@@ -13,16 +10,6 @@ import (
 
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
-
-// TODO(cuonglm): implement.
-func allocateIP(ip string) error {
-	return nil
-}
-
-// TODO(cuonglm): implement.
-func deAllocateIP(ip string) error {
-	return nil
-}
 
 func setDNS(iface *net.Interface, nameservers []string) error {
 	if len(nameservers) == 0 {

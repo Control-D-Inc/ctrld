@@ -31,6 +31,8 @@ type nmManager struct {
 	dnsManager    dbus.BusObject
 }
 
+var _ OSConfigurator = (*nmManager)(nil)
+
 func newNMManager(interfaceName string) (*nmManager, error) {
 	conn, err := dbus.SystemBus()
 	if err != nil {
