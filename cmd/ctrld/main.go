@@ -31,7 +31,6 @@ var (
 
 	rootLogger = zerolog.New(io.Discard)
 	mainLog    = rootLogger
-	proxyLog   = rootLogger
 
 	cdUID          string
 	iface          string
@@ -59,7 +58,6 @@ func normalizeLogFilePath(logFilePath string) string {
 
 func initLogging() {
 	writers := []io.Writer{io.Discard}
-	isLog := cfg.Service.LogLevel != ""
 	if logFilePath := normalizeLogFilePath(cfg.Service.LogPath); logFilePath != "" {
 		// Create parent directory if necessary.
 		if err := os.MkdirAll(filepath.Dir(logFilePath), 0750); err != nil {
@@ -71,7 +69,6 @@ func initLogging() {
 			fmt.Fprintf(os.Stderr, "failed to create log file: %v", err)
 			os.Exit(1)
 		}
-		isLog = true
 		writers = append(writers, logFile)
 	}
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
@@ -81,11 +78,8 @@ func initLogging() {
 	writers = append(writers, consoleWriter)
 	multi := zerolog.MultiLevelWriter(writers...)
 	mainLog = mainLog.Output(multi).With().Timestamp().Logger()
-	if verbose > 0 || isLog {
-		proxyLog = proxyLog.Output(multi).With().Timestamp().Logger()
-		// TODO: find a better way.
-		ctrld.ProxyLog = proxyLog
-	}
+	// TODO: find a better way.
+	ctrld.ProxyLog = mainLog
 
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	logLevel := cfg.Service.LogLevel

@@ -52,7 +52,7 @@ func (p *prog) run() {
 		for _, cidr := range nc.Cidrs {
 			_, ipNet, err := net.ParseCIDR(cidr)
 			if err != nil {
-				proxyLog.Error().Err(err).Str("network", nc.Name).Str("cidr", cidr).Msg("invalid cidr")
+				mainLog.Error().Err(err).Str("network", nc.Name).Str("cidr", cidr).Msg("invalid cidr")
 				continue
 			}
 			nc.IPNets = append(nc.IPNets, ipNet)
@@ -73,11 +73,11 @@ func (p *prog) run() {
 				m.RecursionDesired = true
 				r, _, err := c.Exchange(m, net.JoinHostPort(bootstrapDNS, "53"))
 				if err != nil {
-					proxyLog.Error().Err(err).Msgf("could not resolve domain %s for upstream.%s", uc.Domain, n)
+					mainLog.Error().Err(err).Msgf("could not resolve domain %s for upstream.%s", uc.Domain, n)
 					continue
 				}
 				if r.Rcode != dns.RcodeSuccess {
-					proxyLog.Error().Msgf("could not resolve domain return code: %d, upstream.%s", r.Rcode, n)
+					mainLog.Error().Msgf("could not resolve domain return code: %d, upstream.%s", r.Rcode, n)
 					continue
 				}
 				if len(r.Answer) == 0 {
@@ -110,14 +110,14 @@ func (p *prog) run() {
 			listenerConfig := p.cfg.Listener[listenerNum]
 			upstreamConfig := p.cfg.Upstream[listenerNum]
 			if upstreamConfig == nil {
-				proxyLog.Error().Msgf("missing upstream config for: [listener.%s]", listenerNum)
+				mainLog.Error().Msgf("missing upstream config for: [listener.%s]", listenerNum)
 				return
 			}
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 			mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, addr)
 			err := p.serveUDP(listenerNum)
 			if err != nil && !defaultConfigWritten {
-				proxyLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
+				mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 				return
 			}
 			if err == nil {
@@ -126,16 +126,16 @@ func (p *prog) run() {
 
 			if opErr, ok := err.(*net.OpError); ok {
 				if sErr, ok := opErr.Err.(*os.SyscallError); ok && errors.Is(opErr.Err, syscall.EADDRINUSE) || errors.Is(sErr.Err, errWindowsAddrInUse) {
-					proxyLog.Warn().Msgf("Address %s already in used, pick a random one", addr)
+					mainLog.Warn().Msgf("Address %s already in used, pick a random one", addr)
 					pc, err := net.ListenPacket("udp", net.JoinHostPort(listenerConfig.IP, "0"))
 					if err != nil {
-						proxyLog.Fatal().Err(err).Msg("failed to listen packet")
+						mainLog.Fatal().Err(err).Msg("failed to listen packet")
 						return
 					}
 					_, portStr, _ := net.SplitHostPort(pc.LocalAddr().String())
 					port, err := strconv.Atoi(portStr)
 					if err != nil {
-						proxyLog.Fatal().Err(err).Msg("malformed port")
+						mainLog.Fatal().Err(err).Msg("malformed port")
 						return
 					}
 					listenerConfig.Port = port
@@ -146,7 +146,7 @@ func (p *prog) run() {
 						},
 					})
 					if err := writeConfigFile(); err != nil {
-						proxyLog.Fatal().Err(err).Msg("failed to write config file")
+						mainLog.Fatal().Err(err).Msg("failed to write config file")
 					} else {
 						mainLog.Info().Msg("writing config file to: " + defaultConfigFile)
 					}
@@ -154,16 +154,16 @@ func (p *prog) run() {
 					// There can be a race between closing the listener and start our own UDP server, but it's
 					// rare, and we only do this once, so let conservative here.
 					if err := pc.Close(); err != nil {
-						proxyLog.Fatal().Err(err).Msg("failed to close packet conn")
+						mainLog.Fatal().Err(err).Msg("failed to close packet conn")
 						return
 					}
 					if err := p.serveUDP(listenerNum); err != nil {
-						proxyLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
+						mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 						return
 					}
 				}
 			}
-			proxyLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
+			mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 		}(listenerNum)
 	}
 
