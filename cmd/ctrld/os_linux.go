@@ -27,8 +27,8 @@ import (
 // sudo ip a add 127.0.0.2/24 dev lo
 func allocateIP(ip string) error {
 	cmd := exec.Command("ip", "a", "add", ip+"/24", "dev", "lo")
-	if err := cmd.Run(); err != nil {
-		mainLog.Error().Err(err).Msg("allocateIP failed")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		mainLog.Error().Err(err).Msgf("allocateIP failed: %s", string(out))
 		return err
 	}
 	return nil

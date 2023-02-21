@@ -66,9 +66,9 @@ func InitConfig(v *viper.Viper, name string) {
 // Config represents ctrld supported configuration.
 type Config struct {
 	Service  ServiceConfig              `mapstructure:"service" toml:"service,omitempty"`
+	Listener map[string]*ListenerConfig `mapstructure:"listener" toml:"listener" validate:"min=1,dive"`
 	Network  map[string]*NetworkConfig  `mapstructure:"network" toml:"network" validate:"min=1,dive"`
 	Upstream map[string]*UpstreamConfig `mapstructure:"upstream" toml:"upstream" validate:"min=1,dive"`
-	Listener map[string]*ListenerConfig `mapstructure:"listener" toml:"listener" validate:"min=1,dive"`
 }
 
 // ServiceConfig specifies the general ctrld config.

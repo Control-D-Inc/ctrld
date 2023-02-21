@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
@@ -87,7 +89,6 @@ func initCLI() {
 			if daemon && runtime.GOOS == "windows" {
 				log.Fatal("Cannot run in daemon mode. Please install a Windows service.")
 			}
-
 			noConfigStart := isNoConfigStart(cmd)
 			writeDefaultConfig := !noConfigStart && configBase64 == ""
 			configs := []struct {
@@ -196,18 +197,23 @@ func initCLI() {
 			}
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
+
+			// No config path, generating config in HOME directory.
+			noConfigStart := isNoConfigStart(cmd)
+			writeDefaultConfig := !noConfigStart && configBase64 == ""
+			if configPath != "" {
+				v.SetConfigFile(configPath)
+			}
 			if dir, err := os.UserHomeDir(); err == nil {
 				setWorkingDirectory(sc, dir)
-				// No config path, generating config in HOME directory.
-				noConfigStart := isNoConfigStart(cmd)
-				writeDefaultConfig := !noConfigStart && configBase64 == ""
 				if configPath == "" && writeDefaultConfig {
 					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
-					readConfigFile(writeDefaultConfig && cdUID == "")
+					v.SetConfigFile(defaultConfigFile)
 				}
 				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
 			}
 
+			readConfigFile(writeDefaultConfig && cdUID == "")
 			if err := v.Unmarshal(&cfg); err != nil {
 				log.Fatalf("failed to unmarshal config: %v", err)
 			}
@@ -480,7 +486,7 @@ func writeConfigFile() error {
 		}
 	}
 	enc := toml.NewEncoder(f).SetIndentTables(true)
-	if err := enc.Encode(v.AllSettings()); err != nil {
+	if err := enc.Encode(&cfg); err != nil {
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -495,6 +501,13 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	if err == nil {
 		fmt.Println("loading config file from:", v.ConfigFileUsed())
 		defaultConfigFile = v.ConfigFileUsed()
+		v.OnConfigChange(func(in fsnotify.Event) {
+			if err := v.UnmarshalKey("listener", &cfg.Listener); err != nil {
+				log.Printf("failed to unmarshal listener config: %v", err)
+				return
+			}
+		})
+		v.WatchConfig()
 		return true
 	}
 
@@ -630,10 +643,6 @@ func processCDFlags() {
 		},
 	}
 
-	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
-	v.Set("network", cfg.Network)
-	v.Set("upstream", cfg.Upstream)
-	v.Set("listener", cfg.Listener)
 	processLogAndCacheFlags()
 	if err := writeConfigFile(); err != nil {
 		logger.Fatal().Err(err).Msg("failed to write config file")
@@ -705,14 +714,14 @@ func defaultIfaceName() string {
 
 func selfCheckStatus(status service.Status) service.Status {
 	c := new(dns.Client)
-	lc := cfg.Listener["0"]
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 500 * time.Millisecond
 	ctx := context.Background()
 	err := errors.New("query failed")
-	maxAttempts := 10
+	maxAttempts := 20
 	mainLog.Debug().Msg("Performing self-check")
 	for i := 0; i < maxAttempts; i++ {
+		lc := cfg.Listener["0"]
 		m := new(dns.Msg)
 		m.SetQuestion(selfCheckFQDN+".", dns.TypeA)
 		m.RecursionDesired = true

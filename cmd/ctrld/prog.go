@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -120,7 +122,7 @@ func (p *prog) run() {
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 			mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, addr)
 			err := p.serveUDP(listenerNum)
-			if err != nil && !defaultConfigWritten {
+			if err != nil && !defaultConfigWritten && cdUID == "" {
 				mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 				return
 			}
@@ -128,39 +130,21 @@ func (p *prog) run() {
 				return
 			}
 
-			if opErr, ok := err.(*net.OpError); ok {
+			if opErr, ok := err.(*net.OpError); ok && listenerNum == "0" {
 				if sErr, ok := opErr.Err.(*os.SyscallError); ok && errors.Is(opErr.Err, syscall.EADDRINUSE) || errors.Is(sErr.Err, errWindowsAddrInUse) {
 					mainLog.Warn().Msgf("Address %s already in used, pick a random one", addr)
-					pc, err := net.ListenPacket("udp", net.JoinHostPort(listenerConfig.IP, "0"))
-					if err != nil {
-						mainLog.Fatal().Err(err).Msg("failed to listen packet")
-						return
-					}
-					_, portStr, _ := net.SplitHostPort(pc.LocalAddr().String())
-					port, err := strconv.Atoi(portStr)
-					if err != nil {
-						mainLog.Fatal().Err(err).Msg("malformed port")
-						return
-					}
-					listenerConfig.Port = port
-					v.Set("listener", map[string]*ctrld.ListenerConfig{
-						"0": {
-							IP:   "127.0.0.1",
-							Port: port,
-						},
-					})
+					ip := randomLocalIP()
+					listenerConfig.IP = ip
+					port := listenerConfig.Port
+					cfg.Upstream = map[string]*ctrld.UpstreamConfig{"0": cfg.Upstream["0"]}
 					if err := writeConfigFile(); err != nil {
 						mainLog.Fatal().Err(err).Msg("failed to write config file")
 					} else {
 						mainLog.Info().Msg("writing config file to: " + defaultConfigFile)
 					}
-					mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, pc.LocalAddr())
-					// There can be a race between closing the listener and start our own UDP server, but it's
-					// rare, and we only do this once, so let conservative here.
-					if err := pc.Close(); err != nil {
-						mainLog.Fatal().Err(err).Msg("failed to close packet conn")
-						return
-					}
+					p.cfg.Service.AllocateIP = true
+					p.preRun()
+					mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, net.JoinHostPort(ip, strconv.Itoa(port)))
 					if err := p.serveUDP(listenerNum); err != nil {
 						mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 						return
@@ -253,4 +237,9 @@ func (p *prog) resetDNS() {
 		return
 	}
 	logger.Debug().Msg("Restoring DNS successfully")
+}
+
+func randomLocalIP() string {
+	n := rand.Intn(254-2) + 2
+	return fmt.Sprintf("127.0.0.%d", n)
 }
