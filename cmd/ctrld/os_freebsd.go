@@ -3,10 +3,31 @@ package main
 import (
 	"net"
 	"net/netip"
+	"os/exec"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
+
+// allocate loopback ip
+// sudo ifconfig lo0 127.0.0.53 alias
+func allocateIP(ip string) error {
+	cmd := exec.Command("ifconfig", "lo0", ip, "alias")
+	if err := cmd.Run(); err != nil {
+		mainLog.Error().Err(err).Msg("allocateIP failed")
+		return err
+	}
+	return nil
+}
+
+func deAllocateIP(ip string) error {
+	cmd := exec.Command("ifconfig", "lo0", ip, "-alias")
+	if err := cmd.Run(); err != nil {
+		mainLog.Error().Err(err).Msg("deAllocateIP failed")
+		return err
+	}
+	return nil
+}
 
 // set the dns server for the provided network interface
 func setDNS(iface *net.Interface, nameservers []string) error {
