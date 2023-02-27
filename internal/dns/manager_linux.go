@@ -62,6 +62,10 @@ func NewOSConfigurator(logf logger.Logf, interfaceName string) (ret OSConfigurat
 		return newResolvedManager(logf, interfaceName)
 	case "network-manager":
 		return newNMManager(interfaceName)
+	case "debian-resolvconf":
+		return newDebianResolvconfManager(logf)
+	case "openresolv":
+		return newOpenresolvManager()
 	default:
 		logf("[unexpected] detected unknown DNS mode %q, using direct manager as last resort", mode)
 		return newDirectManagerOnFS(logf, env.fs), nil
