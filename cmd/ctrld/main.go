@@ -27,8 +27,6 @@ var (
 	cfg               ctrld.Config
 	verbose           int
 
-	bootstrapDNS = "76.76.2.0"
-
 	rootLogger = zerolog.New(io.Discard)
 	mainLog    = rootLogger
 

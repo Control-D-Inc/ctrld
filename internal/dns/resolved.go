@@ -100,9 +100,8 @@ type resolvedManager struct {
 	logf  logger.Logf
 	ifidx int
 
-	configCR   chan changeRequest // tracks OSConfigs changes and error responses
-	revertCh   chan struct{}
-	newManager func(conn *dbus.Conn) dbus.BusObject
+	configCR chan changeRequest // tracks OSConfigs changes and error responses
+	revertCh chan struct{}
 }
 
 var _ OSConfigurator = (*resolvedManager)(nil)

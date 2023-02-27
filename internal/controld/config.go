@@ -60,11 +60,11 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		// We experiment hanging in TLS handshake when connecting to ControlD API
 		// with ipv6. So prefer ipv4 if available.
-		network = "tcp6"
+		proto := "tcp6"
 		if ctrldnet.SupportsIPv4() {
-			network = "tcp4"
+			proto = "tcp4"
 		}
-		return ctrldnet.Dialer.DialContext(ctx, network, addr)
+		return ctrldnet.Dialer.DialContext(ctx, proto, addr)
 	}
 	client := http.Client{
 		Timeout:   10 * time.Second,

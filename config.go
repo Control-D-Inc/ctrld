@@ -209,9 +209,11 @@ func (uc *UpstreamConfig) SetupBootstrapIP() error {
 		switch ar := a.(type) {
 		case *dns.A:
 			uc.BootstrapIP = ar.A.String()
+			//lint:ignore S1023 false alarm?
 			break
 		case *dns.AAAA:
 			uc.BootstrapIP = ar.AAAA.String()
+			//lint:ignore S1023 false alarm?
 			break
 		}
 	}
