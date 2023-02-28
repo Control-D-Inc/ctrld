@@ -157,6 +157,7 @@ func (uc *UpstreamConfig) SetupTransport() {
 
 func (uc *UpstreamConfig) setupDOHTransport() {
 	uc.transport = http.DefaultTransport.(*http.Transport).Clone()
+	uc.transport.IdleConnTimeout = 5 * time.Second
 	uc.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dialer := &net.Dialer{
 			Timeout:   10 * time.Second,
