@@ -52,7 +52,7 @@ func setPrimaryDNS(iface *net.Interface, dns string) error {
 		mainLog.Error().Err(err).Msgf("failed to set primary DNS: %s", string(output))
 		return err
 	}
-	if ipVer == "ipv4" {
+	if ipVer == "ipv4" && ctrldnet.SupportsIPv6ListenLocal() {
 		// Disable IPv6 DNS, so the query will be fallback to IPv4.
 		_, _ = netsh("interface", "ipv6", "set", "dnsserver", idx, "static", "::1", "primary")
 	}
