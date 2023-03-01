@@ -2,18 +2,25 @@ package ctrld
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	"github.com/go-playground/validator/v10"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+
+	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
+
+// ErrUpstreamFailed indicates that ctrld failed to connect to an upstream.
+var ErrUpstreamFailed = errors.New("could not connect to upstream")
 
 // SetConfigName set the config name that ctrld will look for.
 func SetConfigName(v *viper.Viper, name string) {
@@ -100,6 +107,9 @@ type UpstreamConfig struct {
 	Timeout           int               `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
 	transport         *http.Transport   `mapstructure:"-" toml:"-"`
 	http3RoundTripper http.RoundTripper `mapstructure:"-" toml:"-"`
+
+	// guard BootstrapIP
+	mu sync.Mutex
 }
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
@@ -155,13 +165,51 @@ func (uc *UpstreamConfig) SetupTransport() {
 	}
 }
 
+// SetupBootstrapIP manually find all available IPs of the upstream.
+func (uc *UpstreamConfig) SetupBootstrapIP() error {
+	uc.mu.Lock()
+	defer uc.mu.Unlock()
+
+	c := new(dns.Client)
+	m := new(dns.Msg)
+	dnsType := dns.TypeA
+	if ctrldnet.SupportsIPv6() {
+		dnsType = dns.TypeAAAA
+	}
+	m.SetQuestion(uc.Domain+".", dnsType)
+	m.RecursionDesired = true
+	r, _, err := c.Exchange(m, net.JoinHostPort(bootstrapDNS, "53"))
+	if err != nil {
+		ProxyLog.Error().Err(err).Msgf("could not resolve domain %s for upstream", uc.Domain)
+		return err
+	}
+	if r.Rcode != dns.RcodeSuccess {
+		ProxyLog.Error().Msgf("could not resolve domain return code: %d, upstream", r.Rcode)
+		return errors.New(dns.RcodeToString[r.Rcode])
+	}
+	if len(r.Answer) == 0 {
+		return errors.New("no answer from bootstrap DNS server")
+	}
+	for _, a := range r.Answer {
+		switch ar := a.(type) {
+		case *dns.A:
+			uc.BootstrapIP = ar.A.String()
+			break
+		case *dns.AAAA:
+			uc.BootstrapIP = ar.AAAA.String()
+			break
+		}
+	}
+	return nil
+}
+
 func (uc *UpstreamConfig) setupDOHTransport() {
 	uc.transport = http.DefaultTransport.(*http.Transport).Clone()
 	uc.transport.IdleConnTimeout = 5 * time.Second
 	uc.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dialer := &net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 10 * time.Second,
+			Timeout:   5 * time.Second,
+			KeepAlive: 5 * time.Second,
 		}
 		Log(ctx, ProxyLog.Debug(), "debug dial context %s - %s - %s", addr, network, bootstrapDNS)
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
@@ -169,9 +217,14 @@ func (uc *UpstreamConfig) setupDOHTransport() {
 			if _, port, _ := net.SplitHostPort(addr); port != "" {
 				addr = net.JoinHostPort(uc.BootstrapIP, port)
 			}
-			Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
 		}
-		return dialer.DialContext(ctx, network, addr)
+		Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
+		conn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			Log(ctx, ProxyLog.Debug().Err(err), "could not dial to upstream")
+			return nil, ErrUpstreamFailed
+		}
+		return conn, nil
 	}
 
 	uc.pingUpstream()

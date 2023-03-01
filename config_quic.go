@@ -32,7 +32,12 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 		if err != nil {
 			return nil, err
 		}
-		return quic.DialEarlyContext(ctx, udpConn, remoteAddr, host, tlsCfg, cfg)
+		conn, err := quic.DialEarlyContext(ctx, udpConn, remoteAddr, host, tlsCfg, cfg)
+		if err != nil {
+			Log(ctx, ProxyLog.Debug().Err(err), "could not dial early to upstream")
+			return nil, ErrUpstreamFailed
+		}
+		return conn, nil
 	}
 
 	uc.http3RoundTripper = rt

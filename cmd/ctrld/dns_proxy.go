@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"runtime"
@@ -182,6 +183,15 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			resolveCtx = timeoutCtx
 		}
 		answer, err := dnsResolver.Resolve(resolveCtx, msg)
+		if errors.Is(err, ctrld.ErrUpstreamFailed) {
+			ctrldnet.Reset()
+			if err := upstreamConfig.SetupBootstrapIP(); err != nil {
+				mainLog.Error().Err(err).Msg("could not re-initialize bootstrap IP")
+			} else {
+				mainLog.Debug().Msg("re-initialize bootstrap IP done")
+			}
+			return nil
+		}
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Error().Err(err), "failed to resolve query")
 			return nil

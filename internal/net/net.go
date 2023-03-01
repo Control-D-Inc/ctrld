@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"tailscale.com/logtail/backoff"
@@ -28,12 +29,16 @@ var Dialer = &net.Dialer{
 }
 
 var (
-	stackOnce          sync.Once
+	stackOnce          atomic.Pointer[sync.Once]
 	ipv4Enabled        bool
 	ipv6Enabled        bool
 	canListenIPv6Local bool
 	hasNetworkUp       bool
 )
+
+func init() {
+	stackOnce.Store(new(sync.Once))
+}
 
 func probeStack() {
 	b := backoff.NewBackoff("probeStack", func(format string, args ...any) {}, time.Minute)
@@ -57,23 +62,27 @@ func probeStack() {
 	}
 }
 
+func Reset() {
+	stackOnce.Store(new(sync.Once))
+}
+
 func Up() bool {
-	stackOnce.Do(probeStack)
+	stackOnce.Load().Do(probeStack)
 	return hasNetworkUp
 }
 
 func SupportsIPv4() bool {
-	stackOnce.Do(probeStack)
+	stackOnce.Load().Do(probeStack)
 	return ipv4Enabled
 }
 
 func SupportsIPv6() bool {
-	stackOnce.Do(probeStack)
+	stackOnce.Load().Do(probeStack)
 	return ipv6Enabled
 }
 
 func SupportsIPv6ListenLocal() bool {
-	stackOnce.Do(probeStack)
+	stackOnce.Load().Do(probeStack)
 	return canListenIPv6Local
 }
 

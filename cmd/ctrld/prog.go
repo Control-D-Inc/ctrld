@@ -11,11 +11,9 @@ import (
 	"syscall"
 
 	"github.com/kardianos/service"
-	"github.com/miekg/dns"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
-	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 var logf = func(format string, args ...any) {
@@ -37,7 +35,6 @@ type prog struct {
 func (p *prog) Start(s service.Service) error {
 	p.cfg = &cfg
 	go p.run()
-	mainLog.Info().Msg("Service started")
 	return nil
 }
 
@@ -67,45 +64,10 @@ func (p *prog) run() {
 	for n := range p.cfg.Upstream {
 		uc := p.cfg.Upstream[n]
 		uc.Init()
-		if uc.BootstrapIP == "" {
-			// resolve it manually and set the bootstrap ip
-			c := new(dns.Client)
-			for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
-				if !ctrldnet.SupportsIPv6() && dnsType == dns.TypeAAAA {
-					continue
-				}
-				m := new(dns.Msg)
-				m.SetQuestion(uc.Domain+".", dnsType)
-				m.RecursionDesired = true
-				r, _, err := c.Exchange(m, net.JoinHostPort(bootstrapDNS, "53"))
-				if err != nil {
-					mainLog.Error().Err(err).Msgf("could not resolve domain %s for upstream.%s", uc.Domain, n)
-					continue
-				}
-				if r.Rcode != dns.RcodeSuccess {
-					mainLog.Error().Msgf("could not resolve domain return code: %d, upstream.%s", r.Rcode, n)
-					continue
-				}
-				if len(r.Answer) == 0 {
-					continue
-				}
-				for _, a := range r.Answer {
-					switch ar := a.(type) {
-					case *dns.A:
-						uc.BootstrapIP = ar.A.String()
-					case *dns.AAAA:
-						uc.BootstrapIP = ar.AAAA.String()
-					default:
-						continue
-					}
-					mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
-					// Stop if we reached here, because we got the bootstrap IP from r.Answer.
-					break
-				}
-				// If we reached here, uc.BootstrapIP was set, nothing to do anymore.
-				break
-			}
+		if err := uc.SetupBootstrapIP(); err != nil {
+			mainLog.Fatal().Err(err).Msgf("failed to setup bootstrap IP for upstream.%s", n)
 		}
+		mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
 		uc.SetupTransport()
 	}
 

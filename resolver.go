@@ -93,5 +93,8 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 		Dialer: dialer,
 	}
 	answer, _, err := dnsClient.ExchangeContext(ctx, msg, r.endpoint)
+	if _, ok := err.(*net.OpError); ok {
+		return answer, ErrUpstreamFailed
+	}
 	return answer, err
 }

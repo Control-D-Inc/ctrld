@@ -47,7 +47,7 @@ func resolve(ctx context.Context, msg *dns.Msg, endpoint string, tlsConfig *tls.
 func doResolve(ctx context.Context, msg *dns.Msg, endpoint string, tlsConfig *tls.Config) (*dns.Msg, error) {
 	session, err := quic.DialAddr(endpoint, tlsConfig, nil)
 	if err != nil {
-		return nil, err
+		return nil, ErrUpstreamFailed
 	}
 	defer session.CloseWithError(quic.ApplicationErrorCode(quic.NoError), "")
 
