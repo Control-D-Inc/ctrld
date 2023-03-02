@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net"
 	"runtime"
@@ -170,12 +169,12 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			staleAnswer = answer
 		}
 	}
-	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
+	resolve1 := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
 		ctrld.Log(ctx, mainLog.Debug(), "sending query to %s: %s", upstreams[n], upstreamConfig.Name)
 		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Error().Err(err), "failed to create resolver")
-			return nil
+			return nil, err
 		}
 		resolveCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
@@ -184,17 +183,17 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			defer cancel()
 			resolveCtx = timeoutCtx
 		}
-		answer, err := dnsResolver.Resolve(resolveCtx, msg)
-		if errors.Is(err, ctrld.ErrUpstreamFailed) {
-			ctrldnet.Reset()
-			if err := upstreamConfig.SetupBootstrapIP(); err != nil {
-				mainLog.Error().Err(err).Msg("could not re-initialize bootstrap IP")
-			} else {
-				mainLog.Debug().Msg("re-initialize bootstrap IP done")
-			}
-			return nil
-		}
+		return dnsResolver.Resolve(resolveCtx, msg)
+	}
+	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
+		answer, err := resolve1(n, upstreamConfig, msg)
 		if err != nil {
+			// If any error occurred, re-bootstrap transport/ip, retry the request.
+			upstreamConfig.ReBootstrap()
+			answer, err = resolve1(n, upstreamConfig, msg)
+			if err == nil {
+				return answer
+			}
 			ctrld.Log(ctx, mainLog.Error().Err(err), "failed to resolve query")
 			return nil
 		}

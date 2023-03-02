@@ -14,13 +14,11 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
-
-// ErrUpstreamFailed indicates that ctrld failed to connect to an upstream.
-var ErrUpstreamFailed = errors.New("could not connect to upstream")
 
 // SetConfigName set the config name that ctrld will look for.
 func SetConfigName(v *viper.Viper, name string) {
@@ -108,6 +106,7 @@ type UpstreamConfig struct {
 	transport         *http.Transport   `mapstructure:"-" toml:"-"`
 	http3RoundTripper http.RoundTripper `mapstructure:"-" toml:"-"`
 
+	g singleflight.Group
 	// guard BootstrapIP
 	mu sync.Mutex
 }
@@ -152,6 +151,22 @@ func (uc *UpstreamConfig) Init() {
 	if net.ParseIP(uc.Domain) != nil {
 		uc.BootstrapIP = uc.Domain
 	}
+}
+
+// ReBootstrap re-setup the bootstrap IP and the transport.
+func (uc *UpstreamConfig) ReBootstrap() {
+	_, _, _ = uc.g.Do("rebootstrap", func() (any, error) {
+		ProxyLog.Debug().Msg("re-bootstrapping upstream ip")
+		ctrldnet.Reset()
+		err := uc.SetupBootstrapIP()
+		if err != nil {
+			ProxyLog.Error().Err(err).Msg("re-bootstrapping failed")
+		} else {
+			ProxyLog.Debug().Msgf("bootstrap ip set to: %s", uc.BootstrapIP)
+		}
+		uc.SetupTransport()
+		return err == nil, err
+	})
 }
 
 // SetupTransport initializes the network transport used to connect to upstream server.
@@ -208,8 +223,8 @@ func (uc *UpstreamConfig) setupDOHTransport() {
 	uc.transport.IdleConnTimeout = 5 * time.Second
 	uc.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dialer := &net.Dialer{
-			Timeout:   5 * time.Second,
-			KeepAlive: 5 * time.Second,
+			Timeout:   2 * time.Second,
+			KeepAlive: 2 * time.Second,
 		}
 		Log(ctx, ProxyLog.Debug(), "debug dial context %s - %s - %s", addr, network, bootstrapDNS)
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
@@ -219,12 +234,7 @@ func (uc *UpstreamConfig) setupDOHTransport() {
 			}
 		}
 		Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
-		conn, err := dialer.DialContext(ctx, network, addr)
-		if err != nil {
-			Log(ctx, ProxyLog.Debug().Err(err), "could not dial to upstream")
-			return nil, ErrUpstreamFailed
-		}
-		return conn, nil
+		return dialer.DialContext(ctx, network, addr)
 	}
 
 	uc.pingUpstream()
