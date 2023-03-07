@@ -205,15 +205,19 @@ func (uc *UpstreamConfig) SetupBootstrapIP() error {
 	if len(r.Answer) == 0 {
 		return errors.New("no answer from bootstrap DNS server")
 	}
-	for _, a := range r.Answer {
-		switch ar := a.(type) {
+
+	bootstrapIP := func(record dns.RR) string {
+		switch ar := record.(type) {
 		case *dns.A:
-			uc.BootstrapIP = ar.A.String()
-			//lint:ignore S1023 false alarm?
-			break
+			return ar.A.String()
 		case *dns.AAAA:
-			uc.BootstrapIP = ar.AAAA.String()
-			//lint:ignore S1023 false alarm?
+			return ar.AAAA.String()
+		}
+		return ""
+	}
+	for _, a := range r.Answer {
+		if ip := bootstrapIP(a); ip != "" {
+			uc.BootstrapIP = ip
 			break
 		}
 	}
