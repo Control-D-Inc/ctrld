@@ -182,7 +182,7 @@ func (uc *UpstreamConfig) SetupTransport() {
 
 // SetupBootstrapIP manually find all available IPs of the upstream.
 func (uc *UpstreamConfig) SetupBootstrapIP() error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uc.Timeout)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uc.Timeout)*time.Millisecond)
 	defer cancel()
 
 	uc.mu.Lock()
