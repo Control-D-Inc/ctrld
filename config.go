@@ -182,6 +182,9 @@ func (uc *UpstreamConfig) SetupTransport() {
 
 // SetupBootstrapIP manually find all available IPs of the upstream.
 func (uc *UpstreamConfig) SetupBootstrapIP() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uc.Timeout)*time.Second)
+	defer cancel()
+
 	uc.mu.Lock()
 	defer uc.mu.Unlock()
 
@@ -193,7 +196,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP() error {
 	}
 	m.SetQuestion(uc.Domain+".", dnsType)
 	m.RecursionDesired = true
-	r, _, err := c.Exchange(m, net.JoinHostPort(bootstrapDNS, "53"))
+	r, _, err := c.ExchangeContext(ctx, m, net.JoinHostPort(bootstrapDNS, "53"))
 	if err != nil {
 		ProxyLog.Error().Err(err).Msgf("could not resolve domain %s for upstream", uc.Domain)
 		return err
