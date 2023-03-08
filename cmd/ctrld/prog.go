@@ -64,10 +64,12 @@ func (p *prog) run() {
 	for n := range p.cfg.Upstream {
 		uc := p.cfg.Upstream[n]
 		uc.Init()
-		if err := uc.SetupBootstrapIP(); err != nil {
-			mainLog.Fatal().Err(err).Msgf("failed to setup bootstrap IP for upstream.%s", n)
+		if uc.BootstrapIP == "" {
+			uc.SetupBootstrapIP()
+			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
+		} else {
+			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap IP for upstream.%s", n)
 		}
-		mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
 		uc.SetupTransport()
 	}
 

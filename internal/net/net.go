@@ -40,6 +40,24 @@ func init() {
 	stackOnce.Store(new(sync.Once))
 }
 
+func supportIPv4() bool {
+	_, err := Dialer.Dial("tcp4", net.JoinHostPort(controldIPv4Test, "80"))
+	return err == nil
+}
+
+func supportIPv6() bool {
+	_, err := Dialer.Dial("tcp6", net.JoinHostPort(controldIPv6Test, "80"))
+	return err == nil
+}
+
+func supportListenIPv6Local() bool {
+	if ln, err := net.Listen("tcp6", "[::1]:0"); err == nil {
+		ln.Close()
+		return true
+	}
+	return false
+}
+
 func probeStack() {
 	b := backoff.NewBackoff("probeStack", func(format string, args ...any) {}, time.Minute)
 	for {
@@ -50,20 +68,9 @@ func probeStack() {
 			b.BackOff(context.Background(), err)
 		}
 	}
-	if _, err := Dialer.Dial("tcp4", net.JoinHostPort(controldIPv4Test, "80")); err == nil {
-		ipv4Enabled = true
-	}
-	if _, err := Dialer.Dial("tcp6", net.JoinHostPort(controldIPv6Test, "80")); err == nil {
-		ipv6Enabled = true
-	}
-	if ln, err := net.Listen("tcp6", "[::1]:53"); err == nil {
-		ln.Close()
-		canListenIPv6Local = true
-	}
-}
-
-func Reset() {
-	stackOnce.Store(new(sync.Once))
+	ipv4Enabled = supportIPv4()
+	ipv6Enabled = supportIPv6()
+	canListenIPv6Local = supportListenIPv6Local()
 }
 
 func Up() bool {
@@ -84,6 +91,11 @@ func SupportsIPv6() bool {
 func SupportsIPv6ListenLocal() bool {
 	stackOnce.Load().Do(probeStack)
 	return canListenIPv6Local
+}
+
+// IPv6Available is like SupportsIPv6, but always do the check without caching.
+func IPv6Available() bool {
+	return supportIPv6()
 }
 
 // IsIPv6 checks if the provided IP is v6.

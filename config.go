@@ -2,13 +2,12 @@ package ctrld
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -106,9 +105,9 @@ type UpstreamConfig struct {
 	transport         *http.Transport   `mapstructure:"-" toml:"-"`
 	http3RoundTripper http.RoundTripper `mapstructure:"-" toml:"-"`
 
-	g singleflight.Group
-	// guard BootstrapIP
-	mu sync.Mutex
+	g               singleflight.Group
+	bootstrapIPs    []string
+	nextBootstrapIP atomic.Uint32
 }
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
@@ -153,19 +152,85 @@ func (uc *UpstreamConfig) Init() {
 	}
 }
 
+// SetupBootstrapIP manually find all available IPs of the upstream.
+// The first usable IP will be used as bootstrap IP of the upstream.
+func (uc *UpstreamConfig) SetupBootstrapIP() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uc.Timeout)*time.Millisecond)
+	defer cancel()
+
+	c := new(dns.Client)
+	bootstrapIP := func(record dns.RR) string {
+		switch ar := record.(type) {
+		case *dns.A:
+			return ar.A.String()
+		case *dns.AAAA:
+			return ar.AAAA.String()
+		}
+		return ""
+	}
+
+	// Find all A, AAAA records of the upstream.
+	for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
+		m := new(dns.Msg)
+		m.SetQuestion(uc.Domain+".", dnsType)
+		m.RecursionDesired = true
+		r, _, err := c.ExchangeContext(ctx, m, net.JoinHostPort(bootstrapDNS, "53"))
+		if err != nil {
+			ProxyLog.Error().Err(err).Str("type", dns.TypeToString[dnsType]).Msgf("could not resolve domain %s for upstream", uc.Domain)
+			continue
+		}
+		if r.Rcode != dns.RcodeSuccess {
+			ProxyLog.Error().Msgf("could not resolve domain return code: %d, upstream", r.Rcode)
+			continue
+		}
+		if len(r.Answer) == 0 {
+			ProxyLog.Error().Msg("no answer from bootstrap DNS server")
+			continue
+		}
+		for _, a := range r.Answer {
+			ip := bootstrapIP(a)
+			if ip == "" {
+				continue
+			}
+
+			// Storing the ip to uc.bootstrapIPs list, so it can be selected later
+			// when retrying failed request due to network stack changed.
+			uc.bootstrapIPs = append(uc.bootstrapIPs, ip)
+			if uc.BootstrapIP == "" {
+				// Remember what's the current IP in bootstrap IPs list,
+				// so we can select next one upon re-bootstrapping.
+				uc.nextBootstrapIP.Add(1)
+
+				// If this is an ipv6, and ipv6 is not available, don't use it as bootstrap ip.
+				if !ctrldnet.IPv6Available() && ctrldnet.IsIPv6(ip) {
+					continue
+				}
+				uc.BootstrapIP = ip
+			}
+		}
+	}
+	ProxyLog.Debug().Msgf("Bootstrap IPs: %v", uc.bootstrapIPs)
+}
+
 // ReBootstrap re-setup the bootstrap IP and the transport.
 func (uc *UpstreamConfig) ReBootstrap() {
 	_, _, _ = uc.g.Do("rebootstrap", func() (any, error) {
 		ProxyLog.Debug().Msg("re-bootstrapping upstream ip")
-		ctrldnet.Reset()
-		err := uc.SetupBootstrapIP()
-		if err != nil {
-			ProxyLog.Error().Err(err).Msg("re-bootstrapping failed")
-		} else {
-			ProxyLog.Debug().Msgf("bootstrap ip set to: %s", uc.BootstrapIP)
+		n := uint32(len(uc.bootstrapIPs))
+		// Only attempt n times, because if there's no usable ip,
+		// the bootstrap ip will be kept as-is.
+		for i := uint32(0); i < n; i++ {
+			// Select the next ip in bootstrap ip list.
+			next := uc.nextBootstrapIP.Add(1)
+			ip := uc.bootstrapIPs[(next-1)%n]
+			if !ctrldnet.IPv6Available() && ctrldnet.IsIPv6(ip) {
+				continue
+			}
+			uc.BootstrapIP = ip
+			break
 		}
 		uc.SetupTransport()
-		return err == nil, err
+		return true, nil
 	})
 }
 
@@ -178,53 +243,6 @@ func (uc *UpstreamConfig) SetupTransport() {
 	case ResolverTypeDOH3:
 		uc.setupDOH3Transport()
 	}
-}
-
-// SetupBootstrapIP manually find all available IPs of the upstream.
-func (uc *UpstreamConfig) SetupBootstrapIP() error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uc.Timeout)*time.Millisecond)
-	defer cancel()
-
-	uc.mu.Lock()
-	defer uc.mu.Unlock()
-
-	c := new(dns.Client)
-	m := new(dns.Msg)
-	dnsType := dns.TypeA
-	if ctrldnet.SupportsIPv6() {
-		dnsType = dns.TypeAAAA
-	}
-	m.SetQuestion(uc.Domain+".", dnsType)
-	m.RecursionDesired = true
-	r, _, err := c.ExchangeContext(ctx, m, net.JoinHostPort(bootstrapDNS, "53"))
-	if err != nil {
-		ProxyLog.Error().Err(err).Msgf("could not resolve domain %s for upstream", uc.Domain)
-		return err
-	}
-	if r.Rcode != dns.RcodeSuccess {
-		ProxyLog.Error().Msgf("could not resolve domain return code: %d, upstream", r.Rcode)
-		return errors.New(dns.RcodeToString[r.Rcode])
-	}
-	if len(r.Answer) == 0 {
-		return errors.New("no answer from bootstrap DNS server")
-	}
-
-	bootstrapIP := func(record dns.RR) string {
-		switch ar := record.(type) {
-		case *dns.A:
-			return ar.A.String()
-		case *dns.AAAA:
-			return ar.AAAA.String()
-		}
-		return ""
-	}
-	for _, a := range r.Answer {
-		if ip := bootstrapIP(a); ip != "" {
-			uc.BootstrapIP = ip
-			break
-		}
-	}
-	return nil
 }
 
 func (uc *UpstreamConfig) setupDOHTransport() {
