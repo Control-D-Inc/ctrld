@@ -169,6 +169,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 		return ""
 	}
 
+	Log(ctx, ProxyLog.Debug(), "Resolving %q using bootstrap DNS %q", uc.Domain, bootstrapDNS)
 	// Find all A, AAAA records of the upstream.
 	for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
 		m := new(dns.Msg)
@@ -202,7 +203,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 				uc.nextBootstrapIP.Add(1)
 
 				// If this is an ipv6, and ipv6 is not available, don't use it as bootstrap ip.
-				if !ctrldnet.IPv6Available() && ctrldnet.IsIPv6(ip) {
+				if !ctrldnet.IPv6Available(ctx) && ctrldnet.IsIPv6(ip) {
 					continue
 				}
 				uc.BootstrapIP = ip
@@ -217,21 +218,39 @@ func (uc *UpstreamConfig) ReBootstrap() {
 	_, _, _ = uc.g.Do("rebootstrap", func() (any, error) {
 		ProxyLog.Debug().Msg("re-bootstrapping upstream ip")
 		n := uint32(len(uc.bootstrapIPs))
+
+		timeoutMs := 1000
+		if uc.Timeout < timeoutMs {
+			timeoutMs = uc.Timeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+		defer cancel()
+
+		hasIPv6 := ctrldnet.IPv6Available(ctx)
 		// Only attempt n times, because if there's no usable ip,
 		// the bootstrap ip will be kept as-is.
 		for i := uint32(0); i < n; i++ {
 			// Select the next ip in bootstrap ip list.
 			next := uc.nextBootstrapIP.Add(1)
 			ip := uc.bootstrapIPs[(next-1)%n]
-			if !ctrldnet.IPv6Available() && ctrldnet.IsIPv6(ip) {
+			if !hasIPv6 && ctrldnet.IsIPv6(ip) {
 				continue
 			}
 			uc.BootstrapIP = ip
 			break
 		}
-		uc.SetupTransport()
+		uc.setupTransportWithoutPingUpstream()
 		return true, nil
 	})
+}
+
+func (uc *UpstreamConfig) setupTransportWithoutPingUpstream() {
+	switch uc.Type {
+	case ResolverTypeDOH:
+		uc.setupDOHTransportWithoutPingUpstream()
+	case ResolverTypeDOH3:
+		uc.setupDOH3TransportWithoutPingUpstream()
+	}
 }
 
 // SetupTransport initializes the network transport used to connect to upstream server.
@@ -246,14 +265,24 @@ func (uc *UpstreamConfig) SetupTransport() {
 }
 
 func (uc *UpstreamConfig) setupDOHTransport() {
+	uc.setupDOHTransportWithoutPingUpstream()
+	uc.pingUpstream()
+}
+
+func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
 	uc.transport = http.DefaultTransport.(*http.Transport).Clone()
 	uc.transport.IdleConnTimeout = 5 * time.Second
+
+	dialerTimeoutMs := 2000
+	if uc.Timeout < dialerTimeoutMs {
+		dialerTimeoutMs = uc.Timeout
+	}
+	dialerTimeout := time.Duration(dialerTimeoutMs) * time.Millisecond
 	uc.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dialer := &net.Dialer{
-			Timeout:   2 * time.Second,
-			KeepAlive: 2 * time.Second,
+			Timeout:   dialerTimeout,
+			KeepAlive: dialerTimeout,
 		}
-		Log(ctx, ProxyLog.Debug(), "debug dial context %s - %s - %s", addr, network, bootstrapDNS)
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
 		if uc.BootstrapIP != "" {
 			if _, port, _ := net.SplitHostPort(addr); port != "" {
@@ -263,8 +292,6 @@ func (uc *UpstreamConfig) setupDOHTransport() {
 		Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
 		return dialer.DialContext(ctx, network, addr)
 	}
-
-	uc.pingUpstream()
 }
 
 func (uc *UpstreamConfig) pingUpstream() {

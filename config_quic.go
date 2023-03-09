@@ -12,6 +12,11 @@ import (
 )
 
 func (uc *UpstreamConfig) setupDOH3Transport() {
+	uc.setupDOH3TransportWithoutPingUpstream()
+	uc.pingUpstream()
+}
+
+func (uc *UpstreamConfig) setupDOH3TransportWithoutPingUpstream() {
 	rt := &http3.RoundTripper{}
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 		host := addr
@@ -36,5 +41,4 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 	}
 
 	uc.http3RoundTripper = rt
-	uc.pingUpstream()
 }

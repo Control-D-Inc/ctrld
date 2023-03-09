@@ -45,8 +45,8 @@ func supportIPv4() bool {
 	return err == nil
 }
 
-func supportIPv6() bool {
-	_, err := Dialer.Dial("tcp6", net.JoinHostPort(controldIPv6Test, "80"))
+func supportIPv6(ctx context.Context) bool {
+	_, err := Dialer.DialContext(ctx, "tcp6", net.JoinHostPort(controldIPv6Test, "80"))
 	return err == nil
 }
 
@@ -69,7 +69,7 @@ func probeStack() {
 		}
 	}
 	ipv4Enabled = supportIPv4()
-	ipv6Enabled = supportIPv6()
+	ipv6Enabled = supportIPv6(context.Background())
 	canListenIPv6Local = supportListenIPv6Local()
 }
 
@@ -94,8 +94,8 @@ func SupportsIPv6ListenLocal() bool {
 }
 
 // IPv6Available is like SupportsIPv6, but always do the check without caching.
-func IPv6Available() bool {
-	return supportIPv6()
+func IPv6Available(ctx context.Context) bool {
+	return supportIPv6(ctx)
 }
 
 // IsIPv6 checks if the provided IP is v6.
