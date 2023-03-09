@@ -189,6 +189,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		answer, err := resolve1(n, upstreamConfig, msg)
 		if err != nil {
+			ctrld.Log(ctx, mainLog.Debug().Err(err), "could not resolve query on first attempt, retrying...")
 			// If any error occurred, re-bootstrap transport/ip, retry the request.
 			upstreamConfig.ReBootstrap()
 			answer, err = resolve1(n, upstreamConfig, msg)
