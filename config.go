@@ -155,9 +155,6 @@ func (uc *UpstreamConfig) Init() {
 // SetupBootstrapIP manually find all available IPs of the upstream.
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) SetupBootstrapIP() {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uc.Timeout)*time.Millisecond)
-	defer cancel()
-
 	c := new(dns.Client)
 	bootstrapIP := func(record dns.RR) string {
 		switch ar := record.(type) {
@@ -169,24 +166,25 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 		return ""
 	}
 
-	Log(ctx, ProxyLog.Debug(), "Resolving %q using bootstrap DNS %q", uc.Domain, bootstrapDNS)
-	// Find all A, AAAA records of the upstream.
-	for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
+	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", uc.Domain, bootstrapDNS)
+	do := func(dnsType uint16) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uc.Timeout)*time.Millisecond)
+		defer cancel()
 		m := new(dns.Msg)
 		m.SetQuestion(uc.Domain+".", dnsType)
 		m.RecursionDesired = true
 		r, _, err := c.ExchangeContext(ctx, m, net.JoinHostPort(bootstrapDNS, "53"))
 		if err != nil {
 			ProxyLog.Error().Err(err).Str("type", dns.TypeToString[dnsType]).Msgf("could not resolve domain %s for upstream", uc.Domain)
-			continue
+			return
 		}
 		if r.Rcode != dns.RcodeSuccess {
 			ProxyLog.Error().Msgf("could not resolve domain return code: %d, upstream", r.Rcode)
-			continue
+			return
 		}
 		if len(r.Answer) == 0 {
 			ProxyLog.Error().Msg("no answer from bootstrap DNS server")
-			continue
+			return
 		}
 		for _, a := range r.Answer {
 			ip := bootstrapIP(a)
@@ -210,17 +208,26 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 			}
 		}
 	}
+	// Find all A, AAAA records of the upstream.
+	for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
+		do(dnsType)
+	}
 	ProxyLog.Debug().Msgf("Bootstrap IPs: %v", uc.bootstrapIPs)
 }
 
 // ReBootstrap re-setup the bootstrap IP and the transport.
 func (uc *UpstreamConfig) ReBootstrap() {
+	switch uc.Type {
+	case ResolverTypeDOH, ResolverTypeDOH3:
+	default:
+		return
+	}
 	_, _, _ = uc.g.Do("rebootstrap", func() (any, error) {
 		ProxyLog.Debug().Msg("re-bootstrapping upstream ip")
 		n := uint32(len(uc.bootstrapIPs))
 
 		timeoutMs := 1000
-		if uc.Timeout < timeoutMs {
+		if uc.Timeout > 0 && uc.Timeout < timeoutMs {
 			timeoutMs = uc.Timeout
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
@@ -274,7 +281,7 @@ func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
 	uc.transport.IdleConnTimeout = 5 * time.Second
 
 	dialerTimeoutMs := 2000
-	if uc.Timeout < dialerTimeoutMs {
+	if uc.Timeout > 0 && uc.Timeout < dialerTimeoutMs {
 		dialerTimeoutMs = uc.Timeout
 	}
 	dialerTimeout := time.Duration(dialerTimeoutMs) * time.Millisecond

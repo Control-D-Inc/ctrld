@@ -32,12 +32,13 @@ func (p *prog) serveUDP(listenerNum string) error {
 		failoverRcodes = listenerConfig.Policy.FailoverRcodeNumbers
 	}
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
-		domain := canonicalName(m.Question[0].Name)
+		q := m.Question[0]
+		domain := canonicalName(q.Name)
 		reqId := requestID()
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, w.RemoteAddr().String(), w.LocalAddr().String())
 		t := time.Now()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
-		ctrld.Log(ctx, mainLog.Debug(), "%s received query: %s", fmtSrcToDest, domain)
+		ctrld.Log(ctx, mainLog.Debug(), "%s received query: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
 		upstreams, matched := p.upstreamFor(ctx, listenerNum, listenerConfig, w.RemoteAddr(), domain)
 		var answer *dns.Msg
 		if !matched && listenerConfig.Restricted {
