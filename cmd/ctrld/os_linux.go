@@ -19,19 +19,16 @@ import (
 	"tailscale.com/util/dnsname"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
-
-var logf = func(format string, args ...any) {
-	mainLog.Debug().Msgf(format, args...)
-}
 
 // allocate loopback ip
 // sudo ip a add 127.0.0.2/24 dev lo
 func allocateIP(ip string) error {
 	cmd := exec.Command("ip", "a", "add", ip+"/24", "dev", "lo")
-	if err := cmd.Run(); err != nil {
-		mainLog.Error().Err(err).Msg("allocateIP failed")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		mainLog.Error().Err(err).Msgf("allocateIP failed: %s", string(out))
 		return err
 	}
 	return nil
@@ -79,16 +76,20 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	return nil
 }
 
-func resetDNS(iface *net.Interface) error {
-	if r, err := dns.NewOSConfigurator(logf, iface.Name); err == nil {
-		if err := r.Close(); err != nil {
-			mainLog.Error().Err(err).Msg("failed to rollback DNS setting")
-			return err
+func resetDNS(iface *net.Interface) (err error) {
+	defer func() {
+		if err == nil {
+			return
 		}
-		if r.Mode() == "direct" {
-			return nil
+		if r, oerr := dns.NewOSConfigurator(logf, iface.Name); oerr == nil {
+			_ = r.SetDNS(dns.OSConfig{})
+			if err := r.Close(); err != nil {
+				mainLog.Error().Err(err).Msg("failed to rollback DNS setting")
+				return
+			}
+			err = nil
 		}
-	}
+	}()
 
 	var ns []string
 	c, err := nclient4.New(iface.Name)
@@ -111,7 +112,7 @@ func resetDNS(iface *net.Interface) error {
 	}
 
 	// TODO(cuonglm): handle DHCPv6 properly.
-	if supportsIPv6() {
+	if ctrldnet.SupportsIPv6() {
 		c := client6.NewClient()
 		conversation, err := c.Exchange(iface.Name)
 		if err != nil {

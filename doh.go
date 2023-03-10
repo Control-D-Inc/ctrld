@@ -3,11 +3,11 @@ package ctrld
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
-	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/miekg/dns"
 )
 
@@ -25,7 +25,7 @@ type dohResolver struct {
 	endpoint          string
 	isDoH3            bool
 	transport         *http.Transport
-	http3RoundTripper *http3.RoundTripper
+	http3RoundTripper http.RoundTripper
 }
 
 func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
@@ -44,12 +44,17 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 
 	c := http.Client{Transport: r.transport}
 	if r.isDoH3 {
+		if r.http3RoundTripper == nil {
+			return nil, errors.New("DoH3 is not supported")
+		}
 		c.Transport = r.http3RoundTripper
 	}
 	resp, err := c.Do(req)
 	if err != nil {
 		if r.isDoH3 {
-			r.http3RoundTripper.Close()
+			if closer, ok := r.http3RoundTripper.(io.Closer); ok {
+				closer.Close()
+			}
 		}
 		return nil, fmt.Errorf("could not perform request: %w", err)
 	}

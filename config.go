@@ -2,20 +2,21 @@ package ctrld
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	"github.com/go-playground/validator/v10"
-	"github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	"golang.org/x/sync/singleflight"
+
+	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 // SetConfigName set the config name that ctrld will look for.
@@ -69,9 +70,9 @@ func InitConfig(v *viper.Viper, name string) {
 // Config represents ctrld supported configuration.
 type Config struct {
 	Service  ServiceConfig              `mapstructure:"service" toml:"service,omitempty"`
+	Listener map[string]*ListenerConfig `mapstructure:"listener" toml:"listener" validate:"min=1,dive"`
 	Network  map[string]*NetworkConfig  `mapstructure:"network" toml:"network" validate:"min=1,dive"`
 	Upstream map[string]*UpstreamConfig `mapstructure:"upstream" toml:"upstream" validate:"min=1,dive"`
-	Listener map[string]*ListenerConfig `mapstructure:"listener" toml:"listener" validate:"min=1,dive"`
 }
 
 // ServiceConfig specifies the general ctrld config.
@@ -95,14 +96,18 @@ type NetworkConfig struct {
 
 // UpstreamConfig specifies configuration for upstreams that ctrld will forward requests to.
 type UpstreamConfig struct {
-	Name              string              `mapstructure:"name" toml:"name,omitempty"`
-	Type              string              `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy"`
-	Endpoint          string              `mapstructure:"endpoint" toml:"endpoint,omitempty" validate:"required_unless=Type os"`
-	BootstrapIP       string              `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
-	Domain            string              `mapstructure:"-" toml:"-"`
-	Timeout           int                 `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
-	transport         *http.Transport     `mapstructure:"-" toml:"-"`
-	http3RoundTripper *http3.RoundTripper `mapstructure:"-" toml:"-"`
+	Name              string            `mapstructure:"name" toml:"name,omitempty"`
+	Type              string            `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy"`
+	Endpoint          string            `mapstructure:"endpoint" toml:"endpoint,omitempty" validate:"required_unless=Type os"`
+	BootstrapIP       string            `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
+	Domain            string            `mapstructure:"-" toml:"-"`
+	Timeout           int               `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
+	transport         *http.Transport   `mapstructure:"-" toml:"-"`
+	http3RoundTripper http.RoundTripper `mapstructure:"-" toml:"-"`
+
+	g               singleflight.Group
+	bootstrapIPs    []string
+	nextBootstrapIP atomic.Uint32
 }
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
@@ -147,6 +152,116 @@ func (uc *UpstreamConfig) Init() {
 	}
 }
 
+// SetupBootstrapIP manually find all available IPs of the upstream.
+// The first usable IP will be used as bootstrap IP of the upstream.
+func (uc *UpstreamConfig) SetupBootstrapIP() {
+	bootstrapIP := func(record dns.RR) string {
+		switch ar := record.(type) {
+		case *dns.A:
+			return ar.A.String()
+		case *dns.AAAA:
+			return ar.AAAA.String()
+		}
+		return ""
+	}
+
+	resolver := &osResolver{nameservers: nameservers()}
+	resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
+	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", uc.Domain, resolver.nameservers)
+	do := func(dnsType uint16) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uc.Timeout)*time.Millisecond)
+		defer cancel()
+		m := new(dns.Msg)
+		m.SetQuestion(uc.Domain+".", dnsType)
+		m.RecursionDesired = true
+
+		r, err := resolver.Resolve(ctx, m)
+		if err != nil {
+			ProxyLog.Error().Err(err).Str("type", dns.TypeToString[dnsType]).Msgf("could not resolve domain %s for upstream", uc.Domain)
+			return
+		}
+		if r.Rcode != dns.RcodeSuccess {
+			ProxyLog.Error().Msgf("could not resolve domain return code: %d, upstream", r.Rcode)
+			return
+		}
+		if len(r.Answer) == 0 {
+			ProxyLog.Error().Msg("no answer from bootstrap DNS server")
+			return
+		}
+		for _, a := range r.Answer {
+			ip := bootstrapIP(a)
+			if ip == "" {
+				continue
+			}
+
+			// Storing the ip to uc.bootstrapIPs list, so it can be selected later
+			// when retrying failed request due to network stack changed.
+			uc.bootstrapIPs = append(uc.bootstrapIPs, ip)
+			if uc.BootstrapIP == "" {
+				// Remember what's the current IP in bootstrap IPs list,
+				// so we can select next one upon re-bootstrapping.
+				uc.nextBootstrapIP.Add(1)
+
+				// If this is an ipv6, and ipv6 is not available, don't use it as bootstrap ip.
+				if !ctrldnet.IPv6Available(ctx) && ctrldnet.IsIPv6(ip) {
+					continue
+				}
+				uc.BootstrapIP = ip
+			}
+		}
+	}
+	// Find all A, AAAA records of the upstream.
+	for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
+		do(dnsType)
+	}
+	ProxyLog.Debug().Msgf("Bootstrap IPs: %v", uc.bootstrapIPs)
+}
+
+// ReBootstrap re-setup the bootstrap IP and the transport.
+func (uc *UpstreamConfig) ReBootstrap() {
+	switch uc.Type {
+	case ResolverTypeDOH, ResolverTypeDOH3:
+	default:
+		return
+	}
+	_, _, _ = uc.g.Do("rebootstrap", func() (any, error) {
+		ProxyLog.Debug().Msg("re-bootstrapping upstream ip")
+		n := uint32(len(uc.bootstrapIPs))
+
+		timeoutMs := 1000
+		if uc.Timeout > 0 && uc.Timeout < timeoutMs {
+			timeoutMs = uc.Timeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+		defer cancel()
+
+		hasIPv6 := ctrldnet.IPv6Available(ctx)
+		// Only attempt n times, because if there's no usable ip,
+		// the bootstrap ip will be kept as-is.
+		for i := uint32(0); i < n; i++ {
+			// Select the next ip in bootstrap ip list.
+			next := uc.nextBootstrapIP.Add(1)
+			ip := uc.bootstrapIPs[(next-1)%n]
+			if !hasIPv6 && ctrldnet.IsIPv6(ip) {
+				continue
+			}
+			uc.BootstrapIP = ip
+			break
+		}
+		uc.setupTransportWithoutPingUpstream()
+		return true, nil
+	})
+}
+
+func (uc *UpstreamConfig) setupTransportWithoutPingUpstream() {
+	switch uc.Type {
+	case ResolverTypeDOH:
+		uc.setupDOHTransportWithoutPingUpstream()
+	case ResolverTypeDOH3:
+		uc.setupDOH3TransportWithoutPingUpstream()
+	}
+}
+
 // SetupTransport initializes the network transport used to connect to upstream server.
 // For now, only DoH upstream is supported.
 func (uc *UpstreamConfig) SetupTransport() {
@@ -159,51 +274,33 @@ func (uc *UpstreamConfig) SetupTransport() {
 }
 
 func (uc *UpstreamConfig) setupDOHTransport() {
-	uc.transport = http.DefaultTransport.(*http.Transport).Clone()
-	uc.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		dialer := &net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 10 * time.Second,
-		}
-		Log(ctx, ProxyLog.Debug(), "debug dial context %s - %s - %s", addr, network, bootstrapDNS)
-		// if we have a bootstrap ip set, use it to avoid DNS lookup
-		if uc.BootstrapIP != "" {
-			if _, port, _ := net.SplitHostPort(addr); port != "" {
-				addr = net.JoinHostPort(uc.BootstrapIP, port)
-			}
-			Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
-		}
-		return dialer.DialContext(ctx, network, addr)
-	}
-
+	uc.setupDOHTransportWithoutPingUpstream()
 	uc.pingUpstream()
 }
 
-func (uc *UpstreamConfig) setupDOH3Transport() {
-	uc.http3RoundTripper = &http3.RoundTripper{}
-	uc.http3RoundTripper.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
-		host := addr
-		ProxyLog.Debug().Msgf("debug dial context D0H3 %s - %s", addr, bootstrapDNS)
+func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
+	uc.transport = http.DefaultTransport.(*http.Transport).Clone()
+	uc.transport.IdleConnTimeout = 5 * time.Second
+
+	dialerTimeoutMs := 2000
+	if uc.Timeout > 0 && uc.Timeout < dialerTimeoutMs {
+		dialerTimeoutMs = uc.Timeout
+	}
+	dialerTimeout := time.Duration(dialerTimeoutMs) * time.Millisecond
+	uc.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialer := &net.Dialer{
+			Timeout:   dialerTimeout,
+			KeepAlive: dialerTimeout,
+		}
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
 		if uc.BootstrapIP != "" {
 			if _, port, _ := net.SplitHostPort(addr); port != "" {
 				addr = net.JoinHostPort(uc.BootstrapIP, port)
 			}
-			ProxyLog.Debug().Msgf("sending doh3 request to: %s", addr)
 		}
-		remoteAddr, err := net.ResolveUDPAddr("udp", addr)
-		if err != nil {
-			return nil, err
-		}
-
-		udpConn, err := net.ListenUDP("udp", nil)
-		if err != nil {
-			return nil, err
-		}
-		return quic.DialEarlyContext(ctx, udpConn, remoteAddr, host, tlsCfg, cfg)
+		Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
+		return dialer.DialContext(ctx, network, addr)
 	}
-
-	uc.pingUpstream()
 }
 
 func (uc *UpstreamConfig) pingUpstream() {

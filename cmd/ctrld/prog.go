@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -9,11 +11,14 @@ import (
 	"syscall"
 
 	"github.com/kardianos/service"
-	"github.com/miekg/dns"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 )
+
+var logf = func(format string, args ...any) {
+	mainLog.Debug().Msgf(format, args...)
+}
 
 var errWindowsAddrInUse = syscall.Errno(0x2740)
 
@@ -30,7 +35,6 @@ type prog struct {
 func (p *prog) Start(s service.Service) error {
 	p.cfg = &cfg
 	go p.run()
-	mainLog.Info().Msg("Service started")
 	return nil
 }
 
@@ -51,7 +55,7 @@ func (p *prog) run() {
 		for _, cidr := range nc.Cidrs {
 			_, ipNet, err := net.ParseCIDR(cidr)
 			if err != nil {
-				proxyLog.Error().Err(err).Str("network", nc.Name).Str("cidr", cidr).Msg("invalid cidr")
+				mainLog.Error().Err(err).Str("network", nc.Name).Str("cidr", cidr).Msg("invalid cidr")
 				continue
 			}
 			nc.IPNets = append(nc.IPNets, ipNet)
@@ -61,43 +65,10 @@ func (p *prog) run() {
 		uc := p.cfg.Upstream[n]
 		uc.Init()
 		if uc.BootstrapIP == "" {
-			// resolve it manually and set the bootstrap ip
-			c := new(dns.Client)
-			for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
-				if !supportsIPv6() && dnsType == dns.TypeAAAA {
-					continue
-				}
-				m := new(dns.Msg)
-				m.SetQuestion(uc.Domain+".", dnsType)
-				m.RecursionDesired = true
-				r, _, err := c.Exchange(m, net.JoinHostPort(bootstrapDNS, "53"))
-				if err != nil {
-					proxyLog.Error().Err(err).Msgf("could not resolve domain %s for upstream.%s", uc.Domain, n)
-					continue
-				}
-				if r.Rcode != dns.RcodeSuccess {
-					proxyLog.Error().Msgf("could not resolve domain return code: %d, upstream.%s", r.Rcode, n)
-					continue
-				}
-				if len(r.Answer) == 0 {
-					continue
-				}
-				for _, a := range r.Answer {
-					switch ar := a.(type) {
-					case *dns.A:
-						uc.BootstrapIP = ar.A.String()
-					case *dns.AAAA:
-						uc.BootstrapIP = ar.AAAA.String()
-					default:
-						continue
-					}
-					mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
-					// Stop if we reached here, because we got the bootstrap IP from r.Answer.
-					break
-				}
-				// If we reached here, uc.BootstrapIP was set, nothing to do anymore.
-				break
-			}
+			uc.SetupBootstrapIP()
+			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
+		} else {
+			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap IP for upstream.%s", n)
 		}
 		uc.SetupTransport()
 	}
@@ -109,60 +80,42 @@ func (p *prog) run() {
 			listenerConfig := p.cfg.Listener[listenerNum]
 			upstreamConfig := p.cfg.Upstream[listenerNum]
 			if upstreamConfig == nil {
-				proxyLog.Error().Msgf("missing upstream config for: [listener.%s]", listenerNum)
+				mainLog.Error().Msgf("missing upstream config for: [listener.%s]", listenerNum)
 				return
 			}
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 			mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, addr)
 			err := p.serveUDP(listenerNum)
-			if err != nil && !defaultConfigWritten {
-				proxyLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
+			if err != nil && !defaultConfigWritten && cdUID == "" {
+				mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 				return
 			}
 			if err == nil {
 				return
 			}
 
-			if opErr, ok := err.(*net.OpError); ok {
+			if opErr, ok := err.(*net.OpError); ok && listenerNum == "0" {
 				if sErr, ok := opErr.Err.(*os.SyscallError); ok && errors.Is(opErr.Err, syscall.EADDRINUSE) || errors.Is(sErr.Err, errWindowsAddrInUse) {
-					proxyLog.Warn().Msgf("Address %s already in used, pick a random one", addr)
-					pc, err := net.ListenPacket("udp", net.JoinHostPort(listenerConfig.IP, "0"))
-					if err != nil {
-						proxyLog.Fatal().Err(err).Msg("failed to listen packet")
-						return
-					}
-					_, portStr, _ := net.SplitHostPort(pc.LocalAddr().String())
-					port, err := strconv.Atoi(portStr)
-					if err != nil {
-						proxyLog.Fatal().Err(err).Msg("malformed port")
-						return
-					}
-					listenerConfig.Port = port
-					v.Set("listener", map[string]*ctrld.ListenerConfig{
-						"0": {
-							IP:   "127.0.0.1",
-							Port: port,
-						},
-					})
+					mainLog.Warn().Msgf("Address %s already in used, pick a random one", addr)
+					ip := randomLocalIP()
+					listenerConfig.IP = ip
+					port := listenerConfig.Port
+					cfg.Upstream = map[string]*ctrld.UpstreamConfig{"0": cfg.Upstream["0"]}
 					if err := writeConfigFile(); err != nil {
-						proxyLog.Fatal().Err(err).Msg("failed to write config file")
+						mainLog.Fatal().Err(err).Msg("failed to write config file")
 					} else {
 						mainLog.Info().Msg("writing config file to: " + defaultConfigFile)
 					}
-					mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, pc.LocalAddr())
-					// There can be a race between closing the listener and start our own UDP server, but it's
-					// rare, and we only do this once, so let conservative here.
-					if err := pc.Close(); err != nil {
-						proxyLog.Fatal().Err(err).Msg("failed to close packet conn")
-						return
-					}
+					p.cfg.Service.AllocateIP = true
+					p.preRun()
+					mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, net.JoinHostPort(ip, strconv.Itoa(port)))
 					if err := p.serveUDP(listenerNum); err != nil {
-						proxyLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
+						mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 						return
 					}
 				}
 			}
-			proxyLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
+			mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 		}(listenerNum)
 	}
 
@@ -248,4 +201,9 @@ func (p *prog) resetDNS() {
 		return
 	}
 	logger.Debug().Msg("Restoring DNS successfully")
+}
+
+func randomLocalIP() string {
+	n := rand.Intn(254-2) + 2
+	return fmt.Sprintf("127.0.0.%d", n)
 }

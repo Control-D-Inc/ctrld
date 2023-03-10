@@ -8,26 +8,14 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 const (
 	resolverDataURL   = "https://api.controld.com/utility"
 	InvalidConfigCode = 40401
 )
-
-const bootstrapDNS = "76.76.2.0:53"
-
-var Dialer = &net.Dialer{
-	Resolver: &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{
-				Timeout: 10 * time.Second,
-			}
-			return d.DialContext(ctx, "udp", bootstrapDNS)
-		},
-	},
-}
 
 // ResolverConfig represents Control D resolver data.
 type ResolverConfig struct {
@@ -70,7 +58,13 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 	req.Header.Add("Content-Type", "application/json")
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return Dialer.DialContext(ctx, network, addr)
+		// We experiment hanging in TLS handshake when connecting to ControlD API
+		// with ipv6. So prefer ipv4 if available.
+		proto := "tcp6"
+		if ctrldnet.SupportsIPv4() {
+			proto = "tcp4"
+		}
+		return ctrldnet.Dialer.DialContext(ctx, proto, addr)
 	}
 	client := http.Client{
 		Timeout:   10 * time.Second,

@@ -11,6 +11,7 @@ builds:
       - -s -w
     goos:
       - linux
+      - freebsd
       - windows
     goarch:
       - 386
@@ -26,7 +27,11 @@ builds:
       - softfloat
     main: ./cmd/ctrld
     hooks:
-      post: /bin/sh ./scripts/upx.sh
+      post: /bin/sh ./scripts/upx.sh {{ .Path }}
+    ignore:
+      - goos: freebsd
+        goarch: arm
+        goarm: 5
 archives:
   - format_overrides:
       - goos: windows

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"sync/atomic"
 
 	"github.com/miekg/dns"
 )
@@ -51,22 +50,42 @@ func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 
 type osResolver struct {
 	nameservers []string
-	next        atomic.Uint32
+}
+
+type osResolverResult struct {
+	answer *dns.Msg
+	err    error
 }
 
 // Resolve performs DNS resolvers using OS default nameservers. Nameserver is chosen from
 // available nameservers with a roundrobin algorithm.
 func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	numServers := uint32(len(o.nameservers))
+	numServers := len(o.nameservers)
 	if numServers == 0 {
 		return nil, errors.New("no nameservers available")
 	}
-	next := o.next.Add(1)
-	server := o.nameservers[(next-1)%numServers]
-	dnsClient := &dns.Client{Net: "udp"}
-	answer, _, err := dnsClient.ExchangeContext(ctx, msg, server)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	return answer, err
+	dnsClient := &dns.Client{Net: "udp"}
+	ch := make(chan *osResolverResult, numServers)
+	for _, server := range o.nameservers {
+		go func(server string) {
+			answer, _, err := dnsClient.ExchangeContext(ctx, msg, server)
+			ch <- &osResolverResult{answer: answer, err: err}
+		}(server)
+	}
+
+	errs := make([]error, 0, numServers)
+	for res := range ch {
+		if res.err == nil {
+			cancel()
+			return res.answer, res.err
+		}
+		errs = append(errs, res.err)
+	}
+
+	return nil, joinErrors(errs...)
 }
 
 func newDialer(dnsAddress string) *net.Dialer {

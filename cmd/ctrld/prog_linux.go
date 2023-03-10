@@ -18,3 +18,7 @@ func setDependencies(svc *service.Config) {
 		"After=NetworkManager-wait-online.service",
 	}
 }
+
+func setWorkingDirectory(svc *service.Config, dir string) {
+	svc.WorkingDirectory = dir
+}

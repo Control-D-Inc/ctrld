@@ -144,6 +144,10 @@ type directManager struct {
 	lastWarnContents []byte // last resolv.conf contents that we warned about
 }
 
+func newDirectManager(logf logger.Logf) *directManager {
+	return newDirectManagerOnFS(logf, directFS{})
+}
+
 func newDirectManagerOnFS(logf logger.Logf, fs wholeFileFS) *directManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &directManager{

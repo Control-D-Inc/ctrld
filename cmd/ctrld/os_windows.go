@@ -1,6 +1,3 @@
-//go:build windows
-// +build windows
-
 package main
 
 import (
@@ -10,17 +7,9 @@ import (
 	"strconv"
 
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
+
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
-
-// TODO(cuonglm): implement.
-func allocateIP(ip string) error {
-	return nil
-}
-
-// TODO(cuonglm): implement.
-func deAllocateIP(ip string) error {
-	return nil
-}
 
 func setDNS(iface *net.Interface, nameservers []string) error {
 	if len(nameservers) == 0 {
@@ -39,7 +28,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 
 // TODO(cuonglm): should we use system API?
 func resetDNS(iface *net.Interface) error {
-	if supportsIPv6ListenLocal() {
+	if ctrldnet.SupportsIPv6ListenLocal() {
 		if output, err := netsh("interface", "ipv6", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp"); err != nil {
 			mainLog.Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))
 		}
@@ -54,7 +43,7 @@ func resetDNS(iface *net.Interface) error {
 
 func setPrimaryDNS(iface *net.Interface, dns string) error {
 	ipVer := "ipv4"
-	if isIPv6(dns) {
+	if ctrldnet.IsIPv6(dns) {
 		ipVer = "ipv6"
 	}
 	idx := strconv.Itoa(iface.Index)
@@ -63,7 +52,7 @@ func setPrimaryDNS(iface *net.Interface, dns string) error {
 		mainLog.Error().Err(err).Msgf("failed to set primary DNS: %s", string(output))
 		return err
 	}
-	if ipVer == "ipv4" {
+	if ipVer == "ipv4" && ctrldnet.SupportsIPv6ListenLocal() {
 		// Disable IPv6 DNS, so the query will be fallback to IPv4.
 		_, _ = netsh("interface", "ipv6", "set", "dnsserver", idx, "static", "::1", "primary")
 	}
@@ -73,7 +62,7 @@ func setPrimaryDNS(iface *net.Interface, dns string) error {
 
 func addSecondaryDNS(iface *net.Interface, dns string) error {
 	ipVer := "ipv4"
-	if isIPv6(dns) {
+	if ctrldnet.IsIPv6(dns) {
 		ipVer = "ipv6"
 	}
 	output, err := netsh("interface", ipVer, "add", "dns", strconv.Itoa(iface.Index), dns, "index=2")

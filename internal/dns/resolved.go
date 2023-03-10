@@ -37,13 +37,44 @@ const reconfigTimeout = time.Second
 // Clients connect to the bus and walk that same hierarchy to invoke
 // RPCs, get/set properties, or listen for signals.
 const (
-	dbusResolvedObject                    = "org.freedesktop.resolve1"
-	dbusResolvedPath      dbus.ObjectPath = "/org/freedesktop/resolve1"
-	dbusResolvedInterface                 = "org.freedesktop.resolve1.Manager"
-	dbusPath              dbus.ObjectPath = "/org/freedesktop/DBus"
-	dbusInterface                         = "org.freedesktop.DBus"
-	dbusOwnerSignal                       = "NameOwnerChanged" // broadcast when a well-known name's owning process changes.
+	dbusResolvedObject                        = "org.freedesktop.resolve1"
+	dbusNetworkdObject                        = "org.freedesktop.network1"
+	dbusResolvedPath          dbus.ObjectPath = "/org/freedesktop/resolve1"
+	dbusNetworkdPath          dbus.ObjectPath = "/org/freedesktop/network1"
+	dbusResolvedInterface                     = "org.freedesktop.resolve1.Manager"
+	dbusNetworkdInterface                     = "org.freedesktop.network1.Manager"
+	dbusPath                  dbus.ObjectPath = "/org/freedesktop/DBus"
+	dbusInterface                             = "org.freedesktop.DBus"
+	dbusOwnerSignal                           = "NameOwnerChanged" // broadcast when a well-known name's owning process changes.
+	dbusResolvedErrorLinkBusy                 = "org.freedesktop.resolve1.LinkBusy"
 )
+
+var (
+	dbusSetLinkDNS          string
+	dbusSetLinkDomains      string
+	dbusSetLinkDefaultRoute string
+	dbusSetLinkLLMNR        string
+	dbusSetLinkMulticastDNS string
+	dbusSetLinkDNSSEC       string
+	dbusSetLinkDNSOverTLS   string
+	dbusFlushCaches         string
+	dbusRevertLink          string
+)
+
+func setDbusMethods(dbusInterface string) {
+	dbusSetLinkDNS = dbusInterface + ".SetLinkDNS"
+	dbusSetLinkDomains = dbusInterface + ".SetLinkDomains"
+	dbusSetLinkDefaultRoute = dbusInterface + ".SetLinkDefaultRoute"
+	dbusSetLinkLLMNR = dbusInterface + ".SetLinkLLMNR"
+	dbusSetLinkMulticastDNS = dbusInterface + ".SetLinkMulticastDNS"
+	dbusSetLinkDNSSEC = dbusInterface + ".SetLinkDNSSEC"
+	dbusSetLinkDNSOverTLS = dbusInterface + ".SetLinkDNSOverTLS"
+	dbusFlushCaches = dbusInterface + ".FlushCaches"
+	dbusRevertLink = dbusInterface + ".RevertLink"
+	if dbusInterface == dbusNetworkdInterface {
+		dbusRevertLink = dbusInterface + ".RevertLinkDNS"
+	}
+}
 
 type resolvedLinkNameserver struct {
 	Family  int32
@@ -70,7 +101,10 @@ type resolvedManager struct {
 	ifidx int
 
 	configCR chan changeRequest // tracks OSConfigs changes and error responses
+	revertCh chan struct{}
 }
+
+var _ OSConfigurator = (*resolvedManager)(nil)
 
 func newResolvedManager(logf logger.Logf, interfaceName string) (*resolvedManager, error) {
 	iface, err := net.InterfaceByName(interfaceName)
@@ -89,6 +123,7 @@ func newResolvedManager(logf logger.Logf, interfaceName string) (*resolvedManage
 		ifidx: iface.Index,
 
 		configCR: make(chan changeRequest),
+		revertCh: make(chan struct{}),
 	}
 
 	go mgr.run(ctx)
@@ -117,6 +152,16 @@ func (m *resolvedManager) SetDNS(config OSConfig) error {
 	}
 }
 
+func newResolvedObject(conn *dbus.Conn) dbus.BusObject {
+	setDbusMethods(dbusResolvedInterface)
+	return conn.Object(dbusResolvedObject, dbusResolvedPath)
+}
+
+func newNetworkdObject(conn *dbus.Conn) dbus.BusObject {
+	setDbusMethods(dbusNetworkdInterface)
+	return conn.Object(dbusNetworkdObject, dbusNetworkdPath)
+}
+
 func (m *resolvedManager) run(ctx context.Context) {
 	var (
 		conn     *dbus.Conn
@@ -128,6 +173,22 @@ func (m *resolvedManager) run(ctx context.Context) {
 	defer func() {
 		if conn != nil {
 			_ = conn.Close()
+		}
+	}()
+
+	newManager := newResolvedObject
+	func() {
+		conn, err := dbus.SystemBus()
+		if err != nil {
+			m.logf("dbus connection error: %v", err)
+			return
+		}
+		rManager = newManager(conn)
+		if call := rManager.CallWithContext(ctx, dbusRevertLink, 0, m.ifidx); call.Err != nil {
+			if dbusErr, ok := call.Err.(dbus.Error); ok && dbusErr.Name == dbusResolvedErrorLinkBusy {
+				m.logf("[v1] Using %s as manager", dbusNetworkdObject)
+				newManager = newNetworkdObject
+			}
 		}
 	}()
 
@@ -151,13 +212,16 @@ func (m *resolvedManager) run(ctx context.Context) {
 			return err
 		}
 
-		rManager = conn.Object(dbusResolvedObject, dbus.ObjectPath(dbusResolvedPath))
+		rManager = newManager(conn)
 
 		// Only receive the DBus signals we need to resync our config on
 		// resolved restart. Failure to set filters isn't a fatal error,
 		// we'll just receive all broadcast signals and have to ignore
 		// them on our end.
 		if err = conn.AddMatchSignal(dbus.WithMatchObjectPath(dbusPath), dbus.WithMatchInterface(dbusInterface), dbus.WithMatchMember(dbusOwnerSignal), dbus.WithMatchArg(0, dbusResolvedObject)); err != nil {
+			m.logf("[v1] Setting DBus signal filter failed: %v", err)
+		}
+		if err = conn.AddMatchSignal(dbus.WithMatchObjectPath(dbusPath), dbus.WithMatchInterface(dbusInterface), dbus.WithMatchMember(dbusOwnerSignal), dbus.WithMatchArg(0, dbusNetworkdObject)); err != nil {
 			m.logf("[v1] Setting DBus signal filter failed: %v", err)
 		}
 		conn.Signal(signals)
@@ -179,13 +243,15 @@ func (m *resolvedManager) run(ctx context.Context) {
 			if rManager == nil {
 				return
 			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			// RevertLink resets all per-interface settings on systemd-resolved to defaults.
 			// When ctx goes away systemd-resolved auto reverts.
 			// Keeping for potential use in future refactor.
-			if call := rManager.CallWithContext(ctx, dbusResolvedInterface+".RevertLink", 0, m.ifidx); call.Err != nil {
+			if call := rManager.CallWithContext(ctx, dbusRevertLink, 0, m.ifidx); call.Err != nil {
 				m.logf("[v1] RevertLink: %v", call.Err)
-				return
 			}
+			cancel()
+			close(m.revertCh)
 			return
 		case configCR := <-m.configCR:
 			// Track and update sync with latest config change.
@@ -223,7 +289,7 @@ func (m *resolvedManager) run(ctx context.Context) {
 			if len(signal.Body) != 3 {
 				m.logf("[unexpected] DBus NameOwnerChanged len(Body) = %d, want 3")
 			}
-			if name, ok := signal.Body[0].(string); !ok || name != dbusResolvedObject {
+			if name, ok := signal.Body[0].(string); !ok || (name != dbusResolvedObject && name != dbusNetworkdObject) {
 				continue
 			}
 			newOwner, ok := signal.Body[2].(string)
@@ -271,7 +337,7 @@ func (m *resolvedManager) setConfigOverDBus(ctx context.Context, rManager dbus.B
 		}
 	}
 	err := rManager.CallWithContext(
-		ctx, dbusResolvedInterface+".SetLinkDNS", 0,
+		ctx, dbusSetLinkDNS, 0,
 		m.ifidx, linkNameservers,
 	).Store()
 	if err != nil {
@@ -311,14 +377,14 @@ func (m *resolvedManager) setConfigOverDBus(ctx context.Context, rManager dbus.B
 	}
 
 	err = rManager.CallWithContext(
-		ctx, dbusResolvedInterface+".SetLinkDomains", 0,
+		ctx, dbusSetLinkDomains, 0,
 		m.ifidx, linkDomains,
 	).Store()
 	if err != nil && err.Error() == "Argument list too long" { // TODO: better error match
 		// Issue 3188: older systemd-resolved had argument length limits.
 		// Trim out the *.arpa. entries and try again.
 		err = rManager.CallWithContext(
-			ctx, dbusResolvedInterface+".SetLinkDomains", 0,
+			ctx, dbusSetLinkDomains, 0,
 			m.ifidx, linkDomainsWithoutReverseDNS(linkDomains),
 		).Store()
 	}
@@ -326,7 +392,7 @@ func (m *resolvedManager) setConfigOverDBus(ctx context.Context, rManager dbus.B
 		return fmt.Errorf("setLinkDomains: %w", err)
 	}
 
-	if call := rManager.CallWithContext(ctx, dbusResolvedInterface+".SetLinkDefaultRoute", 0, m.ifidx, len(config.MatchDomains) == 0); call.Err != nil {
+	if call := rManager.CallWithContext(ctx, dbusSetLinkDefaultRoute, 0, m.ifidx, len(config.MatchDomains) == 0); call.Err != nil {
 		if dbusErr, ok := call.Err.(dbus.Error); ok && dbusErr.Name == dbus.ErrMsgUnknownMethod.Name {
 			// on some older systems like Kubuntu 18.04.6 with systemd 237 method SetLinkDefaultRoute is absent,
 			// but otherwise it's working good
@@ -341,33 +407,37 @@ func (m *resolvedManager) setConfigOverDBus(ctx context.Context, rManager dbus.B
 	// or something).
 
 	// Disable LLMNR, we don't do multicast.
-	if call := rManager.CallWithContext(ctx, dbusResolvedInterface+".SetLinkLLMNR", 0, m.ifidx, "no"); call.Err != nil {
+	if call := rManager.CallWithContext(ctx, dbusSetLinkLLMNR, 0, m.ifidx, "no"); call.Err != nil {
 		m.logf("[v1] failed to disable LLMNR: %v", call.Err)
 	}
 
 	// Disable mdns.
-	if call := rManager.CallWithContext(ctx, dbusResolvedInterface+".SetLinkMulticastDNS", 0, m.ifidx, "no"); call.Err != nil {
+	if call := rManager.CallWithContext(ctx, dbusSetLinkMulticastDNS, 0, m.ifidx, "no"); call.Err != nil {
 		m.logf("[v1] failed to disable mdns: %v", call.Err)
 	}
 
 	// We don't support dnssec consistently right now, force it off to
 	// avoid partial failures when we split DNS internally.
-	if call := rManager.CallWithContext(ctx, dbusResolvedInterface+".SetLinkDNSSEC", 0, m.ifidx, "no"); call.Err != nil {
+	if call := rManager.CallWithContext(ctx, dbusSetLinkDNSSEC, 0, m.ifidx, "no"); call.Err != nil {
 		m.logf("[v1] failed to disable DNSSEC: %v", call.Err)
 	}
 
-	if call := rManager.CallWithContext(ctx, dbusResolvedInterface+".SetLinkDNSOverTLS", 0, m.ifidx, "no"); call.Err != nil {
+	if call := rManager.CallWithContext(ctx, dbusSetLinkDNSOverTLS, 0, m.ifidx, "no"); call.Err != nil {
 		m.logf("[v1] failed to disable DoT: %v", call.Err)
 	}
 
-	if call := rManager.CallWithContext(ctx, dbusResolvedInterface+".FlushCaches", 0); call.Err != nil {
-		m.logf("failed to flush resolved DNS cache: %v", call.Err)
+	if rManager.Path() == dbusResolvedPath {
+		if call := rManager.CallWithContext(ctx, dbusFlushCaches, 0); call.Err != nil {
+			m.logf("failed to flush resolved DNS cache: %v", call.Err)
+		}
 	}
+
 	return nil
 }
 
 func (m *resolvedManager) Close() error {
 	m.cancel() // stops the 'run' method goroutine
+	<-m.revertCh
 	return nil
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/dbus"
@@ -24,10 +23,6 @@ systemd-resolved=false
 var networkManagerCtrldConfFile = filepath.Join(nmConfDir, nmCtrldConfFilename)
 
 func setupNetworkManager() error {
-	if runtime.GOOS != "linux" {
-		mainLog.Debug().Msg("skipping NetworkManager setup, not on Linux")
-		return nil
-	}
 	if content, _ := os.ReadFile(nmCtrldConfContent); string(content) == nmCtrldConfContent {
 		mainLog.Debug().Msg("NetworkManager already setup, nothing to do")
 		return nil
@@ -48,10 +43,6 @@ func setupNetworkManager() error {
 }
 
 func restoreNetworkManager() error {
-	if runtime.GOOS != "linux" {
-		mainLog.Debug().Msg("skipping NetworkManager restoring, not on Linux")
-		return nil
-	}
 	err := os.Remove(networkManagerCtrldConfFile)
 	if os.IsNotExist(err) {
 		mainLog.Debug().Msg("NetworkManager is not available")
