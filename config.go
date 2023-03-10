@@ -155,7 +155,6 @@ func (uc *UpstreamConfig) Init() {
 // SetupBootstrapIP manually find all available IPs of the upstream.
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) SetupBootstrapIP() {
-	c := new(dns.Client)
 	bootstrapIP := func(record dns.RR) string {
 		switch ar := record.(type) {
 		case *dns.A:
@@ -166,14 +165,17 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 		return ""
 	}
 
-	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", uc.Domain, bootstrapDNS)
+	resolver := &osResolver{nameservers: nameservers()}
+	resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
+	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", uc.Domain, resolver.nameservers)
 	do := func(dnsType uint16) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uc.Timeout)*time.Millisecond)
 		defer cancel()
 		m := new(dns.Msg)
 		m.SetQuestion(uc.Domain+".", dnsType)
 		m.RecursionDesired = true
-		r, _, err := c.ExchangeContext(ctx, m, net.JoinHostPort(bootstrapDNS, "53"))
+
+		r, err := resolver.Resolve(ctx, m)
 		if err != nil {
 			ProxyLog.Error().Err(err).Str("type", dns.TypeToString[dnsType]).Msgf("could not resolve domain %s for upstream", uc.Domain)
 			return
