@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
@@ -20,7 +21,7 @@ import (
 
 const staleTTL = 60 * time.Second
 
-func (p *prog) serveUDP(listenerNum string) error {
+func (p *prog) serveDNS(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
 	// make sure ip is allocated
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
@@ -55,27 +56,38 @@ func (p *prog) serveUDP(listenerNum string) error {
 		}
 	})
 
-	// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
-	// listen on ::1, then spawn a listener for receiving DNS requests.
-	if runtime.GOOS == "windows" && ctrldnet.SupportsIPv6ListenLocal() {
-		go func() {
+	g := new(errgroup.Group)
+	for _, proto := range []string{"udp", "tcp"} {
+		proto := proto
+		// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
+		// listen on ::1, then spawn a listener for receiving DNS requests.
+		if runtime.GOOS == "windows" && ctrldnet.SupportsIPv6ListenLocal() {
+			g.Go(func() error {
+				s := &dns.Server{
+					Addr:    net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)),
+					Net:     proto,
+					Handler: handler,
+				}
+				if err := s.ListenAndServe(); err != nil {
+					mainLog.Error().Err(err).Msg("could not serving on ::1")
+				}
+				return nil
+			})
+		}
+		g.Go(func() error {
 			s := &dns.Server{
-				Addr:    net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)),
-				Net:     "udp",
+				Addr:    net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port)),
+				Net:     proto,
 				Handler: handler,
 			}
 			if err := s.ListenAndServe(); err != nil {
-				mainLog.Error().Err(err).Msg("could not serving on ::1")
+				mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
+				return err
 			}
-		}()
+			return nil
+		})
 	}
-
-	s := &dns.Server{
-		Addr:    net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port)),
-		Net:     "udp",
-		Handler: handler,
-	}
-	return s.ListenAndServe()
+	return g.Wait()
 }
 
 func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, domain string) ([]string, bool) {

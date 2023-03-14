@@ -85,7 +85,7 @@ func (p *prog) run() {
 			}
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 			mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, addr)
-			err := p.serveUDP(listenerNum)
+			err := p.serveDNS(listenerNum)
 			if err != nil && !defaultConfigWritten && cdUID == "" {
 				mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 				return
@@ -109,7 +109,7 @@ func (p *prog) run() {
 					p.cfg.Service.AllocateIP = true
 					p.preRun()
 					mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, net.JoinHostPort(ip, strconv.Itoa(port)))
-					if err := p.serveUDP(listenerNum); err != nil {
+					if err := p.serveDNS(listenerNum); err != nil {
 						mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 						return
 					}
