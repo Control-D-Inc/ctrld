@@ -342,6 +342,7 @@ func ttlFromMsg(msg *dns.Msg) uint32 {
 }
 
 var osUpstreamConfig = &ctrld.UpstreamConfig{
-	Name: "OS resolver",
-	Type: ctrld.ResolverTypeOS,
+	Name:    "OS resolver",
+	Type:    ctrld.ResolverTypeOS,
+	Timeout: 2000,
 }

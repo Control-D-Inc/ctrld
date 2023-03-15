@@ -165,11 +165,15 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 		return ""
 	}
 
-	resolver := &osResolver{nameservers: nameservers()}
+	resolver := &osResolver{nameservers: availableNameservers()}
 	resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
 	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", uc.Domain, resolver.nameservers)
+	timeoutMs := 2000
+	if uc.Timeout > 0 && uc.Timeout < timeoutMs {
+		timeoutMs = uc.Timeout
+	}
 	do := func(dnsType uint16) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uc.Timeout)*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 		defer cancel()
 		m := new(dns.Msg)
 		m.SetQuestion(uc.Domain+".", dnsType)
@@ -348,4 +352,19 @@ func defaultPortFor(typ string) string {
 		return "53"
 	}
 	return "53"
+}
+
+func availableNameservers() []string {
+	nss := nameservers()
+	n := 0
+	for _, ns := range nss {
+		ip, _, _ := net.SplitHostPort(ns)
+		// skipping invalid entry or ipv6 nameserver if ipv6 not available.
+		if ip == "" || (ctrldnet.IsIPv6(ip) && !ctrldnet.SupportsIPv6()) {
+			continue
+		}
+		nss[n] = ns
+		n++
+	}
+	return nss[:n]
 }
