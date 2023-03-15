@@ -26,18 +26,22 @@ var (
 	cacheSize         int
 	cfg               ctrld.Config
 	verbose           int
+	cdUID             string
+	iface             string
+	ifaceStartStop    string
+	onRouter          bool
 
-	rootLogger = zerolog.New(io.Discard)
-	mainLog    = rootLogger
-
-	cdUID          string
-	iface          string
-	ifaceStartStop string
+	mainLog = zerolog.New(io.Discard)
 )
 
 func main() {
 	ctrld.InitConfig(v, "ctrld")
 	initCLI()
+	initRouterCLI()
+	if err := rootCmd.Execute(); err != nil {
+		stderrMsg(err.Error())
+		os.Exit(1)
+	}
 }
 
 func normalizeLogFilePath(logFilePath string) string {

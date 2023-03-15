@@ -18,9 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
-
 	"github.com/cuonglm/osinfo"
+	"github.com/fsnotify/fsnotify"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
@@ -33,6 +32,7 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 const selfCheckFQDN = "verify.controld.com"
@@ -200,6 +200,18 @@ func initCLI() {
 				os.Exit(0)
 			}
 
+			if runtime.GOOS == "linux" && onRouter {
+				mainLog.Debug().Msg("Router setup")
+				err := router.Configure(&cfg)
+				if errors.Is(err, router.ErrNotSupported) {
+					unsupportedPlatformHelp(cmd)
+					os.Exit(1)
+				}
+				if err != nil {
+					mainLog.Fatal().Err(err).Msg("failed to configure router")
+				}
+			}
+
 			close(waitCh)
 			<-stopCh
 		},
@@ -218,6 +230,8 @@ func initCLI() {
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	_ = runCmd.Flags().MarkHidden("iface")
+	runCmd.Flags().BoolVarP(&onRouter, "router", "", false, `Configure onRouter for running ctrld`)
+	_ = runCmd.Flags().MarkHidden("router")
 
 	rootCmd.AddCommand(runCmd)
 
@@ -315,6 +329,8 @@ func initCLI() {
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
+	startCmd.Flags().BoolVarP(&onRouter, "router", "", false, `Configure onRouter for running ctrld`)
+	_ = startCmd.Flags().MarkHidden("router")
 
 	stopCmd := &cobra.Command{
 		PreRun: checkHasElevatedPrivilege,
@@ -510,11 +526,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	stopCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
 	stopCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
 	rootCmd.AddCommand(stopCmdAlias)
-
-	if err := rootCmd.Execute(); err != nil {
-		stderrMsg(err.Error())
-		os.Exit(1)
-	}
 }
 
 func writeConfigFile() error {
@@ -801,4 +812,8 @@ func selfCheckStatus(status service.Status) service.Status {
 	}
 	mainLog.Debug().Msgf("self-check against %q failed", selfCheckFQDN)
 	return service.StatusUnknown
+}
+
+func unsupportedPlatformHelp(cmd *cobra.Command) {
+	cmd.PrintErrln("Unsupported or incorrectly chosen onRouter platform. Please open an issue and provide all relevant information: https://github.com/Control-D-Inc/ctrld/issues/new")
 }
