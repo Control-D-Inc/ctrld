@@ -207,7 +207,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 				uc.nextBootstrapIP.Add(1)
 
 				// If this is an ipv6, and ipv6 is not available, don't use it as bootstrap ip.
-				if !ctrldnet.IPv6Available(ctx) && ctrldnet.IsIPv6(ip) {
+				if !ctrldnet.SupportsIPv6() && ctrldnet.IsIPv6(ip) {
 					continue
 				}
 				uc.BootstrapIP = ip
