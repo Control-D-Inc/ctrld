@@ -18,6 +18,10 @@ case "$binary" in
     echo >&2 "upx does not work with windows arm/arm64 binary yet"
     exit 0
     ;;
+  *_darwin_*)
+    echo >&2 "upx claims to work with darwin binary, but testing show that it is broken"
+    exit 0
+    ;;
 esac
 
 upx -- "$binary"
