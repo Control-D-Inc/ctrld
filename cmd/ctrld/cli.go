@@ -112,6 +112,7 @@ func initCLI() {
 			if err := v.Unmarshal(&cfg); err != nil {
 				log.Fatalf("failed to unmarshal config: %v", err)
 			}
+			fmt.Println("starting ctrld...")
 			// Wait for network up.
 			if !ctrldnet.Up() {
 				log.Fatal("network is not up yet")
