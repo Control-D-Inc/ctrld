@@ -70,7 +70,7 @@ func initCLI() {
 	rootCmd := &cobra.Command{
 		Use:     "ctrld",
 		Short:   strings.TrimLeft(rootShortDesc, "\n"),
-		Version: "1.1.1",
+		Version: "1.1.2",
 	}
 	rootCmd.PersistentFlags().CountVarP(
 		&verbose,
