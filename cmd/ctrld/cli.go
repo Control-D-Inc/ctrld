@@ -70,7 +70,7 @@ func initCLI() {
 	rootCmd := &cobra.Command{
 		Use:     "ctrld",
 		Short:   strings.TrimLeft(rootShortDesc, "\n"),
-		Version: "1.1.1",
+		Version: "1.1.2",
 	}
 	rootCmd.PersistentFlags().CountVarP(
 		&verbose,
@@ -112,6 +112,7 @@ func initCLI() {
 			if err := v.Unmarshal(&cfg); err != nil {
 				log.Fatalf("failed to unmarshal config: %v", err)
 			}
+			fmt.Println("starting ctrld...")
 			// Wait for network up.
 			if !ctrldnet.Up() {
 				log.Fatal("network is not up yet")

@@ -1,0 +1,40 @@
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - id: ctrld
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    tags:
+      - qf
+    main: ./cmd/ctrld
+    hooks:
+      post: /bin/sh ./scripts/upx.sh {{ .Path }}
+archives:
+  - format_overrides:
+      - goos: windows
+        format: zip
+    strip_parent_binary_folder: true
+    wrap_in_directory: true
+    files:
+      - README.md
+checksum:
+  name_template: 'checksums.txt'
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'

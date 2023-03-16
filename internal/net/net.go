@@ -28,6 +28,13 @@ var Dialer = &net.Dialer{
 	},
 }
 
+const probeStackTimeout = 2 * time.Second
+
+var probeStackDialer = &net.Dialer{
+	Resolver: Dialer.Resolver,
+	Timeout:  probeStackTimeout,
+}
+
 var (
 	stackOnce          atomic.Pointer[sync.Once]
 	ipv4Enabled        bool
@@ -41,12 +48,12 @@ func init() {
 }
 
 func supportIPv4() bool {
-	_, err := Dialer.Dial("tcp4", net.JoinHostPort(controldIPv4Test, "80"))
+	_, err := probeStackDialer.Dial("tcp4", net.JoinHostPort(controldIPv4Test, "80"))
 	return err == nil
 }
 
 func supportIPv6(ctx context.Context) bool {
-	_, err := Dialer.DialContext(ctx, "tcp6", net.JoinHostPort(controldIPv6Test, "80"))
+	_, err := probeStackDialer.DialContext(ctx, "tcp6", net.JoinHostPort(controldIPv6Test, "80"))
 	return err == nil
 }
 
@@ -61,7 +68,7 @@ func supportListenIPv6Local() bool {
 func probeStack() {
 	b := backoff.NewBackoff("probeStack", func(format string, args ...any) {}, time.Minute)
 	for {
-		if _, err := Dialer.Dial("udp", bootstrapDNS); err == nil {
+		if _, err := probeStackDialer.Dial("udp", bootstrapDNS); err == nil {
 			hasNetworkUp = true
 			break
 		} else {
