@@ -351,7 +351,10 @@ func initCLI() {
 		PreRun: checkHasElevatedPrivilege,
 		Use:    "uninstall",
 		Short:  "Stop and uninstall the ctrld service",
-		Args:   cobra.NoArgs,
+		Long: `Stop and uninstall the ctrld service.
+
+NOTE: Uninstalling will set DNS to values provided by DHCP.`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			prog := &prog{}
 			s, err := service.New(prog, svcConfig)
@@ -365,13 +368,16 @@ func initCLI() {
 			}
 			initLogging()
 			if doTasks(tasks) {
+				if iface == "" {
+					iface = "auto"
+				}
 				prog.resetDNS()
 				mainLog.Info().Msg("Service uninstalled")
 				return
 			}
 		},
 	}
-	uninstallCmd.Flags().StringVarP(&iface, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
+	uninstallCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, use "auto" for the default gateway interface`)
 
 	listIfacesCmd := &cobra.Command{
 		Use:   "list",
