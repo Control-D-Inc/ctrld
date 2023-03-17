@@ -185,7 +185,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 			return
 		}
 		if r.Rcode != dns.RcodeSuccess {
-			ProxyLog.Error().Msgf("could not resolve domain return code: %d, upstream", r.Rcode)
+			ProxyLog.Error().Msgf("could not resolve domain %q, return code: %s", uc.Domain, dns.RcodeToString[r.Rcode])
 			return
 		}
 		if len(r.Answer) == 0 {
