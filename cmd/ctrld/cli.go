@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -508,13 +509,6 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	if err == nil {
 		fmt.Println("loading config file from:", v.ConfigFileUsed())
 		defaultConfigFile = v.ConfigFileUsed()
-		v.OnConfigChange(func(in fsnotify.Event) {
-			if err := v.UnmarshalKey("listener", &cfg.Listener); err != nil {
-				log.Printf("failed to unmarshal listener config: %v", err)
-				return
-			}
-		})
-		v.WatchConfig()
 		return true
 	}
 
@@ -727,8 +721,26 @@ func selfCheckStatus(status service.Status) service.Status {
 	err := errors.New("query failed")
 	maxAttempts := 20
 	mainLog.Debug().Msg("Performing self-check")
+	var (
+		lcChanged map[string]*ctrld.ListenerConfig
+		mu        sync.Mutex
+	)
+	v.OnConfigChange(func(in fsnotify.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err := v.UnmarshalKey("listener", &lcChanged); err != nil {
+			log.Printf("failed to unmarshal listener config: %v", err)
+			return
+		}
+	})
+	v.WatchConfig()
 	for i := 0; i < maxAttempts; i++ {
 		lc := cfg.Listener["0"]
+		mu.Lock()
+		if lcChanged != nil {
+			lc = lcChanged["0"]
+		}
+		mu.Unlock()
 		m := new(dns.Msg)
 		m.SetQuestion(selfCheckFQDN+".", dns.TypeA)
 		m.RecursionDesired = true

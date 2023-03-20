@@ -28,6 +28,8 @@ var svcConfig = &service.Config{
 }
 
 type prog struct {
+	mu sync.Mutex
+
 	cfg   *ctrld.Config
 	cache dnscache.Cacher
 }
@@ -106,7 +108,9 @@ func (p *prog) run() {
 					} else {
 						mainLog.Info().Msg("writing config file to: " + defaultConfigFile)
 					}
+					p.mu.Lock()
 					p.cfg.Service.AllocateIP = true
+					p.mu.Unlock()
 					p.preRun()
 					mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, net.JoinHostPort(ip, strconv.Itoa(port)))
 					if err := p.serveDNS(listenerNum); err != nil {
@@ -132,6 +136,8 @@ func (p *prog) Stop(s service.Service) error {
 }
 
 func (p *prog) allocateIP(ip string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if !p.cfg.Service.AllocateIP {
 		return nil
 	}
@@ -139,6 +145,8 @@ func (p *prog) allocateIP(ip string) error {
 }
 
 func (p *prog) deAllocateIP() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if !p.cfg.Service.AllocateIP {
 		return nil
 	}
