@@ -17,9 +17,16 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 const staleTTL = 60 * time.Second
+
+var osUpstreamConfig = &ctrld.UpstreamConfig{
+	Name:    "OS resolver",
+	Type:    ctrld.ResolverTypeOS,
+	Timeout: 2000,
+}
 
 func (p *prog) serveDNS(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
@@ -61,7 +68,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		proto := proto
 		// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
 		// listen on ::1, then spawn a listener for receiving DNS requests.
-		if runtime.GOOS == "windows" && ctrldnet.SupportsIPv6ListenLocal() {
+		if needLocalIPv6Listener() {
 			g.Go(func() error {
 				s := &dns.Server{
 					Addr:    net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)),
@@ -80,7 +87,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		}
 		g.Go(func() error {
 			s := &dns.Server{
-				Addr:    net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port)),
+				Addr:    dnsListenAddress(listenerConfig),
 				Net:     proto,
 				Handler: handler,
 			}
@@ -353,8 +360,13 @@ func ttlFromMsg(msg *dns.Msg) uint32 {
 	return 0
 }
 
-var osUpstreamConfig = &ctrld.UpstreamConfig{
-	Name:    "OS resolver",
-	Type:    ctrld.ResolverTypeOS,
-	Timeout: 2000,
+func needLocalIPv6Listener() bool {
+	return ctrldnet.SupportsIPv6ListenLocal() && runtime.GOOS == "windows"
+}
+
+func dnsListenAddress(lc *ctrld.ListenerConfig) string {
+	if addr := router.ListenAddress(); addr != "" {
+		return addr
+	}
+	return net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
 }

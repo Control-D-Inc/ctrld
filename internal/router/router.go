@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"sync/atomic"
 
+	"github.com/kardianos/service"
+
 	"github.com/Control-D-Inc/ctrld"
 )
 
@@ -21,7 +23,7 @@ const (
 // ErrNotSupported reports the current router is not supported error.
 var ErrNotSupported = errors.New("unsupported platform")
 
-var routerAtomic atomic.Pointer[router]
+var routerPlatform atomic.Pointer[router]
 
 type router struct {
 	name string
@@ -32,11 +34,13 @@ func SupportedPlatforms() []string {
 	return []string{DDWrt, Merlin, OpenWrt, Ubios}
 }
 
-// Configure change the given *ctrld.Config for running on the router.
+// Configure configures things for running ctrld on the router.
 func Configure(c *ctrld.Config) error {
 	name := Name()
 	switch name {
-	case DDWrt, Merlin, OpenWrt, Ubios:
+	case OpenWrt:
+		return setupOpenWrt()
+	case DDWrt, Merlin, Ubios:
 	default:
 		return ErrNotSupported
 	}
@@ -45,14 +49,57 @@ func Configure(c *ctrld.Config) error {
 	return nil
 }
 
+// ConfigureService performs necessary setup for running ctrld as a service on router.
+func ConfigureService(sc *service.Config) {
+	name := Name()
+	switch name {
+	case OpenWrt:
+		sc.Option["SysvScript"] = openWrtScript
+	case DDWrt, Merlin, Ubios:
+	}
+}
+
+// PostInstall performs task after installing ctrld on router.
+func PostInstall() error {
+	name := Name()
+	switch name {
+	case OpenWrt:
+		return postInstallOpenWrt()
+	case DDWrt, Merlin, Ubios:
+	}
+	return nil
+}
+
+// Cleanup cleans ctrld setup on the router.
+func Cleanup() error {
+	name := Name()
+	switch name {
+	case OpenWrt:
+		return cleanupOpenWrt()
+	case DDWrt, Merlin, Ubios:
+	}
+	return nil
+}
+
+// ListenAddress returns the listener address of ctrld on router.
+func ListenAddress() string {
+	name := Name()
+	switch name {
+	case OpenWrt:
+		return ":53"
+	case DDWrt, Merlin, Ubios:
+	}
+	return ""
+}
+
 // Name returns name of the router platform.
 func Name() string {
-	if r := routerAtomic.Load(); r != nil {
+	if r := routerPlatform.Load(); r != nil {
 		return r.name
 	}
 	r := &router{}
 	r.name = distroName()
-	routerAtomic.Store(r)
+	routerPlatform.Store(r)
 	return r.name
 }
 

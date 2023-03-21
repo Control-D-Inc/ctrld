@@ -25,6 +25,7 @@ var errWindowsAddrInUse = syscall.Errno(0x2740)
 var svcConfig = &service.Config{
 	Name:        "ctrld",
 	DisplayName: "Control-D Helper Service",
+	Option:      service.KeyValue{},
 }
 
 type prog struct {

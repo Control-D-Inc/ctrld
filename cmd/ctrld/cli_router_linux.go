@@ -14,7 +14,7 @@ import (
 func initRouterCLI() {
 	validArgs := append(router.SupportedPlatforms(), "auto")
 	var b strings.Builder
-	b.WriteString("Auto-setup Control D on a onRouter.\n\nSupported platforms:\n\n")
+	b.WriteString("Auto-setup Control D on a router.\n\nSupported platforms:\n\n")
 	for _, arg := range validArgs {
 		b.WriteString("    ₒ ")
 		b.WriteString(arg)
@@ -52,8 +52,7 @@ func initRouterCLI() {
 			}
 
 			cmdArgs := []string{"start"}
-			cmdArgs = append(cmdArgs, os.Args[3:]...)
-			cmdArgs = append(cmdArgs, "--router=true")
+			cmdArgs = append(cmdArgs, osArgs(platform)...)
 			command := exec.Command(exe, cmdArgs...)
 			command.Stdout = os.Stdout
 			command.Stderr = os.Stderr
@@ -63,8 +62,32 @@ func initRouterCLI() {
 			}
 		},
 	}
+	// Keep these flags in sync with startCmd, except for "--router".
+	routerCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
+	routerCmd.Flags().StringVarP(&configBase64, "base64_config", "", "", "Base64 encoded config")
+	routerCmd.Flags().StringVarP(&listenAddress, "listen", "", "", "Listener address and port, in format: address:port")
+	routerCmd.Flags().StringVarP(&primaryUpstream, "primary_upstream", "", "", "Primary upstream endpoint")
+	routerCmd.Flags().StringVarP(&secondaryUpstream, "secondary_upstream", "", "", "Secondary upstream endpoint")
+	routerCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "List of domain to apply in a split DNS policy")
+	routerCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
+	routerCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
+	routerCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
+	routerCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
+
 	tmpl := routerCmd.UsageTemplate()
 	tmpl = strings.Replace(tmpl, "{{.UseLine}}", "{{.UseLine}} [platform]", 1)
 	routerCmd.SetUsageTemplate(tmpl)
 	rootCmd.AddCommand(routerCmd)
+}
+
+func osArgs(platform string) []string {
+	args := os.Args[2:]
+	n := 0
+	for _, x := range args {
+		if x != platform && x != "auto" {
+			args[n] = x
+			n++
+		}
+	}
+	return args[:n]
 }

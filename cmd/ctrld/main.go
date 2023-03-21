@@ -29,7 +29,6 @@ var (
 	cdUID             string
 	iface             string
 	ifaceStartStop    string
-	onRouter          bool
 
 	mainLog = zerolog.New(io.Discard)
 )

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 
+	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
 )
 
@@ -41,5 +44,26 @@ func checkHasElevatedPrivilege(cmd *cobra.Command, args []string) {
 	if !ok {
 		fmt.Println("Please relaunch process with admin/root privilege.")
 		os.Exit(1)
+	}
+}
+
+func serviceStatus(s service.Service) (service.Status, error) {
+	status, err := s.Status()
+	if err != nil && service.Platform() == "unix-systemv" {
+		return unixSystemVServiceStatus()
+	}
+	return status, err
+}
+
+func unixSystemVServiceStatus() (service.Status, error) {
+	out, err := exec.Command("/etc/init.d/ctrld", "status").CombinedOutput()
+	if err != nil {
+		return service.StatusUnknown, nil
+	}
+	switch string(bytes.TrimSpace(out)) {
+	case "running":
+		return service.StatusRunning, nil
+	default:
+		return service.StatusStopped, nil
 	}
 }

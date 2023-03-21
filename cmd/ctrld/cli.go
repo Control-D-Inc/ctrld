@@ -200,7 +200,7 @@ func initCLI() {
 				os.Exit(0)
 			}
 
-			if runtime.GOOS == "linux" && onRouter {
+			if router.Name() != "" {
 				mainLog.Debug().Msg("Router setup")
 				err := router.Configure(&cfg)
 				if errors.Is(err, router.ErrNotSupported) {
@@ -230,8 +230,6 @@ func initCLI() {
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	_ = runCmd.Flags().MarkHidden("iface")
-	runCmd.Flags().BoolVarP(&onRouter, "router", "", false, `Configure onRouter for running ctrld`)
-	_ = runCmd.Flags().MarkHidden("router")
 
 	rootCmd.AddCommand(runCmd)
 
@@ -249,6 +247,7 @@ func initCLI() {
 			}
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
+			router.ConfigureService(sc)
 
 			// No config path, generating config in HOME directory.
 			noConfigStart := isNoConfigStart(cmd)
@@ -276,12 +275,12 @@ func initCLI() {
 			cfg.Service.LogPath = logPath
 
 			processCDFlags()
-			// On Windows, the service will be run as SYSTEM, so if ctrld start as Admin,
-			// the user home dir is different, so pass specific arguments that relevant here.
-			if runtime.GOOS == "windows" {
-				if configPath == "" {
-					sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
-				}
+
+			// Explicitly passing config, so on system where home directory could not be obtained,
+			// or sub-process env is different with the parent, we still behave correctly and use
+			// the expected config file.
+			if configPath == "" {
+				sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
 			}
 
 			prog := &prog{}
@@ -297,7 +296,11 @@ func initCLI() {
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
-				status, err := s.Status()
+				if err := router.PostInstall(); err != nil {
+					mainLog.Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
+					return
+				}
+				status, err := serviceStatus(s)
 				if err != nil {
 					mainLog.Warn().Err(err).Msg("could not get service status")
 					return
@@ -329,8 +332,6 @@ func initCLI() {
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
-	startCmd.Flags().BoolVarP(&onRouter, "router", "", false, `Configure onRouter for running ctrld`)
-	_ = startCmd.Flags().MarkHidden("router")
 
 	stopCmd := &cobra.Command{
 		PreRun: checkHasElevatedPrivilege,
@@ -381,7 +382,7 @@ func initCLI() {
 				stderrMsg(err.Error())
 				return
 			}
-			status, err := s.Status()
+			status, err := serviceStatus(s)
 			if err != nil {
 				stderrMsg(err.Error())
 				os.Exit(1)
@@ -429,6 +430,9 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					iface = "auto"
 				}
 				prog.resetDNS()
+				if err := router.Cleanup(); err != nil {
+					mainLog.Warn().Err(err).Msg("could not cleanup router")
+				}
 				mainLog.Info().Msg("Service uninstalled")
 				return
 			}
@@ -815,5 +819,5 @@ func selfCheckStatus(status service.Status) service.Status {
 }
 
 func unsupportedPlatformHelp(cmd *cobra.Command) {
-	cmd.PrintErrln("Unsupported or incorrectly chosen onRouter platform. Please open an issue and provide all relevant information: https://github.com/Control-D-Inc/ctrld/issues/new")
+	cmd.PrintErrln("Unsupported or incorrectly chosen router platform. Please open an issue and provide all relevant information: https://github.com/Control-D-Inc/ctrld/issues/new")
 }
