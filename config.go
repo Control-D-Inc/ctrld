@@ -380,3 +380,27 @@ func availableNameservers() []string {
 	}
 	return nss[:n]
 }
+
+// ResolverTypeFromEndpoint tries guessing the resolver type with a given endpoint
+// using following rules:
+//
+// - If endpoint is an IP address ->  ResolverTypeLegacy
+// - If endpoint starts with "https://" -> ResolverTypeDOH
+// - If endpoint starts with "quic://" -> ResolverTypeDOQ
+// - For anything else -> ResolverTypeDOT
+func ResolverTypeFromEndpoint(endpoint string) string {
+	switch {
+	case strings.HasPrefix(endpoint, "https://"):
+		return ResolverTypeDOH
+	case strings.HasPrefix(endpoint, "quic://"):
+		return ResolverTypeDOQ
+	}
+	host := endpoint
+	if strings.Contains(endpoint, ":") {
+		host, _, _ = net.SplitHostPort(host)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ResolverTypeLegacy
+	}
+	return ResolverTypeDOT
+}

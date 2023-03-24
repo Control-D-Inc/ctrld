@@ -593,18 +593,24 @@ func processNoConfigFlags(noConfigStart bool) {
 	}
 	processListenFlag()
 
+	endpointAndTyp := func(endpoint string) (string, string) {
+		typ := ctrld.ResolverTypeFromEndpoint(endpoint)
+		return strings.TrimPrefix(endpoint, "quic://"), typ
+	}
+	pEndpoint, pType := endpointAndTyp(primaryUpstream)
 	upstream := map[string]*ctrld.UpstreamConfig{
 		"0": {
-			Name:     primaryUpstream,
-			Endpoint: primaryUpstream,
-			Type:     ctrld.ResolverTypeDOH,
+			Name:     pEndpoint,
+			Endpoint: pEndpoint,
+			Type:     pType,
 		},
 	}
 	if secondaryUpstream != "" {
+		sEndpoint, sType := endpointAndTyp(secondaryUpstream)
 		upstream["1"] = &ctrld.UpstreamConfig{
-			Name:     secondaryUpstream,
-			Endpoint: secondaryUpstream,
-			Type:     ctrld.ResolverTypeLegacy,
+			Name:     sEndpoint,
+			Endpoint: sEndpoint,
+			Type:     sType,
 		}
 		rules := make([]ctrld.Rule, 0, len(domains))
 		for _, domain := range domains {
