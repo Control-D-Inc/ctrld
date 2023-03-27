@@ -90,6 +90,35 @@ func initCLI() {
 			if daemon && runtime.GOOS == "windows" {
 				log.Fatal("Cannot run in daemon mode. Please install a Windows service.")
 			}
+
+			waitCh := make(chan struct{})
+			stopCh := make(chan struct{})
+			if !daemon {
+				// We need to call s.Run() as soon as possible to response to the OS manager, so it
+				// can see ctrld is running and don't mark ctrld as failed service.
+				go func() {
+					p := &prog{
+						waitCh: waitCh,
+						stopCh: stopCh,
+					}
+					s, err := service.New(p, svcConfig)
+					if err != nil {
+						mainLog.Fatal().Err(err).Msg("failed create new service")
+					}
+					serviceLogger, err := s.Logger(nil)
+					if err != nil {
+						mainLog.Error().Err(err).Msg("failed to get service logger")
+						return
+					}
+
+					if err := s.Run(); err != nil {
+						if sErr := serviceLogger.Error(err); sErr != nil {
+							mainLog.Error().Err(sErr).Msg("failed to write service log")
+						}
+						mainLog.Error().Err(err).Msg("failed to start service")
+					}
+				}()
+			}
 			noConfigStart := isNoConfigStart(cmd)
 			writeDefaultConfig := !noConfigStart && configBase64 == ""
 			configs := []struct {
@@ -150,22 +179,8 @@ func initCLI() {
 				os.Exit(0)
 			}
 
-			s, err := service.New(&prog{}, svcConfig)
-			if err != nil {
-				mainLog.Fatal().Err(err).Msg("failed create new service")
-			}
-			serviceLogger, err := s.Logger(nil)
-			if err != nil {
-				mainLog.Error().Err(err).Msg("failed to get service logger")
-				return
-			}
-
-			if err := s.Run(); err != nil {
-				if sErr := serviceLogger.Error(err); sErr != nil {
-					mainLog.Error().Err(sErr).Msg("failed to write service log")
-				}
-				mainLog.Error().Err(err).Msg("failed to start service")
-			}
+			close(waitCh)
+			<-stopCh
 		},
 	}
 	runCmd.Flags().BoolVarP(&daemon, "daemon", "d", false, "Run as daemon")
