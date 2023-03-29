@@ -4,6 +4,7 @@ go 1.19
 
 require (
 	github.com/coreos/go-systemd/v22 v22.3.3-0.20220203105225-a9a7ef127534
+	github.com/cuonglm/osinfo v0.0.0-20230329055532-c513f836da19
 	github.com/frankban/quicktest v1.14.3
 	github.com/fsnotify/fsnotify v1.6.0
 	github.com/go-playground/validator/v10 v10.11.1

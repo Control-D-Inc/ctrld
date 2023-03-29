@@ -20,6 +20,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/cuonglm/osinfo"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
@@ -35,6 +36,11 @@ import (
 )
 
 const selfCheckFQDN = "verify.controld.com"
+
+var (
+	version = "dev"
+	commit  = "none"
+)
 
 var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
@@ -62,17 +68,28 @@ _/ ___\   __\_  __ \  |   / __ |
      \/ dns forwarding proxy  \/
 `
 
+var rootCmd = &cobra.Command{
+	Use:     "ctrld",
+	Short:   strings.TrimLeft(rootShortDesc, "\n"),
+	Version: curVersion(),
+}
+
+func curVersion() string {
+	if version != "dev" {
+		version = "v" + version
+	}
+	if len(commit) > 7 {
+		commit = commit[:7]
+	}
+	return fmt.Sprintf("%s-%s", version, commit)
+}
+
 func initCLI() {
 	// Enable opening via explorer.exe on Windows.
 	// See: https://github.com/spf13/cobra/issues/844.
 	cobra.MousetrapHelpText = ""
 	cobra.EnableCommandSorting = false
 
-	rootCmd := &cobra.Command{
-		Use:     "ctrld",
-		Short:   strings.TrimLeft(rootShortDesc, "\n"),
-		Version: "1.1.3",
-	}
 	rootCmd.PersistentFlags().CountVarP(
 		&verbose,
 		"verbose",
@@ -142,7 +159,12 @@ func initCLI() {
 			if err := v.Unmarshal(&cfg); err != nil {
 				log.Fatalf("failed to unmarshal config: %v", err)
 			}
-			fmt.Println("starting ctrld...")
+
+			log.Println("starting ctrld ...")
+			log.Printf("version: %s\n", curVersion())
+			oi := osinfo.New()
+			log.Printf("os: %s\n", oi.String())
+
 			// Wait for network up.
 			if !ctrldnet.Up() {
 				log.Fatal("network is not up yet")
@@ -362,6 +384,10 @@ func initCLI() {
 			}
 		},
 	}
+	if runtime.GOOS == "darwin" {
+		// On darwin, running status command without privileges may return wrong information.
+		statusCmd.PreRun = checkHasElevatedPrivilege
+	}
 
 	uninstallCmd := &cobra.Command{
 		PreRun: checkHasElevatedPrivilege,
@@ -522,7 +548,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	// If err == nil, there's a config supplied via `--config`, no default config written.
 	err := v.ReadInConfig()
 	if err == nil {
-		fmt.Println("loading config file from:", v.ConfigFileUsed())
+		log.Println("loading config file from:", v.ConfigFileUsed())
 		defaultConfigFile = v.ConfigFileUsed()
 		return true
 	}
@@ -536,7 +562,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 		if err := writeConfigFile(); err != nil {
 			log.Fatalf("failed to write default config file: %v", err)
 		} else {
-			fmt.Println("writing default config file to: " + defaultConfigFile)
+			log.Println("writing default config file to: " + defaultConfigFile)
 		}
 		defaultConfigWritten = true
 		return false
