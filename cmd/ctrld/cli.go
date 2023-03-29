@@ -160,8 +160,7 @@ func initCLI() {
 				log.Fatalf("failed to unmarshal config: %v", err)
 			}
 
-			log.Println("starting ctrld ...")
-			log.Printf("version: %s\n", curVersion())
+			log.Printf("starting ctrld %s\n", curVersion())
 			oi := osinfo.New()
 			log.Printf("os: %s\n", oi.String())
 
