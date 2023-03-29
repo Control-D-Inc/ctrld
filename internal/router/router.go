@@ -38,9 +38,11 @@ func SupportedPlatforms() []string {
 func Configure(c *ctrld.Config) error {
 	name := Name()
 	switch name {
+	case DDWrt:
+		return setupDDWrt()
 	case OpenWrt:
 		return setupOpenWrt()
-	case DDWrt, Merlin, Ubios:
+	case Merlin, Ubios:
 	default:
 		return ErrNotSupported
 	}
@@ -50,22 +52,29 @@ func Configure(c *ctrld.Config) error {
 }
 
 // ConfigureService performs necessary setup for running ctrld as a service on router.
-func ConfigureService(sc *service.Config) {
+func ConfigureService(sc *service.Config) error {
 	name := Name()
 	switch name {
+	case DDWrt:
+		if !ddwrtJff2Enabled() {
+			return ddwrtJffs2NotEnabledErr
+		}
 	case OpenWrt:
 		sc.Option["SysvScript"] = openWrtScript
-	case DDWrt, Merlin, Ubios:
+	case Merlin, Ubios:
 	}
+	return nil
 }
 
 // PostInstall performs task after installing ctrld on router.
 func PostInstall() error {
 	name := Name()
 	switch name {
+	case DDWrt:
+		return postInstallDDWrt()
 	case OpenWrt:
 		return postInstallOpenWrt()
-	case DDWrt, Merlin, Ubios:
+	case Merlin, Ubios:
 	}
 	return nil
 }
@@ -76,7 +85,9 @@ func Cleanup() error {
 	switch name {
 	case OpenWrt:
 		return cleanupOpenWrt()
-	case DDWrt, Merlin, Ubios:
+	case DDWrt:
+		return cleanupDDWrt()
+	case Merlin, Ubios:
 	}
 	return nil
 }
@@ -85,9 +96,9 @@ func Cleanup() error {
 func ListenAddress() string {
 	name := Name()
 	switch name {
-	case OpenWrt:
-		return ":53"
-	case DDWrt, Merlin, Ubios:
+	case DDWrt, OpenWrt:
+		return "127.0.0.1:5353"
+	case Merlin, Ubios:
 	}
 	return ""
 }

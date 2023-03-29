@@ -53,6 +53,7 @@ func initRouterCLI() {
 
 			cmdArgs := []string{"start"}
 			cmdArgs = append(cmdArgs, osArgs(platform)...)
+			cmdArgs = append(cmdArgs, "--router")
 			command := exec.Command(exe, cmdArgs...)
 			command.Stdout = os.Stdout
 			command.Stderr = os.Stderr

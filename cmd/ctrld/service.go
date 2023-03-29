@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,12 +25,14 @@ type task struct {
 }
 
 func doTasks(tasks []task) bool {
+	var prevErr error
 	for _, task := range tasks {
 		if err := task.f(); err != nil {
 			if task.abortOnError {
-				stderrMsg(err.Error())
+				stderrMsg(errors.Join(prevErr, err).Error())
 				return false
 			}
+			prevErr = err
 		}
 	}
 	return true

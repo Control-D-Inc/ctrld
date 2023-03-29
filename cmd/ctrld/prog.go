@@ -14,6 +14,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 var logf = func(format string, args ...any) {
@@ -77,6 +78,7 @@ func (p *prog) run() {
 		} else {
 			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap IP for upstream.%s", n)
 		}
+		uc.SetCertPool(rootCertPool)
 		uc.SetupTransport()
 	}
 
@@ -165,6 +167,10 @@ func (p *prog) deAllocateIP() error {
 }
 
 func (p *prog) setDNS() {
+	// On router, ctrld run as a DNS provider, it does not have to change system DNS.
+	if router.Name() != "" {
+		return
+	}
 	if cfg.Listener == nil || cfg.Listener["0"] == nil {
 		return
 	}
@@ -193,6 +199,10 @@ func (p *prog) setDNS() {
 }
 
 func (p *prog) resetDNS() {
+	// See comment in p.setDNS method.
+	if router.Name() != "" {
+		return
+	}
 	if iface == "" {
 		return
 	}

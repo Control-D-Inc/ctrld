@@ -3,6 +3,7 @@ package controld
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,7 +14,9 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/certs"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 const (
@@ -113,6 +116,10 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 			}
 		}
 		return ctrldnet.Dialer.DialContext(ctx, proto, addr)
+	}
+
+	if router.Name() == router.DDWrt {
+		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
 	}
 	client := http.Client{
 		Timeout:   10 * time.Second,

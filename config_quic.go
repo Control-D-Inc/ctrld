@@ -18,6 +18,7 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 
 func (uc *UpstreamConfig) setupDOH3TransportWithoutPingUpstream() {
 	rt := &http3.RoundTripper{}
+	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 		host := addr
 		ProxyLog.Debug().Msgf("debug dial context D0H3 %s - %s", addr, bootstrapDNS)

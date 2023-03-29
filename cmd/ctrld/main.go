@@ -29,6 +29,7 @@ var (
 	cdUID             string
 	iface             string
 	ifaceStartStop    string
+	setupRouter       bool
 
 	mainLog = zerolog.New(io.Discard)
 )
@@ -50,7 +51,7 @@ func normalizeLogFilePath(logFilePath string) string {
 	if homedir != "" {
 		return filepath.Join(homedir, logFilePath)
 	}
-	dir, _ := os.UserHomeDir()
+	dir, _ := userHomeDir()
 	if dir == "" {
 		return logFilePath
 	}

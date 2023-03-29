@@ -20,12 +20,13 @@ func (r *dotResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	// regardless of the machine DNS status.
 	dialer := newDialer(net.JoinHostPort(bootstrapDNS, "53"))
 	dnsClient := &dns.Client{
-		Net:    "tcp-tls",
-		Dialer: dialer,
+		Net:       "tcp-tls",
+		Dialer:    dialer,
+		TLSConfig: &tls.Config{RootCAs: r.uc.certPool},
 	}
 	endpoint := r.uc.Endpoint
 	if r.uc.BootstrapIP != "" {
-		dnsClient.TLSConfig = &tls.Config{ServerName: r.uc.Domain}
+		dnsClient.TLSConfig.ServerName = r.uc.Domain
 		_, port, _ := net.SplitHostPort(endpoint)
 		endpoint = net.JoinHostPort(r.uc.BootstrapIP, port)
 	}

@@ -2,6 +2,8 @@ package ctrld
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,23 +22,26 @@ import (
 )
 
 // SetConfigName set the config name that ctrld will look for.
+// DEPRECATED: use SetConfigNameWithPath instead.
 func SetConfigName(v *viper.Viper, name string) {
-	v.SetConfigName(name)
-
 	configPath := "$HOME"
 	// viper has its own way to get user home directory:  https://github.com/spf13/viper/blob/v1.14.0/util.go#L134
 	// To be consistent, we prefer os.UserHomeDir instead.
 	if homeDir, err := os.UserHomeDir(); err == nil {
 		configPath = homeDir
 	}
+	SetConfigNameWithPath(v, name, configPath)
+}
+
+// SetConfigNameWithPath set the config path and name that ctrld will look for.
+func SetConfigNameWithPath(v *viper.Viper, name, configPath string) {
+	v.SetConfigName(name)
 	v.AddConfigPath(configPath)
 	v.AddConfigPath(".")
 }
 
 // InitConfig initializes default config values for given *viper.Viper instance.
 func InitConfig(v *viper.Viper, name string) {
-	SetConfigName(v, name)
-
 	v.SetDefault("listener", map[string]*ListenerConfig{
 		"0": {
 			IP:   "127.0.0.1",
@@ -104,6 +109,7 @@ type UpstreamConfig struct {
 	Timeout           int               `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
 	transport         *http.Transport   `mapstructure:"-" toml:"-"`
 	http3RoundTripper http.RoundTripper `mapstructure:"-" toml:"-"`
+	certPool          *x509.CertPool    `mapstructure:"-" toml:"-"`
 
 	g               singleflight.Group
 	bootstrapIPs    []string
@@ -150,6 +156,11 @@ func (uc *UpstreamConfig) Init() {
 	if net.ParseIP(uc.Domain) != nil {
 		uc.BootstrapIP = uc.Domain
 	}
+}
+
+// SetCertPool sets the system cert pool used for TLS connections.
+func (uc *UpstreamConfig) SetCertPool(cp *x509.CertPool) {
+	uc.certPool = cp
 }
 
 // SetupBootstrapIP manually find all available IPs of the upstream.
@@ -297,6 +308,7 @@ func (uc *UpstreamConfig) setupDOHTransport() {
 func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
 	uc.transport = http.DefaultTransport.(*http.Transport).Clone()
 	uc.transport.IdleConnTimeout = 5 * time.Second
+	uc.transport.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
 
 	dialerTimeoutMs := 2000
 	if uc.Timeout > 0 && uc.Timeout < dialerTimeoutMs {

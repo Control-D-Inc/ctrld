@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"tailscale.com/net/interfaces"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/certs"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
@@ -46,6 +48,7 @@ var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	defaultConfigWritten = false
 	defaultConfigFile    = "ctrld.toml"
+	rootCertPool         *x509.CertPool
 )
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains"}
@@ -146,8 +149,13 @@ func initCLI() {
 				{"config", false},
 				{"ctrld", writeDefaultConfig},
 			}
+
+			dir, err := userHomeDir()
+			if err != nil {
+				log.Fatalf("failed to get config dir: %v", dir)
+			}
 			for _, config := range configs {
-				ctrld.SetConfigName(v, config.name)
+				ctrld.SetConfigNameWithPath(v, config.name, dir)
 				v.SetConfigFile(configPath)
 				if readConfigFile(config.written) {
 					break
@@ -200,15 +208,21 @@ func initCLI() {
 				os.Exit(0)
 			}
 
-			if router.Name() != "" {
-				mainLog.Debug().Msg("Router setup")
-				err := router.Configure(&cfg)
-				if errors.Is(err, router.ErrNotSupported) {
-					unsupportedPlatformHelp(cmd)
-					os.Exit(1)
-				}
-				if err != nil {
-					mainLog.Fatal().Err(err).Msg("failed to configure router")
+			if setupRouter {
+				switch platform := router.Name(); {
+				case platform == router.DDWrt:
+					rootCertPool = certs.CACertPool()
+					fallthrough
+				case platform != "":
+					mainLog.Debug().Msg("Router setup")
+					err := router.Configure(&cfg)
+					if errors.Is(err, router.ErrNotSupported) {
+						unsupportedPlatformHelp(cmd)
+						os.Exit(1)
+					}
+					if err != nil {
+						mainLog.Fatal().Err(err).Msg("failed to configure router")
+					}
 				}
 			}
 
@@ -230,6 +244,8 @@ func initCLI() {
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	_ = runCmd.Flags().MarkHidden("iface")
+	runCmd.Flags().BoolVarP(&setupRouter, "router", "", false, `setup for running on router platforms`)
+	_ = runCmd.Flags().MarkHidden("router")
 
 	rootCmd.AddCommand(runCmd)
 
@@ -247,7 +263,9 @@ func initCLI() {
 			}
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
-			router.ConfigureService(sc)
+			if err := router.ConfigureService(sc); err != nil {
+				log.Fatal(err)
+			}
 
 			// No config path, generating config in HOME directory.
 			noConfigStart := isNoConfigStart(cmd)
@@ -255,7 +273,7 @@ func initCLI() {
 			if configPath != "" {
 				v.SetConfigFile(configPath)
 			}
-			if dir, err := os.UserHomeDir(); err == nil {
+			if dir, err := userHomeDir(); err == nil {
 				setWorkingDirectory(sc, dir)
 				if configPath == "" && writeDefaultConfig {
 					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
@@ -332,6 +350,8 @@ func initCLI() {
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
+	startCmd.Flags().BoolVarP(&setupRouter, "router", "", false, `setup for running on router platforms`)
+	_ = startCmd.Flags().MarkHidden("router")
 
 	stopCmd := &cobra.Command{
 		PreRun: checkHasElevatedPrivilege,
@@ -430,6 +450,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					iface = "auto"
 				}
 				prog.resetDNS()
+				mainLog.Debug().Msg("Router cleanup")
 				if err := router.Cleanup(); err != nil {
 					mainLog.Warn().Err(err).Msg("could not cleanup router")
 				}
@@ -820,4 +841,24 @@ func selfCheckStatus(status service.Status) service.Status {
 
 func unsupportedPlatformHelp(cmd *cobra.Command) {
 	cmd.PrintErrln("Unsupported or incorrectly chosen router platform. Please open an issue and provide all relevant information: https://github.com/Control-D-Inc/ctrld/issues/new")
+}
+
+func userHomeDir() (string, error) {
+	switch router.Name() {
+	case router.DDWrt, router.Merlin:
+		exe, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Dir(exe), nil
+	}
+	// viper will expand for us.
+	if runtime.GOOS == "windows" {
+		return os.UserHomeDir()
+	}
+	dir := "/etc/controld"
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
