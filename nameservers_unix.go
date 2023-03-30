@@ -1,11 +1,7 @@
-//go:build !js && !windows
+//go:build unix
 
 package ctrld
 
-import (
-	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
-)
-
 func nameservers() []string {
-	return resolvconffile.NameServersWithPort()
+	return osNameservers()
 }
