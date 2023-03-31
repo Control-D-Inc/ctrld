@@ -14,6 +14,7 @@ func TestUpstreamConfig_SetupBootstrapIP(t *testing.T) {
 	uc.Init()
 	uc.setupBootstrapIP(false)
 	if uc.BootstrapIP == "" {
+		t.Log(availableNameservers())
 		t.Fatal("could not bootstrap ip without bootstrap DNS")
 	}
 	t.Log(uc)

@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"net"
 	"os"
+
+	"github.com/Control-D-Inc/ctrld/internal/dns/resolvconffile"
 )
 
 const (
@@ -13,13 +15,8 @@ const (
 	v6RouteFile = "/proc/net/ipv6_route"
 )
 
-func osNameservers() []string {
-	ns4 := dns4()
-	ns6 := dns6()
-	ns := make([]string, len(ns4)+len(ns6))
-	ns = append(ns, ns4...)
-	ns = append(ns, ns6...)
-	return ns
+func dnsFns() []dnsFn {
+	return []dnsFn{dns4, dns6, dnsFromSystemdResolver}
 }
 
 func dns4() []string {
@@ -53,7 +50,7 @@ func dns4() []string {
 			continue
 		}
 		seen[ip.String()] = true
-		dns = append(dns, net.JoinHostPort(ip.String(), "53"))
+		dns = append(dns, ip.String())
 	}
 	return dns
 }
@@ -82,7 +79,19 @@ func dns6() []string {
 		if ip.Equal(net.IPv6zero) {
 			continue
 		}
-		dns = append(dns, net.JoinHostPort(ip.String(), "53"))
+		dns = append(dns, ip.String())
 	}
 	return dns
+}
+
+func dnsFromSystemdResolver() []string {
+	c, err := resolvconffile.ParseFile("/run/systemd/resolve/resolv.conf")
+	if err != nil {
+		return nil
+	}
+	ns := make([]string, 0, len(c.Nameservers))
+	for _, nameserver := range c.Nameservers {
+		ns = append(ns, nameserver.String())
+	}
+	return ns
 }

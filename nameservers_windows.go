@@ -9,7 +9,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func nameservers() []string {
+func dnsFns() []dnsFn {
+	return []dnsFn{dnsFromAdapter}
+}
+
+func dnsFromAdapter() []string {
 	aas, err := winipcfg.GetAdaptersAddresses(syscall.AF_UNSPEC, winipcfg.GAAFlagIncludeGateways|winipcfg.GAAFlagIncludePrefix)
 	if err != nil {
 		return nil
@@ -42,7 +46,7 @@ func nameservers() []string {
 			return
 		}
 		seen[ip.String()] = true
-		ns = append(ns, net.JoinHostPort(ip.String(), "53"))
+		ns = append(ns, ip.String())
 	}
 	for _, aa := range aas {
 		for dns := aa.FirstDNSServerAddress; dns != nil; dns = dns.Next {

@@ -4,14 +4,20 @@ package ctrld
 
 import (
 	"net"
+	"os/exec"
+	"runtime"
+	"strings"
 	"syscall"
 
 	"golang.org/x/net/route"
 )
 
-func osNameservers() []string {
+func dnsFns() []dnsFn {
+	return []dnsFn{dnsFromRIB, dnsFromIPConfig}
+}
+
+func dnsFromRIB() []string {
 	var dns []string
-	seen := make(map[string]bool)
 	rib, err := route.FetchRIB(syscall.AF_UNSPEC, route.RIBTypeRoute, 0)
 	if err != nil {
 		return nil
@@ -33,15 +39,26 @@ func osNameservers() []string {
 		if dst == nil || gw == nil {
 			continue
 		}
-		if gw.IsLoopback() || seen[gw.String()] {
+		if gw.IsLoopback() {
 			continue
 		}
 		if dst.Equal(net.IPv4zero) || dst.Equal(net.IPv6zero) {
-			seen[gw.String()] = true
-			dns = append(dns, net.JoinHostPort(gw.String(), "53"))
+			dns = append(dns, gw.String())
 		}
 	}
 	return dns
+}
+
+func dnsFromIPConfig() []string {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	cmd := exec.Command("ipconfig", "getoption", "", "domain_name_server")
+	out, _ := cmd.Output()
+	if ip := net.ParseIP(strings.TrimSpace(string(out))); ip != nil {
+		return []string{ip.String()}
+	}
+	return nil
 }
 
 func toNetIP(addr route.Addr) net.IP {
