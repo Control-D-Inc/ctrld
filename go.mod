@@ -1,6 +1,6 @@
 module github.com/Control-D-Inc/ctrld
 
-go 1.19
+go 1.20
 
 require (
 	github.com/coreos/go-systemd/v22 v22.3.3-0.20220203105225-a9a7ef127534
