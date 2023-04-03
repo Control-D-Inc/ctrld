@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/josharian/native"
 	"tailscale.com/util/dnsname"
-	"tailscale.com/util/endian"
 )
 
 const (
@@ -131,7 +131,7 @@ func (m *nmManager) trySet(ctx context.Context, config OSConfig) error {
 	for _, ip := range config.Nameservers {
 		b := ip.As16()
 		if ip.Is4() {
-			dnsv4 = append(dnsv4, endian.Native.Uint32(b[12:]))
+			dnsv4 = append(dnsv4, native.Endian.Uint32(b[12:]))
 		} else {
 			dnsv6 = append(dnsv6, b[:])
 		}

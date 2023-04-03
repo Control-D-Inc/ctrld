@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/miekg/dns"
 )
@@ -69,8 +70,15 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 
 	dnsClient := &dns.Client{Net: "udp"}
 	ch := make(chan *osResolverResult, numServers)
+	var wg sync.WaitGroup
+	wg.Add(len(o.nameservers))
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
 	for _, server := range o.nameservers {
 		go func(server string) {
+			defer wg.Done()
 			answer, _, err := dnsClient.ExchangeContext(ctx, msg, server)
 			ch <- &osResolverResult{answer: answer, err: err}
 		}(server)

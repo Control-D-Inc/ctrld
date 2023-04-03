@@ -15,10 +15,12 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/cuonglm/osinfo"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
@@ -34,6 +36,11 @@ import (
 )
 
 const selfCheckFQDN = "verify.controld.com"
+
+var (
+	version = "dev"
+	commit  = "none"
+)
 
 var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
@@ -61,17 +68,28 @@ _/ ___\   __\_  __ \  |   / __ |
      \/ dns forwarding proxy  \/
 `
 
+var rootCmd = &cobra.Command{
+	Use:     "ctrld",
+	Short:   strings.TrimLeft(rootShortDesc, "\n"),
+	Version: curVersion(),
+}
+
+func curVersion() string {
+	if version != "dev" {
+		version = "v" + version
+	}
+	if len(commit) > 7 {
+		commit = commit[:7]
+	}
+	return fmt.Sprintf("%s-%s", version, commit)
+}
+
 func initCLI() {
 	// Enable opening via explorer.exe on Windows.
 	// See: https://github.com/spf13/cobra/issues/844.
 	cobra.MousetrapHelpText = ""
 	cobra.EnableCommandSorting = false
 
-	rootCmd := &cobra.Command{
-		Use:     "ctrld",
-		Short:   strings.TrimLeft(rootShortDesc, "\n"),
-		Version: "1.1.3",
-	}
 	rootCmd.PersistentFlags().CountVarP(
 		&verbose,
 		"verbose",
@@ -88,6 +106,35 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, args []string) {
 			if daemon && runtime.GOOS == "windows" {
 				log.Fatal("Cannot run in daemon mode. Please install a Windows service.")
+			}
+
+			waitCh := make(chan struct{})
+			stopCh := make(chan struct{})
+			if !daemon {
+				// We need to call s.Run() as soon as possible to response to the OS manager, so it
+				// can see ctrld is running and don't mark ctrld as failed service.
+				go func() {
+					p := &prog{
+						waitCh: waitCh,
+						stopCh: stopCh,
+					}
+					s, err := service.New(p, svcConfig)
+					if err != nil {
+						mainLog.Fatal().Err(err).Msg("failed create new service")
+					}
+					serviceLogger, err := s.Logger(nil)
+					if err != nil {
+						mainLog.Error().Err(err).Msg("failed to get service logger")
+						return
+					}
+
+					if err := s.Run(); err != nil {
+						if sErr := serviceLogger.Error(err); sErr != nil {
+							mainLog.Error().Err(sErr).Msg("failed to write service log")
+						}
+						mainLog.Error().Err(err).Msg("failed to start service")
+					}
+				}()
 			}
 			noConfigStart := isNoConfigStart(cmd)
 			writeDefaultConfig := !noConfigStart && configBase64 == ""
@@ -112,7 +159,11 @@ func initCLI() {
 			if err := v.Unmarshal(&cfg); err != nil {
 				log.Fatalf("failed to unmarshal config: %v", err)
 			}
-			fmt.Println("starting ctrld...")
+
+			log.Printf("starting ctrld %s\n", curVersion())
+			oi := osinfo.New()
+			log.Printf("os: %s\n", oi.String())
+
 			// Wait for network up.
 			if !ctrldnet.Up() {
 				log.Fatal("network is not up yet")
@@ -149,22 +200,8 @@ func initCLI() {
 				os.Exit(0)
 			}
 
-			s, err := service.New(&prog{}, svcConfig)
-			if err != nil {
-				mainLog.Fatal().Err(err).Msg("failed create new service")
-			}
-			serviceLogger, err := s.Logger(nil)
-			if err != nil {
-				mainLog.Error().Err(err).Msg("failed to get service logger")
-				return
-			}
-
-			if err := s.Run(); err != nil {
-				if sErr := serviceLogger.Error(err); sErr != nil {
-					mainLog.Error().Err(sErr).Msg("failed to write service log")
-				}
-				mainLog.Error().Err(err).Msg("failed to start service")
-			}
+			close(waitCh)
+			<-stopCh
 		},
 	}
 	runCmd.Flags().BoolVarP(&daemon, "daemon", "d", false, "Run as daemon")
@@ -346,6 +383,10 @@ func initCLI() {
 			}
 		},
 	}
+	if runtime.GOOS == "darwin" {
+		// On darwin, running status command without privileges may return wrong information.
+		statusCmd.PreRun = checkHasElevatedPrivilege
+	}
 
 	uninstallCmd := &cobra.Command{
 		PreRun: checkHasElevatedPrivilege,
@@ -506,15 +547,8 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	// If err == nil, there's a config supplied via `--config`, no default config written.
 	err := v.ReadInConfig()
 	if err == nil {
-		fmt.Println("loading config file from:", v.ConfigFileUsed())
+		log.Println("loading config file from:", v.ConfigFileUsed())
 		defaultConfigFile = v.ConfigFileUsed()
-		v.OnConfigChange(func(in fsnotify.Event) {
-			if err := v.UnmarshalKey("listener", &cfg.Listener); err != nil {
-				log.Printf("failed to unmarshal listener config: %v", err)
-				return
-			}
-		})
-		v.WatchConfig()
 		return true
 	}
 
@@ -527,7 +561,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 		if err := writeConfigFile(); err != nil {
 			log.Fatalf("failed to write default config file: %v", err)
 		} else {
-			fmt.Println("writing default config file to: " + defaultConfigFile)
+			log.Println("writing default config file to: " + defaultConfigFile)
 		}
 		defaultConfigWritten = true
 		return false
@@ -559,18 +593,24 @@ func processNoConfigFlags(noConfigStart bool) {
 	}
 	processListenFlag()
 
+	endpointAndTyp := func(endpoint string) (string, string) {
+		typ := ctrld.ResolverTypeFromEndpoint(endpoint)
+		return strings.TrimPrefix(endpoint, "quic://"), typ
+	}
+	pEndpoint, pType := endpointAndTyp(primaryUpstream)
 	upstream := map[string]*ctrld.UpstreamConfig{
 		"0": {
-			Name:     primaryUpstream,
-			Endpoint: primaryUpstream,
-			Type:     ctrld.ResolverTypeDOH,
+			Name:     pEndpoint,
+			Endpoint: pEndpoint,
+			Type:     pType,
 		},
 	}
 	if secondaryUpstream != "" {
+		sEndpoint, sType := endpointAndTyp(secondaryUpstream)
 		upstream["1"] = &ctrld.UpstreamConfig{
-			Name:     secondaryUpstream,
-			Endpoint: secondaryUpstream,
-			Type:     ctrld.ResolverTypeLegacy,
+			Name:     sEndpoint,
+			Endpoint: sEndpoint,
+			Type:     sType,
 		}
 		rules := make([]ctrld.Rule, 0, len(domains))
 		for _, domain := range domains {
@@ -727,8 +767,26 @@ func selfCheckStatus(status service.Status) service.Status {
 	err := errors.New("query failed")
 	maxAttempts := 20
 	mainLog.Debug().Msg("Performing self-check")
+	var (
+		lcChanged map[string]*ctrld.ListenerConfig
+		mu        sync.Mutex
+	)
+	v.OnConfigChange(func(in fsnotify.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err := v.UnmarshalKey("listener", &lcChanged); err != nil {
+			log.Printf("failed to unmarshal listener config: %v", err)
+			return
+		}
+	})
+	v.WatchConfig()
 	for i := 0; i < maxAttempts; i++ {
 		lc := cfg.Listener["0"]
+		mu.Lock()
+		if lcChanged != nil {
+			lc = lcChanged["0"]
+		}
+		mu.Unlock()
 		m := new(dns.Msg)
 		m.SetQuestion(selfCheckFQDN+".", dns.TypeA)
 		m.RecursionDesired = true

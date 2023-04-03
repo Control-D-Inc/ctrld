@@ -66,7 +66,7 @@ func supportListenIPv6Local() bool {
 }
 
 func probeStack() {
-	b := backoff.NewBackoff("probeStack", func(format string, args ...any) {}, time.Minute)
+	b := backoff.NewBackoff("probeStack", func(format string, args ...any) {}, 5*time.Second)
 	for {
 		if _, err := probeStackDialer.Dial("udp", bootstrapDNS); err == nil {
 			hasNetworkUp = true

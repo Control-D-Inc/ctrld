@@ -56,7 +56,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		}
 	})
 
-	g := new(errgroup.Group)
+	g, ctx := errgroup.WithContext(context.Background())
 	for _, proto := range []string{"udp", "tcp"} {
 		proto := proto
 		// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
@@ -68,6 +68,10 @@ func (p *prog) serveDNS(listenerNum string) error {
 					Net:     proto,
 					Handler: handler,
 				}
+				go func() {
+					<-ctx.Done()
+					_ = s.Shutdown()
+				}()
 				if err := s.ListenAndServe(); err != nil {
 					mainLog.Error().Err(err).Msg("could not serving on ::1")
 				}
@@ -80,6 +84,10 @@ func (p *prog) serveDNS(listenerNum string) error {
 				Net:     proto,
 				Handler: handler,
 			}
+			go func() {
+				<-ctx.Done()
+				_ = s.Shutdown()
+			}()
 			if err := s.ListenAndServe(); err != nil {
 				mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
 				return err

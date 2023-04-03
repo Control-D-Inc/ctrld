@@ -7,14 +7,24 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/miekg/dns"
+
+	"github.com/Control-D-Inc/ctrld"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 const (
+	apiDomain         = "api.controld.com"
 	resolverDataURL   = "https://api.controld.com/utility"
 	InvalidConfigCode = 40401
+)
+
+var (
+	resolveAPIDomainOnce sync.Once
+	apiDomainIP          string
 )
 
 // ResolverConfig represents Control D resolver data.
@@ -63,6 +73,44 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 		proto := "tcp6"
 		if ctrldnet.SupportsIPv4() {
 			proto = "tcp4"
+		}
+		resolveAPIDomainOnce.Do(func() {
+			r, err := ctrld.NewResolver(&ctrld.UpstreamConfig{Type: ctrld.ResolverTypeOS})
+			if err != nil {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			msg := new(dns.Msg)
+			dnsType := dns.TypeAAAA
+			if proto == "tcp4" {
+				dnsType = dns.TypeA
+			}
+			msg.SetQuestion(apiDomain+".", dnsType)
+			msg.RecursionDesired = true
+			answer, err := r.Resolve(ctx, msg)
+			if err != nil {
+				return
+			}
+			if answer.Rcode != dns.RcodeSuccess || len(answer.Answer) == 0 {
+				return
+			}
+			for _, record := range answer.Answer {
+				switch ar := record.(type) {
+				case *dns.A:
+					apiDomainIP = ar.A.String()
+					return
+				case *dns.AAAA:
+					apiDomainIP = ar.AAAA.String()
+					return
+				}
+			}
+		})
+		if apiDomainIP != "" {
+			if _, port, _ := net.SplitHostPort(addr); port != "" {
+				return ctrldnet.Dialer.DialContext(ctx, proto, net.JoinHostPort(apiDomainIP, port))
+			}
 		}
 		return ctrldnet.Dialer.DialContext(ctx, proto, addr)
 	}

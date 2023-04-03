@@ -155,6 +155,12 @@ func (uc *UpstreamConfig) Init() {
 // SetupBootstrapIP manually find all available IPs of the upstream.
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) SetupBootstrapIP() {
+	uc.setupBootstrapIP(true)
+}
+
+// SetupBootstrapIP manually find all available IPs of the upstream.
+// The first usable IP will be used as bootstrap IP of the upstream.
+func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
 	bootstrapIP := func(record dns.RR) string {
 		switch ar := record.(type) {
 		case *dns.A:
@@ -166,7 +172,9 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 	}
 
 	resolver := &osResolver{nameservers: availableNameservers()}
-	resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
+	if withBootstrapDNS {
+		resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
+	}
 	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", uc.Domain, resolver.nameservers)
 	timeoutMs := 2000
 	if uc.Timeout > 0 && uc.Timeout < timeoutMs {
@@ -228,9 +236,13 @@ func (uc *UpstreamConfig) ReBootstrap() {
 	default:
 		return
 	}
-	_, _, _ = uc.g.Do("rebootstrap", func() (any, error) {
+	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
 		ProxyLog.Debug().Msg("re-bootstrapping upstream ip")
 		n := uint32(len(uc.bootstrapIPs))
+		if n == 0 {
+			uc.SetupBootstrapIP()
+			uc.setupTransportWithoutPingUpstream()
+		}
 
 		timeoutMs := 1000
 		if uc.Timeout > 0 && uc.Timeout < timeoutMs {
@@ -367,4 +379,28 @@ func availableNameservers() []string {
 		n++
 	}
 	return nss[:n]
+}
+
+// ResolverTypeFromEndpoint tries guessing the resolver type with a given endpoint
+// using following rules:
+//
+// - If endpoint is an IP address ->  ResolverTypeLegacy
+// - If endpoint starts with "https://" -> ResolverTypeDOH
+// - If endpoint starts with "quic://" -> ResolverTypeDOQ
+// - For anything else -> ResolverTypeDOT
+func ResolverTypeFromEndpoint(endpoint string) string {
+	switch {
+	case strings.HasPrefix(endpoint, "https://"):
+		return ResolverTypeDOH
+	case strings.HasPrefix(endpoint, "quic://"):
+		return ResolverTypeDOQ
+	}
+	host := endpoint
+	if strings.Contains(endpoint, ":") {
+		host, _, _ = net.SplitHostPort(host)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ResolverTypeLegacy
+	}
+	return ResolverTypeDOT
 }

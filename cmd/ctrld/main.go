@@ -73,7 +73,6 @@ func initLogging() {
 		}
 		writers = append(writers, logFile)
 	}
-	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
 	consoleWriter := zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
 		w.TimeFormat = time.StampMilli
 	})
