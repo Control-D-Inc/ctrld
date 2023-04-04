@@ -16,6 +16,8 @@ builds:
       - linux
       - windows
     goarch:
+      - 386
+      - arm
       - amd64
       - arm64
     tags:
