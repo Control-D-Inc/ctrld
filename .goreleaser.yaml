@@ -19,6 +19,7 @@ builds:
       - 386
       - arm
       - mips
+      - mipsle
       - amd64
       - arm64
     goarm:
