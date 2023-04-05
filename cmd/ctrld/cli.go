@@ -603,6 +603,7 @@ func processNoConfigFlags(noConfigStart bool) {
 			Name:     pEndpoint,
 			Endpoint: pEndpoint,
 			Type:     pType,
+			Timeout:  5000,
 		},
 	}
 	if secondaryUpstream != "" {
@@ -611,6 +612,7 @@ func processNoConfigFlags(noConfigStart bool) {
 			Name:     sEndpoint,
 			Endpoint: sEndpoint,
 			Type:     sType,
+			Timeout:  5000,
 		}
 		rules := make([]ctrld.Rule, 0, len(domains))
 		for _, domain := range domains {
