@@ -93,7 +93,7 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		errs = append(errs, res.err)
 	}
 
-	return nil, joinErrors(errs...)
+	return nil, errors.Join(errs...)
 }
 
 func newDialer(dnsAddress string) *net.Dialer {
