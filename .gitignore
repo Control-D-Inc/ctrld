@@ -1,3 +1,5 @@
-
 dist/
 gon.hcl
+
+/Build
+.DS_Store

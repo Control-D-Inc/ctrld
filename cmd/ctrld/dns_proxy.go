@@ -236,6 +236,10 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			ctrld.Log(ctx, mainLog.Debug(), "failover rcode matched, process to next upstream")
 			continue
 		}
+
+		// set compression, as it is not set by default when unpacking
+		answer.Compress = true
+
 		if p.cache != nil {
 			ttl := ttlFromMsg(answer)
 			now := time.Now()
