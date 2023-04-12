@@ -7,16 +7,27 @@ import (
 )
 
 func init() {
-	system := &linuxSystemService{
-		name:   "ddwrt",
-		detect: func() bool { return Name() == DDWrt },
-		interactive: func() bool {
-			is, _ := isInteractive()
-			return is
+	systems := []service.System{
+		&linuxSystemService{
+			name:   "ddwrt",
+			detect: func() bool { return Name() == DDWrt },
+			interactive: func() bool {
+				is, _ := isInteractive()
+				return is
+			},
+			new: newddwrtService,
 		},
-		new: newddwrtService,
+		&linuxSystemService{
+			name:   "merlin",
+			detect: func() bool { return Name() == Merlin },
+			interactive: func() bool {
+				is, _ := isInteractive()
+				return is
+			},
+			new: newMerlinService,
+		},
 	}
-	systems := append([]service.System{system}, service.AvailableSystems()...)
+	systems = append(systems, service.AvailableSystems()...)
 	service.ChooseSystem(systems...)
 }
 

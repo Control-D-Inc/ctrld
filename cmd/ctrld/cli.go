@@ -152,7 +152,7 @@ func initCLI() {
 
 			dir, err := userHomeDir()
 			if err != nil {
-				log.Fatalf("failed to get config dir: %v", dir)
+				log.Fatalf("failed to get config dir: %v", err)
 			}
 			for _, config := range configs {
 				ctrld.SetConfigNameWithPath(v, config.name, dir)

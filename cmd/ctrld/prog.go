@@ -167,8 +167,10 @@ func (p *prog) deAllocateIP() error {
 }
 
 func (p *prog) setDNS() {
-	// On router, ctrld run as a DNS provider, it does not have to change system DNS.
-	if router.Name() != "" {
+	switch router.Name() {
+	case router.DDWrt, router.OpenWrt, router.Ubios:
+		// On router, ctrld run as a DNS forwarder, it does not have to change system DNS.
+		// Except for Merlin, which has WAN DNS setup on boot for NTP.
 		return
 	}
 	if cfg.Listener == nil || cfg.Listener["0"] == nil {
@@ -199,8 +201,9 @@ func (p *prog) setDNS() {
 }
 
 func (p *prog) resetDNS() {
-	// See comment in p.setDNS method.
-	if router.Name() != "" {
+	switch router.Name() {
+	case router.DDWrt, router.OpenWrt, router.Ubios:
+		// See comment in p.setDNS method.
 		return
 	}
 	if iface == "" {

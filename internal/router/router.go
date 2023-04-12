@@ -40,9 +40,11 @@ func Configure(c *ctrld.Config) error {
 	switch name {
 	case DDWrt:
 		return setupDDWrt()
+	case Merlin:
+		return setupMerlin()
 	case OpenWrt:
 		return setupOpenWrt()
-	case Merlin, Ubios:
+	case Ubios:
 	default:
 		return ErrNotSupported
 	}
@@ -72,9 +74,12 @@ func PostInstall() error {
 	switch name {
 	case DDWrt:
 		return postInstallDDWrt()
+	case Merlin:
+		return postInstallMerlin()
 	case OpenWrt:
 		return postInstallOpenWrt()
-	case Merlin, Ubios:
+
+	case Ubios:
 	}
 	return nil
 }
@@ -83,11 +88,13 @@ func PostInstall() error {
 func Cleanup() error {
 	name := Name()
 	switch name {
-	case OpenWrt:
-		return cleanupOpenWrt()
 	case DDWrt:
 		return cleanupDDWrt()
-	case Merlin, Ubios:
+	case Merlin:
+		return cleanupMerlin()
+	case OpenWrt:
+		return cleanupOpenWrt()
+	case Ubios:
 	}
 	return nil
 }
@@ -98,7 +105,9 @@ func ListenAddress() string {
 	switch name {
 	case DDWrt, OpenWrt:
 		return "127.0.0.1:5353"
-	case Merlin, Ubios:
+	case Merlin:
+		return "127.0.0.1:5354"
+	case Ubios:
 	}
 	return ""
 }

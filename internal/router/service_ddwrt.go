@@ -157,7 +157,11 @@ func (s *ddwrtSvc) Run() (err error) {
 		return err
 	}
 
-	var sigChan = make(chan os.Signal, 3)
+	if interactice, _ := isInteractive(); !interactice {
+		signal.Ignore(syscall.SIGHUP)
+		signal.Ignore(sigCHLD)
+	}
+	var sigChan = make(chan os.Signal, 2)
 	signal.Notify(sigChan, syscall.SIGTERM, os.Interrupt)
 	<-sigChan
 
