@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/miekg/dns"
 )
 
 func newDohResolver(uc *UpstreamConfig) *dohResolver {
 	r := &dohResolver{
-		endpoint:          uc.Endpoint,
+		endpoint:          uc.u,
 		isDoH3:            uc.Type == ResolverTypeDOH3,
 		transport:         uc.transport,
 		http3RoundTripper: uc.http3RoundTripper,
@@ -22,7 +23,7 @@ func newDohResolver(uc *UpstreamConfig) *dohResolver {
 }
 
 type dohResolver struct {
-	endpoint          string
+	endpoint          *url.URL
 	isDoH3            bool
 	transport         *http.Transport
 	http3RoundTripper http.RoundTripper
@@ -33,9 +34,14 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	if err != nil {
 		return nil, err
 	}
+
 	enc := base64.RawURLEncoding.EncodeToString(data)
-	url := fmt.Sprintf("%s?dns=%s", r.endpoint, enc)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	query := r.endpoint.Query()
+	query.Add("dns", enc)
+
+	endpoint := *r.endpoint
+	endpoint.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("could not create request: %w", err)
 	}

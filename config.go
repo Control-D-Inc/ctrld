@@ -110,6 +110,7 @@ type UpstreamConfig struct {
 	transport         *http.Transport   `mapstructure:"-" toml:"-"`
 	http3RoundTripper http.RoundTripper `mapstructure:"-" toml:"-"`
 	certPool          *x509.CertPool    `mapstructure:"-" toml:"-"`
+	u                 *url.URL          `mapstructure:"-" toml:"-"`
 
 	g               singleflight.Group
 	bootstrapIPs    []string
@@ -142,6 +143,10 @@ type Rule map[string][]string
 func (uc *UpstreamConfig) Init() {
 	if u, err := url.Parse(uc.Endpoint); err == nil {
 		uc.Domain = u.Host
+		switch uc.Type {
+		case ResolverTypeDOH, ResolverTypeDOH3:
+			uc.u = u
+		}
 	}
 	if uc.Domain != "" {
 		return
