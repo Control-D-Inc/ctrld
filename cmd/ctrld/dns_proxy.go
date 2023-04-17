@@ -105,6 +105,13 @@ func (p *prog) serveDNS(listenerNum string) error {
 	return g.Wait()
 }
 
+// upstreamFor returns the list of upstreams for resolving the given domain,
+// matching by policies defined in the listener config. The second return value
+// reports whether the domain matches the policy.
+//
+// Though domain policy has higher priority than network policy, it is still
+// processed later, because policy logging want to know whether a network rule
+// is disregarded in favor of the domain level rule.
 func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, domain string) ([]string, bool) {
 	upstreams := []string{"upstream." + defaultUpstreamNum}
 	matchedPolicy := "no policy"
@@ -128,11 +135,43 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 		upstreams = append([]string(nil), policyUpstreams...)
 	}
 
+	var networkTargets []string
+	var sourceIP net.IP
+	switch addr := addr.(type) {
+	case *net.UDPAddr:
+		sourceIP = addr.IP
+	case *net.TCPAddr:
+		sourceIP = addr.IP
+	}
+
+networkRules:
+	for _, rule := range lc.Policy.Networks {
+		for source, targets := range rule {
+			networkNum := strings.TrimPrefix(source, "network.")
+			nc := p.cfg.Network[networkNum]
+			if nc == nil {
+				continue
+			}
+			for _, ipNet := range nc.IPNets {
+				if ipNet.Contains(sourceIP) {
+					matchedPolicy = lc.Policy.Name
+					matchedNetwork = source
+					networkTargets = targets
+					matched = true
+					break networkRules
+				}
+			}
+		}
+	}
+
 	for _, rule := range lc.Policy.Rules {
 		// There's only one entry per rule, config validation ensures this.
 		for source, targets := range rule {
 			if source == domain || wildcardMatches(source, domain) {
 				matchedPolicy = lc.Policy.Name
+				if len(networkTargets) > 0 {
+					matchedNetwork += " (unenforced)"
+				}
 				matchedRule = source
 				do(targets)
 				matched = true
@@ -141,31 +180,8 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 		}
 	}
 
-	var sourceIP net.IP
-	switch addr := addr.(type) {
-	case *net.UDPAddr:
-		sourceIP = addr.IP
-	case *net.TCPAddr:
-		sourceIP = addr.IP
-	}
-	for _, rule := range lc.Policy.Networks {
-		for source, targets := range rule {
-			networkNum := strings.TrimPrefix(source, "network.")
-			nc := p.cfg.Network[networkNum]
-			if nc == nil {
-				continue
-			}
-
-			for _, ipNet := range nc.IPNets {
-				if ipNet.Contains(sourceIP) {
-					matchedPolicy = lc.Policy.Name
-					matchedNetwork = source
-					do(targets)
-					matched = true
-					return upstreams, matched
-				}
-			}
-		}
+	if matched {
+		do(networkTargets)
 	}
 
 	return upstreams, matched
