@@ -1,7 +1,9 @@
 package router
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 
 	"github.com/kardianos/service"
 )
@@ -25,6 +27,26 @@ func init() {
 				return is
 			},
 			new: newMerlinService,
+		},
+		&linuxSystemService{
+			name: "ubios",
+			detect: func() bool {
+				if Name() != Ubios {
+					return false
+				}
+				out, err := exec.Command("ubnt-device-info", "firmware").CombinedOutput()
+				if err == nil {
+					// For v2/v3, UbiOS use a Debian base with systemd, so it is not
+					// necessary to use custom implementation for supporting init system.
+					return bytes.HasPrefix(out, []byte("1."))
+				}
+				return true
+			},
+			interactive: func() bool {
+				is, _ := isInteractive()
+				return is
+			},
+			new: newUbiosService,
 		},
 	}
 	systems = append(systems, service.AvailableSystems()...)

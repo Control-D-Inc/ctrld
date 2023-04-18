@@ -3,7 +3,6 @@ package router
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"sync/atomic"
@@ -45,12 +44,10 @@ func Configure(c *ctrld.Config) error {
 	case OpenWrt:
 		return setupOpenWrt()
 	case Ubios:
+		return setupUbiOS()
 	default:
 		return ErrNotSupported
 	}
-	// TODO: implement all supported platforms.
-	fmt.Printf("Configuring router for: %s\n", name)
-	return nil
 }
 
 // ConfigureService performs necessary setup for running ctrld as a service on router.
@@ -78,8 +75,8 @@ func PostInstall() error {
 		return postInstallMerlin()
 	case OpenWrt:
 		return postInstallOpenWrt()
-
 	case Ubios:
+		return postInstallUbiOS()
 	}
 	return nil
 }
@@ -95,6 +92,7 @@ func Cleanup() error {
 	case OpenWrt:
 		return cleanupOpenWrt()
 	case Ubios:
+		return cleanupUbiOS()
 	}
 	return nil
 }
@@ -103,11 +101,8 @@ func Cleanup() error {
 func ListenAddress() string {
 	name := Name()
 	switch name {
-	case DDWrt, OpenWrt:
-		return "127.0.0.1:5353"
-	case Merlin:
+	case DDWrt, Merlin, OpenWrt, Ubios:
 		return "127.0.0.1:5354"
-	case Ubios:
 	}
 	return ""
 }
