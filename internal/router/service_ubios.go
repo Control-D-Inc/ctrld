@@ -131,6 +131,23 @@ func (s *ubiosSvc) Uninstall() error {
 	if err := os.Remove(s.configPath()); err != nil {
 		return err
 	}
+	// Remove ctrld-boot service inside unifi-os container.
+	cmd := exec.Command("podman", "exec", "unifi-os", "systemctl", "disable", "ctrld-boot.service")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to disable ctrld-boot service, out: %s, err: %v", string(out), err)
+	}
+	cmd = exec.Command("podman", "exec", "unifi-os", "rm", "/lib/systemd/system/ctrld-boot.service")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to remove ctrld-boot service file, out: %s, err: %v", string(out), err)
+	}
+	cmd = exec.Command("podman", "exec", "unifi-os", "systemctl", "daemon-reload")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reload systemd service, out: %s, err: %v", string(out), err)
+	}
+	cmd = exec.Command("podman", "exec", "unifi-os", "systemctl", "reset-failed")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reset-failed systemd service, out: %s, err: %v", string(out), err)
+	}
 	return nil
 }
 
