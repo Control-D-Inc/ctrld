@@ -170,7 +170,6 @@ func (s *ubiosSvc) Run() (err error) {
 
 	if interactice, _ := isInteractive(); !interactice {
 		signal.Ignore(syscall.SIGHUP)
-		signal.Ignore(sigCHLD)
 	}
 
 	var sigChan = make(chan os.Signal, 3)
