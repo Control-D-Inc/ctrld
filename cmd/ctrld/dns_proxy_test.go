@@ -155,3 +155,39 @@ func TestCache(t *testing.T) {
 	assert.Equal(t, answer1.Rcode, got1.Rcode)
 	assert.Equal(t, answer2.Rcode, got2.Rcode)
 }
+
+func Test_macFromMsg(t *testing.T) {
+	tests := []struct {
+		name    string
+		mac     string
+		wantMac bool
+	}{
+		{"has mac", "4c:20:b8:ab:87:1b", true},
+		{"no mac", "4c:20:b8:ab:87:1b", false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			hw, err := net.ParseMAC(tc.mac)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := new(dns.Msg)
+			m.SetQuestion(selfCheckFQDN+".", dns.TypeA)
+			o := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+			if tc.wantMac {
+				ec1 := &dns.EDNS0_LOCAL{Code: EDNS0_OPTION_MAC, Data: hw}
+				o.Option = append(o.Option, ec1)
+			}
+			m.Extra = append(m.Extra, o)
+			got := macFromMsg(m)
+			if tc.wantMac && got != tc.mac {
+				t.Errorf("mismatch, want: %q, got: %q", tc.mac, got)
+			}
+			if !tc.wantMac && got != "" {
+				t.Errorf("unexpected mac: %q", got)
+			}
+		})
+	}
+}

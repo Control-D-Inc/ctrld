@@ -20,7 +20,13 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
-const staleTTL = 60 * time.Second
+const (
+	staleTTL = 60 * time.Second
+	// EDNS0_OPTION_MAC is dnsmasq EDNS0 code for adding mac option.
+	// https://thekelleys.org.uk/gitweb/?p=dnsmasq.git;a=blob;f=src/dns-protocol.h;h=76ac66a8c28317e9c121a74ab5fd0e20f6237dc8;hb=HEAD#l81
+	// This is also dns.EDNS0LOCALSTART, but define our own constant here for clarification.
+	EDNS0_OPTION_MAC = 0xFDE9
+)
 
 var osUpstreamConfig = &ctrld.UpstreamConfig{
 	Name:    "OS resolver",
@@ -230,6 +236,12 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		return dnsResolver.Resolve(resolveCtx, msg)
 	}
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
+		if upstreamConfig.UpstreamSendClientInfo() {
+			ci := router.GetClientInfoByMac(macFromMsg(msg))
+			if ci != nil {
+				ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, ci)
+			}
+		}
 		answer, err := resolve1(n, upstreamConfig, msg)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Debug().Err(err), "could not resolve query on first attempt, retrying...")
@@ -385,4 +397,18 @@ func dnsListenAddress(lc *ctrld.ListenerConfig) string {
 		return addr
 	}
 	return net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
+}
+
+func macFromMsg(msg *dns.Msg) string {
+	if opt := msg.IsEdns0(); opt != nil {
+		for _, s := range opt.Option {
+			switch e := s.(type) {
+			case *dns.EDNS0_LOCAL:
+				if e.Code == EDNS0_OPTION_MAC {
+					return net.HardwareAddr(e.Data).String()
+				}
+			}
+		}
+	}
+	return ""
 }

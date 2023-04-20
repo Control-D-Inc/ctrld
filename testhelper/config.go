@@ -50,6 +50,13 @@ type = "legacy"
 endpoint = "8.8.8.8"
 timeout = 5
 
+[upstream.3]
+name = "DOH with client info"
+type = "doh"
+endpoint = "https://dns.controld.com/client_info_upstream/main-device"
+timeout = 5
+send_client_info = false
+
 [listener.0]
 ip = "127.0.0.1"
 port = 53

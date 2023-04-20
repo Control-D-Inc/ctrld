@@ -12,6 +12,10 @@ const (
 
 func setupUbiOS() error {
 	// Disable dnsmasq as DNS server.
+	dnsMasqConfigContent, err := dnsMasqConf()
+	if err != nil {
+		return err
+	}
 	if err := os.WriteFile(ubiosDNSMasqConfigPath, []byte(dnsMasqConfigContent), 0600); err != nil {
 		return err
 	}

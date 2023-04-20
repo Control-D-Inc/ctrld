@@ -24,10 +24,12 @@ func TestLoadConfig(t *testing.T) {
 	assert.Contains(t, cfg.Network, "0")
 	assert.Contains(t, cfg.Network, "1")
 
-	assert.Len(t, cfg.Upstream, 3)
+	assert.Len(t, cfg.Upstream, 4)
 	assert.Contains(t, cfg.Upstream, "0")
 	assert.Contains(t, cfg.Upstream, "1")
 	assert.Contains(t, cfg.Upstream, "2")
+	assert.Contains(t, cfg.Upstream, "3")
+	assert.NotNil(t, cfg.Upstream["3"].SendClientInfo)
 
 	assert.Len(t, cfg.Listener, 2)
 	assert.Contains(t, cfg.Listener, "0")
@@ -42,6 +44,8 @@ func TestLoadConfig(t *testing.T) {
 	assert.Len(t, cfg.Listener["0"].Policy.Rules, 2)
 	assert.Contains(t, cfg.Listener["0"].Policy.Rules[0], "*.ru")
 	assert.Contains(t, cfg.Listener["0"].Policy.Rules[1], "*.local.host")
+
+	assert.True(t, cfg.HasUpstreamSendClientInfo())
 }
 
 func TestLoadDefaultConfig(t *testing.T) {

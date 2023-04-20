@@ -139,6 +139,9 @@ func (p *prog) Stop(s service.Service) error {
 		return err
 	}
 	p.preStop()
+	if err := router.Stop(); err != nil {
+		mainLog.Warn().Err(err).Msg("problem occurred while stopping router")
+	}
 	mainLog.Info().Msg("Service stopped")
 	close(p.stopCh)
 	return nil

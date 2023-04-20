@@ -19,6 +19,10 @@ func setupOpenWrt() error {
 		return err
 	}
 	// Disable dnsmasq as DNS server.
+	dnsMasqConfigContent, err := dnsMasqConf()
+	if err != nil {
+		return err
+	}
 	if err := os.WriteFile(openwrtDNSMasqConfigPath, []byte(dnsMasqConfigContent), 0600); err != nil {
 		return err
 	}

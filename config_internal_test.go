@@ -147,6 +147,28 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				Timeout:     0,
 			},
 		},
+		{
+			"doh+doh3 with send client info set",
+			&UpstreamConfig{
+				Name:           "doh",
+				Type:           "doh",
+				Endpoint:       "https://example.com?k=v",
+				BootstrapIP:    "",
+				Domain:         "",
+				Timeout:        0,
+				SendClientInfo: ptrBool(false),
+			},
+			&UpstreamConfig{
+				Name:           "doh",
+				Type:           "doh",
+				Endpoint:       "https://example.com?k=v",
+				BootstrapIP:    "",
+				Domain:         "example.com",
+				Timeout:        0,
+				SendClientInfo: ptrBool(false),
+				u:              u2,
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -157,4 +179,8 @@ func TestUpstreamConfig_Init(t *testing.T) {
 			assert.Equal(t, tc.expected, tc.uc)
 		})
 	}
+}
+
+func ptrBool(b bool) *bool {
+	return &b
 }

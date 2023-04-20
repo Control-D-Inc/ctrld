@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"sync"
 	"sync/atomic"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -25,7 +27,10 @@ var ErrNotSupported = errors.New("unsupported platform")
 var routerPlatform atomic.Pointer[router]
 
 type router struct {
-	name string
+	name           string
+	sendClientInfo bool
+	mac            sync.Map
+	watcher        *fsnotify.Watcher
 }
 
 // SupportedPlatforms return all platforms that can be configured to run with ctrld.
@@ -33,18 +38,37 @@ func SupportedPlatforms() []string {
 	return []string{DDWrt, Merlin, OpenWrt, Ubios}
 }
 
+var configureFunc = map[string]func() error{
+	DDWrt:   setupDDWrt,
+	Merlin:  setupMerlin,
+	OpenWrt: setupOpenWrt,
+	Ubios:   setupUbiOS,
+}
+
 // Configure configures things for running ctrld on the router.
 func Configure(c *ctrld.Config) error {
 	name := Name()
 	switch name {
-	case DDWrt:
-		return setupDDWrt()
-	case Merlin:
-		return setupMerlin()
-	case OpenWrt:
-		return setupOpenWrt()
-	case Ubios:
-		return setupUbiOS()
+	case DDWrt, Merlin, OpenWrt, Ubios:
+		if c.HasUpstreamSendClientInfo() {
+			r := routerPlatform.Load()
+			r.sendClientInfo = true
+			watcher, err := fsnotify.NewWatcher()
+			if err != nil {
+				return err
+			}
+			r.watcher = watcher
+			go r.watchClientInfoTable()
+			for _, file := range clientInfoFiles {
+				_ = readClientInfoFile(file)
+				_ = r.watcher.Add(file)
+			}
+		}
+		configure := configureFunc[name]
+		if err := configure(); err != nil {
+			return err
+		}
+		return nil
 	default:
 		return ErrNotSupported
 	}

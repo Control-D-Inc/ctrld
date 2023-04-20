@@ -80,6 +80,17 @@ type Config struct {
 	Upstream map[string]*UpstreamConfig `mapstructure:"upstream" toml:"upstream" validate:"min=1,dive"`
 }
 
+// HasUpstreamSendClientInfo reports whether the config has any upstream
+// is configured to send client info to Control D DNS server.
+func (c *Config) HasUpstreamSendClientInfo() bool {
+	for _, uc := range c.Upstream {
+		if uc.UpstreamSendClientInfo() {
+			return true
+		}
+	}
+	return false
+}
+
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
 	LogLevel         string `mapstructure:"log_level" toml:"log_level,omitempty"`
@@ -101,12 +112,15 @@ type NetworkConfig struct {
 
 // UpstreamConfig specifies configuration for upstreams that ctrld will forward requests to.
 type UpstreamConfig struct {
-	Name              string            `mapstructure:"name" toml:"name,omitempty"`
-	Type              string            `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy"`
-	Endpoint          string            `mapstructure:"endpoint" toml:"endpoint,omitempty" validate:"required_unless=Type os"`
-	BootstrapIP       string            `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
-	Domain            string            `mapstructure:"-" toml:"-"`
-	Timeout           int               `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
+	Name        string `mapstructure:"name" toml:"name,omitempty"`
+	Type        string `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy"`
+	Endpoint    string `mapstructure:"endpoint" toml:"endpoint,omitempty" validate:"required_unless=Type os"`
+	BootstrapIP string `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
+	Domain      string `mapstructure:"-" toml:"-"`
+	Timeout     int    `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
+	// The caller should not access this field directly.
+	// Use UpstreamSendClientInfo instead.
+	SendClientInfo    *bool             `mapstructure:"send_client_info" toml:"send_client_info,omitempty"`
 	transport         *http.Transport   `mapstructure:"-" toml:"-"`
 	http3RoundTripper http.RoundTripper `mapstructure:"-" toml:"-"`
 	certPool          *x509.CertPool    `mapstructure:"-" toml:"-"`
@@ -161,6 +175,34 @@ func (uc *UpstreamConfig) Init() {
 	if net.ParseIP(uc.Domain) != nil {
 		uc.BootstrapIP = uc.Domain
 	}
+}
+
+// UpstreamSendClientInfo reports whether the upstream is
+// configured to send client info to Control D DNS server.
+//
+// Client info includes:
+//   - MAC
+//   - Lan IP
+//   - Hostname
+func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
+	if uc.SendClientInfo != nil && !(*uc.SendClientInfo) {
+		return false
+	}
+	if uc.SendClientInfo == nil {
+		return true
+	}
+	switch uc.Type {
+	case ResolverTypeDOH, ResolverTypeDOH3:
+		if u, err := url.Parse(uc.Endpoint); err == nil {
+			domain := u.Hostname()
+			for _, parent := range []string{"controld.com", "controld.net"} {
+				if dns.IsSubDomain(parent, domain) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // SetCertPool sets the system cert pool used for TLS connections.

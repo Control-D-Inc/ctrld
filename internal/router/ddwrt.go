@@ -20,9 +20,9 @@ https://wiki.dd-wrt.com/wiki/index.php/Journalling_Flash_File_System
 `)
 
 var nvramKeys = map[string]string{
-	"dns_dnsmasq":     "1",                  // Make dnsmasq running but disable DNS ability, ctrld will replace it.
-	"dnsmasq_options": dnsMasqConfigContent, // Configuration of dnsmasq set by ctrld.
-	"dns_crypt":       "0",                  // Disable DNSCrypt.
+	"dns_dnsmasq":     "1", // Make dnsmasq running but disable DNS ability, ctrld will replace it.
+	"dnsmasq_options": "",  // Configuration of dnsmasq set by ctrld, filled by setupDDWrt.
+	"dns_crypt":       "0", // Disable DNSCrypt.
 }
 
 func setupDDWrt() error {
@@ -31,6 +31,11 @@ func setupDDWrt() error {
 		return nil
 	}
 
+	data, err := dnsMasqConf()
+	if err != nil {
+		return err
+	}
+	nvramKeys["dnsmasq_options"] = data
 	// Backup current value, store ctrld's configs.
 	for key, value := range nvramKeys {
 		old, err := nvram("get", key)

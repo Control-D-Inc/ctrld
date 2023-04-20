@@ -19,6 +19,10 @@ func setupMerlin() error {
 		return err
 	}
 
+	merlinDNSMasqPostConf, err := dnsMasqConf()
+	if err != nil {
+		return err
+	}
 	data := strings.Join([]string{
 		merlinDNSMasqPostConf,
 		"\n",
@@ -38,7 +42,7 @@ func setupMerlin() error {
 }
 
 func cleanupMerlin() error {
-	buf, err := os.ReadFile(merlinDNSMasqPostConf)
+	buf, err := os.ReadFile(merlinDNSMasqPostConfPath)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}

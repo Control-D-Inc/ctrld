@@ -9,7 +9,7 @@ import (
 func Test_merlinParsePostConf(t *testing.T) {
 	origContent := "# foo"
 	data := strings.Join([]string{
-		merlinDNSMasqPostConf,
+		merlinDNSMasqPostConfTmpl,
 		"\n",
 		merlinDNSMasqPostConfMarker,
 		"\n",
