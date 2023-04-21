@@ -138,6 +138,7 @@ func (p *prog) Stop(s service.Service) error {
 		mainLog.Error().Err(err).Msg("de-allocate ip failed")
 		return err
 	}
+	p.preStop()
 	mainLog.Info().Msg("Service stopped")
 	close(p.stopCh)
 	return nil

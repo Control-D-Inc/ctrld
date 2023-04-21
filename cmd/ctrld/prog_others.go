@@ -1,4 +1,4 @@
-//go:build !linux && !freebsd
+//go:build !linux && !freebsd && !darwin
 
 package main
 
@@ -12,3 +12,5 @@ func setWorkingDirectory(svc *service.Config, dir string) {
 	// WorkingDirectory is not supported on Windows.
 	svc.WorkingDirectory = dir
 }
+
+func (p *prog) preStop() {}
