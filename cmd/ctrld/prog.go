@@ -74,7 +74,7 @@ func (p *prog) run() {
 		uc.Init()
 		if uc.BootstrapIP == "" {
 			uc.SetupBootstrapIP()
-			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
+			mainLog.Info().Msgf("Bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
 		} else {
 			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap IP for upstream.%s", n)
 		}

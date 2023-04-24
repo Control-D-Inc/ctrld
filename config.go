@@ -205,6 +205,10 @@ func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
 	return false
 }
 
+func (uc *UpstreamConfig) BootstrapIPs() []string {
+	return uc.bootstrapIPs
+}
+
 // SetCertPool sets the system cert pool used for TLS connections.
 func (uc *UpstreamConfig) SetCertPool(cp *x509.CertPool) {
 	uc.certPool = cp
@@ -220,19 +224,6 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
 	uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, withBootstrapDNS)
-	for _, ip := range uc.bootstrapIPs {
-		if uc.BootstrapIP == "" {
-			// Remember what's the current IP in bootstrap IPs list,
-			// so we can select next one upon re-bootstrapping.
-			uc.nextBootstrapIP.Add(1)
-
-			// If this is an ipv6, and ipv6 is not available, don't use it as bootstrap ip.
-			if !ctrldnet.SupportsIPv6() && ctrldnet.IsIPv6(ip) {
-				continue
-			}
-			uc.BootstrapIP = ip
-		}
-	}
 	ProxyLog.Debug().Msgf("Bootstrap IPs: %v", uc.bootstrapIPs)
 }
 
@@ -245,32 +236,7 @@ func (uc *UpstreamConfig) ReBootstrap() {
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
 		ProxyLog.Debug().Msg("re-bootstrapping upstream ip")
-		n := uint32(len(uc.bootstrapIPs))
-		if n == 0 {
-			uc.SetupBootstrapIP()
-			uc.setupTransportWithoutPingUpstream()
-		}
-
-		timeoutMs := 1000
-		if uc.Timeout > 0 && uc.Timeout < timeoutMs {
-			timeoutMs = uc.Timeout
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
-		defer cancel()
-
-		hasIPv6 := ctrldnet.IPv6Available(ctx)
-		// Only attempt n times, because if there's no usable ip,
-		// the bootstrap ip will be kept as-is.
-		for i := uint32(0); i < n; i++ {
-			// Select the next ip in bootstrap ip list.
-			next := uc.nextBootstrapIP.Add(1)
-			ip := uc.bootstrapIPs[(next-1)%n]
-			if !hasIPv6 && ctrldnet.IsIPv6(ip) {
-				continue
-			}
-			uc.BootstrapIP = ip
-			break
-		}
+		uc.BootstrapIP = ""
 		uc.setupTransportWithoutPingUpstream()
 		return true, nil
 	})
@@ -312,18 +278,26 @@ func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
 	}
 	dialerTimeout := time.Duration(dialerTimeoutMs) * time.Millisecond
 	uc.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		dialer := &net.Dialer{
-			Timeout:   dialerTimeout,
-			KeepAlive: dialerTimeout,
-		}
-		// if we have a bootstrap ip set, use it to avoid DNS lookup
+		_, port, _ := net.SplitHostPort(addr)
 		if uc.BootstrapIP != "" {
-			if _, port, _ := net.SplitHostPort(addr); port != "" {
-				addr = net.JoinHostPort(uc.BootstrapIP, port)
-			}
+			dialer := net.Dialer{Timeout: dialerTimeout, KeepAlive: dialerTimeout}
+			addr := net.JoinHostPort(uc.BootstrapIP, port)
+			Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
+			return dialer.DialContext(ctx, network, addr)
 		}
-		Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
-		return dialer.DialContext(ctx, network, addr)
+		pd := &ctrldnet.ParallelDialer{}
+		pd.Timeout = dialerTimeout
+		pd.KeepAlive = dialerTimeout
+		addrs := make([]string, len(uc.bootstrapIPs))
+		for i := range uc.bootstrapIPs {
+			addrs[i] = net.JoinHostPort(uc.bootstrapIPs[i], port)
+		}
+		conn, err := pd.DialContext(ctx, network, addrs)
+		if err != nil {
+			return nil, err
+		}
+		Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", conn.RemoteAddr())
+		return conn, nil
 	}
 }
 
@@ -372,21 +346,6 @@ func defaultPortFor(typ string) string {
 		return "53"
 	}
 	return "53"
-}
-
-func availableNameservers() []string {
-	nss := nameservers()
-	n := 0
-	for _, ns := range nss {
-		ip, _, _ := net.SplitHostPort(ns)
-		// skipping invalid entry or ipv6 nameserver if ipv6 not available.
-		if ip == "" || (ctrldnet.IsIPv6(ip) && !ctrldnet.SupportsIPv6()) {
-			continue
-		}
-		nss[n] = ns
-		n++
-	}
-	return nss[:n]
 }
 
 // ResolverTypeFromEndpoint tries guessing the resolver type with a given endpoint

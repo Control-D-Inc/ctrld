@@ -13,7 +13,6 @@ import (
 
 const (
 	controldIPv6Test = "ipv6.controld.io"
-	controldIPv4Test = "ipv4.controld.io"
 	bootstrapDNS     = "76.76.2.0:53"
 )
 
@@ -38,7 +37,6 @@ var probeStackDialer = &net.Dialer{
 
 var (
 	stackOnce          atomic.Pointer[sync.Once]
-	ipv6Enabled        bool
 	canListenIPv6Local bool
 	hasNetworkUp       bool
 )
@@ -47,13 +45,8 @@ func init() {
 	stackOnce.Store(new(sync.Once))
 }
 
-func supportIPv4() bool {
-	_, err := probeStackDialer.Dial("tcp4", net.JoinHostPort(controldIPv4Test, "80"))
-	return err == nil
-}
-
 func supportIPv6(ctx context.Context) bool {
-	_, err := probeStackDialer.DialContext(ctx, "tcp6", net.JoinHostPort(controldIPv6Test, "80"))
+	_, err := probeStackDialer.DialContext(ctx, "tcp6", net.JoinHostPort(controldIPv6Test, "443"))
 	return err == nil
 }
 
@@ -75,18 +68,12 @@ func probeStack() {
 			b.BackOff(context.Background(), err)
 		}
 	}
-	ipv6Enabled = supportIPv6(context.Background())
 	canListenIPv6Local = supportListenIPv6Local()
 }
 
 func Up() bool {
 	stackOnce.Load().Do(probeStack)
 	return hasNetworkUp
-}
-
-func SupportsIPv6() bool {
-	stackOnce.Load().Do(probeStack)
-	return ipv6Enabled
 }
 
 func SupportsIPv6ListenLocal() bool {

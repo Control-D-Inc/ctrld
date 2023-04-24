@@ -131,7 +131,7 @@ func LookupIP(domain string) []string {
 }
 
 func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) {
-	resolver := &osResolver{nameservers: availableNameservers()}
+	resolver := &osResolver{nameservers: nameservers()}
 	if withBootstrapDNS {
 		resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
 	}
