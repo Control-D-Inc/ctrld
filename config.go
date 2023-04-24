@@ -177,70 +177,19 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 // SetupBootstrapIP manually find all available IPs of the upstream.
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
-	bootstrapIP := func(record dns.RR) string {
-		switch ar := record.(type) {
-		case *dns.A:
-			return ar.A.String()
-		case *dns.AAAA:
-			return ar.AAAA.String()
-		}
-		return ""
-	}
+	uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, withBootstrapDNS)
+	for _, ip := range uc.bootstrapIPs {
+		if uc.BootstrapIP == "" {
+			// Remember what's the current IP in bootstrap IPs list,
+			// so we can select next one upon re-bootstrapping.
+			uc.nextBootstrapIP.Add(1)
 
-	resolver := &osResolver{nameservers: availableNameservers()}
-	if withBootstrapDNS {
-		resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
-	}
-	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", uc.Domain, resolver.nameservers)
-	timeoutMs := 2000
-	if uc.Timeout > 0 && uc.Timeout < timeoutMs {
-		timeoutMs = uc.Timeout
-	}
-	do := func(dnsType uint16) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
-		defer cancel()
-		m := new(dns.Msg)
-		m.SetQuestion(uc.Domain+".", dnsType)
-		m.RecursionDesired = true
-
-		r, err := resolver.Resolve(ctx, m)
-		if err != nil {
-			ProxyLog.Error().Err(err).Str("type", dns.TypeToString[dnsType]).Msgf("could not resolve domain %s for upstream", uc.Domain)
-			return
-		}
-		if r.Rcode != dns.RcodeSuccess {
-			ProxyLog.Error().Msgf("could not resolve domain %q, return code: %s", uc.Domain, dns.RcodeToString[r.Rcode])
-			return
-		}
-		if len(r.Answer) == 0 {
-			ProxyLog.Error().Msg("no answer from bootstrap DNS server")
-			return
-		}
-		for _, a := range r.Answer {
-			ip := bootstrapIP(a)
-			if ip == "" {
+			// If this is an ipv6, and ipv6 is not available, don't use it as bootstrap ip.
+			if !ctrldnet.SupportsIPv6() && ctrldnet.IsIPv6(ip) {
 				continue
 			}
-
-			// Storing the ip to uc.bootstrapIPs list, so it can be selected later
-			// when retrying failed request due to network stack changed.
-			uc.bootstrapIPs = append(uc.bootstrapIPs, ip)
-			if uc.BootstrapIP == "" {
-				// Remember what's the current IP in bootstrap IPs list,
-				// so we can select next one upon re-bootstrapping.
-				uc.nextBootstrapIP.Add(1)
-
-				// If this is an ipv6, and ipv6 is not available, don't use it as bootstrap ip.
-				if !ctrldnet.SupportsIPv6() && ctrldnet.IsIPv6(ip) {
-					continue
-				}
-				uc.BootstrapIP = ip
-			}
+			uc.BootstrapIP = ip
 		}
-	}
-	// Find all A, AAAA records of the upstream.
-	for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
-		do(dnsType)
 	}
 	ProxyLog.Debug().Msgf("Bootstrap IPs: %v", uc.bootstrapIPs)
 }

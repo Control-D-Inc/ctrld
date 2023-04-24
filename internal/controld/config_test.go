@@ -9,8 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const utilityURL = "https://api.controld.com/utility"
-
 func TestFetchResolverConfig(t *testing.T) {
 	tests := []struct {
 		name    string

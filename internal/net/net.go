@@ -2,6 +2,7 @@ package net
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -37,7 +38,6 @@ var probeStackDialer = &net.Dialer{
 
 var (
 	stackOnce          atomic.Pointer[sync.Once]
-	ipv4Enabled        bool
 	ipv6Enabled        bool
 	canListenIPv6Local bool
 	hasNetworkUp       bool
@@ -75,7 +75,6 @@ func probeStack() {
 			b.BackOff(context.Background(), err)
 		}
 	}
-	ipv4Enabled = supportIPv4()
 	ipv6Enabled = supportIPv6(context.Background())
 	canListenIPv6Local = supportListenIPv6Local()
 }
@@ -83,11 +82,6 @@ func probeStack() {
 func Up() bool {
 	stackOnce.Load().Do(probeStack)
 	return hasNetworkUp
-}
-
-func SupportsIPv4() bool {
-	stackOnce.Load().Do(probeStack)
-	return ipv4Enabled
 }
 
 func SupportsIPv6() bool {
@@ -111,4 +105,48 @@ func IPv6Available(ctx context.Context) bool {
 func IsIPv6(ip string) bool {
 	parsedIP := net.ParseIP(ip)
 	return parsedIP != nil && parsedIP.To4() == nil && parsedIP.To16() != nil
+}
+
+type parallelDialerResult struct {
+	conn net.Conn
+	err  error
+}
+
+type ParallelDialer struct {
+	net.Dialer
+}
+
+func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs []string) (net.Conn, error) {
+	if len(addrs) == 0 {
+		return nil, errors.New("empty addresses")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	ch := make(chan *parallelDialerResult, len(addrs))
+	var wg sync.WaitGroup
+	wg.Add(len(addrs))
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	for _, addr := range addrs {
+		go func(addr string) {
+			defer wg.Done()
+			conn, err := d.Dialer.DialContext(ctx, network, addr)
+			ch <- &parallelDialerResult{conn: conn, err: err}
+		}(addr)
+	}
+
+	errs := make([]error, 0, len(addrs))
+	for res := range ch {
+		if res.err == nil {
+			cancel()
+			return res.conn, res.err
+		}
+		errs = append(errs, res.err)
+	}
+
+	return nil, errors.Join(errs...)
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -79,7 +80,7 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	for _, server := range o.nameservers {
 		go func(server string) {
 			defer wg.Done()
-			answer, _, err := dnsClient.ExchangeContext(ctx, msg, server)
+			answer, _, err := dnsClient.ExchangeContext(ctx, msg.Copy(), server)
 			ch <- &osResolverResult{answer: answer, err: err}
 		}(server)
 	}
@@ -121,4 +122,63 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 	}
 	answer, _, err := dnsClient.ExchangeContext(ctx, msg, r.endpoint)
 	return answer, err
+}
+
+// LookupIP looks up host using OS resolver.
+// It returns a slice of that host's IPv4 and IPv6 addresses.
+func LookupIP(domain string) []string {
+	return lookupIP(domain, -1, true)
+}
+
+func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) {
+	resolver := &osResolver{nameservers: availableNameservers()}
+	if withBootstrapDNS {
+		resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
+	}
+	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", domain, resolver.nameservers)
+	timeoutMs := 2000
+	if timeout > 0 && timeout < timeoutMs {
+		timeoutMs = timeoutMs
+	}
+	ipFromRecord := func(record dns.RR) string {
+		switch ar := record.(type) {
+		case *dns.A:
+			return ar.A.String()
+		case *dns.AAAA:
+			return ar.AAAA.String()
+		}
+		return ""
+	}
+
+	lookup := func(dnsType uint16) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+		defer cancel()
+		m := new(dns.Msg)
+		m.SetQuestion(domain+".", dnsType)
+		m.RecursionDesired = true
+
+		r, err := resolver.Resolve(ctx, m)
+		if err != nil {
+			ProxyLog.Error().Err(err).Msgf("could not lookup %q record for domain %q", dns.TypeToString[dnsType], domain)
+			return
+		}
+		if r.Rcode != dns.RcodeSuccess {
+			ProxyLog.Error().Msgf("could not resolve domain %q, return code: %s", domain, dns.RcodeToString[r.Rcode])
+			return
+		}
+		if len(r.Answer) == 0 {
+			ProxyLog.Error().Msg("no answer from OS resolver")
+			return
+		}
+		for _, a := range r.Answer {
+			if ip := ipFromRecord(a); ip != "" {
+				ips = append(ips, ip)
+			}
+		}
+	}
+	// Find all A, AAAA records of the domain.
+	for _, dnsType := range []uint16{dns.TypeAAAA, dns.TypeA} {
+		lookup(dnsType)
+	}
+	return ips
 }

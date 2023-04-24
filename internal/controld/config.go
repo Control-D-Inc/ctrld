@@ -8,10 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"sync"
 	"time"
-
-	"github.com/miekg/dns"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/certs"
@@ -23,11 +20,6 @@ const (
 	apiDomain         = "api.controld.com"
 	resolverDataURL   = "https://api.controld.com/utility"
 	InvalidConfigCode = 40401
-)
-
-var (
-	resolveAPIDomainOnce sync.Once
-	apiDomainIP          string
 )
 
 // ResolverConfig represents Control D resolver data.
@@ -71,51 +63,19 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 	req.Header.Add("Content-Type", "application/json")
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		// We experiment hanging in TLS handshake when connecting to ControlD API
-		// with ipv6. So prefer ipv4 if available.
-		proto := "tcp6"
-		if ctrldnet.SupportsIPv4() {
-			proto = "tcp4"
+		ips := ctrld.LookupIP(apiDomain)
+		if len(ips) == 0 {
+			ctrld.ProxyLog.Warn().Msgf("No IPs found for %s, connecting to %s", apiDomain, addr)
+			return ctrldnet.Dialer.DialContext(ctx, network, addr)
 		}
-		resolveAPIDomainOnce.Do(func() {
-			r, err := ctrld.NewResolver(&ctrld.UpstreamConfig{Type: ctrld.ResolverTypeOS})
-			if err != nil {
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-
-			msg := new(dns.Msg)
-			dnsType := dns.TypeAAAA
-			if proto == "tcp4" {
-				dnsType = dns.TypeA
-			}
-			msg.SetQuestion(apiDomain+".", dnsType)
-			msg.RecursionDesired = true
-			answer, err := r.Resolve(ctx, msg)
-			if err != nil {
-				return
-			}
-			if answer.Rcode != dns.RcodeSuccess || len(answer.Answer) == 0 {
-				return
-			}
-			for _, record := range answer.Answer {
-				switch ar := record.(type) {
-				case *dns.A:
-					apiDomainIP = ar.A.String()
-					return
-				case *dns.AAAA:
-					apiDomainIP = ar.AAAA.String()
-					return
-				}
-			}
-		})
-		if apiDomainIP != "" {
-			if _, port, _ := net.SplitHostPort(addr); port != "" {
-				return ctrldnet.Dialer.DialContext(ctx, proto, net.JoinHostPort(apiDomainIP, port))
-			}
+		ctrld.ProxyLog.Debug().Msgf("API IPs: %v", ips)
+		_, port, _ := net.SplitHostPort(addr)
+		addrs := make([]string, len(ips))
+		for i := range ips {
+			addrs[i] = net.JoinHostPort(ips[i], port)
 		}
-		return ctrldnet.Dialer.DialContext(ctx, proto, addr)
+		d := &ctrldnet.ParallelDialer{}
+		return d.DialContext(ctx, network, addrs)
 	}
 
 	if router.Name() == router.DDWrt {

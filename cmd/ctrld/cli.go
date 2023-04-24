@@ -78,7 +78,7 @@ var rootCmd = &cobra.Command{
 }
 
 func curVersion() string {
-	if version != "dev" {
+	if version != "dev" && !strings.HasPrefix(version, "v") {
 		version = "v" + version
 	}
 	if len(commit) > 7 {
