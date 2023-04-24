@@ -13,12 +13,11 @@ import (
 )
 
 const (
-	DoHMacHeader  = "Dns-Mac"
-	DoHIPHeader   = "Dns-IP"
-	DoHHostHeader = "Dns-Host"
+	DoHMacHeader  = "x-cd-mac"
+	DoHIPHeader   = "x-cd-ip"
+	DoHHostHeader = "x-cd-host"
 
-	headerContentTypeValue = "application/dns-message"
-	headerAcceptValue      = "application/dns-message"
+	headerApplicationDNS = "application/dns-message"
 )
 
 func newDohResolver(uc *UpstreamConfig) *dohResolver {
@@ -90,8 +89,8 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 }
 
 func addHeader(ctx context.Context, req *http.Request, sendClientInfo bool) {
-	req.Header.Set("Content-Type", headerContentTypeValue)
-	req.Header.Set("Accept", headerAcceptValue)
+	req.Header.Set("Content-Type", headerApplicationDNS)
+	req.Header.Set("Accept", headerApplicationDNS)
 	if sendClientInfo {
 		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
 			if ci.Mac != "" {
