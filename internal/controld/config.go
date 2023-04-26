@@ -24,7 +24,10 @@ const (
 
 // ResolverConfig represents Control D resolver data.
 type ResolverConfig struct {
-	DOH     string   `json:"doh"`
+	DOH   string `json:"doh"`
+	Ctrld struct {
+		CustomConfig string `json:"custom_config"`
+	} `json:"ctrld"`
 	Exclude []string `json:"exclude"`
 }
 

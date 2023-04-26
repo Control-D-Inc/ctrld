@@ -162,7 +162,7 @@ func initCLI() {
 				}
 			}
 
-			readBase64Config()
+			readBase64Config(configBase64)
 			processNoConfigFlags(noConfigStart)
 			if err := v.Unmarshal(&cfg); err != nil {
 				log.Fatalf("failed to unmarshal config: %v", err)
@@ -607,7 +607,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	return false
 }
 
-func readBase64Config() {
+func readBase64Config(configBase64 string) {
 	if configBase64 == "" {
 		return
 	}
@@ -701,34 +701,42 @@ func processCDFlags() {
 		return
 	}
 
-	logger.Info().Msg("generating ctrld config from Controld-D configuration")
-	cfg = ctrld.Config{}
-	cfg.Network = make(map[string]*ctrld.NetworkConfig)
-	cfg.Network["0"] = &ctrld.NetworkConfig{
-		Name:  "Network 0",
-		Cidrs: []string{"0.0.0.0/0"},
-	}
-	cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
-	cfg.Upstream["0"] = &ctrld.UpstreamConfig{
-		Endpoint: resolverConfig.DOH,
-		Type:     ctrld.ResolverTypeDOH,
-		Timeout:  5000,
-	}
-	rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
-	for _, domain := range resolverConfig.Exclude {
-		rules = append(rules, ctrld.Rule{domain: []string{}})
-	}
-	cfg.Listener = make(map[string]*ctrld.ListenerConfig)
-	cfg.Listener["0"] = &ctrld.ListenerConfig{
-		IP:   "127.0.0.1",
-		Port: 53,
-		Policy: &ctrld.ListenerPolicyConfig{
-			Name:  "My Policy",
-			Rules: rules,
-		},
+	logger.Info().Msg("generating ctrld config from Control-D configuration")
+	if resolverConfig.Ctrld.CustomConfig != "" {
+		logger.Info().Msg("using defined custom config of Control-D resolver")
+		readBase64Config(resolverConfig.Ctrld.CustomConfig)
+		if err := v.Unmarshal(&cfg); err != nil {
+			log.Fatalf("failed to unmarshal config: %v", err)
+		}
+	} else {
+		cfg = ctrld.Config{}
+		cfg.Network = make(map[string]*ctrld.NetworkConfig)
+		cfg.Network["0"] = &ctrld.NetworkConfig{
+			Name:  "Network 0",
+			Cidrs: []string{"0.0.0.0/0"},
+		}
+		cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
+		cfg.Upstream["0"] = &ctrld.UpstreamConfig{
+			Endpoint: resolverConfig.DOH,
+			Type:     ctrld.ResolverTypeDOH,
+			Timeout:  5000,
+		}
+		rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
+		for _, domain := range resolverConfig.Exclude {
+			rules = append(rules, ctrld.Rule{domain: []string{}})
+		}
+		cfg.Listener = make(map[string]*ctrld.ListenerConfig)
+		cfg.Listener["0"] = &ctrld.ListenerConfig{
+			IP:   "127.0.0.1",
+			Port: 53,
+			Policy: &ctrld.ListenerPolicyConfig{
+				Name:  "My Policy",
+				Rules: rules,
+			},
+		}
+		processLogAndCacheFlags()
 	}
 
-	processLogAndCacheFlags()
 	if err := writeConfigFile(); err != nil {
 		logger.Fatal().Err(err).Msg("failed to write config file")
 	} else {
