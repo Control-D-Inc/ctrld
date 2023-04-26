@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"log"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -82,6 +83,10 @@ func readClientInfoFile(name string) error {
 		fields := bytes.Fields(line)
 		mac := string(fields[1])
 		ip := normalizeIP(string(fields[2]))
+		if net.ParseIP(ip) == nil {
+			log.Printf("invalid ip address entry: %q", ip)
+			ip = ""
+		}
 		hostname := string(fields[3])
 		r.mac.Store(mac, &ctrld.ClientInfo{Mac: mac, IP: ip, Hostname: hostname})
 		return nil
