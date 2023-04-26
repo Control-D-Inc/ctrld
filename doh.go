@@ -85,7 +85,10 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	}
 
 	answer := new(dns.Msg)
-	return answer, answer.Unpack(buf)
+	if err := answer.Unpack(buf); err != nil {
+		return nil, fmt.Errorf("answer.Unpack: %w", err)
+	}
+	return answer, nil
 }
 
 func addHeader(ctx context.Context, req *http.Request, sendClientInfo bool) {
