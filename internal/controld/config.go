@@ -51,7 +51,7 @@ type utilityRequest struct {
 }
 
 // FetchResolverConfig fetch Control D config for given uid.
-func FetchResolverConfig(uid string) (*ResolverConfig, error) {
+func FetchResolverConfig(uid, version string) (*ResolverConfig, error) {
 	body, _ := json.Marshal(utilityRequest{UID: uid})
 	req, err := http.NewRequest("POST", resolverDataURL, bytes.NewReader(body))
 	if err != nil {
@@ -59,6 +59,7 @@ func FetchResolverConfig(uid string) (*ResolverConfig, error) {
 	}
 	q := req.URL.Query()
 	q.Set("platform", "ctrld")
+	q.Set("version", version)
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/json")
 	transport := http.DefaultTransport.(*http.Transport).Clone()

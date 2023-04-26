@@ -669,7 +669,7 @@ func processCDFlags() {
 	}
 	logger := mainLog.With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
-	resolverConfig, err := controld.FetchResolverConfig(cdUID)
+	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version)
 	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
 		s, err := service.New(&prog{}, svcConfig)
 		if err != nil {

@@ -22,7 +22,7 @@ func TestFetchResolverConfig(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := FetchResolverConfig(tc.uid)
+			got, err := FetchResolverConfig(tc.uid, "dev-test")
 			require.False(t, (err != nil) != tc.wantErr, err)
 			if !tc.wantErr {
 				assert.NotEmpty(t, got.DOH)
