@@ -608,10 +608,17 @@ func readConfigFile(writeDefaultConfig bool) bool {
 
 	// If error is viper.ConfigFileNotFoundError, write default config.
 	if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+		if err := v.Unmarshal(&cfg); err != nil {
+			log.Fatalf("failed to unmarshal default config: %v", err)
+		}
 		if err := writeConfigFile(); err != nil {
 			log.Fatalf("failed to write default config file: %v", err)
 		} else {
-			log.Println("writing default config file to: " + defaultConfigFile)
+			fp, err := filepath.Abs(defaultConfigFile)
+			if err != nil {
+				log.Fatalf("failed to get default config file path: %v", err)
+			}
+			log.Println("writing default config file to: " + fp)
 		}
 		defaultConfigWritten = true
 		return false
