@@ -133,8 +133,8 @@ type UpstreamConfig struct {
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
 type ListenerConfig struct {
-	IP         string                `mapstructure:"ip" toml:"ip,omitempty" validate:"ip"`
-	Port       int                   `mapstructure:"port" toml:"port,omitempty" validate:"gt=0"`
+	IP         string                `mapstructure:"ip" toml:"ip,omitempty" validate:"iporempty"`
+	Port       int                   `mapstructure:"port" toml:"port,omitempty" validate:"gte=0"`
 	Restricted bool                  `mapstructure:"restricted" toml:"restricted,omitempty"`
 	Policy     *ListenerPolicyConfig `mapstructure:"policy" toml:"policy,omitempty"`
 }
@@ -329,11 +329,20 @@ func (lc *ListenerConfig) Init() {
 // ValidateConfig validates the given config.
 func ValidateConfig(validate *validator.Validate, cfg *Config) error {
 	_ = validate.RegisterValidation("dnsrcode", validateDnsRcode)
+	_ = validate.RegisterValidation("iporempty", validateIpOrEmpty)
 	return validate.Struct(cfg)
 }
 
 func validateDnsRcode(fl validator.FieldLevel) bool {
 	return dnsrcode.FromString(fl.Field().String()) != -1
+}
+
+func validateIpOrEmpty(fl validator.FieldLevel) bool {
+	val := fl.Field().String()
+	if val == "" {
+		return true
+	}
+	return net.ParseIP(val) != nil
 }
 
 func defaultPortFor(typ string) string {

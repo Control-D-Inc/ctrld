@@ -271,16 +271,14 @@ The `[listener]` section specifies the ip and port of the local DNS server. You 
 ```
 
 ### ip
-IP address that serves the incoming requests.
+IP address that serves the incoming requests. If `ip` is empty, ctrld will listen on all available addresses.
 
-- Type: string
-- Required: yes
+- Type: ip address
 
 ### port
-Port number that the listener will listen on for incoming requests.
+Port number that the listener will listen on for incoming requests. If `port` is `0`, a random available port will be chosen.
 
 - Type: number
-- Required: yes
 
 ### restricted
 If set to `true` makes the listener `REFUSE` DNS queries from all source IP addresses that are not explicitly defined in the policy using a `network`. 

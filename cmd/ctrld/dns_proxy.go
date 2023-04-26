@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -72,40 +73,37 @@ func (p *prog) serveDNS(listenerNum string) error {
 	g, ctx := errgroup.WithContext(context.Background())
 	for _, proto := range []string{"udp", "tcp"} {
 		proto := proto
-		// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
-		// listen on ::1, then spawn a listener for receiving DNS requests.
 		if needLocalIPv6Listener() {
 			g.Go(func() error {
-				s := &dns.Server{
-					Addr:    net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)),
-					Net:     proto,
-					Handler: handler,
-				}
-				go func() {
-					<-ctx.Done()
-					_ = s.Shutdown()
-				}()
-				if err := s.ListenAndServe(); err != nil {
-					mainLog.Error().Err(err).Msg("could not serving on ::1")
+				s, errCh := runDNSServer(net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)), proto, handler)
+				defer s.Shutdown()
+				select {
+				case <-ctx.Done():
+				case err := <-errCh:
+					// Local ipv6 listener should not terminate ctrld.
+					// It's a workaround for a quirk on Windows.
+					mainLog.Warn().Err(err).Msg("local ipv6 listener failed")
 				}
 				return nil
 			})
 		}
 		g.Go(func() error {
-			s := &dns.Server{
-				Addr:    dnsListenAddress(listenerConfig),
-				Net:     proto,
-				Handler: handler,
+			s, errCh := runDNSServer(dnsListenAddress(listenerConfig), proto, handler)
+			defer s.Shutdown()
+			if listenerConfig.Port == 0 {
+				switch s.Net {
+				case "udp":
+					mainLog.Info().Msgf("Random port chosen for udp listener.%s: %s", listenerNum, s.PacketConn.LocalAddr())
+				case "tcp":
+					mainLog.Info().Msgf("Random port chosen for tcp listener.%s: %s", listenerNum, s.Listener.Addr())
+				}
 			}
-			go func() {
-				<-ctx.Done()
-				_ = s.Shutdown()
-			}()
-			if err := s.ListenAndServe(); err != nil {
-				mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
+			select {
+			case <-ctx.Done():
+				return nil
+			case err := <-errCh:
 				return err
 			}
-			return nil
 		})
 	}
 	return g.Wait()
@@ -389,6 +387,8 @@ func ttlFromMsg(msg *dns.Msg) uint32 {
 }
 
 func needLocalIPv6Listener() bool {
+	// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
+	// listen on ::1, then spawn a listener for receiving DNS requests.
 	return ctrldnet.SupportsIPv6ListenLocal() && runtime.GOOS == "windows"
 }
 
@@ -411,4 +411,32 @@ func macFromMsg(msg *dns.Msg) string {
 		}
 	}
 	return ""
+}
+
+// runDNSServer starts a DNS server for given address and network,
+// with the given handler. It ensures the server has started listening.
+// Any error will be reported to the caller via returned channel.
+//
+// It's the caller responsibility to call Shutdown to close the server.
+func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-chan error) {
+	s := &dns.Server{
+		Addr:    addr,
+		Net:     network,
+		Handler: handler,
+	}
+
+	waitLock := sync.Mutex{}
+	waitLock.Lock()
+	s.NotifyStartedFunc = waitLock.Unlock
+
+	errCh := make(chan error)
+	go func() {
+		defer close(errCh)
+		if err := s.ListenAndServe(); err != nil {
+			mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
+			errCh <- err
+		}
+	}()
+	waitLock.Lock()
+	return s, errCh
 }

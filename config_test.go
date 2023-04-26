@@ -65,6 +65,7 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid Config", &ctrld.Config{}, true},
 		{"default Config", defaultConfig(t), false},
 		{"sample Config", testhelper.SampleConfig(t), false},
+		{"empty listener IP", emptyListenerIP(t), false},
 		{"invalid cidr", invalidNetworkConfig(t), true},
 		{"invalid upstream type", invalidUpstreamType(t), true},
 		{"invalid upstream timeout", invalidUpstreamTimeout(t), true},
@@ -134,9 +135,15 @@ func invalidListenerIP(t *testing.T) *ctrld.Config {
 	return cfg
 }
 
+func emptyListenerIP(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Listener["0"].IP = ""
+	return cfg
+}
+
 func invalidListenerPort(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
-	cfg.Listener["0"].Port = 0
+	cfg.Listener["0"].Port = -1
 	return cfg
 }
 
