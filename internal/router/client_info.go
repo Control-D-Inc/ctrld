@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -80,9 +81,18 @@ func readClientInfoFile(name string) error {
 	return lineread.File(name, func(line []byte) error {
 		fields := bytes.Fields(line)
 		mac := string(fields[1])
-		ip := string(fields[2])
+		ip := normalizeIP(string(fields[2]))
 		hostname := string(fields[3])
 		r.mac.Store(mac, &ctrld.ClientInfo{Mac: mac, IP: ip, Hostname: hostname})
 		return nil
 	})
+}
+
+func normalizeIP(in string) string {
+	// dnsmasq may put ip with interface index in lease file, strip it here.
+	ip, _, found := strings.Cut(in, "%")
+	if found {
+		return ip
+	}
+	return in
 }
