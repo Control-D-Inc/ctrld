@@ -27,7 +27,6 @@ var (
 	cfg               ctrld.Config
 	verbose           int
 	cdUID             string
-	noCD              bool
 	iface             string
 	ifaceStartStop    string
 	setupRouter       bool

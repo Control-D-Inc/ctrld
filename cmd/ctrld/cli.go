@@ -37,13 +37,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
-const (
-	selfCheckFQDN      = "verify.controld.com"
-	cdModeConfigHeader = `# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY
-# TO DISABLE AUTO-GENERATION RUN: ctrld service start --no-cd
-
-`
-)
+const selfCheckFQDN = "verify.controld.com"
 
 var (
 	version = "dev"
@@ -246,7 +240,6 @@ func initCLI() {
 	runCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	runCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
-	runCmd.Flags().BoolVarP(&noCD, "no-cd", "", false, `Disable cd mode, the same effect with --cd=""`)
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
@@ -299,12 +292,6 @@ func initCLI() {
 			initLogging()
 			cfg.Service.LogPath = logPath
 
-			if noCD {
-				cdUID = ""
-				if err := writeConfigFile(); err != nil {
-					log.Fatalf("failed to overwrite config file with --no-cd: %v", err)
-				}
-			}
 			processCDFlags()
 
 			// Explicitly passing config, so on system where home directory could not be obtained,
@@ -362,7 +349,6 @@ func initCLI() {
 	startCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
-	startCmd.Flags().BoolVarP(&noCD, "no-cd", "", false, `Disable cd mode, the same effect with --cd=""`)
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmd.Flags().BoolVarP(&setupRouter, "router", "", false, `setup for running on router platforms`)
 	_ = startCmd.Flags().MarkHidden("router")
@@ -579,7 +565,7 @@ func writeConfigFile() error {
 	}
 	defer f.Close()
 	if cdUID != "" {
-		if _, err := f.WriteString(cdModeConfigHeader); err != nil {
+		if _, err := f.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n"); err != nil {
 			return err
 		}
 	}
