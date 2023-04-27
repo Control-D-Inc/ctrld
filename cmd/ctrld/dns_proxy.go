@@ -237,6 +237,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		if upstreamConfig.UpstreamSendClientInfo() {
 			ci := router.GetClientInfoByMac(macFromMsg(msg))
 			if ci != nil {
+				ctrld.Log(ctx, mainLog.Debug(), "including client info with the request")
 				ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, ci)
 			}
 		}

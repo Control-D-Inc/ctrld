@@ -107,4 +107,5 @@ func addHeader(ctx context.Context, req *http.Request, sendClientInfo bool) {
 			}
 		}
 	}
+	Log(ctx, ProxyLog.Debug().Interface("header", req.Header), "sending request header")
 }
