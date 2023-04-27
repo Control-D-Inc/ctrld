@@ -48,6 +48,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				BootstrapIP: "",
 				Domain:      "example.com",
 				Timeout:     0,
+				IPStack:     IpStackBoth,
 				u:           u1,
 			},
 		},
@@ -68,6 +69,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				BootstrapIP: "",
 				Domain:      "example.com",
 				Timeout:     0,
+				IPStack:     IpStackBoth,
 				u:           u2,
 			},
 		},
@@ -88,6 +90,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				BootstrapIP: "",
 				Domain:      "freedns.controld.com",
 				Timeout:     0,
+				IPStack:     IpStackSplit,
 			},
 		},
 		{
@@ -99,6 +102,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				BootstrapIP: "",
 				Domain:      "",
 				Timeout:     0,
+				IPStack:     IpStackSplit,
 			},
 			&UpstreamConfig{
 				Name:        "dot",
@@ -107,6 +111,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				BootstrapIP: "",
 				Domain:      "freedns.controld.com",
 				Timeout:     0,
+				IPStack:     IpStackSplit,
 			},
 		},
 		{
@@ -126,6 +131,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				BootstrapIP: "1.2.3.4",
 				Domain:      "1.2.3.4",
 				Timeout:     0,
+				IPStack:     IpStackBoth,
 			},
 		},
 		{
@@ -145,6 +151,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				BootstrapIP: "1.2.3.4",
 				Domain:      "1.2.3.4",
 				Timeout:     0,
+				IPStack:     IpStackBoth,
 			},
 		},
 		{
@@ -157,6 +164,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				Domain:         "",
 				Timeout:        0,
 				SendClientInfo: ptrBool(false),
+				IPStack:        IpStackBoth,
 			},
 			&UpstreamConfig{
 				Name:           "doh",
@@ -166,6 +174,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				Domain:         "example.com",
 				Timeout:        0,
 				SendClientInfo: ptrBool(false),
+				IPStack:        IpStackBoth,
 				u:              u2,
 			},
 		},

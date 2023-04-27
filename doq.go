@@ -20,11 +20,17 @@ type doqResolver struct {
 func (r *doqResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	endpoint := r.uc.Endpoint
 	tlsConfig := &tls.Config{NextProtos: []string{"doq"}}
-	if r.uc.BootstrapIP != "" {
-		tlsConfig.ServerName = r.uc.Domain
-		_, port, _ := net.SplitHostPort(endpoint)
-		endpoint = net.JoinHostPort(r.uc.BootstrapIP, port)
+	ip := r.uc.BootstrapIP
+	if ip == "" {
+		dnsTyp := uint16(0)
+		if len(msg.Question) > 0 {
+			dnsTyp = msg.Question[0].Qtype
+		}
+		ip = r.uc.bootstrapIPForDNSType(dnsTyp)
 	}
+	tlsConfig.ServerName = r.uc.Domain
+	_, port, _ := net.SplitHostPort(endpoint)
+	endpoint = net.JoinHostPort(ip, port)
 	return resolve(ctx, msg, endpoint, tlsConfig)
 }
 

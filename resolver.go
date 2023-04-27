@@ -34,7 +34,7 @@ var errUnknownResolver = errors.New("unknown resolver")
 
 // NewResolver creates a Resolver based on the given upstream config.
 func NewResolver(uc *UpstreamConfig) (Resolver, error) {
-	typ, endpoint := uc.Type, uc.Endpoint
+	typ := uc.Type
 	switch typ {
 	case ResolverTypeDOH, ResolverTypeDOH3:
 		return newDohResolver(uc), nil
@@ -45,7 +45,7 @@ func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 	case ResolverTypeOS:
 		return or, nil
 	case ResolverTypeLegacy:
-		return &legacyResolver{endpoint: endpoint}, nil
+		return &legacyResolver{uc: uc}, nil
 	}
 	return nil, fmt.Errorf("%w: %s", errUnknownResolver, typ)
 }
@@ -110,17 +110,22 @@ func newDialer(dnsAddress string) *net.Dialer {
 }
 
 type legacyResolver struct {
-	endpoint string
+	uc *UpstreamConfig
 }
 
 func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	// See comment in (*dotResolver).resolve method.
 	dialer := newDialer(net.JoinHostPort(bootstrapDNS, "53"))
+	dnsTyp := uint16(0)
+	if len(msg.Question) > 0 {
+		dnsTyp = msg.Question[0].Qtype
+	}
+	_, udpNet := r.uc.netForDNSType(dnsTyp)
 	dnsClient := &dns.Client{
-		Net:    "udp",
+		Net:    udpNet,
 		Dialer: dialer,
 	}
-	answer, _, err := dnsClient.ExchangeContext(ctx, msg, r.endpoint)
+	answer, _, err := dnsClient.ExchangeContext(ctx, msg, r.uc.Endpoint)
 	return answer, err
 }
 

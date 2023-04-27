@@ -14,13 +14,19 @@ type dotResolver struct {
 
 func (r *dotResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	// The dialer is used to prevent bootstrapping cycle.
-	// If r.endpoing is set to dns.controld.dev, we need to resolve
+	// If r.endpoint is set to dns.controld.dev, we need to resolve
 	// dns.controld.dev first. By using a dialer with custom resolver,
 	// we ensure that we can always resolve the bootstrap domain
 	// regardless of the machine DNS status.
 	dialer := newDialer(net.JoinHostPort(bootstrapDNS, "53"))
+	dnsTyp := uint16(0)
+	if len(msg.Question) > 0 {
+		dnsTyp = msg.Question[0].Qtype
+	}
+
+	tcpNet, _ := r.uc.netForDNSType(dnsTyp)
 	dnsClient := &dns.Client{
-		Net:       "tcp-tls",
+		Net:       tcpNet,
 		Dialer:    dialer,
 		TLSConfig: &tls.Config{RootCAs: r.uc.certPool},
 	}

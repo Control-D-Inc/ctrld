@@ -4,13 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -21,6 +21,15 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
+
+const (
+	IpStackBoth  = "both"
+	IpStackV4    = "v4"
+	IpStackV6    = "v6"
+	IpStackSplit = "split"
+)
+
+var controldParentDomains = []string{"controld.com", "controld.net", "controld.dev"}
 
 // SetConfigName set the config name that ctrld will look for.
 // DEPRECATED: use SetConfigNameWithPath instead.
@@ -118,19 +127,25 @@ type UpstreamConfig struct {
 	Endpoint    string `mapstructure:"endpoint" toml:"endpoint,omitempty" validate:"required_unless=Type os"`
 	BootstrapIP string `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
 	Domain      string `mapstructure:"-" toml:"-"`
+	IPStack     string `mapstructure:"ip_stack" toml:"ip_stack,omitempty" validate:"ipstack"`
 	Timeout     int    `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
 	// The caller should not access this field directly.
 	// Use UpstreamSendClientInfo instead.
-	SendClientInfo    *bool             `mapstructure:"send_client_info" toml:"send_client_info,omitempty"`
-	transport         *http.Transport   `mapstructure:"-" toml:"-"`
-	http3RoundTripper http.RoundTripper `mapstructure:"-" toml:"-"`
-	certPool          *x509.CertPool    `mapstructure:"-" toml:"-"`
-	u                 *url.URL          `mapstructure:"-" toml:"-"`
+	SendClientInfo *bool `mapstructure:"send_client_info" toml:"send_client_info,omitempty"`
 
-	g               singleflight.Group
-	mu              sync.Mutex
-	bootstrapIPs    []string
-	nextBootstrapIP atomic.Uint32
+	g                  singleflight.Group
+	mu                 sync.Mutex
+	bootstrapIPs       []string
+	bootstrapIPs4      []string
+	bootstrapIPs6      []string
+	transport          *http.Transport
+	transport4         *http.Transport
+	transport6         *http.Transport
+	http3RoundTripper  http.RoundTripper
+	http3RoundTripper4 http.RoundTripper
+	http3RoundTripper6 http.RoundTripper
+	certPool           *x509.CertPool
+	u                  *url.URL
 }
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
@@ -164,18 +179,23 @@ func (uc *UpstreamConfig) Init() {
 			uc.u = u
 		}
 	}
-	if uc.Domain != "" {
-		return
+	if uc.Domain == "" {
+		if !strings.Contains(uc.Endpoint, ":") {
+			uc.Domain = uc.Endpoint
+			uc.Endpoint = net.JoinHostPort(uc.Endpoint, defaultPortFor(uc.Type))
+		}
+		host, _, _ := net.SplitHostPort(uc.Endpoint)
+		uc.Domain = host
+		if net.ParseIP(uc.Domain) != nil {
+			uc.BootstrapIP = uc.Domain
+		}
 	}
-
-	if !strings.Contains(uc.Endpoint, ":") {
-		uc.Domain = uc.Endpoint
-		uc.Endpoint = net.JoinHostPort(uc.Endpoint, defaultPortFor(uc.Type))
-	}
-	host, _, _ := net.SplitHostPort(uc.Endpoint)
-	uc.Domain = host
-	if net.ParseIP(uc.Domain) != nil {
-		uc.BootstrapIP = uc.Domain
+	if uc.IPStack == "" {
+		if uc.isControlD() {
+			uc.IPStack = IpStackSplit
+		} else {
+			uc.IPStack = IpStackBoth
+		}
 	}
 }
 
@@ -195,13 +215,8 @@ func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
 	}
 	switch uc.Type {
 	case ResolverTypeDOH, ResolverTypeDOH3:
-		if u, err := url.Parse(uc.Endpoint); err == nil {
-			domain := u.Hostname()
-			for _, parent := range []string{"controld.com", "controld.net"} {
-				if dns.IsSubDomain(parent, domain) {
-					return true
-				}
-			}
+		if uc.isControlD() {
+			return true
 		}
 	}
 	return false
@@ -226,6 +241,13 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
 	uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, withBootstrapDNS)
+	for _, ip := range uc.bootstrapIPs {
+		if ctrldnet.IsIPv6(ip) {
+			uc.bootstrapIPs6 = append(uc.bootstrapIPs6, ip)
+		} else {
+			uc.bootstrapIPs4 = append(uc.bootstrapIPs4, ip)
+		}
+	}
 	ProxyLog.Debug().Msgf("Bootstrap IPs: %v", uc.bootstrapIPs)
 }
 
@@ -238,7 +260,6 @@ func (uc *UpstreamConfig) ReBootstrap() {
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
 		ProxyLog.Debug().Msg("re-bootstrapping upstream ip")
-		uc.BootstrapIP = ""
 		uc.setupTransportWithoutPingUpstream()
 		return true, nil
 	})
@@ -269,19 +290,17 @@ func (uc *UpstreamConfig) setupDOHTransport() {
 	uc.pingUpstream()
 }
 
-func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
-	uc.mu.Lock()
-	defer uc.mu.Unlock()
-	uc.transport = http.DefaultTransport.(*http.Transport).Clone()
-	uc.transport.IdleConnTimeout = 5 * time.Second
-	uc.transport.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
+func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.IdleConnTimeout = 5 * time.Second
+	transport.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
 
 	dialerTimeoutMs := 2000
 	if uc.Timeout > 0 && uc.Timeout < dialerTimeoutMs {
 		dialerTimeoutMs = uc.Timeout
 	}
 	dialerTimeout := time.Duration(dialerTimeoutMs) * time.Millisecond
-	uc.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		_, port, _ := net.SplitHostPort(addr)
 		if uc.BootstrapIP != "" {
 			dialer := net.Dialer{Timeout: dialerTimeout, KeepAlive: dialerTimeout}
@@ -292,16 +311,41 @@ func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
 		pd := &ctrldnet.ParallelDialer{}
 		pd.Timeout = dialerTimeout
 		pd.KeepAlive = dialerTimeout
-		addrs := make([]string, len(uc.bootstrapIPs))
-		for i := range uc.bootstrapIPs {
-			addrs[i] = net.JoinHostPort(uc.bootstrapIPs[i], port)
+		dialAddrs := make([]string, len(addrs))
+		for i := range addrs {
+			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
 		}
-		conn, err := pd.DialContext(ctx, network, addrs)
+		conn, err := pd.DialContext(ctx, network, dialAddrs)
 		if err != nil {
 			return nil, err
 		}
 		Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", conn.RemoteAddr())
 		return conn, nil
+	}
+	return transport
+}
+
+func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
+	uc.mu.Lock()
+	defer uc.mu.Unlock()
+	switch uc.IPStack {
+	case IpStackBoth, "":
+		uc.transport = uc.newDOHTransport(uc.bootstrapIPs)
+	case IpStackV4:
+		uc.transport = uc.newDOHTransport(uc.bootstrapIPs4)
+	case IpStackV6:
+		uc.transport = uc.newDOHTransport(uc.bootstrapIPs6)
+	case IpStackSplit:
+		uc.transport4 = uc.newDOHTransport(uc.bootstrapIPs4)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if ctrldnet.IPv6Available(ctx) {
+			uc.transport6 = uc.newDOHTransport(uc.bootstrapIPs6)
+		} else {
+			uc.transport6 = uc.transport4
+		}
+
+		uc.transport = uc.newDOHTransport(uc.bootstrapIPs)
 	}
 }
 
@@ -320,6 +364,74 @@ func (uc *UpstreamConfig) pingUpstream() {
 	_, _ = dnsResolver.Resolve(ctx, msg)
 }
 
+func (uc *UpstreamConfig) isControlD() bool {
+	domain := uc.Domain
+	if domain == "" {
+		if u, err := url.Parse(uc.Endpoint); err == nil {
+			domain = u.Hostname()
+		}
+	}
+	for _, parent := range controldParentDomains {
+		if dns.IsSubDomain(parent, domain) {
+			return true
+		}
+	}
+	return false
+}
+
+func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
+	switch uc.IPStack {
+	case IpStackBoth, IpStackV4, IpStackV6:
+		return uc.transport
+	case IpStackSplit:
+		switch dnsType {
+		case dns.TypeA:
+			return uc.transport4
+		default:
+			return uc.transport6
+		}
+	}
+	return uc.transport
+}
+
+func (uc *UpstreamConfig) bootstrapIPForDNSType(dnsType uint16) string {
+	switch uc.IPStack {
+	case IpStackBoth:
+		return pick(uc.bootstrapIPs)
+	case IpStackV4:
+		return pick(uc.bootstrapIPs4)
+	case IpStackV6:
+		return pick(uc.bootstrapIPs6)
+	case IpStackSplit:
+		switch dnsType {
+		case dns.TypeA:
+			return pick(uc.bootstrapIPs4)
+		default:
+			return pick(uc.bootstrapIPs6)
+		}
+	}
+	return pick(uc.bootstrapIPs)
+}
+
+func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
+	switch uc.IPStack {
+	case IpStackBoth:
+		return "tcp-tls", "udp"
+	case IpStackV4:
+		return "tcp4-tls", "udp4"
+	case IpStackV6:
+		return "tcp6-tls", "udp6"
+	case IpStackSplit:
+		switch dnsType {
+		case dns.TypeA:
+			return "tcp4-tls", "udp4"
+		default:
+			return "tcp6-tls", "udp6"
+		}
+	}
+	return "tcp-tls", "udp"
+}
+
 // Init initialized necessary values for an ListenerConfig.
 func (lc *ListenerConfig) Init() {
 	if lc.Policy != nil {
@@ -333,12 +445,22 @@ func (lc *ListenerConfig) Init() {
 // ValidateConfig validates the given config.
 func ValidateConfig(validate *validator.Validate, cfg *Config) error {
 	_ = validate.RegisterValidation("dnsrcode", validateDnsRcode)
+	_ = validate.RegisterValidation("ipstack", validateIpStack)
 	_ = validate.RegisterValidation("iporempty", validateIpOrEmpty)
 	return validate.Struct(cfg)
 }
 
 func validateDnsRcode(fl validator.FieldLevel) bool {
 	return dnsrcode.FromString(fl.Field().String()) != -1
+}
+
+func validateIpStack(fl validator.FieldLevel) bool {
+	switch fl.Field().String() {
+	case IpStackBoth, IpStackV4, IpStackV6, IpStackSplit, "":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateIpOrEmpty(fl validator.FieldLevel) bool {
@@ -383,4 +505,8 @@ func ResolverTypeFromEndpoint(endpoint string) string {
 		return ResolverTypeLegacy
 	}
 	return ResolverTypeDOT
+}
+
+func pick(s []string) string {
+	return s[rand.Intn(len(s))]
 }

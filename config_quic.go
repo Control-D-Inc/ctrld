@@ -7,10 +7,15 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"net/http"
 	"sync"
+	"time"
 
+	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 func (uc *UpstreamConfig) setupDOH3Transport() {
@@ -18,9 +23,7 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 	uc.pingUpstream()
 }
 
-func (uc *UpstreamConfig) setupDOH3TransportWithoutPingUpstream() {
-	uc.mu.Lock()
-	defer uc.mu.Unlock()
+func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 	rt := &http3.RoundTripper{}
 	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
@@ -40,20 +43,57 @@ func (uc *UpstreamConfig) setupDOH3TransportWithoutPingUpstream() {
 			}
 			return quic.DialEarlyContext(ctx, udpConn, remoteAddr, domain, tlsCfg, cfg)
 		}
-		addrs := make([]string, len(uc.bootstrapIPs))
-		for i := range uc.bootstrapIPs {
-			addrs[i] = net.JoinHostPort(uc.bootstrapIPs[i], port)
+		dialAddrs := make([]string, len(addrs))
+		for i := range addrs {
+			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
 		}
 		pd := &quicParallelDialer{}
-		conn, err := pd.Dial(ctx, domain, addrs, tlsCfg, cfg)
+		conn, err := pd.Dial(ctx, domain, dialAddrs, tlsCfg, cfg)
 		if err != nil {
 			return nil, err
 		}
 		ProxyLog.Debug().Msgf("sending doh3 request to: %s", conn.RemoteAddr())
 		return conn, err
 	}
+	return rt
+}
 
-	uc.http3RoundTripper = rt
+func (uc *UpstreamConfig) setupDOH3TransportWithoutPingUpstream() {
+	uc.mu.Lock()
+	defer uc.mu.Unlock()
+	switch uc.IPStack {
+	case IpStackBoth, "":
+		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
+	case IpStackV4:
+		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs4)
+	case IpStackV6:
+		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs6)
+	case IpStackSplit:
+		uc.http3RoundTripper4 = uc.newDOH3Transport(uc.bootstrapIPs4)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if ctrldnet.IPv6Available(ctx) {
+			uc.http3RoundTripper6 = uc.newDOH3Transport(uc.bootstrapIPs6)
+		} else {
+			uc.http3RoundTripper6 = uc.http3RoundTripper4
+		}
+		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
+	}
+}
+
+func (uc *UpstreamConfig) doh3Transport(dnsType uint16) http.RoundTripper {
+	switch uc.IPStack {
+	case IpStackBoth, IpStackV4, IpStackV6:
+		return uc.http3RoundTripper
+	case IpStackSplit:
+		switch dnsType {
+		case dns.TypeA:
+			return uc.http3RoundTripper4
+		default:
+			return uc.http3RoundTripper6
+		}
+	}
+	return uc.http3RoundTripper
 }
 
 // Putting the code for quic parallel dialer here:

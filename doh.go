@@ -36,12 +36,12 @@ func newDohResolver(uc *UpstreamConfig) *dohResolver {
 }
 
 type dohResolver struct {
+	uc                *UpstreamConfig
 	endpoint          *url.URL
 	isDoH3            bool
 	transport         *http.Transport
 	http3RoundTripper http.RoundTripper
 	sendClientInfo    bool
-	uc                *UpstreamConfig
 }
 
 func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
@@ -61,18 +61,22 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 		return nil, fmt.Errorf("could not create request: %w", err)
 	}
 	addHeader(ctx, req, r.sendClientInfo)
-
-	c := http.Client{Transport: r.transport}
+	dnsTyp := uint16(0)
+	if len(msg.Question) > 0 {
+		dnsTyp = msg.Question[0].Qtype
+	}
+	c := http.Client{Transport: r.uc.dohTransport(dnsTyp)}
 	if r.isDoH3 {
-		if r.http3RoundTripper == nil {
+		transport := r.uc.doh3Transport(dnsTyp)
+		if transport == nil {
 			return nil, errors.New("DoH3 is not supported")
 		}
-		c.Transport = r.http3RoundTripper
+		c.Transport = transport
 	}
 	resp, err := c.Do(req)
 	if err != nil {
 		if r.isDoH3 {
-			if closer, ok := r.http3RoundTripper.(io.Closer); ok {
+			if closer, ok := c.Transport.(io.Closer); ok {
 				closer.Close()
 			}
 		}
