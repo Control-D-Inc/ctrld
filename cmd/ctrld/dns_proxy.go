@@ -434,6 +434,7 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 	go func() {
 		defer close(errCh)
 		if err := s.ListenAndServe(); err != nil {
+			waitLock.Unlock()
 			mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
 			errCh <- err
 		}
