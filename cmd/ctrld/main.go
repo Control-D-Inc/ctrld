@@ -86,9 +86,12 @@ func initLogging() {
 	// TODO: find a better way.
 	ctrld.ProxyLog = mainLog
 
-	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	zerolog.SetGlobalLevel(zerolog.WarnLevel)
 	logLevel := cfg.Service.LogLevel
-	if verbose > 1 {
+	switch {
+	case verbose == 1:
+		logLevel = "info"
+	case verbose > 1:
 		logLevel = "debug"
 	}
 	if logLevel == "" {
