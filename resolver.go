@@ -140,11 +140,18 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 	if timeout > 0 && timeout < timeoutMs {
 		timeoutMs = timeoutMs
 	}
+	questionDomain := dns.Fqdn(domain)
 	ipFromRecord := func(record dns.RR) string {
 		switch ar := record.(type) {
 		case *dns.A:
+			if ar.Hdr.Name != questionDomain {
+				return ""
+			}
 			return ar.A.String()
 		case *dns.AAAA:
+			if ar.Hdr.Name != questionDomain {
+				return ""
+			}
 			return ar.AAAA.String()
 		}
 		return ""
@@ -154,7 +161,7 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 		defer cancel()
 		m := new(dns.Msg)
-		m.SetQuestion(domain+".", dnsType)
+		m.SetQuestion(questionDomain, dnsType)
 		m.RecursionDesired = true
 
 		r, err := resolver.Resolve(ctx, m)
