@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -127,6 +128,7 @@ type UpstreamConfig struct {
 	u                 *url.URL          `mapstructure:"-" toml:"-"`
 
 	g               singleflight.Group
+	mu              sync.Mutex
 	bootstrapIPs    []string
 	nextBootstrapIP atomic.Uint32
 }
@@ -268,6 +270,8 @@ func (uc *UpstreamConfig) setupDOHTransport() {
 }
 
 func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
+	uc.mu.Lock()
+	defer uc.mu.Unlock()
 	uc.transport = http.DefaultTransport.(*http.Transport).Clone()
 	uc.transport.IdleConnTimeout = 5 * time.Second
 	uc.transport.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}

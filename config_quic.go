@@ -19,6 +19,8 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 }
 
 func (uc *UpstreamConfig) setupDOH3TransportWithoutPingUpstream() {
+	uc.mu.Lock()
+	defer uc.mu.Unlock()
 	rt := &http3.RoundTripper{}
 	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {

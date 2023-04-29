@@ -21,6 +21,7 @@ require (
 	github.com/spf13/cobra v1.4.0
 	github.com/spf13/viper v1.14.0
 	github.com/stretchr/testify v1.8.1
+	github.com/vishvananda/netlink v1.1.1-0.20211118161826-650dca95af54
 	golang.org/x/net v0.7.0
 	golang.org/x/sync v0.1.0
 	golang.org/x/sys v0.5.0
@@ -65,6 +66,7 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/subosito/gotenv v1.4.1 // indirect
 	github.com/u-root/uio v0.0.0-20221213070652-c3537552635f // indirect
+	github.com/vishvananda/netns v0.0.0-20211101163701-50045581ed74 // indirect
 	go4.org/mem v0.0.0-20210711025021-927187094b94 // indirect
 	golang.org/x/crypto v0.6.0 // indirect
 	golang.org/x/exp v0.0.0-20221205204356-47842c84f3db // indirect
