@@ -23,7 +23,7 @@ func (r *doqResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	ip := r.uc.BootstrapIP
 	if ip == "" {
 		dnsTyp := uint16(0)
-		if len(msg.Question) > 0 {
+		if msg != nil && len(msg.Question) > 0 {
 			dnsTyp = msg.Question[0].Qtype
 		}
 		ip = r.uc.bootstrapIPForDNSType(dnsTyp)

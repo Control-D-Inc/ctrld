@@ -20,7 +20,7 @@ func (r *dotResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	// regardless of the machine DNS status.
 	dialer := newDialer(net.JoinHostPort(bootstrapDNS, "53"))
 	dnsTyp := uint16(0)
-	if len(msg.Question) > 0 {
+	if msg != nil && len(msg.Question) > 0 {
 		dnsTyp = msg.Question[0].Qtype
 	}
 
