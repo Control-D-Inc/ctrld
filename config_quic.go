@@ -82,6 +82,8 @@ func (uc *UpstreamConfig) setupDOH3TransportWithoutPingUpstream() {
 }
 
 func (uc *UpstreamConfig) doh3Transport(dnsType uint16) http.RoundTripper {
+	uc.mu.Lock()
+	defer uc.mu.Unlock()
 	switch uc.IPStack {
 	case IpStackBoth, IpStackV4, IpStackV6:
 		return uc.http3RoundTripper

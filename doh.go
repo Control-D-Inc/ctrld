@@ -21,13 +21,9 @@ const (
 )
 
 func newDohResolver(uc *UpstreamConfig) *dohResolver {
-	uc.mu.Lock()
-	transport := uc.transport
-	uc.mu.Unlock()
 	r := &dohResolver{
 		endpoint:          uc.u,
 		isDoH3:            uc.Type == ResolverTypeDOH3,
-		transport:         transport,
 		http3RoundTripper: uc.http3RoundTripper,
 		sendClientInfo:    uc.UpstreamSendClientInfo(),
 		uc:                uc,
@@ -39,7 +35,6 @@ type dohResolver struct {
 	uc                *UpstreamConfig
 	endpoint          *url.URL
 	isDoH3            bool
-	transport         *http.Transport
 	http3RoundTripper http.RoundTripper
 	sendClientInfo    bool
 }

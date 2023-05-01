@@ -380,6 +380,8 @@ func (uc *UpstreamConfig) isControlD() bool {
 }
 
 func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
+	uc.mu.Lock()
+	defer uc.mu.Unlock()
 	switch uc.IPStack {
 	case IpStackBoth, IpStackV4, IpStackV6:
 		return uc.transport
