@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"math/rand"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"golang.org/x/sync/singleflight"
+	"tailscale.com/logtail/backoff"
 
 	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
@@ -240,7 +242,15 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 // SetupBootstrapIP manually find all available IPs of the upstream.
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
-	uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, withBootstrapDNS)
+	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 2*time.Second)
+	for {
+		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, withBootstrapDNS)
+		if len(uc.bootstrapIPs) > 0 {
+			break
+		}
+		ProxyLog.Warn().Msg("could not resolve bootstrap IPs, retrying...")
+		b.BackOff(context.Background(), errors.New("no bootstrap IPs"))
+	}
 	for _, ip := range uc.bootstrapIPs {
 		if ctrldnet.IsIPv6(ip) {
 			uc.bootstrapIPs6 = append(uc.bootstrapIPs6, ip)
