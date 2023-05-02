@@ -20,7 +20,7 @@ import (
 
 func (uc *UpstreamConfig) setupDOH3Transport() {
 	uc.setupDOH3TransportWithoutPingUpstream()
-	uc.pingUpstream()
+	go uc.pingUpstream()
 }
 
 func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {

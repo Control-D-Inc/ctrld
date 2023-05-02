@@ -297,7 +297,7 @@ func (uc *UpstreamConfig) SetupTransport() {
 
 func (uc *UpstreamConfig) setupDOHTransport() {
 	uc.setupDOHTransportWithoutPingUpstream()
-	uc.pingUpstream()
+	go uc.pingUpstream()
 }
 
 func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
