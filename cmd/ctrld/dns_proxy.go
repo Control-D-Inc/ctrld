@@ -257,6 +257,9 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		return answer
 	}
 	for n, upstreamConfig := range upstreamConfigs {
+		if upstreamConfig == nil {
+			continue
+		}
 		answer := resolve(n, upstreamConfig, msg)
 		if answer == nil {
 			if serveStaleCache && staleAnswer != nil {

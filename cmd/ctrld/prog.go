@@ -91,8 +91,7 @@ func (p *prog) run() {
 			listenerConfig := p.cfg.Listener[listenerNum]
 			upstreamConfig := p.cfg.Upstream[listenerNum]
 			if upstreamConfig == nil {
-				mainLog.Error().Msgf("missing upstream config for: [listener.%s]", listenerNum)
-				return
+				mainLog.Warn().Msgf("no default upstream for: [listener.%s]", listenerNum)
 			}
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 			mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, addr)
