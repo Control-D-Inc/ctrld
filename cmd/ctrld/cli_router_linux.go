@@ -46,6 +46,7 @@ func initRouterCLI() {
 			case router.DDWrt, router.Merlin, router.OpenWrt, router.Ubios:
 			default:
 				unsupportedPlatformHelp(cmd)
+				os.Exit(1)
 			}
 			exe, err := os.Executable()
 			if err != nil {

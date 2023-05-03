@@ -70,7 +70,7 @@ func initConsoleLogging() {
 	case verbose > 1:
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	default:
-		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+		zerolog.SetGlobalLevel(zerolog.NoticeLevel)
 	}
 }
 
@@ -99,7 +99,7 @@ func initLogging() {
 	// TODO: find a better way.
 	ctrld.ProxyLog = mainLog
 
-	zerolog.SetGlobalLevel(zerolog.WarnLevel)
+	zerolog.SetGlobalLevel(zerolog.NoticeLevel)
 	logLevel := cfg.Service.LogLevel
 	switch {
 	case verbose == 1:

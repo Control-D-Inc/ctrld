@@ -3,7 +3,7 @@ module github.com/Control-D-Inc/ctrld
 go 1.20
 
 require (
-	github.com/coreos/go-systemd/v22 v22.3.3-0.20220203105225-a9a7ef127534
+	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/cuonglm/osinfo v0.0.0-20230329055532-c513f836da19
 	github.com/frankban/quicktest v1.14.3
 	github.com/fsnotify/fsnotify v1.6.0
@@ -77,3 +77,7 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/mr-karan/doggo => github.com/Windscribe/doggo v0.0.0-20220919152748-2c118fc391f8
+
+replace github.com/rs/zerolog => github.com/Windscribe/zerolog v0.0.0-20230503170159-e6aa153233be

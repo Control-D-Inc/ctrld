@@ -335,7 +335,7 @@ func initCLI() {
 				status = selfCheckStatus(status)
 				switch status {
 				case service.StatusRunning:
-					mainLog.Warn().Msg("Service started")
+					mainLog.Notice().Msg("Service started")
 				default:
 					mainLog.Error().Msg("Service did not start, please check system/service log for details error")
 					if runtime.GOOS == "linux" {
@@ -379,7 +379,7 @@ func initCLI() {
 			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
 				prog.resetDNS()
-				mainLog.Warn().Msg("Service stopped")
+				mainLog.Notice().Msg("Service stopped")
 			}
 		},
 	}
@@ -401,7 +401,7 @@ func initCLI() {
 			}
 			initLogging()
 			if doTasks([]task{{s.Restart, true}}) {
-				mainLog.Warn().Msg("Service restarted")
+				mainLog.Notice().Msg("Service restarted")
 			}
 		},
 	}
@@ -426,13 +426,13 @@ func initCLI() {
 			}
 			switch status {
 			case service.StatusUnknown:
-				mainLog.Warn().Msg("Unknown status")
+				mainLog.Notice().Msg("Unknown status")
 				os.Exit(2)
 			case service.StatusRunning:
-				mainLog.Warn().Msg("Service is running")
+				mainLog.Notice().Msg("Service is running")
 				os.Exit(0)
 			case service.StatusStopped:
-				mainLog.Warn().Msg("Service is stopped")
+				mainLog.Notice().Msg("Service is stopped")
 				os.Exit(1)
 			}
 		},
@@ -477,7 +477,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				if err := router.Cleanup(); err != nil {
 					mainLog.Warn().Err(err).Msg("could not cleanup router")
 				}
-				mainLog.Warn().Msg("Service uninstalled")
+				mainLog.Notice().Msg("Service uninstalled")
 				return
 			}
 		},
@@ -887,7 +887,7 @@ func selfCheckStatus(status service.Status) service.Status {
 }
 
 func unsupportedPlatformHelp(cmd *cobra.Command) {
-	cmd.PrintErrln("Unsupported or incorrectly chosen router platform. Please open an issue and provide all relevant information: https://github.com/Control-D-Inc/ctrld/issues/new")
+	mainLog.Error().Msg("Unsupported or incorrectly chosen router platform. Please open an issue and provide all relevant information: https://github.com/Control-D-Inc/ctrld/issues/new")
 }
 
 func userHomeDir() (string, error) {
