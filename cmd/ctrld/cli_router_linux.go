@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,6 +26,9 @@ func initRouterCLI() {
 	routerCmd := &cobra.Command{
 		Use:   "setup",
 		Short: b.String(),
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(args) == 0 {
 				_ = cmd.Help()
@@ -47,7 +49,7 @@ func initRouterCLI() {
 			}
 			exe, err := os.Executable()
 			if err != nil {
-				log.Fatal(err)
+				mainLog.Fatal().Msgf("could not find executable path: %v", err)
 				os.Exit(1)
 			}
 
@@ -59,7 +61,7 @@ func initRouterCLI() {
 			command.Stderr = os.Stderr
 			command.Stdin = os.Stdin
 			if err := command.Run(); err != nil {
-				log.Fatal(err)
+				mainLog.Fatal().Msg(err.Error())
 			}
 		},
 	}

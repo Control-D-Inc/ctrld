@@ -3,21 +3,11 @@ package main
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 
 	"github.com/kardianos/service"
-	"github.com/spf13/cobra"
 )
-
-func stderrMsg(msg string) {
-	_, _ = fmt.Fprintln(os.Stderr, msg)
-}
-
-func stdoutMsg(msg string) {
-	_, _ = fmt.Fprintln(os.Stdout, msg)
-}
 
 type task struct {
 	f            func() error
@@ -29,7 +19,7 @@ func doTasks(tasks []task) bool {
 	for _, task := range tasks {
 		if err := task.f(); err != nil {
 			if task.abortOnError {
-				stderrMsg(errors.Join(prevErr, err).Error())
+				mainLog.Error().Msg(errors.Join(prevErr, err).Error())
 				return false
 			}
 			prevErr = err
@@ -38,14 +28,14 @@ func doTasks(tasks []task) bool {
 	return true
 }
 
-func checkHasElevatedPrivilege(cmd *cobra.Command, args []string) {
+func checkHasElevatedPrivilege() {
 	ok, err := hasElevatedPrivilege()
 	if err != nil {
-		fmt.Printf("could not detect user privilege: %v", err)
+		mainLog.Error().Msgf("could not detect user privilege: %v", err)
 		return
 	}
 	if !ok {
-		fmt.Println("Please relaunch process with admin/root privilege.")
+		mainLog.Error().Msg("Please relaunch process with admin/root privilege.")
 		os.Exit(1)
 	}
 }

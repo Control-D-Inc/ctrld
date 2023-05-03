@@ -2,7 +2,6 @@ package main
 
 import (
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,7 +30,8 @@ var (
 	ifaceStartStop    string
 	setupRouter       bool
 
-	mainLog = zerolog.New(io.Discard)
+	mainLog       = zerolog.New(io.Discard)
+	consoleWriter zerolog.ConsoleWriter
 )
 
 func main() {
@@ -39,7 +39,7 @@ func main() {
 	initCLI()
 	initRouterCLI()
 	if err := rootCmd.Execute(); err != nil {
-		stderrMsg(err.Error())
+		mainLog.Error().Msg(err.Error())
 		os.Exit(1)
 	}
 }
@@ -58,28 +58,41 @@ func normalizeLogFilePath(logFilePath string) string {
 	return filepath.Join(dir, logFilePath)
 }
 
+func initConsoleLogging() {
+	consoleWriter = zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
+		w.TimeFormat = time.StampMilli
+	})
+	multi := zerolog.MultiLevelWriter(consoleWriter)
+	mainLog = mainLog.Output(multi).With().Timestamp().Logger()
+	switch {
+	case verbose == 1:
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	case verbose > 1:
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	default:
+		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+	}
+}
+
 func initLogging() {
 	writers := []io.Writer{io.Discard}
 	if logFilePath := normalizeLogFilePath(cfg.Service.LogPath); logFilePath != "" {
 		// Create parent directory if necessary.
 		if err := os.MkdirAll(filepath.Dir(logFilePath), 0750); err != nil {
-			log.Printf("failed to create log path: %v", err)
+			mainLog.Error().Msgf("failed to create log path: %v", err)
 			os.Exit(1)
 		}
 		// Backup old log file with .1 suffix.
 		if err := os.Rename(logFilePath, logFilePath+".1"); err != nil && !os.IsNotExist(err) {
-			log.Printf("could not backup old log file: %v", err)
+			mainLog.Error().Msgf("could not backup old log file: %v", err)
 		}
 		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_RDWR, os.FileMode(0o600))
 		if err != nil {
-			log.Printf("failed to create log file: %v", err)
+			mainLog.Error().Msgf("failed to create log file: %v", err)
 			os.Exit(1)
 		}
 		writers = append(writers, logFile)
 	}
-	consoleWriter := zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
-		w.TimeFormat = time.StampMilli
-	})
 	writers = append(writers, consoleWriter)
 	multi := zerolog.MultiLevelWriter(writers...)
 	mainLog = mainLog.Output(multi).With().Timestamp().Logger()
