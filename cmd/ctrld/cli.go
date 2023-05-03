@@ -146,26 +146,7 @@ func initCLI() {
 			}
 			noConfigStart := isNoConfigStart(cmd)
 			writeDefaultConfig := !noConfigStart && configBase64 == ""
-			configs := []struct {
-				name    string
-				written bool
-			}{
-				// For compatibility, we check for config.toml first, but only read it if exists.
-				{"config", false},
-				{"ctrld", writeDefaultConfig},
-			}
-
-			dir, err := userHomeDir()
-			if err != nil {
-				mainLog.Fatal().Msgf("failed to get config dir: %v", err)
-			}
-			for _, config := range configs {
-				ctrld.SetConfigNameWithPath(v, config.name, dir)
-				v.SetConfigFile(configPath)
-				if readConfigFile(config.written) {
-					break
-				}
-			}
+			tryReadingConfig(writeDefaultConfig)
 
 			readBase64Config(configBase64)
 			processNoConfigFlags(noConfigStart)
@@ -285,12 +266,12 @@ func initCLI() {
 				setWorkingDirectory(sc, dir)
 				if configPath == "" && writeDefaultConfig {
 					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
-					v.SetConfigFile(defaultConfigFile)
 				}
 				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
 			}
 
-			readConfigFile(writeDefaultConfig && cdUID == "")
+			tryReadingConfig(writeDefaultConfig)
+
 			if err := v.Unmarshal(&cfg); err != nil {
 				mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
 			}
@@ -908,4 +889,27 @@ func userHomeDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+func tryReadingConfig(writeDefaultConfig bool) {
+	configs := []struct {
+		name    string
+		written bool
+	}{
+		// For compatibility, we check for config.toml first, but only read it if exists.
+		{"config", false},
+		{"ctrld", writeDefaultConfig},
+	}
+
+	dir, err := userHomeDir()
+	if err != nil {
+		mainLog.Fatal().Msgf("failed to get config dir: %v", err)
+	}
+	for _, config := range configs {
+		ctrld.SetConfigNameWithPath(v, config.name, dir)
+		v.SetConfigFile(configPath)
+		if readConfigFile(config.written) {
+			break
+		}
+	}
 }
