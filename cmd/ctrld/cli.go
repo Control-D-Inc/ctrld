@@ -728,6 +728,14 @@ func processCDFlags() {
 		if err := v.Unmarshal(&cfg); err != nil {
 			mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
 		}
+		for _, listener := range cfg.Listener {
+			if listener.IP == "" {
+				listener.IP = randomLocalIP()
+			}
+			if listener.Port == 0 {
+				listener.Port = 53
+			}
+		}
 	} else {
 		cfg = ctrld.Config{}
 		cfg.Network = make(map[string]*ctrld.NetworkConfig)
