@@ -25,6 +25,7 @@ var (
 	cacheSize         int
 	cfg               ctrld.Config
 	verbose           int
+	silent            bool
 	cdUID             string
 	iface             string
 	ifaceStartStop    string
@@ -65,6 +66,8 @@ func initConsoleLogging() {
 	multi := zerolog.MultiLevelWriter(consoleWriter)
 	mainLog = mainLog.Output(multi).With().Timestamp().Logger()
 	switch {
+	case silent:
+		zerolog.SetGlobalLevel(zerolog.NoLevel)
 	case verbose == 1:
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	case verbose > 1:
@@ -102,6 +105,9 @@ func initLogging() {
 	zerolog.SetGlobalLevel(zerolog.NoticeLevel)
 	logLevel := cfg.Service.LogLevel
 	switch {
+	case silent:
+		zerolog.SetGlobalLevel(zerolog.NoLevel)
+		return
 	case verbose == 1:
 		logLevel = "info"
 	case verbose > 1:

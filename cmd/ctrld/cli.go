@@ -101,6 +101,13 @@ func initCLI() {
 		"v",
 		`verbose log output, "-v" basic logging, "-vv" debug level logging`,
 	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&silent,
+		"silent",
+		"s",
+		false,
+		`do not write any log output`,
+	)
 	rootCmd.SetHelpCommand(&cobra.Command{Hidden: true})
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true
 
