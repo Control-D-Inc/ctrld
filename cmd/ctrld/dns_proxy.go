@@ -88,7 +88,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 			})
 		}
 		g.Go(func() error {
-			s, errCh := runDNSServer(dnsListenAddress(listenerConfig), proto, handler)
+			s, errCh := runDNSServer(dnsListenAddress(listenerNum, listenerConfig), proto, handler)
 			defer s.Shutdown()
 			if listenerConfig.Port == 0 {
 				switch s.Net {
@@ -397,8 +397,8 @@ func needLocalIPv6Listener() bool {
 	return ctrldnet.SupportsIPv6ListenLocal() && runtime.GOOS == "windows"
 }
 
-func dnsListenAddress(lc *ctrld.ListenerConfig) string {
-	if addr := router.ListenAddress(); addr != "" {
+func dnsListenAddress(lcNum string, lc *ctrld.ListenerConfig) string {
+	if addr := router.ListenAddress(); addr != "" && lcNum == "0" {
 		return addr
 	}
 	return net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
