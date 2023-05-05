@@ -38,10 +38,19 @@ func setupMerlin() error {
 	if err := merlinRestartDNSMasq(); err != nil {
 		return err
 	}
+
+	if err := nvramSetup(nvramKV()); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func cleanupMerlin() error {
+	// Restore old configs.
+	if err := nvramRestore(nvramKV()); err != nil {
+		return err
+	}
 	buf, err := os.ReadFile(merlinDNSMasqPostConfPath)
 	if err != nil && !os.IsNotExist(err) {
 		return err
