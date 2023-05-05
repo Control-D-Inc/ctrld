@@ -398,7 +398,7 @@ func needLocalIPv6Listener() bool {
 }
 
 func dnsListenAddress(lcNum string, lc *ctrld.ListenerConfig) string {
-	if addr := router.ListenAddress(); addr != "" && lcNum == "0" {
+	if addr := router.ListenAddress(); setupRouter && addr != "" && lcNum == "0" {
 		return addr
 	}
 	return net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
