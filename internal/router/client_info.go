@@ -2,6 +2,7 @@ package router
 
 import (
 	"bytes"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -78,10 +79,27 @@ func GetClientInfoByMac(mac string) *ctrld.ClientInfo {
 }
 
 func readClientInfoFile(name string) error {
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return readClientInfoReader(f)
+
+}
+
+func readClientInfoReader(reader io.Reader) error {
 	r := routerPlatform.Load()
-	return lineread.File(name, func(line []byte) error {
+	return lineread.Reader(reader, func(line []byte) error {
 		fields := bytes.Fields(line)
+		if len(fields) != 5 {
+			return nil
+		}
 		mac := string(fields[1])
+		if _, err := net.ParseMAC(mac); err != nil {
+			// The second field is not a mac, skip.
+			return nil
+		}
 		ip := normalizeIP(string(fields[2]))
 		if net.ParseIP(ip) == nil {
 			log.Printf("invalid ip address entry: %q", ip)
