@@ -15,7 +15,10 @@ import (
 	"github.com/kardianos/service"
 )
 
-const merlinJFFSScriptPath = "/jffs/scripts/services-start"
+const (
+	merlinJFFSScriptPath             = "/jffs/scripts/services-start"
+	merlinJFFSServiceEventScriptPath = "/jffs/scripts/service-event"
+)
 
 type merlinSvc struct {
 	i        service.Interface
@@ -101,14 +104,6 @@ func (s *merlinSvc) Install() error {
 	if err := os.MkdirAll(filepath.Dir(merlinJFFSScriptPath), 0755); err != nil {
 		return fmt.Errorf("os.MkdirAll: %w", err)
 	}
-	if _, err := os.Stat(merlinJFFSScriptPath); os.IsNotExist(err) {
-		if err := os.WriteFile(merlinJFFSScriptPath, []byte("#!/bin/sh\n"), 0755); err != nil {
-			return err
-		}
-	}
-	if err := os.Chmod(merlinJFFSScriptPath, 0755); err != nil {
-		return fmt.Errorf("os.Chmod: jffs script: %w", err)
-	}
 
 	tmpScript, err := os.CreateTemp("", "ctrld_install")
 	if err != nil {
@@ -117,14 +112,35 @@ func (s *merlinSvc) Install() error {
 	defer os.Remove(tmpScript.Name())
 	defer tmpScript.Close()
 
-	if _, err := tmpScript.WriteString(merlinAddStartupScript); err != nil {
+	if _, err := tmpScript.WriteString(merlinAddLineToScript); err != nil {
 		return fmt.Errorf("tmpScript.WriteString: %w", err)
 	}
 	if err := tmpScript.Close(); err != nil {
 		return fmt.Errorf("tmpScript.Close: %w", err)
 	}
-	if err := exec.Command("sh", tmpScript.Name(), s.configPath()+" start", merlinJFFSScriptPath).Run(); err != nil {
-		return fmt.Errorf("exec.Command: add startup script: %w", err)
+	addLineToScript := func(line, script string) error {
+		if _, err := os.Stat(script); os.IsNotExist(err) {
+			if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0755); err != nil {
+				return err
+			}
+		}
+		if err := os.Chmod(script, 0755); err != nil {
+			return fmt.Errorf("os.Chmod: jffs script: %w", err)
+		}
+
+		if err := exec.Command("sh", tmpScript.Name(), line, script).Run(); err != nil {
+			return fmt.Errorf("exec.Command: add startup script: %w", err)
+		}
+		return nil
+	}
+
+	for script, line := range map[string]string{
+		merlinJFFSScriptPath:             s.configPath() + " start",
+		merlinJFFSServiceEventScriptPath: s.configPath() + ` service_event "$1" "$2"`,
+	} {
+		if err := addLineToScript(line, script); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -141,15 +157,37 @@ func (s *merlinSvc) Uninstall() error {
 	defer os.Remove(tmpScript.Name())
 	defer tmpScript.Close()
 
-	if _, err := tmpScript.WriteString(merlinRemoveStartupScript); err != nil {
+	if _, err := tmpScript.WriteString(merlinRemoveLineFromScript); err != nil {
 		return fmt.Errorf("tmpScript.WriteString: %w", err)
 	}
 	if err := tmpScript.Close(); err != nil {
 		return fmt.Errorf("tmpScript.Close: %w", err)
 	}
-	if err := exec.Command("sh", tmpScript.Name(), s.configPath()+" start", merlinJFFSScriptPath).Run(); err != nil {
-		return fmt.Errorf("exec.Command: %w", err)
+	removeLineFromScript := func(line, script string) error {
+		if _, err := os.Stat(script); os.IsNotExist(err) {
+			if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0755); err != nil {
+				return err
+			}
+		}
+		if err := os.Chmod(script, 0755); err != nil {
+			return fmt.Errorf("os.Chmod: jffs script: %w", err)
+		}
+
+		if err := exec.Command("sh", tmpScript.Name(), line, script).Run(); err != nil {
+			return fmt.Errorf("exec.Command: add startup script: %w", err)
+		}
+		return nil
 	}
+
+	for script, line := range map[string]string{
+		merlinJFFSScriptPath:             s.configPath() + " start",
+		merlinJFFSServiceEventScriptPath: s.configPath() + ` service_event "$1" "$2"`,
+	} {
+		if err := removeLineFromScript(line, script); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -278,6 +316,15 @@ case "$1" in
       exit 1
     fi
   ;;
+  service_event)
+    event=$2
+    svc=$3
+    dnsmasq_pid_file=$(sed -n '/pid-file=/s///p' /etc/dnsmasq.conf)
+
+    if [ "$event" = "restart" ] && [ "$svc" = "diskmon" ]; then
+      kill "$(cat "$dnsmasq_pid_file")" >/dev/null 2>&1
+    fi
+  ;;
   *)
     echo "Usage: $0 {start|stop|restart|status}"
     exit 1
@@ -286,7 +333,7 @@ esac
 exit 0
 `
 
-const merlinAddStartupScript = `#!/bin/sh
+const merlinAddLineToScript = `#!/bin/sh
 
 line=$1
 file=$2
@@ -296,7 +343,7 @@ file=$2
 pc_append "$line" "$file" 
 `
 
-const merlinRemoveStartupScript = `#!/bin/sh
+const merlinRemoveLineFromScript = `#!/bin/sh
 
 line=$1
 file=$2
