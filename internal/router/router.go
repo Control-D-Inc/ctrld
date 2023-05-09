@@ -2,14 +2,18 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/kardianos/service"
+	"tailscale.com/logtail/backoff"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -87,6 +91,52 @@ func ConfigureService(sc *service.Config) error {
 	case Merlin, Ubios:
 	}
 	return nil
+}
+
+// PreStart blocks until the router is ready for running ctrld.
+func PreStart() (err error) {
+	if Name() != DDWrt {
+		return nil
+	}
+
+	pidFile := "/tmp/ctrld.pid"
+	// On Merlin, NTP may out of sync, so waiting for it to be ready.
+	//
+	// Remove pid file and trigger dnsmasq restart, so NTP can resolve
+	// server name and perform time synchronization.
+	pid, err := os.ReadFile(pidFile)
+	if err != nil {
+		return fmt.Errorf("PreStart: os.Readfile: %w", err)
+	}
+	if err := os.Remove(pidFile); err != nil {
+		return fmt.Errorf("PreStart: os.Remove: %w", err)
+	}
+	defer func() {
+		if werr := os.WriteFile(pidFile, pid, 0600); werr != nil {
+			err = errors.Join(err, werr)
+			return
+		}
+		if rerr := merlinRestartDNSMasq(); rerr != nil {
+			err = errors.Join(err, rerr)
+			return
+		}
+	}()
+	if err := merlinRestartDNSMasq(); err != nil {
+		return fmt.Errorf("PreStart: merlinRestartDNSMasq: %w", err)
+	}
+
+	// Wait until `ntp_read=1` set.
+	b := backoff.NewBackoff("PreStart", func(format string, args ...any) {}, 10*time.Second)
+	for {
+		out, err := nvram("get", "ntp_ready")
+		if err != nil {
+			return fmt.Errorf("PreStart: nvram: %w", err)
+		}
+		if out == "1" {
+			return nil
+		}
+		b.BackOff(context.Background(), errors.New("ntp not ready"))
+	}
 }
 
 // PostInstall performs task after installing ctrld on router.

@@ -173,6 +173,13 @@ func initCLI() {
 			// Log config do not have thing to validate, so it's safe to init log here,
 			// so it's able to log information in processCDFlags.
 			initLogging()
+
+			if setupRouter {
+				if err := router.PreStart(); err != nil {
+					mainLog.Fatal().Err(err).Msg("failed to perform router pre-start check")
+				}
+			}
+
 			processCDFlags()
 			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
 				mainLog.Fatal().Msgf("invalid config: %v", err)
