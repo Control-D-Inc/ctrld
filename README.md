@@ -138,6 +138,17 @@ Once you run the above command, the following things will happen:
 - Your default network interface will be updated to use the listener started by the service
 - All OS DNS queries will be sent to the listener
 
+### Router Mode
+You can run `ctrld` on any supported router, which will function similarly to the Service Mode mentioned above. The list of supported routers and firmware includes:
+- OpenWRT
+- DD-WRT
+- Asus Merlin
+- GL.iNet
+- Ubiquiti
+
+In order to start `ctrld` as a DNS provider, simply run `./ctrld setup auto` command. You can optionally supply the `--cd` flag on order to configure a specific Control D device on the router. 
+
+
 ## Configuration
 See [Configuration Docs](docs/config.md).
 
