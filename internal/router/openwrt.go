@@ -13,6 +13,16 @@ var errUCIEntryNotFound = errors.New("uci: Entry not found")
 
 const openwrtDNSMasqConfigPath = "/tmp/dnsmasq.d/ctrld.conf"
 
+// IsGLiNet reports whether the router is an GL.iNet router.
+func IsGLiNet() bool {
+	if Name() != OpenWrt {
+		return false
+	}
+	buf, _ := os.ReadFile("/proc/version")
+	// The output of /proc/version contains "(glinet@glinet)".
+	return bytes.Contains(buf, []byte(" (glinet"))
+}
+
 func setupOpenWrt() error {
 	// Delete dnsmasq port if set.
 	if _, err := uci("delete", "dhcp.@dnsmasq[0].port"); err != nil && !errors.Is(err, errUCIEntryNotFound) {

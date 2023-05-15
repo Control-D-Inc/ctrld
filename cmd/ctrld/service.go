@@ -7,7 +7,39 @@ import (
 	"os/exec"
 
 	"github.com/kardianos/service"
+
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
+
+func newService(s service.Service) service.Service {
+	// TODO: unify for other SysV system.
+	if router.IsGLiNet() {
+		return &sysV{s}
+	}
+	return s
+}
+
+// sysV wraps a service.Service, and provide start/stop/status command
+// base on "/etc/init.d/<service_name>".
+//
+// Use this on system wherer "service" command is not available, like GL.iNET router.
+type sysV struct {
+	service.Service
+}
+
+func (s *sysV) Start() error {
+	_, err := exec.Command("/etc/init.d/ctrld", "start").CombinedOutput()
+	return err
+}
+
+func (s *sysV) Stop() error {
+	_, err := exec.Command("/etc/init.d/ctrld", "stop").CombinedOutput()
+	return err
+}
+
+func (s *sysV) Status() (service.Status, error) {
+	return unixSystemVServiceStatus()
+}
 
 type task struct {
 	f            func() error

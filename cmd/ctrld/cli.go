@@ -137,6 +137,7 @@ func initCLI() {
 					if err != nil {
 						mainLog.Fatal().Err(err).Msg("failed create new service")
 					}
+					s = newService(s)
 					serviceLogger, err := s.Logger(nil)
 					if err != nil {
 						mainLog.Error().Err(err).Msg("failed to get service logger")
@@ -310,6 +311,7 @@ func initCLI() {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
+			s = newService(s)
 			tasks := []task{
 				{s.Stop, false},
 				{s.Uninstall, false},
@@ -371,6 +373,7 @@ func initCLI() {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
+			s = newService(s)
 			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
 				prog.resetDNS()
@@ -394,6 +397,7 @@ func initCLI() {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
+			s = newService(s)
 			initLogging()
 			if doTasks([]task{{s.Restart, true}}) {
 				mainLog.Notice().Msg("Service restarted")
@@ -414,6 +418,7 @@ func initCLI() {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
+			s = newService(s)
 			status, err := serviceStatus(s)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
