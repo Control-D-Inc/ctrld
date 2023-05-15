@@ -12,7 +12,8 @@ const (
 	nvramRCStartupKey   = "rc_startup"
 )
 
-var ddwrtJffs2NotEnabledErr = errors.New(`could not install service without jffs, follow this guide to enable:
+// lint:ignore ST1005 This error is for human.
+var errDdwrtJffs2NotEnabled = errors.New(`could not install service without jffs, follow this guide to enable:
 
 https://wiki.dd-wrt.com/wiki/index.php/Journalling_Flash_File_System
 `)

@@ -143,7 +143,7 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", domain, resolver.nameservers)
 	timeoutMs := 2000
 	if timeout > 0 && timeout < timeoutMs {
-		timeoutMs = timeoutMs
+		timeoutMs = timeout
 	}
 	questionDomain := dns.Fqdn(domain)
 	ipFromRecord := func(record dns.RR) string {

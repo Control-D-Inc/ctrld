@@ -84,7 +84,7 @@ func ConfigureService(sc *service.Config) error {
 	switch name {
 	case DDWrt:
 		if !ddwrtJff2Enabled() {
-			return ddwrtJffs2NotEnabledErr
+			return errDdwrtJffs2NotEnabled
 		}
 	case OpenWrt:
 		sc.Option["SysvScript"] = openWrtScript
