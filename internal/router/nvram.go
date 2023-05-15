@@ -18,6 +18,14 @@ func nvram(args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+/*
+NOTE:
+  - For Openwrt, DNSSEC is not included in default dnsmasq (require dnsmasq-full).
+  - For Merlin, DNSSEC is configured during postconf script (see merlinDNSMasqPostConfTmpl).
+  - For Ubios UDM Pro/Dream Machine, DNSSEC is not included in their dnsmasq package:
+    +https://community.ui.com/questions/Implement-DNSSEC-into-UniFi/951c72b0-4d88-4c86-9174-45417bd2f9ca
+    +https://community.ui.com/questions/Enable-DNSSEC-for-Unifi-Dream-Machine-FW-updates/e68e367c-d09b-4459-9444-18908f7c1ea1
+*/
 func nvramKV() map[string]string {
 	switch Name() {
 	case DDWrt:
@@ -25,6 +33,7 @@ func nvramKV() map[string]string {
 			"dns_dnsmasq":     "1", // Make dnsmasq running but disable DNS ability, ctrld will replace it.
 			"dnsmasq_options": "",  // Configuration of dnsmasq set by ctrld, filled by setupDDWrt.
 			"dns_crypt":       "0", // Disable DNSCrypt.
+			"dnssec":          "0", // Disable DNSSEC.
 		}
 	case Merlin:
 		return map[string]string{

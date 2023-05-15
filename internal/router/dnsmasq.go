@@ -29,8 +29,10 @@ if [ -n "$pid" ] && [ -f "/proc/${pid}/cmdline" ]; then
   pc_append "no-resolv" "$config_file"              # do not read /etc/resolv.conf
   pc_append "server=127.0.0.1#5354" "$config_file"  # use ctrld as upstream
   {{- if .SendClientInfo}}
-  pc_append "add-mac" "$config_file"                 # add client mac
+  pc_append "add-mac" "$config_file"                # add client mac
   {{- end}}
+  pc_delete "dnssec" "$config_file"                 # disable DNSSEC
+  pc_delete "trust-anchor=" "$config_file"          # disable DNSSEC
 	
   # For John fork
   pc_delete "resolv-file" "$config_file"            # no WAN DNS settings
