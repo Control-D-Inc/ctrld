@@ -3,10 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -18,9 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
-
 	"github.com/cuonglm/osinfo"
+	"github.com/fsnotify/fsnotify"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
@@ -31,8 +30,10 @@ import (
 	"tailscale.com/net/interfaces"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/certs"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 const selfCheckFQDN = "verify.controld.com"
@@ -46,6 +47,7 @@ var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	defaultConfigWritten = false
 	defaultConfigFile    = "ctrld.toml"
+	rootCertPool         *x509.CertPool
 )
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains"}
@@ -72,10 +74,13 @@ var rootCmd = &cobra.Command{
 	Use:     "ctrld",
 	Short:   strings.TrimLeft(rootShortDesc, "\n"),
 	Version: curVersion(),
+	PreRun: func(cmd *cobra.Command, args []string) {
+		initConsoleLogging()
+	},
 }
 
 func curVersion() string {
-	if version != "dev" {
+	if version != "dev" && !strings.HasPrefix(version, "v") {
 		version = "v" + version
 	}
 	if len(commit) > 7 {
@@ -96,6 +101,13 @@ func initCLI() {
 		"v",
 		`verbose log output, "-v" basic logging, "-vv" debug level logging`,
 	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&silent,
+		"silent",
+		"s",
+		false,
+		`do not write any log output`,
+	)
 	rootCmd.SetHelpCommand(&cobra.Command{Hidden: true})
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true
 
@@ -103,9 +115,12 @@ func initCLI() {
 		Use:   "run",
 		Short: "Run the DNS proxy server",
 		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			if daemon && runtime.GOOS == "windows" {
-				log.Fatal("Cannot run in daemon mode. Please install a Windows service.")
+				mainLog.Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
 			}
 
 			waitCh := make(chan struct{})
@@ -122,6 +137,7 @@ func initCLI() {
 					if err != nil {
 						mainLog.Fatal().Err(err).Msg("failed create new service")
 					}
+					s = newService(s)
 					serviceLogger, err := s.Logger(nil)
 					if err != nil {
 						mainLog.Error().Err(err).Msg("failed to get service logger")
@@ -138,43 +154,36 @@ func initCLI() {
 			}
 			noConfigStart := isNoConfigStart(cmd)
 			writeDefaultConfig := !noConfigStart && configBase64 == ""
-			configs := []struct {
-				name    string
-				written bool
-			}{
-				// For compatibility, we check for config.toml first, but only read it if exists.
-				{"config", false},
-				{"ctrld", writeDefaultConfig},
-			}
-			for _, config := range configs {
-				ctrld.SetConfigName(v, config.name)
-				v.SetConfigFile(configPath)
-				if readConfigFile(config.written) {
-					break
-				}
-			}
+			tryReadingConfig(writeDefaultConfig)
 
-			readBase64Config()
+			readBase64Config(configBase64)
 			processNoConfigFlags(noConfigStart)
 			if err := v.Unmarshal(&cfg); err != nil {
-				log.Fatalf("failed to unmarshal config: %v", err)
+				mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
 			}
 
-			log.Printf("starting ctrld %s\n", curVersion())
+			mainLog.Info().Msgf("starting ctrld %s", curVersion())
 			oi := osinfo.New()
-			log.Printf("os: %s\n", oi.String())
+			mainLog.Info().Msgf("os: %s", oi.String())
 
 			// Wait for network up.
 			if !ctrldnet.Up() {
-				log.Fatal("network is not up yet")
+				mainLog.Fatal().Msg("network is not up yet")
 			}
 			processLogAndCacheFlags()
 			// Log config do not have thing to validate, so it's safe to init log here,
 			// so it's able to log information in processCDFlags.
 			initLogging()
+
+			if setupRouter {
+				if err := router.PreStart(); err != nil {
+					mainLog.Fatal().Err(err).Msg("failed to perform router pre-start check")
+				}
+			}
+
 			processCDFlags()
 			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
-				log.Fatalf("invalid config: %v", err)
+				mainLog.Fatal().Msgf("invalid config: %v", err)
 			}
 			initCache()
 
@@ -200,6 +209,24 @@ func initCLI() {
 				os.Exit(0)
 			}
 
+			if setupRouter {
+				switch platform := router.Name(); {
+				case platform == router.DDWrt:
+					rootCertPool = certs.CACertPool()
+					fallthrough
+				case platform != "":
+					mainLog.Debug().Msg("Router setup")
+					err := router.Configure(&cfg)
+					if errors.Is(err, router.ErrNotSupported) {
+						unsupportedPlatformHelp(cmd)
+						os.Exit(1)
+					}
+					if err != nil {
+						mainLog.Fatal().Err(err).Msg("failed to configure router")
+					}
+				}
+			}
+
 			close(waitCh)
 			<-stopCh
 		},
@@ -218,14 +245,19 @@ func initCLI() {
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	_ = runCmd.Flags().MarkHidden("iface")
+	runCmd.Flags().BoolVarP(&setupRouter, "router", "", false, `setup for running on router platforms`)
+	_ = runCmd.Flags().MarkHidden("router")
 
 	rootCmd.AddCommand(runCmd)
 
 	startCmd := &cobra.Command{
-		PreRun: checkHasElevatedPrivilege,
-		Use:    "start",
-		Short:  "Install and start the ctrld service",
-		Args:   cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Use:   "start",
+		Short: "Install and start the ctrld service",
+		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			sc := &service.Config{}
 			*sc = *svcConfig
@@ -235,6 +267,9 @@ func initCLI() {
 			}
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
+			if err := router.ConfigureService(sc); err != nil {
+				mainLog.Fatal().Err(err).Msg("failed to configure service on router")
+			}
 
 			// No config path, generating config in HOME directory.
 			noConfigStart := isNoConfigStart(cmd)
@@ -242,18 +277,18 @@ func initCLI() {
 			if configPath != "" {
 				v.SetConfigFile(configPath)
 			}
-			if dir, err := os.UserHomeDir(); err == nil {
+			if dir, err := userHomeDir(); err == nil {
 				setWorkingDirectory(sc, dir)
 				if configPath == "" && writeDefaultConfig {
 					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
-					v.SetConfigFile(defaultConfigFile)
 				}
 				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
 			}
 
-			readConfigFile(writeDefaultConfig && cdUID == "")
+			tryReadingConfig(writeDefaultConfig)
+
 			if err := v.Unmarshal(&cfg); err != nil {
-				log.Fatalf("failed to unmarshal config: %v", err)
+				mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
 			}
 
 			logPath := cfg.Service.LogPath
@@ -262,20 +297,21 @@ func initCLI() {
 			cfg.Service.LogPath = logPath
 
 			processCDFlags()
-			// On Windows, the service will be run as SYSTEM, so if ctrld start as Admin,
-			// the user home dir is different, so pass specific arguments that relevant here.
-			if runtime.GOOS == "windows" {
-				if configPath == "" {
-					sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
-				}
+
+			// Explicitly passing config, so on system where home directory could not be obtained,
+			// or sub-process env is different with the parent, we still behave correctly and use
+			// the expected config file.
+			if configPath == "" {
+				sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
 			}
 
 			prog := &prog{}
 			s, err := service.New(prog, sc)
 			if err != nil {
-				stderrMsg(err.Error())
+				mainLog.Error().Msg(err.Error())
 				return
 			}
+			s = newService(s)
 			tasks := []task{
 				{s.Stop, false},
 				{s.Uninstall, false},
@@ -283,7 +319,11 @@ func initCLI() {
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
-				status, err := s.Status()
+				if err := router.PostInstall(); err != nil {
+					mainLog.Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
+					return
+				}
+				status, err := serviceStatus(s)
 				if err != nil {
 					mainLog.Warn().Err(err).Msg("could not get service status")
 					return
@@ -292,7 +332,7 @@ func initCLI() {
 				status = selfCheckStatus(status)
 				switch status {
 				case service.StatusRunning:
-					mainLog.Info().Msg("Service started")
+					mainLog.Notice().Msg("Service started")
 				default:
 					mainLog.Error().Msg("Service did not start, please check system/service log for details error")
 					if runtime.GOOS == "linux" {
@@ -315,42 +355,52 @@ func initCLI() {
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
+	startCmd.Flags().BoolVarP(&setupRouter, "router", "", false, `setup for running on router platforms`)
+	_ = startCmd.Flags().MarkHidden("router")
 
 	stopCmd := &cobra.Command{
-		PreRun: checkHasElevatedPrivilege,
-		Use:    "stop",
-		Short:  "Stop the ctrld service",
-		Args:   cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Use:   "stop",
+		Short: "Stop the ctrld service",
+		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			prog := &prog{}
 			s, err := service.New(prog, svcConfig)
 			if err != nil {
-				stderrMsg(err.Error())
+				mainLog.Error().Msg(err.Error())
 				return
 			}
+			s = newService(s)
 			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
 				prog.resetDNS()
-				mainLog.Info().Msg("Service stopped")
+				mainLog.Notice().Msg("Service stopped")
 			}
 		},
 	}
 	stopCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, "auto" means the default interface gateway`)
 
 	restartCmd := &cobra.Command{
-		PreRun: checkHasElevatedPrivilege,
-		Use:    "restart",
-		Short:  "Restart the ctrld service",
-		Args:   cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Use:   "restart",
+		Short: "Restart the ctrld service",
+		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := service.New(&prog{}, svcConfig)
 			if err != nil {
-				stderrMsg(err.Error())
+				mainLog.Error().Msg(err.Error())
 				return
 			}
+			s = newService(s)
 			initLogging()
 			if doTasks([]task{{s.Restart, true}}) {
-				stdoutMsg("Service restarted")
+				mainLog.Notice().Msg("Service restarted")
 			}
 		},
 	}
@@ -359,39 +409,49 @@ func initCLI() {
 		Use:   "status",
 		Short: "Show status of the ctrld service",
 		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := service.New(&prog{}, svcConfig)
 			if err != nil {
-				stderrMsg(err.Error())
+				mainLog.Error().Msg(err.Error())
 				return
 			}
-			status, err := s.Status()
+			s = newService(s)
+			status, err := serviceStatus(s)
 			if err != nil {
-				stderrMsg(err.Error())
+				mainLog.Error().Msg(err.Error())
 				os.Exit(1)
 			}
 			switch status {
 			case service.StatusUnknown:
-				stdoutMsg("Unknown status")
+				mainLog.Notice().Msg("Unknown status")
 				os.Exit(2)
 			case service.StatusRunning:
-				stdoutMsg("Service is running")
+				mainLog.Notice().Msg("Service is running")
 				os.Exit(0)
 			case service.StatusStopped:
-				stdoutMsg("Service is stopped")
+				mainLog.Notice().Msg("Service is stopped")
 				os.Exit(1)
 			}
 		},
 	}
 	if runtime.GOOS == "darwin" {
 		// On darwin, running status command without privileges may return wrong information.
-		statusCmd.PreRun = checkHasElevatedPrivilege
+		statusCmd.PreRun = func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		}
 	}
 
 	uninstallCmd := &cobra.Command{
-		PreRun: checkHasElevatedPrivilege,
-		Use:    "uninstall",
-		Short:  "Stop and uninstall the ctrld service",
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Use:   "uninstall",
+		Short: "Stop and uninstall the ctrld service",
 		Long: `Stop and uninstall the ctrld service.
 
 NOTE: Uninstalling will set DNS to values provided by DHCP.`,
@@ -400,7 +460,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			prog := &prog{}
 			s, err := service.New(prog, svcConfig)
 			if err != nil {
-				stderrMsg(err.Error())
+				mainLog.Error().Msg(err.Error())
 				return
 			}
 			tasks := []task{
@@ -413,7 +473,11 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					iface = "auto"
 				}
 				prog.resetDNS()
-				mainLog.Info().Msg("Service uninstalled")
+				mainLog.Debug().Msg("Router cleanup")
+				if err := router.Cleanup(); err != nil {
+					mainLog.Warn().Err(err).Msg("could not cleanup router")
+				}
+				mainLog.Notice().Msg("Service uninstalled")
 				return
 			}
 		},
@@ -424,6 +488,9 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Use:   "list",
 		Short: "List network interfaces of the host",
 		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
 				fmt.Printf("Index : %d\n", i.Index)
@@ -446,7 +513,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				println()
 			})
 			if err != nil {
-				stderrMsg(err.Error())
+				mainLog.Error().Msg(err.Error())
 			}
 		},
 	}
@@ -481,9 +548,12 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	serviceCmd.AddCommand(interfacesCmd)
 	rootCmd.AddCommand(serviceCmd)
 	startCmdAlias := &cobra.Command{
-		PreRun: checkHasElevatedPrivilege,
-		Use:    "start",
-		Short:  "Quick start service and configure DNS on interface",
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Use:   "start",
+		Short: "Quick start service and configure DNS on interface",
 		Run: func(cmd *cobra.Command, args []string) {
 			if !cmd.Flags().Changed("iface") {
 				os.Args = append(os.Args, "--iface="+ifaceStartStop)
@@ -496,9 +566,12 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	startCmdAlias.Flags().AddFlagSet(startCmd.Flags())
 	rootCmd.AddCommand(startCmdAlias)
 	stopCmdAlias := &cobra.Command{
-		PreRun: checkHasElevatedPrivilege,
-		Use:    "stop",
-		Short:  "Quick stop service and remove DNS from interface",
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Use:   "stop",
+		Short: "Quick stop service and remove DNS from interface",
 		Run: func(cmd *cobra.Command, args []string) {
 			if !cmd.Flags().Changed("iface") {
 				os.Args = append(os.Args, "--iface="+ifaceStartStop)
@@ -510,11 +583,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	stopCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
 	stopCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
 	rootCmd.AddCommand(stopCmdAlias)
-
-	if err := rootCmd.Execute(); err != nil {
-		stderrMsg(err.Error())
-		os.Exit(1)
-	}
 }
 
 func writeConfigFile() error {
@@ -547,7 +615,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	// If err == nil, there's a config supplied via `--config`, no default config written.
 	err := v.ReadInConfig()
 	if err == nil {
-		log.Println("loading config file from:", v.ConfigFileUsed())
+		mainLog.Info().Msg("loading config file from: " + v.ConfigFileUsed())
 		defaultConfigFile = v.ConfigFileUsed()
 		return true
 	}
@@ -558,29 +626,36 @@ func readConfigFile(writeDefaultConfig bool) bool {
 
 	// If error is viper.ConfigFileNotFoundError, write default config.
 	if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+		if err := v.Unmarshal(&cfg); err != nil {
+			mainLog.Fatal().Msgf("failed to unmarshal default config: %v", err)
+		}
 		if err := writeConfigFile(); err != nil {
-			log.Fatalf("failed to write default config file: %v", err)
+			mainLog.Fatal().Msgf("failed to write default config file: %v", err)
 		} else {
-			log.Println("writing default config file to: " + defaultConfigFile)
+			fp, err := filepath.Abs(defaultConfigFile)
+			if err != nil {
+				mainLog.Fatal().Msgf("failed to get default config file path: %v", err)
+			}
+			mainLog.Info().Msg("writing default config file to: " + fp)
 		}
 		defaultConfigWritten = true
 		return false
 	}
 	// Otherwise, report fatal error and exit.
-	log.Fatalf("failed to decode config file: %v", err)
+	mainLog.Fatal().Msgf("failed to decode config file: %v", err)
 	return false
 }
 
-func readBase64Config() {
+func readBase64Config(configBase64 string) {
 	if configBase64 == "" {
 		return
 	}
 	configStr, err := base64.StdEncoding.DecodeString(configBase64)
 	if err != nil {
-		log.Fatalf("invalid base64 config: %v", err)
+		mainLog.Fatal().Msgf("invalid base64 config: %v", err)
 	}
 	if err := v.ReadConfig(bytes.NewReader(configStr)); err != nil {
-		log.Fatalf("failed to read base64 config: %v", err)
+		mainLog.Fatal().Msgf("failed to read base64 config: %v", err)
 	}
 }
 
@@ -589,7 +664,7 @@ func processNoConfigFlags(noConfigStart bool) {
 		return
 	}
 	if listenAddress == "" || primaryUpstream == "" {
-		log.Fatal(`"listen" and "primary_upstream" flags must be set in no config mode`)
+		mainLog.Fatal().Msg(`"listen" and "primary_upstream" flags must be set in no config mode`)
 	}
 	processListenFlag()
 
@@ -633,7 +708,7 @@ func processCDFlags() {
 	}
 	logger := mainLog.With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
-	resolverConfig, err := controld.FetchResolverConfig(cdUID)
+	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version)
 	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
 		s, err := service.New(&prog{}, svcConfig)
 		if err != nil {
@@ -665,34 +740,57 @@ func processCDFlags() {
 		return
 	}
 
-	logger.Info().Msg("generating ctrld config from Controld-D configuration")
-	cfg = ctrld.Config{}
-	cfg.Network = make(map[string]*ctrld.NetworkConfig)
-	cfg.Network["0"] = &ctrld.NetworkConfig{
-		Name:  "Network 0",
-		Cidrs: []string{"0.0.0.0/0"},
-	}
-	cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
-	cfg.Upstream["0"] = &ctrld.UpstreamConfig{
-		Endpoint: resolverConfig.DOH,
-		Type:     ctrld.ResolverTypeDOH,
-		Timeout:  5000,
-	}
-	rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
-	for _, domain := range resolverConfig.Exclude {
-		rules = append(rules, ctrld.Rule{domain: []string{}})
-	}
-	cfg.Listener = make(map[string]*ctrld.ListenerConfig)
-	cfg.Listener["0"] = &ctrld.ListenerConfig{
-		IP:   "127.0.0.1",
-		Port: 53,
-		Policy: &ctrld.ListenerPolicyConfig{
-			Name:  "My Policy",
-			Rules: rules,
-		},
+	logger.Info().Msg("generating ctrld config from Control-D configuration")
+	if resolverConfig.Ctrld.CustomConfig != "" {
+		logger.Info().Msg("using defined custom config of Control-D resolver")
+		readBase64Config(resolverConfig.Ctrld.CustomConfig)
+		if err := v.Unmarshal(&cfg); err != nil {
+			mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
+		}
+		for _, listener := range cfg.Listener {
+			if listener.IP == "" {
+				listener.IP = randomLocalIP()
+			}
+			if listener.Port == 0 {
+				listener.Port = 53
+			}
+		}
+		// On router, we want to keep the listener address point to dnsmasq listener, aka 127.0.0.1:53.
+		if router.Name() != "" {
+			if lc := cfg.Listener["0"]; lc != nil {
+				lc.IP = "127.0.0.1"
+				lc.Port = 53
+			}
+		}
+	} else {
+		cfg = ctrld.Config{}
+		cfg.Network = make(map[string]*ctrld.NetworkConfig)
+		cfg.Network["0"] = &ctrld.NetworkConfig{
+			Name:  "Network 0",
+			Cidrs: []string{"0.0.0.0/0"},
+		}
+		cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
+		cfg.Upstream["0"] = &ctrld.UpstreamConfig{
+			Endpoint: resolverConfig.DOH,
+			Type:     ctrld.ResolverTypeDOH,
+			Timeout:  5000,
+		}
+		rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
+		for _, domain := range resolverConfig.Exclude {
+			rules = append(rules, ctrld.Rule{domain: []string{}})
+		}
+		cfg.Listener = make(map[string]*ctrld.ListenerConfig)
+		cfg.Listener["0"] = &ctrld.ListenerConfig{
+			IP:   "127.0.0.1",
+			Port: 53,
+			Policy: &ctrld.ListenerPolicyConfig{
+				Name:  "My Policy",
+				Rules: rules,
+			},
+		}
+		processLogAndCacheFlags()
 	}
 
-	processLogAndCacheFlags()
 	if err := writeConfigFile(); err != nil {
 		logger.Fatal().Err(err).Msg("failed to write config file")
 	} else {
@@ -706,11 +804,11 @@ func processListenFlag() {
 	}
 	host, portStr, err := net.SplitHostPort(listenAddress)
 	if err != nil {
-		log.Fatalf("invalid listener address: %v", err)
+		mainLog.Fatal().Msgf("invalid listener address: %v", err)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		log.Fatalf("invalid port number: %v", err)
+		mainLog.Fatal().Msgf("invalid port number: %v", err)
 	}
 	lc := &ctrld.ListenerConfig{
 		IP:   host,
@@ -777,7 +875,7 @@ func selfCheckStatus(status service.Status) service.Status {
 		mu.Lock()
 		defer mu.Unlock()
 		if err := v.UnmarshalKey("listener", &lcChanged); err != nil {
-			log.Printf("failed to unmarshal listener config: %v", err)
+			mainLog.Error().Msgf("failed to unmarshal listener config: %v", err)
 			return
 		}
 	})
@@ -801,4 +899,51 @@ func selfCheckStatus(status service.Status) service.Status {
 	}
 	mainLog.Debug().Msgf("self-check against %q failed", selfCheckFQDN)
 	return service.StatusUnknown
+}
+
+func unsupportedPlatformHelp(cmd *cobra.Command) {
+	mainLog.Error().Msg("Unsupported or incorrectly chosen router platform. Please open an issue and provide all relevant information: https://github.com/Control-D-Inc/ctrld/issues/new")
+}
+
+func userHomeDir() (string, error) {
+	switch router.Name() {
+	case router.DDWrt, router.Merlin:
+		exe, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Dir(exe), nil
+	}
+	// viper will expand for us.
+	if runtime.GOOS == "windows" {
+		return os.UserHomeDir()
+	}
+	dir := "/etc/controld"
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func tryReadingConfig(writeDefaultConfig bool) {
+	configs := []struct {
+		name    string
+		written bool
+	}{
+		// For compatibility, we check for config.toml first, but only read it if exists.
+		{"config", false},
+		{"ctrld", writeDefaultConfig},
+	}
+
+	dir, err := userHomeDir()
+	if err != nil {
+		mainLog.Fatal().Msgf("failed to get config dir: %v", err)
+	}
+	for _, config := range configs {
+		ctrld.SetConfigNameWithPath(v, config.name, dir)
+		v.SetConfigFile(configPath)
+		if readConfigFile(config.written) {
+			break
+		}
+	}
 }

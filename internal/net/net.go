@@ -2,6 +2,7 @@ package net
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -12,7 +13,6 @@ import (
 
 const (
 	controldIPv6Test = "ipv6.controld.io"
-	controldIPv4Test = "ipv4.controld.io"
 	bootstrapDNS     = "76.76.2.0:53"
 )
 
@@ -37,8 +37,6 @@ var probeStackDialer = &net.Dialer{
 
 var (
 	stackOnce          atomic.Pointer[sync.Once]
-	ipv4Enabled        bool
-	ipv6Enabled        bool
 	canListenIPv6Local bool
 	hasNetworkUp       bool
 )
@@ -47,13 +45,8 @@ func init() {
 	stackOnce.Store(new(sync.Once))
 }
 
-func supportIPv4() bool {
-	_, err := probeStackDialer.Dial("tcp4", net.JoinHostPort(controldIPv4Test, "80"))
-	return err == nil
-}
-
 func supportIPv6(ctx context.Context) bool {
-	_, err := probeStackDialer.DialContext(ctx, "tcp6", net.JoinHostPort(controldIPv6Test, "80"))
+	_, err := probeStackDialer.DialContext(ctx, "tcp6", net.JoinHostPort(controldIPv6Test, "443"))
 	return err == nil
 }
 
@@ -75,24 +68,12 @@ func probeStack() {
 			b.BackOff(context.Background(), err)
 		}
 	}
-	ipv4Enabled = supportIPv4()
-	ipv6Enabled = supportIPv6(context.Background())
 	canListenIPv6Local = supportListenIPv6Local()
 }
 
 func Up() bool {
 	stackOnce.Load().Do(probeStack)
 	return hasNetworkUp
-}
-
-func SupportsIPv4() bool {
-	stackOnce.Load().Do(probeStack)
-	return ipv4Enabled
-}
-
-func SupportsIPv6() bool {
-	stackOnce.Load().Do(probeStack)
-	return ipv6Enabled
 }
 
 func SupportsIPv6ListenLocal() bool {
@@ -111,4 +92,48 @@ func IPv6Available(ctx context.Context) bool {
 func IsIPv6(ip string) bool {
 	parsedIP := net.ParseIP(ip)
 	return parsedIP != nil && parsedIP.To4() == nil && parsedIP.To16() != nil
+}
+
+type parallelDialerResult struct {
+	conn net.Conn
+	err  error
+}
+
+type ParallelDialer struct {
+	net.Dialer
+}
+
+func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs []string) (net.Conn, error) {
+	if len(addrs) == 0 {
+		return nil, errors.New("empty addresses")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	ch := make(chan *parallelDialerResult, len(addrs))
+	var wg sync.WaitGroup
+	wg.Add(len(addrs))
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	for _, addr := range addrs {
+		go func(addr string) {
+			defer wg.Done()
+			conn, err := d.Dialer.DialContext(ctx, network, addr)
+			ch <- &parallelDialerResult{conn: conn, err: err}
+		}(addr)
+	}
+
+	errs := make([]error, 0, len(addrs))
+	for res := range ch {
+		if res.err == nil {
+			cancel()
+			return res.conn, res.err
+		}
+		errs = append(errs, res.err)
+	}
+
+	return nil, errors.Join(errs...)
 }

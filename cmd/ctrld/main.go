@@ -2,7 +2,6 @@ package main
 
 import (
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -26,18 +25,24 @@ var (
 	cacheSize         int
 	cfg               ctrld.Config
 	verbose           int
+	silent            bool
+	cdUID             string
+	iface             string
+	ifaceStartStop    string
+	setupRouter       bool
 
-	rootLogger = zerolog.New(io.Discard)
-	mainLog    = rootLogger
-
-	cdUID          string
-	iface          string
-	ifaceStartStop string
+	mainLog       = zerolog.New(io.Discard)
+	consoleWriter zerolog.ConsoleWriter
 )
 
 func main() {
 	ctrld.InitConfig(v, "ctrld")
 	initCLI()
+	initRouterCLI()
+	if err := rootCmd.Execute(); err != nil {
+		mainLog.Error().Msg(err.Error())
+		os.Exit(1)
+	}
 }
 
 func normalizeLogFilePath(logFilePath string) string {
@@ -47,11 +52,29 @@ func normalizeLogFilePath(logFilePath string) string {
 	if homedir != "" {
 		return filepath.Join(homedir, logFilePath)
 	}
-	dir, _ := os.UserHomeDir()
+	dir, _ := userHomeDir()
 	if dir == "" {
 		return logFilePath
 	}
 	return filepath.Join(dir, logFilePath)
+}
+
+func initConsoleLogging() {
+	consoleWriter = zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
+		w.TimeFormat = time.StampMilli
+	})
+	multi := zerolog.MultiLevelWriter(consoleWriter)
+	mainLog = mainLog.Output(multi).With().Timestamp().Logger()
+	switch {
+	case silent:
+		zerolog.SetGlobalLevel(zerolog.NoLevel)
+	case verbose == 1:
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	case verbose > 1:
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	default:
+		zerolog.SetGlobalLevel(zerolog.NoticeLevel)
+	}
 }
 
 func initLogging() {
@@ -59,32 +82,35 @@ func initLogging() {
 	if logFilePath := normalizeLogFilePath(cfg.Service.LogPath); logFilePath != "" {
 		// Create parent directory if necessary.
 		if err := os.MkdirAll(filepath.Dir(logFilePath), 0750); err != nil {
-			log.Printf("failed to create log path: %v", err)
+			mainLog.Error().Msgf("failed to create log path: %v", err)
 			os.Exit(1)
 		}
 		// Backup old log file with .1 suffix.
 		if err := os.Rename(logFilePath, logFilePath+".1"); err != nil && !os.IsNotExist(err) {
-			log.Printf("could not backup old log file: %v", err)
+			mainLog.Error().Msgf("could not backup old log file: %v", err)
 		}
 		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_RDWR, os.FileMode(0o600))
 		if err != nil {
-			log.Printf("failed to create log file: %v", err)
+			mainLog.Error().Msgf("failed to create log file: %v", err)
 			os.Exit(1)
 		}
 		writers = append(writers, logFile)
 	}
-	consoleWriter := zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
-		w.TimeFormat = time.StampMilli
-	})
 	writers = append(writers, consoleWriter)
 	multi := zerolog.MultiLevelWriter(writers...)
 	mainLog = mainLog.Output(multi).With().Timestamp().Logger()
 	// TODO: find a better way.
 	ctrld.ProxyLog = mainLog
 
-	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	zerolog.SetGlobalLevel(zerolog.NoticeLevel)
 	logLevel := cfg.Service.LogLevel
-	if verbose > 1 {
+	switch {
+	case silent:
+		zerolog.SetGlobalLevel(zerolog.NoLevel)
+		return
+	case verbose == 1:
+		logLevel = "info"
+	case verbose > 1:
 		logLevel = "debug"
 	}
 	if logLevel == "" {

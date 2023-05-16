@@ -14,6 +14,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 var logf = func(format string, args ...any) {
@@ -25,6 +26,7 @@ var errWindowsAddrInUse = syscall.Errno(0x2740)
 var svcConfig = &service.Config{
 	Name:        "ctrld",
 	DisplayName: "Control-D Helper Service",
+	Option:      service.KeyValue{},
 }
 
 type prog struct {
@@ -72,12 +74,15 @@ func (p *prog) run() {
 		uc.Init()
 		if uc.BootstrapIP == "" {
 			uc.SetupBootstrapIP()
-			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Setting bootstrap IP for upstream.%s", n)
+			mainLog.Info().Msgf("Bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
 		} else {
 			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap IP for upstream.%s", n)
 		}
+		uc.SetCertPool(rootCertPool)
 		uc.SetupTransport()
 	}
+
+	go p.watchLinkState()
 
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()
@@ -86,8 +91,7 @@ func (p *prog) run() {
 			listenerConfig := p.cfg.Listener[listenerNum]
 			upstreamConfig := p.cfg.Upstream[listenerNum]
 			if upstreamConfig == nil {
-				mainLog.Error().Msgf("missing upstream config for: [listener.%s]", listenerNum)
-				return
+				mainLog.Warn().Msgf("no default upstream for: [listener.%s]", listenerNum)
 			}
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 			mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, addr)
@@ -135,6 +139,10 @@ func (p *prog) Stop(s service.Service) error {
 		mainLog.Error().Err(err).Msg("de-allocate ip failed")
 		return err
 	}
+	p.preStop()
+	if err := router.Stop(); err != nil {
+		mainLog.Warn().Err(err).Msg("problem occurred while stopping router")
+	}
 	mainLog.Info().Msg("Service stopped")
 	close(p.stopCh)
 	return nil
@@ -164,6 +172,12 @@ func (p *prog) deAllocateIP() error {
 }
 
 func (p *prog) setDNS() {
+	switch router.Name() {
+	case router.DDWrt, router.OpenWrt, router.Ubios:
+		// On router, ctrld run as a DNS forwarder, it does not have to change system DNS.
+		// Except for Merlin, which has WAN DNS setup on boot for NTP.
+		return
+	}
 	if cfg.Listener == nil || cfg.Listener["0"] == nil {
 		return
 	}
@@ -192,6 +206,11 @@ func (p *prog) setDNS() {
 }
 
 func (p *prog) resetDNS() {
+	switch router.Name() {
+	case router.DDWrt, router.OpenWrt, router.Ubios:
+		// See comment in p.setDNS method.
+		return
+	}
 	if iface == "" {
 		return
 	}

@@ -86,17 +86,17 @@ func Test_prog_upstreamFor(t *testing.T) {
 		domain             string
 		upstreams          []string
 		matched            bool
+		testLogMsg         string
 	}{
-		{"Policy map matches", "192.168.0.1:0", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.1", "upstream.0"}, true},
-		{"Policy split matches", "192.168.0.1:0", "0", prog.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true},
-		{"Policy map for other network matches", "192.168.1.2:0", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.0"}, true},
-		{"No policy map for listener", "192.168.1.2:0", "1", prog.cfg.Listener["1"], "abc.ru", []string{"upstream.1"}, false},
+		{"Policy map matches", "192.168.0.1:0", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.1", "upstream.0"}, true, ""},
+		{"Policy split matches", "192.168.0.1:0", "0", prog.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true, ""},
+		{"Policy map for other network matches", "192.168.1.2:0", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.0"}, true, ""},
+		{"No policy map for listener", "192.168.1.2:0", "1", prog.cfg.Listener["1"], "abc.ru", []string{"upstream.1"}, false, ""},
+		{"unenforced loging", "192.168.1.2:0", "0", prog.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true, "My Policy, network.1 (unenforced), *.ru -> [upstream.1]"},
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			for _, network := range []string{"udp", "tcp"} {
 				var (
 					addr net.Addr
@@ -114,6 +114,9 @@ func Test_prog_upstreamFor(t *testing.T) {
 				upstreams, matched := prog.upstreamFor(ctx, tc.defaultUpstreamNum, tc.lc, addr, tc.domain)
 				assert.Equal(t, tc.matched, matched)
 				assert.Equal(t, tc.upstreams, upstreams)
+				if tc.testLogMsg != "" {
+					assert.Contains(t, logOutput.String(), tc.testLogMsg)
+				}
 			}
 		})
 	}
@@ -151,4 +154,40 @@ func TestCache(t *testing.T) {
 	assert.NotSame(t, got1, got2)
 	assert.Equal(t, answer1.Rcode, got1.Rcode)
 	assert.Equal(t, answer2.Rcode, got2.Rcode)
+}
+
+func Test_macFromMsg(t *testing.T) {
+	tests := []struct {
+		name    string
+		mac     string
+		wantMac bool
+	}{
+		{"has mac", "4c:20:b8:ab:87:1b", true},
+		{"no mac", "4c:20:b8:ab:87:1b", false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			hw, err := net.ParseMAC(tc.mac)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := new(dns.Msg)
+			m.SetQuestion(selfCheckFQDN+".", dns.TypeA)
+			o := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+			if tc.wantMac {
+				ec1 := &dns.EDNS0_LOCAL{Code: EDNS0_OPTION_MAC, Data: hw}
+				o.Option = append(o.Option, ec1)
+			}
+			m.Extra = append(m.Extra, o)
+			got := macFromMsg(m)
+			if tc.wantMac && got != tc.mac {
+				t.Errorf("mismatch, want: %q, got: %q", tc.mac, got)
+			}
+			if !tc.wantMac && got != "" {
+				t.Errorf("unexpected mac: %q", got)
+			}
+		})
+	}
 }

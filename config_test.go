@@ -24,10 +24,12 @@ func TestLoadConfig(t *testing.T) {
 	assert.Contains(t, cfg.Network, "0")
 	assert.Contains(t, cfg.Network, "1")
 
-	assert.Len(t, cfg.Upstream, 3)
+	assert.Len(t, cfg.Upstream, 4)
 	assert.Contains(t, cfg.Upstream, "0")
 	assert.Contains(t, cfg.Upstream, "1")
 	assert.Contains(t, cfg.Upstream, "2")
+	assert.Contains(t, cfg.Upstream, "3")
+	assert.NotNil(t, cfg.Upstream["3"].SendClientInfo)
 
 	assert.Len(t, cfg.Listener, 2)
 	assert.Contains(t, cfg.Listener, "0")
@@ -42,6 +44,8 @@ func TestLoadConfig(t *testing.T) {
 	assert.Len(t, cfg.Listener["0"].Policy.Rules, 2)
 	assert.Contains(t, cfg.Listener["0"].Policy.Rules[0], "*.ru")
 	assert.Contains(t, cfg.Listener["0"].Policy.Rules[1], "*.local.host")
+
+	assert.True(t, cfg.HasUpstreamSendClientInfo())
 }
 
 func TestLoadDefaultConfig(t *testing.T) {
@@ -61,6 +65,7 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid Config", &ctrld.Config{}, true},
 		{"default Config", defaultConfig(t), false},
 		{"sample Config", testhelper.SampleConfig(t), false},
+		{"empty listener IP", emptyListenerIP(t), false},
 		{"invalid cidr", invalidNetworkConfig(t), true},
 		{"invalid upstream type", invalidUpstreamType(t), true},
 		{"invalid upstream timeout", invalidUpstreamTimeout(t), true},
@@ -130,9 +135,15 @@ func invalidListenerIP(t *testing.T) *ctrld.Config {
 	return cfg
 }
 
+func emptyListenerIP(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Listener["0"].IP = ""
+	return cfg
+}
+
 func invalidListenerPort(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
-	cfg.Listener["0"].Port = 0
+	cfg.Listener["0"].Port = -1
 	return cfg
 }
 
@@ -164,117 +175,4 @@ func configWithInvalidRcodes(t *testing.T) *ctrld.Config {
 		FailoverRcodes: []string{"foo"},
 	}
 	return cfg
-}
-
-func TestUpstreamConfig_Init(t *testing.T) {
-	tests := []struct {
-		name     string
-		uc       *ctrld.UpstreamConfig
-		expected *ctrld.UpstreamConfig
-	}{
-		{
-			"doh+doh3",
-			&ctrld.UpstreamConfig{
-				Name:        "doh",
-				Type:        "doh",
-				Endpoint:    "https://example.com",
-				BootstrapIP: "",
-				Domain:      "",
-				Timeout:     0,
-			},
-			&ctrld.UpstreamConfig{
-				Name:        "doh",
-				Type:        "doh",
-				Endpoint:    "https://example.com",
-				BootstrapIP: "",
-				Domain:      "example.com",
-				Timeout:     0,
-			},
-		},
-		{
-			"dot+doq",
-			&ctrld.UpstreamConfig{
-				Name:        "dot",
-				Type:        "dot",
-				Endpoint:    "freedns.controld.com:8853",
-				BootstrapIP: "",
-				Domain:      "",
-				Timeout:     0,
-			},
-			&ctrld.UpstreamConfig{
-				Name:        "dot",
-				Type:        "dot",
-				Endpoint:    "freedns.controld.com:8853",
-				BootstrapIP: "",
-				Domain:      "freedns.controld.com",
-				Timeout:     0,
-			},
-		},
-		{
-			"dot+doq without port",
-			&ctrld.UpstreamConfig{
-				Name:        "dot",
-				Type:        "dot",
-				Endpoint:    "freedns.controld.com",
-				BootstrapIP: "",
-				Domain:      "",
-				Timeout:     0,
-			},
-			&ctrld.UpstreamConfig{
-				Name:        "dot",
-				Type:        "dot",
-				Endpoint:    "freedns.controld.com:853",
-				BootstrapIP: "",
-				Domain:      "freedns.controld.com",
-				Timeout:     0,
-			},
-		},
-		{
-			"legacy",
-			&ctrld.UpstreamConfig{
-				Name:        "legacy",
-				Type:        "legacy",
-				Endpoint:    "1.2.3.4:53",
-				BootstrapIP: "",
-				Domain:      "",
-				Timeout:     0,
-			},
-			&ctrld.UpstreamConfig{
-				Name:        "legacy",
-				Type:        "legacy",
-				Endpoint:    "1.2.3.4:53",
-				BootstrapIP: "1.2.3.4",
-				Domain:      "1.2.3.4",
-				Timeout:     0,
-			},
-		},
-		{
-			"legacy without port",
-			&ctrld.UpstreamConfig{
-				Name:        "legacy",
-				Type:        "legacy",
-				Endpoint:    "1.2.3.4",
-				BootstrapIP: "",
-				Domain:      "",
-				Timeout:     0,
-			},
-			&ctrld.UpstreamConfig{
-				Name:        "legacy",
-				Type:        "legacy",
-				Endpoint:    "1.2.3.4:53",
-				BootstrapIP: "1.2.3.4",
-				Domain:      "1.2.3.4",
-				Timeout:     0,
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tc.uc.Init()
-			assert.Equal(t, tc.expected, tc.uc)
-		})
-	}
 }

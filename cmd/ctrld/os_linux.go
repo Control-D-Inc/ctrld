@@ -112,7 +112,7 @@ func resetDNS(iface *net.Interface) (err error) {
 	}
 
 	// TODO(cuonglm): handle DHCPv6 properly.
-	if ctrldnet.SupportsIPv6() {
+	if ctrldnet.IPv6Available(ctx) {
 		c := client6.NewClient()
 		conversation, err := c.Exchange(iface.Name)
 		if err != nil {

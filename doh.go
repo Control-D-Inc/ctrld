@@ -7,25 +7,36 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/miekg/dns"
 )
 
+const (
+	DoHMacHeader  = "x-cd-mac"
+	DoHIPHeader   = "x-cd-ip"
+	DoHHostHeader = "x-cd-host"
+
+	headerApplicationDNS = "application/dns-message"
+)
+
 func newDohResolver(uc *UpstreamConfig) *dohResolver {
 	r := &dohResolver{
-		endpoint:          uc.Endpoint,
+		endpoint:          uc.u,
 		isDoH3:            uc.Type == ResolverTypeDOH3,
-		transport:         uc.transport,
 		http3RoundTripper: uc.http3RoundTripper,
+		sendClientInfo:    uc.UpstreamSendClientInfo(),
+		uc:                uc,
 	}
 	return r
 }
 
 type dohResolver struct {
-	endpoint          string
+	uc                *UpstreamConfig
+	endpoint          *url.URL
 	isDoH3            bool
-	transport         *http.Transport
 	http3RoundTripper http.RoundTripper
+	sendClientInfo    bool
 }
 
 func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
@@ -33,26 +44,34 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	if err != nil {
 		return nil, err
 	}
+
 	enc := base64.RawURLEncoding.EncodeToString(data)
-	url := fmt.Sprintf("%s?dns=%s", r.endpoint, enc)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	query := r.endpoint.Query()
+	query.Add("dns", enc)
+
+	endpoint := *r.endpoint
+	endpoint.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("could not create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/dns-message")
-	req.Header.Set("Accept", "application/dns-message")
-
-	c := http.Client{Transport: r.transport}
+	addHeader(ctx, req, r.sendClientInfo)
+	dnsTyp := uint16(0)
+	if len(msg.Question) > 0 {
+		dnsTyp = msg.Question[0].Qtype
+	}
+	c := http.Client{Transport: r.uc.dohTransport(dnsTyp)}
 	if r.isDoH3 {
-		if r.http3RoundTripper == nil {
+		transport := r.uc.doh3Transport(dnsTyp)
+		if transport == nil {
 			return nil, errors.New("DoH3 is not supported")
 		}
-		c.Transport = r.http3RoundTripper
+		c.Transport = transport
 	}
 	resp, err := c.Do(req)
 	if err != nil {
 		if r.isDoH3 {
-			if closer, ok := r.http3RoundTripper.(io.Closer); ok {
+			if closer, ok := c.Transport.(io.Closer); ok {
 				closer.Close()
 			}
 		}
@@ -70,5 +89,27 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	}
 
 	answer := new(dns.Msg)
-	return answer, answer.Unpack(buf)
+	if err := answer.Unpack(buf); err != nil {
+		return nil, fmt.Errorf("answer.Unpack: %w", err)
+	}
+	return answer, nil
+}
+
+func addHeader(ctx context.Context, req *http.Request, sendClientInfo bool) {
+	req.Header.Set("Content-Type", headerApplicationDNS)
+	req.Header.Set("Accept", headerApplicationDNS)
+	if sendClientInfo {
+		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
+			if ci.Mac != "" {
+				req.Header.Set(DoHMacHeader, ci.Mac)
+			}
+			if ci.IP != "" {
+				req.Header.Set(DoHIPHeader, ci.IP)
+			}
+			if ci.Hostname != "" {
+				req.Header.Set(DoHHostHeader, ci.Hostname)
+			}
+		}
+	}
+	Log(ctx, ProxyLog.Debug().Interface("header", req.Header), "sending request header")
 }

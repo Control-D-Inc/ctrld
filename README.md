@@ -28,6 +28,7 @@ All DNS protocols are supported, including:
 - Windows (386, amd64, arm)
 - Mac (amd64, arm64)
 - Linux (386, amd64, arm, mips)
+- Common routers (See Router Mode below)
 
 ## Download
 Download pre-compiled binaries from the [Releases](https://github.com/Control-D-Inc/ctrld/releases) section.
@@ -137,6 +138,19 @@ Once you run the above command, the following things will happen:
 - Application will start as a service, and keep running (even after reboot) until you run the `stop` or `service uninstall` sub-commands
 - Your default network interface will be updated to use the listener started by the service
 - All OS DNS queries will be sent to the listener
+
+### Router Mode
+You can run `ctrld` on any supported router, which will function similarly to the Service Mode mentioned above. The list of supported routers and firmware includes:
+- OpenWRT
+- DD-WRT
+- Asus Merlin
+- GL.iNet
+- Ubiquiti
+
+In order to start `ctrld` as a DNS provider, simply run `./ctrld setup auto` command. You can optionally supply the `--cd` flag on order to configure a specific Control D device on the router. 
+
+In this mode, and when Control D upstreams are used, the router will [relay your network topology](https://docs.controld.com/docs/device-clients) to Control D (LAN IPs, MAC addresses, and hostnames), and you will be able to see your LAN devices in the web panel, view analytics and apply unique profiles to them. 
+
 
 ## Configuration
 See [Configuration Docs](docs/config.md).

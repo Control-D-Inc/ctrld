@@ -227,8 +227,26 @@ Value `0` means no timeout.
 The protocol that `ctrld` will use to send DNS requests to upstream.
 
  - Type: string
- - required: yes
+ - Required: yes
  - Valid values: `doh`, `doh3`, `dot`, `doq`, `legacy`, `os`
+
+### ip_stack
+Specifying what kind of ip stack that `ctrld` will use to connect to upstream.
+
+ - Type: string
+ - Required: no
+ - Valid values:
+   - `both`: using either ipv4 or ipv6.
+   - `v4`:   only dial upstream via IPv4, never dial IPv6.
+   - `v6`:   only dial upstream via IPv6, never dial IPv4.
+   - `split`:
+     - If `A` record is requested -> dial via ipv4.
+     - If `AAAA` or any other record is requested -> dial ipv6 (if available, otherwise ipv4)
+
+If `ip_stack` is empty, or undefined:
+
+ - Default value is `both` for non-Control D resolvers.
+ - Default value is `split` for Control D resolvers.
 
 ## Network
 The `[network]` section defines networks from which DNS queries can originate from. These are used in policies. You can define multiple networks, and each one can have multiple cidrs.
@@ -271,16 +289,14 @@ The `[listener]` section specifies the ip and port of the local DNS server. You 
 ```
 
 ### ip
-IP address that serves the incoming requests.
+IP address that serves the incoming requests. If `ip` is empty, ctrld will listen on all available addresses.
 
-- Type: string
-- Required: yes
+- Type: ip address
 
 ### port
-Port number that the listener will listen on for incoming requests.
+Port number that the listener will listen on for incoming requests. If `port` is `0`, a random available port will be chosen.
 
 - Type: number
-- Required: yes
 
 ### restricted
 If set to `true` makes the listener `REFUSE` DNS queries from all source IP addresses that are not explicitly defined in the policy using a `network`. 

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -17,9 +18,22 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
-const staleTTL = 60 * time.Second
+const (
+	staleTTL = 60 * time.Second
+	// EDNS0_OPTION_MAC is dnsmasq EDNS0 code for adding mac option.
+	// https://thekelleys.org.uk/gitweb/?p=dnsmasq.git;a=blob;f=src/dns-protocol.h;h=76ac66a8c28317e9c121a74ab5fd0e20f6237dc8;hb=HEAD#l81
+	// This is also dns.EDNS0LOCALSTART, but define our own constant here for clarification.
+	EDNS0_OPTION_MAC = 0xFDE9
+)
+
+var osUpstreamConfig = &ctrld.UpstreamConfig{
+	Name:    "OS resolver",
+	Type:    ctrld.ResolverTypeOS,
+	Timeout: 2000,
+}
 
 func (p *prog) serveDNS(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
@@ -59,45 +73,49 @@ func (p *prog) serveDNS(listenerNum string) error {
 	g, ctx := errgroup.WithContext(context.Background())
 	for _, proto := range []string{"udp", "tcp"} {
 		proto := proto
-		// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
-		// listen on ::1, then spawn a listener for receiving DNS requests.
-		if runtime.GOOS == "windows" && ctrldnet.SupportsIPv6ListenLocal() {
+		if needLocalIPv6Listener() {
 			g.Go(func() error {
-				s := &dns.Server{
-					Addr:    net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)),
-					Net:     proto,
-					Handler: handler,
-				}
-				go func() {
-					<-ctx.Done()
-					_ = s.Shutdown()
-				}()
-				if err := s.ListenAndServe(); err != nil {
-					mainLog.Error().Err(err).Msg("could not serving on ::1")
+				s, errCh := runDNSServer(net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)), proto, handler)
+				defer s.Shutdown()
+				select {
+				case <-ctx.Done():
+				case err := <-errCh:
+					// Local ipv6 listener should not terminate ctrld.
+					// It's a workaround for a quirk on Windows.
+					mainLog.Warn().Err(err).Msg("local ipv6 listener failed")
 				}
 				return nil
 			})
 		}
 		g.Go(func() error {
-			s := &dns.Server{
-				Addr:    net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port)),
-				Net:     proto,
-				Handler: handler,
+			s, errCh := runDNSServer(dnsListenAddress(listenerNum, listenerConfig), proto, handler)
+			defer s.Shutdown()
+			if listenerConfig.Port == 0 {
+				switch s.Net {
+				case "udp":
+					mainLog.Info().Msgf("Random port chosen for udp listener.%s: %s", listenerNum, s.PacketConn.LocalAddr())
+				case "tcp":
+					mainLog.Info().Msgf("Random port chosen for tcp listener.%s: %s", listenerNum, s.Listener.Addr())
+				}
 			}
-			go func() {
-				<-ctx.Done()
-				_ = s.Shutdown()
-			}()
-			if err := s.ListenAndServe(); err != nil {
-				mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
+			select {
+			case <-ctx.Done():
+				return nil
+			case err := <-errCh:
 				return err
 			}
-			return nil
 		})
 	}
 	return g.Wait()
 }
 
+// upstreamFor returns the list of upstreams for resolving the given domain,
+// matching by policies defined in the listener config. The second return value
+// reports whether the domain matches the policy.
+//
+// Though domain policy has higher priority than network policy, it is still
+// processed later, because policy logging want to know whether a network rule
+// is disregarded in favor of the domain level rule.
 func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, domain string) ([]string, bool) {
 	upstreams := []string{"upstream." + defaultUpstreamNum}
 	matchedPolicy := "no policy"
@@ -121,11 +139,43 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 		upstreams = append([]string(nil), policyUpstreams...)
 	}
 
+	var networkTargets []string
+	var sourceIP net.IP
+	switch addr := addr.(type) {
+	case *net.UDPAddr:
+		sourceIP = addr.IP
+	case *net.TCPAddr:
+		sourceIP = addr.IP
+	}
+
+networkRules:
+	for _, rule := range lc.Policy.Networks {
+		for source, targets := range rule {
+			networkNum := strings.TrimPrefix(source, "network.")
+			nc := p.cfg.Network[networkNum]
+			if nc == nil {
+				continue
+			}
+			for _, ipNet := range nc.IPNets {
+				if ipNet.Contains(sourceIP) {
+					matchedPolicy = lc.Policy.Name
+					matchedNetwork = source
+					networkTargets = targets
+					matched = true
+					break networkRules
+				}
+			}
+		}
+	}
+
 	for _, rule := range lc.Policy.Rules {
 		// There's only one entry per rule, config validation ensures this.
 		for source, targets := range rule {
 			if source == domain || wildcardMatches(source, domain) {
 				matchedPolicy = lc.Policy.Name
+				if len(networkTargets) > 0 {
+					matchedNetwork += " (unenforced)"
+				}
 				matchedRule = source
 				do(targets)
 				matched = true
@@ -134,31 +184,8 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 		}
 	}
 
-	var sourceIP net.IP
-	switch addr := addr.(type) {
-	case *net.UDPAddr:
-		sourceIP = addr.IP
-	case *net.TCPAddr:
-		sourceIP = addr.IP
-	}
-	for _, rule := range lc.Policy.Networks {
-		for source, targets := range rule {
-			networkNum := strings.TrimPrefix(source, "network.")
-			nc := p.cfg.Network[networkNum]
-			if nc == nil {
-				continue
-			}
-
-			for _, ipNet := range nc.IPNets {
-				if ipNet.Contains(sourceIP) {
-					matchedPolicy = lc.Policy.Name
-					matchedNetwork = source
-					do(targets)
-					matched = true
-					return upstreams, matched
-				}
-			}
-		}
+	if matched {
+		do(networkTargets)
 	}
 
 	return upstreams, matched
@@ -207,8 +234,16 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		return dnsResolver.Resolve(resolveCtx, msg)
 	}
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
+		if upstreamConfig.UpstreamSendClientInfo() {
+			ci := router.GetClientInfoByMac(macFromMsg(msg))
+			if ci != nil {
+				ctrld.Log(ctx, mainLog.Debug(), "including client info with the request")
+				ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, ci)
+			}
+		}
 		answer, err := resolve1(n, upstreamConfig, msg)
-		if err != nil {
+		// Only do re-bootstrapping if bootstrap ip is not explicitly set by user.
+		if err != nil && upstreamConfig.BootstrapIP == "" {
 			ctrld.Log(ctx, mainLog.Debug().Err(err), "could not resolve query on first attempt, retrying...")
 			// If any error occurred, re-bootstrap transport/ip, retry the request.
 			upstreamConfig.ReBootstrap()
@@ -222,6 +257,9 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		return answer
 	}
 	for n, upstreamConfig := range upstreamConfigs {
+		if upstreamConfig == nil {
+			continue
+		}
 		answer := resolve(n, upstreamConfig, msg)
 		if answer == nil {
 			if serveStaleCache && staleAnswer != nil {
@@ -236,6 +274,10 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			ctrld.Log(ctx, mainLog.Debug(), "failover rcode matched, process to next upstream")
 			continue
 		}
+
+		// set compression, as it is not set by default when unpacking
+		answer.Compress = true
+
 		if p.cache != nil {
 			ttl := ttlFromMsg(answer)
 			now := time.Now()
@@ -349,8 +391,58 @@ func ttlFromMsg(msg *dns.Msg) uint32 {
 	return 0
 }
 
-var osUpstreamConfig = &ctrld.UpstreamConfig{
-	Name:    "OS resolver",
-	Type:    ctrld.ResolverTypeOS,
-	Timeout: 2000,
+func needLocalIPv6Listener() bool {
+	// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
+	// listen on ::1, then spawn a listener for receiving DNS requests.
+	return ctrldnet.SupportsIPv6ListenLocal() && runtime.GOOS == "windows"
+}
+
+func dnsListenAddress(lcNum string, lc *ctrld.ListenerConfig) string {
+	if addr := router.ListenAddress(); setupRouter && addr != "" && lcNum == "0" {
+		return addr
+	}
+	return net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
+}
+
+func macFromMsg(msg *dns.Msg) string {
+	if opt := msg.IsEdns0(); opt != nil {
+		for _, s := range opt.Option {
+			switch e := s.(type) {
+			case *dns.EDNS0_LOCAL:
+				if e.Code == EDNS0_OPTION_MAC {
+					return net.HardwareAddr(e.Data).String()
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// runDNSServer starts a DNS server for given address and network,
+// with the given handler. It ensures the server has started listening.
+// Any error will be reported to the caller via returned channel.
+//
+// It's the caller responsibility to call Shutdown to close the server.
+func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-chan error) {
+	s := &dns.Server{
+		Addr:    addr,
+		Net:     network,
+		Handler: handler,
+	}
+
+	waitLock := sync.Mutex{}
+	waitLock.Lock()
+	s.NotifyStartedFunc = waitLock.Unlock
+
+	errCh := make(chan error)
+	go func() {
+		defer close(errCh)
+		if err := s.ListenAndServe(); err != nil {
+			waitLock.Unlock()
+			mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
+			errCh <- err
+		}
+	}()
+	waitLock.Lock()
+	return s, errCh
 }
