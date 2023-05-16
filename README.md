@@ -10,6 +10,9 @@ A highly configurable DNS forwarding proxy with support for:
 - Multiple network policy driven DNS query steering
 - Policy driven domain based "split horizon" DNS with wildcard support
 
+## TLDR
+Proxy legacy DNS traffic to secure DNS upstreams in highly configurable ways. 
+
 All DNS protocols are supported, including:
 - `UDP 53`
 - `DNS-over-HTTPS`
@@ -17,7 +20,7 @@ All DNS protocols are supported, including:
 - `DNS-over-HTTP/3` (DOH3)
 - `DNS-over-QUIC`
 
-## Use Cases
+# Use Cases
 1. Use secure DNS protocols on networks and devices that don't natively support them (legacy routers, legacy OSes, TVs, smart toasters).
 2. Create source IP based DNS routing policies with variable secure DNS upstreams. Subnet 1 (admin) uses upstream resolver A, while Subnet 2 (employee) uses upstream resolver B.
 3. Create destination IP based DNS routing policies with variable secure DNS upstreams. Listener 1 uses upstream resolver C, while Listener 2 uses upstream resolver D.
@@ -30,11 +33,26 @@ All DNS protocols are supported, including:
 - Linux (386, amd64, arm, mips)
 - Common routers (See Router Mode below)
 
-## Download
-Download pre-compiled binaries from the [Releases](https://github.com/Control-D-Inc/ctrld/releases) section.
+# Install
+There are several ways to download and install `ctrld.
+
+## Quick Install
+The simplest way to download and install `ctrld` is to use the following installer command on any UNIX-like platform:
+
+```shell
+sh -c 'sh -c "$(curl -sL https://api.controld.com/dl)"'
+```
+
+Windows user and prefer Powershell (who doesn't)? No problem, execute this command instead in administrative cmd:
+```shell
+powershell -Command "(Invoke-WebRequest -Uri 'https://api.controld.com/dl' -UseBasicParsing).Content | Set-Content 'ctrld_install.bat'" && ctrld_install.bat
+```
+
+## Download Manually
+Alternatively, if you know what you're doing you can download pre-compiled binaries from the [Releases](https://github.com/Control-D-Inc/ctrld/releases) section for the appropriate platform. 
 
 ## Build
-`ctrld` requires `go1.19+`:
+Lastly, you can build `ctrld` from source which requires `go1.19+`:
 
 ```shell
 $ go build ./cmd/ctrld
@@ -45,6 +63,10 @@ or
 ```shell
 $ go install github.com/Control-D-Inc/ctrld/cmd/ctrld@latest
 ```
+
+
+# Usage
+The cli is self documenting, so free free to run `--help` on any sub-command to get specific usages. 
 
 ## Arguments
 ```
@@ -61,18 +83,29 @@ Usage:
 Available Commands:
   run         Run the DNS proxy server
   service     Manage ctrld service
-  start       Quick start service and configure DNS on default interface
-  stop        Quick stop service and remove DNS from default interface
+  start       Quick start service and configure DNS on interface
+  stop        Quick stop service and remove DNS from interface
+  setup       Auto-setup Control D on a router.
+
+Supported platforms:
+
+    ₒ ddwrt
+    ₒ merlin
+    ₒ openwrt
+    ₒ ubios
+    ₒ auto - detect the platform you are running on
+
 
 Flags:
   -h, --help            help for ctrld
+  -s, --silent          do not write any log output
   -v, --verbose count   verbose log output, "-v" basic logging, "-vv" debug level logging
       --version         version for ctrld
 
 Use "ctrld [command] --help" for more information about a command.
 ```
 
-## Usage
+## Basic Run Mode
 To start the server with default configuration, simply run: `./ctrld run`. This will create a generic `ctrld.toml` file in the **working directory** and start the application in foreground. 
 1. Start the server
   ```
@@ -86,12 +119,12 @@ To start the server with default configuration, simply run: `./ctrld run`. This 
   147.185.34.1
   ```
 
-If `verify.controld.com` resolves, you're successfully using the default Control D upstream.
+If `verify.controld.com` resolves, you're successfully using the default Control D upstream. From here, you can start editing the config file and go nuts with it. To enforce a new config, restart the server. 
 
-### Service Mode
-To run the application in service mode, simply run: `./ctrld start` as system/root user. This will create a generic `ctrld.toml` file in the **user home** directory, start the system service, and configure the listener on the default interface. Service will start on OS boot.
+## Service Mode
+To run the application in service mode on any Windows, MacOS or Linux distibution, simply run: `./ctrld start` as system/root user. This will create a generic `ctrld.toml` file in the **user home** directory (on Windows) or `/etc/controld/` (everywhere else), start the system service, and configure the listener on the default network interface. Service will start on OS boot.
 
-In order to stop the service, and restore your DNS to original state, simply run `./ctrld stop`.
+In order to stop the service, and restore your DNS to original state, simply run `./ctrld stop`. If you wish to uninstall the service permanently, run `./ctrld service uninstall`. 
 
 For granular control of the service, run the `service` command. Each sub-command has its own help section so you can see what arguments you can supply.
 
@@ -118,28 +151,7 @@ For granular control of the service, run the `service` command. Each sub-command
   Use "ctrld service [command] --help" for more information about a command.
 ```
 
-### Control D Auto Configuration
-Application can be started with a specific resolver config, instead of the default one. Simply supply your resolver ID with a `--cd` flag, when using the `run` (foreground) or `start` (service) modes. 
-
-The following command will start the application in foreground mode, using the free "p2" resolver, which blocks Ads & Trackers. 
-
-```shell
-./ctrld run --cd p2
-```
-
-Alternatively, you can use your own personal Control D Device resolver, and start the application in service mode. Your resolver ID is the part after the slash of your DNS-over-HTTPS resolver. ie. https://dns.controld.com/abcd1234
-
-```shell
-./ctrld start --cd abcd1234
-```
-
-Once you run the above command, the following things will happen:
-- You resolver configuration will be fetched from the API, and config file templated with the resolver data
-- Application will start as a service, and keep running (even after reboot) until you run the `stop` or `service uninstall` sub-commands
-- Your default network interface will be updated to use the listener started by the service
-- All OS DNS queries will be sent to the listener
-
-### Router Mode
+## Router Mode
 You can run `ctrld` on any supported router, which will function similarly to the Service Mode mentioned above. The list of supported routers and firmware includes:
 - OpenWRT
 - DD-WRT
@@ -147,15 +159,40 @@ You can run `ctrld` on any supported router, which will function similarly to th
 - GL.iNet
 - Ubiquiti
 
-In order to start `ctrld` as a DNS provider, simply run `./ctrld setup auto` command. You can optionally supply the `--cd` flag on order to configure a specific Control D device on the router. 
+In order to start `ctrld` as a DNS provider, simply run `./ctrld setup auto` command. 
 
 In this mode, and when Control D upstreams are used, the router will [relay your network topology](https://docs.controld.com/docs/device-clients) to Control D (LAN IPs, MAC addresses, and hostnames), and you will be able to see your LAN devices in the web panel, view analytics and apply unique profiles to them. 
 
+### Control D Auto Configuration
+Application can be started with a specific resolver config, instead of the default one. Simply supply your Resolver ID with a `--cd` flag, when using the `run` (foreground) or `start` (service) or `setup` (router) modes. 
 
-## Configuration
+The following command will start the application in foreground mode, using the free "p2" resolver, which blocks Ads & Trackers. 
+
+```shell
+./ctrld run --cd p2
+```
+
+Alternatively, you can use your own personal Control D Device resolver, and start the application in service mode. Your resolver ID is displayed on the "Show Resolvers" screen for the relevant Control D Device. 
+
+```shell
+./ctrld start --cd abcd1234
+```
+
+You can do the same while starting in router mode:
+```shell
+./ctrld setup auto --cd abcd1234
+```
+
+Once you run the above commands (in service or router modes only), the following things will happen:
+- You resolver configuration will be fetched from the API, and config file templated with the resolver data
+- Application will start as a service, and keep running (even after reboot) until you run the `stop` or `service uninstall` sub-commands
+- Your default network interface will be updated to use the listener started by the service
+- All OS DNS queries will be sent to the listener
+
+# Configuration
 See [Configuration Docs](docs/config.md).
 
-### Example 
+## Example 
 - Start `listener.0` on 127.0.0.1:53
 - Accept queries from any source address
 - Send all queries to `upstream.0` via DoH protocol
@@ -197,13 +234,12 @@ See [Configuration Docs](docs/config.md).
 
 ```
 
-### Advanced
+## Advanced Configuration
 The above is the most basic example, which will work out of the box. If you're looking to do advanced configurations using policies, see [Configuration Docs](docs/config.md) for complete documentation of the config file.
 
 You can also supply configuration via launch argeuments, in [Ephemeral Mode](docs/ephemeral_mode.md).
 
 ## Contributing
-
 See [Contribution Guideline](./docs/contributing.md)
 
 ## Roadmap
