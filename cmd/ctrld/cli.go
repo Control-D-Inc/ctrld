@@ -138,16 +138,7 @@ func initCLI() {
 						mainLog.Fatal().Err(err).Msg("failed create new service")
 					}
 					s = newService(s)
-					serviceLogger, err := s.Logger(nil)
-					if err != nil {
-						mainLog.Error().Err(err).Msg("failed to get service logger")
-						return
-					}
-
 					if err := s.Run(); err != nil {
-						if sErr := serviceLogger.Error(err); sErr != nil {
-							mainLog.Error().Err(sErr).Msg("failed to write service log")
-						}
 						mainLog.Error().Err(err).Msg("failed to start service")
 					}
 				}()
@@ -854,6 +845,11 @@ func netInterface(ifaceName string) (*net.Interface, error) {
 func defaultIfaceName() string {
 	dri, err := interfaces.DefaultRouteInterface()
 	if err != nil {
+		// On WSL 1, the route table does not have any default route. But the fact that
+		// it only uses /etc/resolv.conf for setup DNS, so we can use "lo" here.
+		if oi := osinfo.New(); strings.Contains(oi.String(), "Microsoft") {
+			return "lo"
+		}
 		mainLog.Fatal().Err(err).Msg("failed to get default route interface")
 	}
 	return dri
@@ -864,7 +860,6 @@ func selfCheckStatus(status service.Status) service.Status {
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 500 * time.Millisecond
 	ctx := context.Background()
-	err := errors.New("query failed")
 	maxAttempts := 20
 	mainLog.Debug().Msg("Performing self-check")
 	var (
@@ -890,7 +885,7 @@ func selfCheckStatus(status service.Status) service.Status {
 		m := new(dns.Msg)
 		m.SetQuestion(selfCheckFQDN+".", dns.TypeA)
 		m.RecursionDesired = true
-		r, _, _ := c.ExchangeContext(ctx, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
+		r, _, err := c.ExchangeContext(ctx, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
 		if r != nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
 			mainLog.Debug().Msgf("self-check against %q succeeded", selfCheckFQDN)
 			return status
