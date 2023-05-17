@@ -125,7 +125,14 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 		Net:    udpNet,
 		Dialer: dialer,
 	}
-	answer, _, err := dnsClient.ExchangeContext(ctx, msg, r.uc.Endpoint)
+	endpoint := r.uc.Endpoint
+	if r.uc.BootstrapIP != "" {
+		dnsClient.Net = "udp"
+		_, port, _ := net.SplitHostPort(endpoint)
+		endpoint = net.JoinHostPort(r.uc.BootstrapIP, port)
+	}
+
+	answer, _, err := dnsClient.ExchangeContext(ctx, msg, endpoint)
 	return answer, err
 }
 

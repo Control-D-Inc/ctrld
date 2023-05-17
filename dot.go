@@ -33,6 +33,7 @@ func (r *dotResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	endpoint := r.uc.Endpoint
 	if r.uc.BootstrapIP != "" {
 		dnsClient.TLSConfig.ServerName = r.uc.Domain
+		dnsClient.Net = "tcp-tls"
 		_, port, _ := net.SplitHostPort(endpoint)
 		endpoint = net.JoinHostPort(r.uc.BootstrapIP, port)
 	}
