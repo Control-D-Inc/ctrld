@@ -19,10 +19,11 @@ import (
 )
 
 const (
-	OpenWrt = "openwrt"
-	DDWrt   = "ddwrt"
-	Merlin  = "merlin"
-	Ubios   = "ubios"
+	OpenWrt  = "openwrt"
+	DDWrt    = "ddwrt"
+	Merlin   = "merlin"
+	Ubios    = "ubios"
+	Synology = "synology"
 )
 
 // ErrNotSupported reports the current router is not supported error.
@@ -39,21 +40,22 @@ type router struct {
 
 // SupportedPlatforms return all platforms that can be configured to run with ctrld.
 func SupportedPlatforms() []string {
-	return []string{DDWrt, Merlin, OpenWrt, Ubios}
+	return []string{DDWrt, Merlin, OpenWrt, Ubios, Synology}
 }
 
 var configureFunc = map[string]func() error{
-	DDWrt:   setupDDWrt,
-	Merlin:  setupMerlin,
-	OpenWrt: setupOpenWrt,
-	Ubios:   setupUbiOS,
+	DDWrt:    setupDDWrt,
+	Merlin:   setupMerlin,
+	OpenWrt:  setupOpenWrt,
+	Ubios:    setupUbiOS,
+	Synology: setupSynology,
 }
 
 // Configure configures things for running ctrld on the router.
 func Configure(c *ctrld.Config) error {
 	name := Name()
 	switch name {
-	case DDWrt, Merlin, OpenWrt, Ubios:
+	case DDWrt, Merlin, OpenWrt, Ubios, Synology:
 		if c.HasUpstreamSendClientInfo() {
 			r := routerPlatform.Load()
 			r.sendClientInfo = true
@@ -88,7 +90,7 @@ func ConfigureService(sc *service.Config) error {
 		}
 	case OpenWrt:
 		sc.Option["SysvScript"] = openWrtScript
-	case Merlin, Ubios:
+	case Merlin, Ubios, Synology:
 	}
 	return nil
 }
@@ -151,6 +153,8 @@ func PostInstall() error {
 		return postInstallOpenWrt()
 	case Ubios:
 		return postInstallUbiOS()
+	case Synology:
+		return postInstallSynology()
 	}
 	return nil
 }
@@ -167,6 +171,8 @@ func Cleanup() error {
 		return cleanupOpenWrt()
 	case Ubios:
 		return cleanupUbiOS()
+	case Synology:
+		return cleanupSynology()
 	}
 	return nil
 }
@@ -175,7 +181,7 @@ func Cleanup() error {
 func ListenAddress() string {
 	name := Name()
 	switch name {
-	case DDWrt, Merlin, OpenWrt, Ubios:
+	case DDWrt, Merlin, OpenWrt, Ubios, Synology:
 		return "127.0.0.1:5354"
 	}
 	return ""
@@ -194,14 +200,16 @@ func Name() string {
 
 func distroName() string {
 	switch {
-	case bytes.HasPrefix(uname(), []byte("DD-WRT")):
+	case bytes.HasPrefix(unameO(), []byte("DD-WRT")):
 		return DDWrt
-	case bytes.HasPrefix(uname(), []byte("ASUSWRT-Merlin")):
+	case bytes.HasPrefix(unameO(), []byte("ASUSWRT-Merlin")):
 		return Merlin
 	case haveFile("/etc/openwrt_version"):
 		return OpenWrt
 	case haveDir("/data/unifi"):
 		return Ubios
+	case bytes.HasPrefix(unameU(), []byte("synology")):
+		return Synology
 	}
 	return ""
 }
@@ -216,7 +224,12 @@ func haveDir(dir string) bool {
 	return fi != nil && fi.IsDir()
 }
 
-func uname() []byte {
+func unameO() []byte {
 	out, _ := exec.Command("uname", "-o").Output()
+	return out
+}
+
+func unameU() []byte {
+	out, _ := exec.Command("uname", "-u").Output()
 	return out
 }

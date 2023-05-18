@@ -28,7 +28,6 @@ func setupOpenWrt() error {
 	if _, err := uci("delete", "dhcp.@dnsmasq[0].port"); err != nil && !errors.Is(err, errUCIEntryNotFound) {
 		return err
 	}
-	// Disable dnsmasq as DNS server.
 	dnsMasqConfigContent, err := dnsMasqConf()
 	if err != nil {
 		return err

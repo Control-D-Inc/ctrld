@@ -43,7 +43,7 @@ func initRouterCLI() {
 				platform = router.Name()
 			}
 			switch platform {
-			case router.DDWrt, router.Merlin, router.OpenWrt, router.Ubios:
+			case router.DDWrt, router.Merlin, router.OpenWrt, router.Ubios, router.Synology:
 			default:
 				unsupportedPlatformHelp(cmd)
 				os.Exit(1)

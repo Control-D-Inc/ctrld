@@ -49,7 +49,7 @@ func dnsMasqConf() (string, error) {
 	var sb strings.Builder
 	var tmplText string
 	switch Name() {
-	case DDWrt, OpenWrt, Ubios:
+	case DDWrt, OpenWrt, Ubios, Synology:
 		tmplText = dnsMasqConfigContentTmpl
 	case Merlin:
 		tmplText = merlinDNSMasqPostConfTmpl
