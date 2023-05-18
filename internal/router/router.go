@@ -95,7 +95,7 @@ func ConfigureService(sc *service.Config) error {
 
 // PreStart blocks until the router is ready for running ctrld.
 func PreStart() (err error) {
-	if Name() != DDWrt {
+	if Name() != Merlin {
 		return nil
 	}
 
