@@ -890,7 +890,7 @@ func selfCheckStatus(status service.Status) service.Status {
 			mainLog.Debug().Msgf("self-check against %q succeeded", selfCheckFQDN)
 			return status
 		}
-		bo.BackOff(ctx, err)
+		bo.BackOff(ctx, fmt.Errorf("ExchangeContext: %w", err))
 	}
 	mainLog.Debug().Msgf("self-check against %q failed", selfCheckFQDN)
 	return service.StatusUnknown
