@@ -21,6 +21,7 @@ var clientInfoFiles = []string{
 	"/var/lib/misc/dnsmasq.leases",         // merlin
 	"/mnt/data/udapi-config/dnsmasq.lease", // UDM Pro
 	"/data/udapi-config/dnsmasq.lease",     // UDR
+	"/etc/dhcpd/dhcpd-leases.log",          // Synology
 }
 
 func (r *router) watchClientInfoTable() {
