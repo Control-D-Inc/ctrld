@@ -20,7 +20,7 @@ func setupUbiOS() error {
 		return err
 	}
 	// Restart dnsmasq service.
-	if err := ubiosRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil
@@ -32,7 +32,7 @@ func cleanupUbiOS() error {
 		return err
 	}
 	// Restart dnsmasq service.
-	if err := ubiosRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil

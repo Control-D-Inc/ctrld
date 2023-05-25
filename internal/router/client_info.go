@@ -22,6 +22,7 @@ var clientInfoFiles = []string{
 	"/mnt/data/udapi-config/dnsmasq.lease", // UDM Pro
 	"/data/udapi-config/dnsmasq.lease",     // UDR
 	"/etc/dhcpd/dhcpd-leases.log",          // Synology
+	"/tmp/var/lib/misc/dnsmasq.leases",     // Tomato
 }
 
 func (r *router) watchClientInfoTable() {

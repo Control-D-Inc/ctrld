@@ -2,18 +2,14 @@ package router
 
 import (
 	"bytes"
-	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/kardianos/service"
-	"tailscale.com/logtail/backoff"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -24,6 +20,7 @@ const (
 	Merlin   = "merlin"
 	Ubios    = "ubios"
 	Synology = "synology"
+	Tomato   = "tomato"
 )
 
 // ErrNotSupported reports the current router is not supported error.
@@ -38,9 +35,18 @@ type router struct {
 	watcher        *fsnotify.Watcher
 }
 
+// IsSupported reports whether the given platform is supported by ctrld.
+func IsSupported(platform string) bool {
+	switch platform {
+	case DDWrt, Merlin, OpenWrt, Ubios, Synology, Tomato:
+		return true
+	}
+	return false
+}
+
 // SupportedPlatforms return all platforms that can be configured to run with ctrld.
 func SupportedPlatforms() []string {
-	return []string{DDWrt, Merlin, OpenWrt, Ubios, Synology}
+	return []string{DDWrt, Merlin, OpenWrt, Ubios, Synology, Tomato}
 }
 
 var configureFunc = map[string]func() error{
@@ -49,13 +55,14 @@ var configureFunc = map[string]func() error{
 	OpenWrt:  setupOpenWrt,
 	Ubios:    setupUbiOS,
 	Synology: setupSynology,
+	Tomato:   setupTomato,
 }
 
 // Configure configures things for running ctrld on the router.
 func Configure(c *ctrld.Config) error {
 	name := Name()
 	switch name {
-	case DDWrt, Merlin, OpenWrt, Ubios, Synology:
+	case DDWrt, Merlin, OpenWrt, Ubios, Synology, Tomato:
 		if c.HasUpstreamSendClientInfo() {
 			r := routerPlatform.Load()
 			r.sendClientInfo = true
@@ -90,54 +97,21 @@ func ConfigureService(sc *service.Config) error {
 		}
 	case OpenWrt:
 		sc.Option["SysvScript"] = openWrtScript
-	case Merlin, Ubios, Synology:
+	case Merlin, Ubios, Synology, Tomato:
 	}
 	return nil
 }
 
 // PreStart blocks until the router is ready for running ctrld.
 func PreStart() (err error) {
-	if Name() != Merlin {
+	// On some routers, NTP may out of sync, so waiting for it to be ready.
+	switch Name() {
+	case Merlin:
+		return merlinPreStart()
+	case Tomato:
+		return tomatoPreStart()
+	default:
 		return nil
-	}
-
-	pidFile := "/tmp/ctrld.pid"
-	// On Merlin, NTP may out of sync, so waiting for it to be ready.
-	//
-	// Remove pid file and trigger dnsmasq restart, so NTP can resolve
-	// server name and perform time synchronization.
-	pid, err := os.ReadFile(pidFile)
-	if err != nil {
-		return fmt.Errorf("PreStart: os.Readfile: %w", err)
-	}
-	if err := os.Remove(pidFile); err != nil {
-		return fmt.Errorf("PreStart: os.Remove: %w", err)
-	}
-	defer func() {
-		if werr := os.WriteFile(pidFile, pid, 0600); werr != nil {
-			err = errors.Join(err, werr)
-			return
-		}
-		if rerr := merlinRestartDNSMasq(); rerr != nil {
-			err = errors.Join(err, rerr)
-			return
-		}
-	}()
-	if err := merlinRestartDNSMasq(); err != nil {
-		return fmt.Errorf("PreStart: merlinRestartDNSMasq: %w", err)
-	}
-
-	// Wait until `ntp_read=1` set.
-	b := backoff.NewBackoff("PreStart", func(format string, args ...any) {}, 10*time.Second)
-	for {
-		out, err := nvram("get", "ntp_ready")
-		if err != nil {
-			return fmt.Errorf("PreStart: nvram: %w", err)
-		}
-		if out == "1" {
-			return nil
-		}
-		b.BackOff(context.Background(), errors.New("ntp not ready"))
 	}
 }
 
@@ -155,6 +129,8 @@ func PostInstall() error {
 		return postInstallUbiOS()
 	case Synology:
 		return postInstallSynology()
+	case Tomato:
+		return postInstallTomato()
 	}
 	return nil
 }
@@ -173,6 +149,8 @@ func Cleanup() error {
 		return cleanupUbiOS()
 	case Synology:
 		return cleanupSynology()
+	case Tomato:
+		return cleanupTomato()
 	}
 	return nil
 }
@@ -181,7 +159,7 @@ func Cleanup() error {
 func ListenAddress() string {
 	name := Name()
 	switch name {
-	case DDWrt, Merlin, OpenWrt, Ubios, Synology:
+	case DDWrt, Merlin, OpenWrt, Ubios, Synology, Tomato:
 		return "127.0.0.1:5354"
 	}
 	return ""
@@ -210,6 +188,8 @@ func distroName() string {
 		return Ubios
 	case bytes.HasPrefix(unameU(), []byte("synology")):
 		return Synology
+	case bytes.HasPrefix(unameO(), []byte("Tomato")):
+		return Tomato
 	}
 	return ""
 }

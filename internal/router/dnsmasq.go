@@ -49,7 +49,7 @@ func dnsMasqConf() (string, error) {
 	var sb strings.Builder
 	var tmplText string
 	switch Name() {
-	case DDWrt, OpenWrt, Ubios, Synology:
+	case DDWrt, OpenWrt, Ubios, Synology, Tomato:
 		tmplText = dnsMasqConfigContentTmpl
 	case Merlin:
 		tmplText = merlinDNSMasqPostConfTmpl
@@ -64,4 +64,22 @@ func dnsMasqConf() (string, error) {
 		return "", err
 	}
 	return sb.String(), nil
+}
+
+func restartDNSMasq() error {
+	switch Name() {
+	case DDWrt:
+		return ddwrtRestartDNSMasq()
+	case Merlin:
+		return merlinRestartDNSMasq()
+	case OpenWrt:
+		return openwrtRestartDNSMasq()
+	case Ubios:
+		return ubiosRestartDNSMasq()
+	case Synology:
+		return synologyRestartDNSMasq()
+	case Tomato:
+		return tomatoRestartService(tomatoDNSMasqSvcName)
+	}
+	panic("not supported platform")
 }

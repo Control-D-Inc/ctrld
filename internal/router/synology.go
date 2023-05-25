@@ -22,7 +22,7 @@ func setupSynology() error {
 	if err := os.WriteFile(synologyDhcpdInfoPath, []byte(`enable="yes"`), 0600); err != nil {
 		return err
 	}
-	if err := synologyRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil
@@ -37,7 +37,7 @@ func cleanupSynology() error {
 	}
 
 	// Restart dnsmasq service.
-	if err := synologyRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil

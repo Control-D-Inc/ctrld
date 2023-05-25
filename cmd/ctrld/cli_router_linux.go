@@ -42,12 +42,11 @@ func initRouterCLI() {
 			if platform == "auto" {
 				platform = router.Name()
 			}
-			switch platform {
-			case router.DDWrt, router.Merlin, router.OpenWrt, router.Ubios, router.Synology:
-			default:
+			if !router.IsSupported(platform) {
 				unsupportedPlatformHelp(cmd)
 				os.Exit(1)
 			}
+
 			exe, err := os.Executable()
 			if err != nil {
 				mainLog.Fatal().Msgf("could not find executable path: %v", err)

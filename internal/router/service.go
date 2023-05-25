@@ -48,6 +48,15 @@ func init() {
 			},
 			new: newUbiosService,
 		},
+		&linuxSystemService{
+			name:   "tomato",
+			detect: func() bool { return Name() == Tomato },
+			interactive: func() bool {
+				is, _ := isInteractive()
+				return is
+			},
+			new: newTomatoService,
+		},
 	}
 	systems = append(systems, service.AvailableSystems()...)
 	service.ChooseSystem(systems...)

@@ -40,7 +40,7 @@ func setupOpenWrt() error {
 		return err
 	}
 	// Restart dnsmasq service.
-	if err := openwrtRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil
@@ -52,7 +52,7 @@ func cleanupOpenWrt() error {
 		return err
 	}
 	// Restart dnsmasq service.
-	if err := openwrtRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil

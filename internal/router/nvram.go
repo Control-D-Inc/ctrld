@@ -26,7 +26,7 @@ NOTE:
     +https://community.ui.com/questions/Implement-DNSSEC-into-UniFi/951c72b0-4d88-4c86-9174-45417bd2f9ca
     +https://community.ui.com/questions/Enable-DNSSEC-for-Unifi-Dream-Machine-FW-updates/e68e367c-d09b-4459-9444-18908f7c1ea1
 */
-func nvramKV() map[string]string {
+func nvramSetupKV() map[string]string {
 	switch Name() {
 	case DDWrt:
 		return map[string]string{
@@ -39,11 +39,28 @@ func nvramKV() map[string]string {
 		return map[string]string{
 			"dnspriv_enable": "0", // Ensure Merlin native DoT disabled.
 		}
+	case Tomato:
+		return map[string]string{
+			"dnsmasq_custom": "",  // Configuration of dnsmasq set by ctrld, filled by setupTomato.
+			"dnscrypt_proxy": "0", // Disable DNSCrypt.
+			"dnssec_enable":  "0", // Disable DNSSEC.
+			"stubby_proxy":   "0", // Disable Stubby
+		}
 	}
 	return nil
 }
 
-func nvramSetup(m map[string]string) error {
+func nvramInstallKV() map[string]string {
+	switch Name() {
+	case Tomato:
+		return map[string]string{
+			tomatoNvramScriptWanupKey: "", // script to start ctrld, filled by tomatoSvc.Install method.
+		}
+	}
+	return nil
+}
+
+func nvramSetKV(m map[string]string, setupKey string) error {
 	// Backup current value, store ctrld's configs.
 	for key, value := range m {
 		old, err := nvram("get", key)
@@ -58,7 +75,7 @@ func nvramSetup(m map[string]string) error {
 		}
 	}
 
-	if out, err := nvram("set", nvramCtrldSetupKey+"=1"); err != nil {
+	if out, err := nvram("set", setupKey+"=1"); err != nil {
 		return fmt.Errorf("%s: %w", out, err)
 	}
 	// Commit.
@@ -68,7 +85,7 @@ func nvramSetup(m map[string]string) error {
 	return nil
 }
 
-func nvramRestore(m map[string]string) error {
+func nvramRestore(m map[string]string, setupKey string) error {
 	// Restore old configs.
 	for key := range m {
 		ctrldKey := nvramCtrldKeyPrefix + key
@@ -82,7 +99,7 @@ func nvramRestore(m map[string]string) error {
 		}
 	}
 
-	if out, err := nvram("unset", "ctrld_setup"); err != nil {
+	if out, err := nvram("unset", setupKey); err != nil {
 		return fmt.Errorf("%s: %w", out, err)
 	}
 	// Commit.
