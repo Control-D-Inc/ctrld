@@ -21,6 +21,7 @@ const (
 	Ubios    = "ubios"
 	Synology = "synology"
 	Tomato   = "tomato"
+	EdgeOS   = "edgeos"
 )
 
 // ErrNotSupported reports the current router is not supported error.
@@ -38,7 +39,7 @@ type router struct {
 // IsSupported reports whether the given platform is supported by ctrld.
 func IsSupported(platform string) bool {
 	switch platform {
-	case DDWrt, Merlin, OpenWrt, Ubios, Synology, Tomato:
+	case EdgeOS, DDWrt, Merlin, OpenWrt, Synology, Tomato, Ubios:
 		return true
 	}
 	return false
@@ -46,23 +47,24 @@ func IsSupported(platform string) bool {
 
 // SupportedPlatforms return all platforms that can be configured to run with ctrld.
 func SupportedPlatforms() []string {
-	return []string{DDWrt, Merlin, OpenWrt, Ubios, Synology, Tomato}
+	return []string{EdgeOS, DDWrt, Merlin, OpenWrt, Synology, Tomato, Ubios}
 }
 
 var configureFunc = map[string]func() error{
+	EdgeOS:   setupEdgeOS,
 	DDWrt:    setupDDWrt,
 	Merlin:   setupMerlin,
 	OpenWrt:  setupOpenWrt,
-	Ubios:    setupUbiOS,
 	Synology: setupSynology,
 	Tomato:   setupTomato,
+	Ubios:    setupUbiOS,
 }
 
 // Configure configures things for running ctrld on the router.
 func Configure(c *ctrld.Config) error {
 	name := Name()
 	switch name {
-	case DDWrt, Merlin, OpenWrt, Ubios, Synology, Tomato:
+	case EdgeOS, DDWrt, Merlin, OpenWrt, Synology, Tomato, Ubios:
 		if c.HasUpstreamSendClientInfo() {
 			r := routerPlatform.Load()
 			r.sendClientInfo = true
@@ -72,8 +74,8 @@ func Configure(c *ctrld.Config) error {
 			}
 			r.watcher = watcher
 			go r.watchClientInfoTable()
-			for _, file := range clientInfoFiles {
-				_ = readClientInfoFile(file)
+			for file, readClienInfoFunc := range clientInfoFiles {
+				_ = readClienInfoFunc(file)
 				_ = r.watcher.Add(file)
 			}
 		}
@@ -97,7 +99,7 @@ func ConfigureService(sc *service.Config) error {
 		}
 	case OpenWrt:
 		sc.Option["SysvScript"] = openWrtScript
-	case Merlin, Ubios, Synology, Tomato:
+	case EdgeOS, Merlin, Synology, Tomato, Ubios:
 	}
 	return nil
 }
@@ -119,18 +121,20 @@ func PreStart() (err error) {
 func PostInstall() error {
 	name := Name()
 	switch name {
+	case EdgeOS:
+		return postInstallEdgeOS()
 	case DDWrt:
 		return postInstallDDWrt()
 	case Merlin:
 		return postInstallMerlin()
 	case OpenWrt:
 		return postInstallOpenWrt()
-	case Ubios:
-		return postInstallUbiOS()
 	case Synology:
 		return postInstallSynology()
 	case Tomato:
 		return postInstallTomato()
+	case Ubios:
+		return postInstallUbiOS()
 	}
 	return nil
 }
@@ -139,18 +143,20 @@ func PostInstall() error {
 func Cleanup() error {
 	name := Name()
 	switch name {
+	case EdgeOS:
+		return cleanupEdgeOS()
 	case DDWrt:
 		return cleanupDDWrt()
 	case Merlin:
 		return cleanupMerlin()
 	case OpenWrt:
 		return cleanupOpenWrt()
-	case Ubios:
-		return cleanupUbiOS()
 	case Synology:
 		return cleanupSynology()
 	case Tomato:
 		return cleanupTomato()
+	case Ubios:
+		return cleanupUbiOS()
 	}
 	return nil
 }
@@ -159,7 +165,7 @@ func Cleanup() error {
 func ListenAddress() string {
 	name := Name()
 	switch name {
-	case DDWrt, Merlin, OpenWrt, Ubios, Synology, Tomato:
+	case EdgeOS, DDWrt, Merlin, OpenWrt, Synology, Tomato, Ubios:
 		return "127.0.0.1:5354"
 	}
 	return ""
@@ -190,6 +196,10 @@ func distroName() string {
 		return Synology
 	case bytes.HasPrefix(unameO(), []byte("Tomato")):
 		return Tomato
+	case haveDir("/config/scripts/post-config.d"):
+		return EdgeOS
+	case haveFile("/etc/ubnt/init/vyatta-router"):
+		return EdgeOS // For 2.x
 	}
 	return ""
 }

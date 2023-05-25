@@ -49,7 +49,7 @@ func dnsMasqConf() (string, error) {
 	var sb strings.Builder
 	var tmplText string
 	switch Name() {
-	case DDWrt, OpenWrt, Ubios, Synology, Tomato:
+	case EdgeOS, DDWrt, OpenWrt, Ubios, Synology, Tomato:
 		tmplText = dnsMasqConfigContentTmpl
 	case Merlin:
 		tmplText = merlinDNSMasqPostConfTmpl
@@ -68,6 +68,8 @@ func dnsMasqConf() (string, error) {
 
 func restartDNSMasq() error {
 	switch Name() {
+	case EdgeOS:
+		return edgeOSRestartDNSMasq()
 	case DDWrt:
 		return ddwrtRestartDNSMasq()
 	case Merlin:

@@ -175,7 +175,10 @@ func (p *prog) setDNS() {
 	switch router.Name() {
 	case router.DDWrt, router.OpenWrt, router.Ubios:
 		// On router, ctrld run as a DNS forwarder, it does not have to change system DNS.
-		// Except for Merlin/Tomato, which has WAN DNS setup on boot for NTP.
+		// Except for:
+		//   + EdgeOS, which /etc/resolv.conf could be managed by vyatta_update_resolv.pl script.
+		//   + Merlin/Tomato, which has WAN DNS setup on boot for NTP.
+		//   + Synology, which /etc/resolv.conf is not configured to point to localhost.
 		return
 	}
 	if cfg.Listener == nil || cfg.Listener["0"] == nil {

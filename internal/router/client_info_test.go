@@ -1,6 +1,7 @@
 package router
 
 import (
+	"io"
 	"strings"
 	"testing"
 
@@ -31,23 +32,51 @@ func Test_normalizeIP(t *testing.T) {
 
 func Test_readClientInfoReader(t *testing.T) {
 	tests := []struct {
-		name string
-		in   string
-		mac  string
+		name     string
+		in       string
+		readFunc func(r io.Reader) error
+		mac      string
 	}{
 		{
-			"good",
+			"good dnsmasq",
 			`1683329857 e6:20:59:b8:c1:6d 192.168.1.186 * 01:e6:20:59:b8:c1:6d
 `,
+			dnsmasqReadClientInfoReader,
 			"e6:20:59:b8:c1:6d",
 		},
 		{
-			"bad seen on UDMdream machine",
+			"bad dnsmasq seen on UDMdream machine",
 			`1683329857 e6:20:59:b8:c1:6e 192.168.1.111 * 01:e6:20:59:b8:c1:6e
 duid 00:01:00:01:2b:e4:2e:2c:52:52:14:26:dc:1c
 1683322985 117442354 2600:4040:b0e6:b700::111 ASDASD 00:01:00:01:2a:d0:b9:81:00:07:32:4c:1c:07
 `,
+			dnsmasqReadClientInfoReader,
 			"e6:20:59:b8:c1:6e",
+		},
+		{
+			"isc-dhcpd good",
+			`lease 192.168.1.1 {
+    hardware ethernet 00:00:00:00:00:01;
+    client-hostname "host-1";
+}
+`,
+			iscDHCPReadClientInfoReader,
+			"00:00:00:00:00:01",
+		},
+		{
+			"isc-dhcpd bad mac",
+			`lease 192.168.1.1 {
+    hardware ethernet invalid-mac;
+    client-hostname "host-1";
+}
+
+lease 192.168.1.2 {
+    hardware ethernet 00:00:00:00:00:02;
+    client-hostname "host-2";
+}
+`,
+			iscDHCPReadClientInfoReader,
+			"00:00:00:00:00:02",
 		},
 	}
 
@@ -55,7 +84,7 @@ duid 00:01:00:01:2b:e4:2e:2c:52:52:14:26:dc:1c
 		t.Run(tc.name, func(t *testing.T) {
 			r := routerPlatform.Load()
 			r.mac.Delete(tc.mac)
-			if err := readClientInfoReader(strings.NewReader(tc.in)); err != nil {
+			if err := tc.readFunc(strings.NewReader(tc.in)); err != nil {
 				t.Errorf("readClientInfoReader() error = %v", err)
 			}
 			info, existed := r.mac.Load(tc.mac)
@@ -64,6 +93,8 @@ duid 00:01:00:01:2b:e4:2e:2c:52:52:14:26:dc:1c
 			}
 			if ci, ok := info.(*ctrld.ClientInfo); ok && existed && ci.Mac != tc.mac {
 				t.Errorf("mac mismatched, got: %q, want: %q", ci.Mac, tc.mac)
+			} else {
+				t.Log(ci)
 			}
 		})
 	}
