@@ -29,9 +29,19 @@ const (
 	IpStackV4    = "v4"
 	IpStackV6    = "v6"
 	IpStackSplit = "split"
+
+	controlDComDomain = "controld.com"
+	controlDNetDomain = "controld.net"
+	controlDDevDomain = "controld.dev"
 )
 
-var controldParentDomains = []string{"controld.com", "controld.net", "controld.dev"}
+var (
+	controldParentDomains  = []string{controlDComDomain, controlDNetDomain, controlDDevDomain}
+	controldVerifiedDomain = map[string]string{
+		controlDComDomain: "verify.controld.com",
+		controlDDevDomain: "verify.controld.dev",
+	}
+)
 
 // SetConfigName set the config name that ctrld will look for.
 // DEPRECATED: use SetConfigNameWithPath instead.
@@ -199,6 +209,23 @@ func (uc *UpstreamConfig) Init() {
 			uc.IPStack = IpStackBoth
 		}
 	}
+}
+
+// VerifyDomain returns the domain name that could be resolved by the upstream endpoint.
+// It returns empty for non-ControlD upstream endpoint.
+func (uc *UpstreamConfig) VerifyDomain() string {
+	domain := uc.Domain
+	if domain == "" {
+		if u, err := url.Parse(uc.Endpoint); err == nil {
+			domain = u.Hostname()
+		}
+	}
+	for _, parent := range controldParentDomains {
+		if dns.IsSubDomain(parent, domain) {
+			return controldVerifiedDomain[parent]
+		}
+	}
+	return ""
 }
 
 // UpstreamSendClientInfo reports whether the upstream is

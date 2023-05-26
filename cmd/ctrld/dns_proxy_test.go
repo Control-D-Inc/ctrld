@@ -174,7 +174,7 @@ func Test_macFromMsg(t *testing.T) {
 				t.Fatal(err)
 			}
 			m := new(dns.Msg)
-			m.SetQuestion(selfCheckFQDN+".", dns.TypeA)
+			m.SetQuestion("example.com.", dns.TypeA)
 			o := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
 			if tc.wantMac {
 				ec1 := &dns.EDNS0_LOCAL{Code: EDNS0_OPTION_MAC, Data: hw}

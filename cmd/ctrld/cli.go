@@ -36,8 +36,6 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
-const selfCheckFQDN = "verify.controld.com"
-
 var (
 	version = "dev"
 	commit  = "none"
@@ -289,6 +287,10 @@ func initCLI() {
 
 			processCDFlags()
 
+			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
+				mainLog.Fatal().Msgf("invalid config: %v", err)
+			}
+
 			// Explicitly passing config, so on system where home directory could not be obtained,
 			// or sub-process env is different with the parent, we still behave correctly and use
 			// the expected config file.
@@ -320,7 +322,8 @@ func initCLI() {
 					return
 				}
 
-				status = selfCheckStatus(status)
+				domain := cfg.Upstream["0"].VerifyDomain()
+				status = selfCheckStatus(status, domain)
 				switch status {
 				case service.StatusRunning:
 					mainLog.Notice().Msg("Service started")
@@ -855,7 +858,11 @@ func defaultIfaceName() string {
 	return dri
 }
 
-func selfCheckStatus(status service.Status) service.Status {
+func selfCheckStatus(status service.Status, domain string) service.Status {
+	if domain == "" {
+		// Nothing to do, return the status as-is.
+		return status
+	}
 	c := new(dns.Client)
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 500 * time.Millisecond
@@ -883,16 +890,16 @@ func selfCheckStatus(status service.Status) service.Status {
 		}
 		mu.Unlock()
 		m := new(dns.Msg)
-		m.SetQuestion(selfCheckFQDN+".", dns.TypeA)
+		m.SetQuestion(domain+".", dns.TypeA)
 		m.RecursionDesired = true
 		r, _, err := c.ExchangeContext(ctx, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
 		if r != nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
-			mainLog.Debug().Msgf("self-check against %q succeeded", selfCheckFQDN)
+			mainLog.Debug().Msgf("self-check against %q succeeded", domain)
 			return status
 		}
 		bo.BackOff(ctx, fmt.Errorf("ExchangeContext: %w", err))
 	}
-	mainLog.Debug().Msgf("self-check against %q failed", selfCheckFQDN)
+	mainLog.Debug().Msgf("self-check against %q failed", domain)
 	return service.StatusUnknown
 }
 
