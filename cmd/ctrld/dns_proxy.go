@@ -50,11 +50,12 @@ func (p *prog) serveDNS(listenerNum string) error {
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
 		reqId := requestID()
-		fmtSrcToDest := fmtRemoteToLocal(listenerNum, w.RemoteAddr().String(), w.LocalAddr().String())
+		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), router.GetClientInfoByMac(macFromMsg(m)))
+		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
 		t := time.Now()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
 		ctrld.Log(ctx, mainLog.Debug(), "%s received query: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
-		upstreams, matched := p.upstreamFor(ctx, listenerNum, listenerConfig, w.RemoteAddr(), domain)
+		upstreams, matched := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, domain)
 		var answer *dns.Msg
 		if !matched && listenerConfig.Restricted {
 			answer = new(dns.Msg)
@@ -416,6 +417,18 @@ func macFromMsg(msg *dns.Msg) string {
 		}
 	}
 	return ""
+}
+
+func spoofRemoteAddr(addr net.Addr, ci *ctrld.ClientInfo) net.Addr {
+	if ci != nil && ci.IP != "" {
+		switch addr := addr.(type) {
+		case *net.UDPAddr:
+			addr.IP = net.ParseIP(ci.IP)
+		case *net.TCPAddr:
+			addr.IP = net.ParseIP(ci.IP)
+		}
+	}
+	return addr
 }
 
 // runDNSServer starts a DNS server for given address and network,

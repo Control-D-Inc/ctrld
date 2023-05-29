@@ -191,3 +191,28 @@ func Test_macFromMsg(t *testing.T) {
 		})
 	}
 }
+
+func Test_remoteAddrFromMsg(t *testing.T) {
+	loopbackIP := net.ParseIP("127.0.0.1")
+	tests := []struct {
+		name string
+		addr net.Addr
+		ci   *ctrld.ClientInfo
+		want string
+	}{
+		{"tcp", &net.TCPAddr{IP: loopbackIP, Port: 12345}, &ctrld.ClientInfo{IP: "192.168.1.10"}, "192.168.1.10:12345"},
+		{"udp", &net.UDPAddr{IP: loopbackIP, Port: 12345}, &ctrld.ClientInfo{IP: "192.168.1.11"}, "192.168.1.11:12345"},
+		{"nil client info", &net.UDPAddr{IP: loopbackIP, Port: 12345}, nil, "127.0.0.1:12345"},
+		{"empty ip", &net.UDPAddr{IP: loopbackIP, Port: 12345}, &ctrld.ClientInfo{}, "127.0.0.1:12345"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			addr := spoofRemoteAddr(tc.addr, tc.ci)
+			if addr.String() != tc.want {
+				t.Errorf("unexpected result, want: %q, got: %q", tc.want, addr.String())
+			}
+		})
+	}
+}
