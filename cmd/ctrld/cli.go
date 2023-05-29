@@ -312,7 +312,7 @@ func initCLI() {
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
-				if err := router.PostInstall(); err != nil {
+				if err := router.PostInstall(svcConfig); err != nil {
 					mainLog.Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
 					return
 				}
@@ -468,7 +468,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				}
 				prog.resetDNS()
 				mainLog.Debug().Msg("Router cleanup")
-				if err := router.Cleanup(); err != nil {
+				if err := router.Cleanup(svcConfig); err != nil {
 					mainLog.Warn().Err(err).Msg("could not cleanup router")
 				}
 				mainLog.Notice().Msg("Service uninstalled")

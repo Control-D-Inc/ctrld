@@ -28,6 +28,7 @@ var clientInfoFiles = map[string]readClientInfoFunc{
 	"/tmp/var/lib/misc/dnsmasq.leases":     dnsmasqReadClientInfoFile, // Tomato
 	"/run/dnsmasq-dhcp.leases":             dnsmasqReadClientInfoFile, // EdgeOS
 	"/run/dhcpd.leases":                    iscDHCPReadClientInfoFile, // EdgeOS
+	"/var/dhcpd/var/db/dhcpd.leases":       iscDHCPReadClientInfoFile, // Pfsense
 }
 
 func (r *router) watchClientInfoTable() {
