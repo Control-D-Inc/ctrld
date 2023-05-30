@@ -2,16 +2,11 @@ package router
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 	"unicode"
-
-	"tailscale.com/logtail/backoff"
 )
 
 func setupMerlin() error {
@@ -91,44 +86,4 @@ func merlinParsePostConf(buf []byte) []byte {
 		return bytes.TrimLeftFunc(parts[1], unicode.IsSpace)
 	}
 	return buf
-}
-
-func merlinPreStart() (err error) {
-	pidFile := "/tmp/ctrld.pid"
-
-	// Remove pid file and trigger dnsmasq restart, so NTP can resolve
-	// server name and perform time synchronization.
-	pid, err := os.ReadFile(pidFile)
-	if err != nil {
-		return fmt.Errorf("PreStart: os.Readfile: %w", err)
-	}
-	if err := os.Remove(pidFile); err != nil {
-		return fmt.Errorf("PreStart: os.Remove: %w", err)
-	}
-	defer func() {
-		if werr := os.WriteFile(pidFile, pid, 0600); werr != nil {
-			err = errors.Join(err, werr)
-			return
-		}
-		if rerr := restartDNSMasq(); rerr != nil {
-			err = errors.Join(err, rerr)
-			return
-		}
-	}()
-	if err := restartDNSMasq(); err != nil {
-		return fmt.Errorf("PreStart: restartDNSMasqFn: %w", err)
-	}
-
-	// Wait until `ntp_ready=1` set.
-	b := backoff.NewBackoff("PreStart", func(format string, args ...any) {}, 10*time.Second)
-	for {
-		out, err := nvram("get", "ntp_ready")
-		if err != nil {
-			return fmt.Errorf("PreStart: nvram: %w", err)
-		}
-		if out == "1" {
-			return nil
-		}
-		b.BackOff(context.Background(), errors.New("ntp not ready"))
-	}
 }

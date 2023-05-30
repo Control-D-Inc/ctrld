@@ -165,8 +165,12 @@ func initCLI() {
 			initLogging()
 
 			if setupRouter {
-				if err := router.PreStart(); err != nil {
+				s, _ := runDNSServerForNTPD()
+				if err := router.PreRun(); err != nil {
 					mainLog.Fatal().Err(err).Msg("failed to perform router pre-start check")
+				}
+				if err := s.Shutdown(); err != nil {
+					mainLog.Fatal().Err(err).Msg("failed to shutdown dns server for ntpd")
 				}
 			}
 
@@ -909,7 +913,7 @@ func unsupportedPlatformHelp(cmd *cobra.Command) {
 
 func userHomeDir() (string, error) {
 	switch router.Name() {
-	case router.DDWrt, router.Merlin:
+	case router.DDWrt, router.Merlin, router.Tomato:
 		exe, err := os.Executable()
 		if err != nil {
 			return "", err

@@ -1,13 +1,8 @@
 package router
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"os/exec"
-	"time"
-
-	"tailscale.com/logtail/backoff"
 )
 
 const (
@@ -70,27 +65,6 @@ func cleanupTomato() error {
 		return err
 	}
 	return nil
-}
-
-func tomatoPreStart() (err error) {
-	// cleanup to trigger dnsmasq restart, so NTP can resolve
-	// server name and perform time synchronization.
-	if err = cleanupTomato(); err != nil {
-		return err
-	}
-
-	// Wait until `ntp_ready=1` set.
-	b := backoff.NewBackoff("PreStart", func(format string, args ...any) {}, 10*time.Second)
-	for {
-		out, err := nvram("get", "ntp_ready")
-		if err != nil {
-			return fmt.Errorf("PreStart: nvram: %w", err)
-		}
-		if out == "1" {
-			return nil
-		}
-		b.BackOff(context.Background(), errors.New("ntp not ready"))
-	}
 }
 
 func tomatoRestartService(name string) error {

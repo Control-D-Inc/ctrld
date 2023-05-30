@@ -201,3 +201,17 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 	}
 	return ips
 }
+
+// NewBootstrapResolver returns an OS resolver, which use following nameservers:
+//
+//   - ControlD bootstrap DNS server.
+//   - Gateway IP address (depends on OS).
+//   - Input servers.
+func NewBootstrapResolver(servers ...string) Resolver {
+	resolver := &osResolver{nameservers: nameservers()}
+	resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
+	for _, ns := range servers {
+		resolver.nameservers = append([]string{net.JoinHostPort(ns, "53")}, resolver.nameservers...)
+	}
+	return resolver
+}

@@ -2,14 +2,18 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/kardianos/service"
+	"tailscale.com/logtail/backoff"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -106,14 +110,23 @@ func ConfigureService(sc *service.Config) error {
 	return nil
 }
 
-// PreStart blocks until the router is ready for running ctrld.
-func PreStart() (err error) {
+// PreRun blocks until the router is ready for running ctrld.
+func PreRun() (err error) {
 	// On some routers, NTP may out of sync, so waiting for it to be ready.
 	switch Name() {
-	case Merlin:
-		return merlinPreStart()
-	case Tomato:
-		return tomatoPreStart()
+	case Merlin, Tomato:
+		// Wait until `ntp_ready=1` set.
+		b := backoff.NewBackoff("PreStart", func(format string, args ...any) {}, 10*time.Second)
+		for {
+			out, err := nvram("get", "ntp_ready")
+			if err != nil {
+				return fmt.Errorf("PreStart: nvram: %w", err)
+			}
+			if out == "1" {
+				return nil
+			}
+			b.BackOff(context.Background(), errors.New("ntp not ready"))
+		}
 	default:
 		return nil
 	}

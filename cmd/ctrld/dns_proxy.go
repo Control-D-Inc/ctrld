@@ -459,3 +459,45 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 	waitLock.Lock()
 	return s, errCh
 }
+
+func runDNSServerForNTPD() (*dns.Server, <-chan error) {
+	dnsResolver := ctrld.NewBootstrapResolver()
+	s := &dns.Server{
+		Addr: router.ListenAddress(),
+		Net:  "udp",
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
+			mainLog.Debug().Msg("Serving query for ntpd")
+			resolveCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if osUpstreamConfig.Timeout > 0 {
+				timeoutCtx, cancel := context.WithTimeout(resolveCtx, time.Millisecond*time.Duration(osUpstreamConfig.Timeout))
+				defer cancel()
+				resolveCtx = timeoutCtx
+			}
+			answer, err := dnsResolver.Resolve(resolveCtx, m)
+			if err != nil {
+				mainLog.Error().Err(err).Msgf("could not resolve: %v", m)
+				return
+			}
+			if err := w.WriteMsg(answer); err != nil {
+				mainLog.Error().Err(err).Msg("runDNSServerForNTPD: failed to send DNS response")
+			}
+		}),
+	}
+
+	waitLock := sync.Mutex{}
+	waitLock.Lock()
+	s.NotifyStartedFunc = waitLock.Unlock
+
+	errCh := make(chan error)
+	go func() {
+		defer close(errCh)
+		if err := s.ListenAndServe(); err != nil {
+			waitLock.Unlock()
+			mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
+			errCh <- err
+		}
+	}()
+	waitLock.Lock()
+	return s, errCh
+}
