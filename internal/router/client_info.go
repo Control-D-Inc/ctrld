@@ -105,7 +105,7 @@ func dnsmasqReadClientInfoReader(reader io.Reader) error {
 	r := routerPlatform.Load()
 	return lineread.Reader(reader, func(line []byte) error {
 		fields := bytes.Fields(line)
-		if len(fields) != 5 {
+		if len(fields) < 4 {
 			return nil
 		}
 		mac := string(fields[1])

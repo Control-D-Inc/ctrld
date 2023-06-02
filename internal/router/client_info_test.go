@@ -78,6 +78,12 @@ lease 192.168.1.2 {
 			iscDHCPReadClientInfoReader,
 			"00:00:00:00:00:02",
 		},
+		{
+			"",
+			`1685794060 00:00:00:00:00:04 192.168.0.209 cuonglm-ThinkPad-X1-Carbon-Gen-9 00:00:00:00:00:04 9`,
+			dnsmasqReadClientInfoReader,
+			"00:00:00:00:00:04",
+		},
 	}
 
 	for _, tc := range tests {
