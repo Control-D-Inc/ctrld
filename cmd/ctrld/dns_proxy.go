@@ -423,9 +423,19 @@ func spoofRemoteAddr(addr net.Addr, ci *ctrld.ClientInfo) net.Addr {
 	if ci != nil && ci.IP != "" {
 		switch addr := addr.(type) {
 		case *net.UDPAddr:
-			addr.IP = net.ParseIP(ci.IP)
+			udpAddr := &net.UDPAddr{
+				IP:   net.ParseIP(ci.IP),
+				Port: addr.Port,
+				Zone: addr.Zone,
+			}
+			return udpAddr
 		case *net.TCPAddr:
-			addr.IP = net.ParseIP(ci.IP)
+			udpAddr := &net.TCPAddr{
+				IP:   net.ParseIP(ci.IP),
+				Port: addr.Port,
+				Zone: addr.Zone,
+			}
+			return udpAddr
 		}
 	}
 	return addr
