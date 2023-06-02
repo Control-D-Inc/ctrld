@@ -37,6 +37,14 @@ func cleanupEdgeOS() error {
 }
 
 func postInstallEdgeOS() error {
+	// If "Content Filtering" is enabled, UniFi OS will create firewall rules to intercept all DNS queries
+	// from outside, and route those queries to separated interfaces (e.g: dnsfilter-2@if79) created by UniFi OS.
+	// Thus, those queries will never reach ctrld listener. UniFi OS does not provide any mechanism to toggle this
+	// feature via command line, so there's nothing ctrld can do to disable this feature. For now, reporting an
+	// error and guiding users to disable the feature using UniFi OS web UI.
+	if contentFilteringEnabled() {
+		return errContentFilteringEnabled
+	}
 	return nil
 }
 
