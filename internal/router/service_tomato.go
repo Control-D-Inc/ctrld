@@ -229,7 +229,7 @@ stop() {
       if [ -f "$pid_file" ]; then
         rm "$pid_file"
       fi
-      exit 0
+      return 0
     fi
     printf "."
     sleep 2
