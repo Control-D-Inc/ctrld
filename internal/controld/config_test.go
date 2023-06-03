@@ -13,16 +13,18 @@ func TestFetchResolverConfig(t *testing.T) {
 	tests := []struct {
 		name    string
 		uid     string
+		dev     bool
 		wantErr bool
 	}{
-		{"valid", "p2", false},
-		{"invalid uid", "abcd1234", true},
+		{"valid com", "p2", false, false},
+		{"valid dev", "p2", true, false},
+		{"invalid uid", "abcd1234", false, true},
 	}
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := FetchResolverConfig(tc.uid, "dev-test")
+			got, err := FetchResolverConfig(tc.uid, "dev-test", tc.dev)
 			require.False(t, (err != nil) != tc.wantErr, err)
 			if !tc.wantErr {
 				assert.NotEmpty(t, got.DOH)

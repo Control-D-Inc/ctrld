@@ -17,9 +17,11 @@ import (
 )
 
 const (
-	apiDomain         = "api.controld.com"
-	resolverDataURL   = "https://api.controld.com/utility"
-	InvalidConfigCode = 40401
+	apiDomainCom       = "api.controld.com"
+	apiDomainDev       = "api.controld.dev"
+	resolverDataURLCom = "https://api.controld.com/utility"
+	resolverDataURLDev = "https://api.controld.dev/utility"
+	InvalidConfigCode  = 40401
 )
 
 // ResolverConfig represents Control D resolver data.
@@ -54,9 +56,13 @@ type utilityRequest struct {
 }
 
 // FetchResolverConfig fetch Control D config for given uid.
-func FetchResolverConfig(uid, version string) (*ResolverConfig, error) {
+func FetchResolverConfig(uid, version string, cdDev bool) (*ResolverConfig, error) {
 	body, _ := json.Marshal(utilityRequest{UID: uid})
-	req, err := http.NewRequest("POST", resolverDataURL, bytes.NewReader(body))
+	apiUrl := resolverDataURLCom
+	if cdDev {
+		apiUrl = resolverDataURLDev
+	}
+	req, err := http.NewRequest("POST", apiUrl, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("http.NewRequest: %w", err)
 	}
@@ -67,6 +73,10 @@ func FetchResolverConfig(uid, version string) (*ResolverConfig, error) {
 	req.Header.Add("Content-Type", "application/json")
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		apiDomain := apiDomainCom
+		if cdDev {
+			apiDomain = apiDomainDev
+		}
 		ips := ctrld.LookupIP(apiDomain)
 		if len(ips) == 0 {
 			ctrld.ProxyLog.Warn().Msgf("No IPs found for %s, connecting to %s", apiDomain, addr)

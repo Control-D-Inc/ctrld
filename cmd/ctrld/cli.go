@@ -234,6 +234,8 @@ func initCLI() {
 	runCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	runCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
+	runCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
+	_ = runCmd.Flags().MarkHidden("dev")
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
@@ -352,6 +354,8 @@ func initCLI() {
 	startCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
+	startCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
+	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmd.Flags().BoolVarP(&setupRouter, "router", "", false, `setup for running on router platforms`)
 	_ = startCmd.Flags().MarkHidden("router")
@@ -706,7 +710,7 @@ func processCDFlags() {
 	}
 	logger := mainLog.With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
-	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version)
+	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
 	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
 		s, err := service.New(&prog{}, svcConfig)
 		if err != nil {

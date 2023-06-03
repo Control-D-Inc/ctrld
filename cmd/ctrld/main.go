@@ -27,6 +27,7 @@ var (
 	verbose           int
 	silent            bool
 	cdUID             string
+	cdDev             bool
 	iface             string
 	ifaceStartStop    string
 	setupRouter       bool
