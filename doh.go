@@ -13,10 +13,9 @@ import (
 )
 
 const (
-	DoHMacHeader  = "x-cd-mac"
-	DoHIPHeader   = "x-cd-ip"
-	DoHHostHeader = "x-cd-host"
-
+	dohMacHeader         = "x-cd-mac"
+	dohIPHeader          = "x-cd-ip"
+	dohHostHeader        = "x-cd-host"
 	headerApplicationDNS = "application/dns-message"
 )
 
@@ -101,13 +100,13 @@ func addHeader(ctx context.Context, req *http.Request, sendClientInfo bool) {
 	if sendClientInfo {
 		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
 			if ci.Mac != "" {
-				req.Header.Set(DoHMacHeader, ci.Mac)
+				req.Header.Set(dohMacHeader, ci.Mac)
 			}
 			if ci.IP != "" {
-				req.Header.Set(DoHIPHeader, ci.IP)
+				req.Header.Set(dohIPHeader, ci.IP)
 			}
 			if ci.Hostname != "" {
-				req.Header.Set(DoHHostHeader, ci.Hostname)
+				req.Header.Set(dohHostHeader, ci.Hostname)
 			}
 		}
 	}

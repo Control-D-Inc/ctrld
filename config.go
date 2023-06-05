@@ -24,10 +24,17 @@ import (
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
+// IpStackBoth ...
 const (
-	IpStackBoth  = "both"
-	IpStackV4    = "v4"
-	IpStackV6    = "v6"
+	// IpStackBoth indicates that ctrld will use either ipv4 or ipv6 for connecting to upstream,
+	// depending on which stack is available when receiving the DNS query.
+	IpStackBoth = "both"
+	// IpStackV4 indicates that ctrld will use only ipv4 for connecting to upstream.
+	IpStackV4 = "v4"
+	// IpStackV6 indicates that ctrld will use only ipv6 for connecting to upstream.
+	IpStackV6 = "v6"
+	// IpStackSplit indicates that ctrld will use either ipv4 or ipv6 for connecting to upstream,
+	// depending on the record type of the DNS query.
 	IpStackSplit = "split"
 
 	controlDComDomain = "controld.com"
@@ -251,6 +258,7 @@ func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
 	return false
 }
 
+// BootstrapIPs returns the bootstrap IPs list of upstreams.
 func (uc *UpstreamConfig) BootstrapIPs() []string {
 	return uc.bootstrapIPs
 }

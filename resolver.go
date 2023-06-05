@@ -12,11 +12,17 @@ import (
 )
 
 const (
-	ResolverTypeDOH    = "doh"
-	ResolverTypeDOH3   = "doh3"
-	ResolverTypeDOT    = "dot"
-	ResolverTypeDOQ    = "doq"
-	ResolverTypeOS     = "os"
+	// ResolverTypeDOH specifies DoH resolver.
+	ResolverTypeDOH = "doh"
+	// ResolverTypeDOH3 specifies DoH3 resolver.
+	ResolverTypeDOH3 = "doh3"
+	// ResolverTypeDOT specifies DoT resolver.
+	ResolverTypeDOT = "dot"
+	// ResolverTypeDOQ specifies DoQ resolver.
+	ResolverTypeDOQ = "doq"
+	// ResolverTypeOS specifies OS resolver.
+	ResolverTypeOS = "os"
+	// ResolverTypeLegacy specifies legacy resolver.
 	ResolverTypeLegacy = "legacy"
 )
 

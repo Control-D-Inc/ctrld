@@ -470,6 +470,9 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 	return s, errCh
 }
 
+// runDNSServerForNTPD starts a DNS server listening on router.ListenAddress(). It must only be called when ctrld
+// running on router, before router.PreRun() to serve DNS request for NTP synchronization. The caller must call
+// s.Shutdown() explicitly when NTP is synced successfully.
 func runDNSServerForNTPD() (*dns.Server, <-chan error) {
 	dnsResolver := ctrld.NewBootstrapResolver()
 	s := &dns.Server{

@@ -16,8 +16,10 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 )
 
+// readClientInfoFunc represents the function for reading client info.
 type readClientInfoFunc func(name string) error
 
+// clientInfoFiles specifies client info files and how to read them on supported platforms.
 var clientInfoFiles = map[string]readClientInfoFunc{
 	"/tmp/dnsmasq.leases":                  dnsmasqReadClientInfoFile, // ddwrt
 	"/tmp/dhcp.leases":                     dnsmasqReadClientInfoFile, // openwrt
@@ -31,6 +33,8 @@ var clientInfoFiles = map[string]readClientInfoFunc{
 	"/var/dhcpd/var/db/dhcpd.leases":       iscDHCPReadClientInfoFile, // Pfsense
 }
 
+// watchClientInfoTable watches changes happens in dnsmasq/dhcpd
+// lease files, perform updating to mac table if necessary.
 func (r *router) watchClientInfoTable() {
 	if r.watcher == nil {
 		return
@@ -65,6 +69,7 @@ func (r *router) watchClientInfoTable() {
 	}
 }
 
+// Stop performs tasks need to be done before the router stopped.
 func Stop() error {
 	if Name() == "" {
 		return nil
@@ -78,6 +83,7 @@ func Stop() error {
 	return nil
 }
 
+// GetClientInfoByMac returns ClientInfo for the client associated with the given mac.
 func GetClientInfoByMac(mac string) *ctrld.ClientInfo {
 	if mac == "" {
 		return nil
@@ -91,6 +97,7 @@ func GetClientInfoByMac(mac string) *ctrld.ClientInfo {
 	return val.(*ctrld.ClientInfo)
 }
 
+// dnsmasqReadClientInfoFile populates mac table with client info reading from dnsmasq lease file.
 func dnsmasqReadClientInfoFile(name string) error {
 	f, err := os.Open(name)
 	if err != nil {
@@ -101,6 +108,7 @@ func dnsmasqReadClientInfoFile(name string) error {
 
 }
 
+// dnsmasqReadClientInfoReader likes dnsmasqReadClientInfoFile, but reading from an io.Reader instead of file.
 func dnsmasqReadClientInfoReader(reader io.Reader) error {
 	r := routerPlatform.Load()
 	return lineread.Reader(reader, func(line []byte) error {
@@ -124,6 +132,7 @@ func dnsmasqReadClientInfoReader(reader io.Reader) error {
 	})
 }
 
+// iscDHCPReadClientInfoFile populates mac table with client info reading from isc-dhcpd lease file.
 func iscDHCPReadClientInfoFile(name string) error {
 	f, err := os.Open(name)
 	if err != nil {
@@ -133,6 +142,7 @@ func iscDHCPReadClientInfoFile(name string) error {
 	return iscDHCPReadClientInfoReader(f)
 }
 
+// iscDHCPReadClientInfoReader likes iscDHCPReadClientInfoFile, but reading from an io.Reader instead of file.
 func iscDHCPReadClientInfoReader(reader io.Reader) error {
 	r := routerPlatform.Load()
 	s := bufio.NewScanner(reader)
@@ -172,6 +182,7 @@ func iscDHCPReadClientInfoReader(reader io.Reader) error {
 	return nil
 }
 
+// normalizeIP normalizes the ip parsed from dnsmasq/dhcpd lease file.
 func normalizeIP(in string) string {
 	// dnsmasq may put ip with interface index in lease file, strip it here.
 	ip, _, found := strings.Cut(in, "%")
