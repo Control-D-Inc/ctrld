@@ -20,7 +20,7 @@ func setupPfsense() error {
 	_ = exec.Command("killall", "unbound").Run()
 
 	// If Pfsense is in DNS Forwarder mode, ensure no dnsmasq processes running.
-	_ = exec.Command("killall", "dnsmasq")
+	_ = exec.Command("killall", "dnsmasq").Run()
 	return nil
 }
 
