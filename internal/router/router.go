@@ -105,7 +105,9 @@ func ConfigureService(sc *service.Config) error {
 		}
 	case OpenWrt:
 		sc.Option["SysvScript"] = openWrtScript
-	case EdgeOS, Merlin, Pfsense, Synology, Tomato, Ubios:
+	case Pfsense:
+		sc.Option["SysvScript"] = pfsenseInitScript
+	case EdgeOS, Merlin, Synology, Tomato, Ubios:
 	}
 	return nil
 }

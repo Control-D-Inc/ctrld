@@ -12,21 +12,15 @@ import (
 const (
 	rcPath        = "/usr/local/etc/rc.d"
 	unboundRcPath = rcPath + "/unbound"
+	dnsmasqRcPath = rcPath + "/dnsmasq"
 )
 
 func setupPfsense() error {
 	// If Pfsense is in DNS Resolver mode, ensure no unbound processes running.
-	if _, err := exec.Command("service", "unbound", "onestatus").CombinedOutput(); err == nil {
-		if out, err := exec.Command("killall", "unbound").CombinedOutput(); err != nil {
-			return fmt.Errorf("could not killall unbound: %s: %w", string(out), err)
-		}
-	}
+	_ = exec.Command("killall", "unbound").Run()
+
 	// If Pfsense is in DNS Forwarder mode, ensure no dnsmasq processes running.
-	if _, err := exec.Command("service", "dnsmasq", "onestatus").CombinedOutput(); err == nil {
-		if out, err := exec.Command("killall", "dnsmasq").CombinedOutput(); err != nil {
-			return fmt.Errorf("could not killall unbound: %s: %w", string(out), err)
-		}
-	}
+	_ = exec.Command("killall", "dnsmasq")
 	return nil
 }
 
@@ -34,12 +28,9 @@ func cleanupPfsense(svc *service.Config) error {
 	if err := os.Remove(filepath.Join(rcPath, svc.Name+".sh")); err != nil {
 		return fmt.Errorf("os.Remove: %w", err)
 	}
-	if out, err := exec.Command(unboundRcPath, "onerestart").CombinedOutput(); err != nil {
-		return fmt.Errorf("could not restart unbound: %s: %w", string(out), err)
-	}
-	if out, err := exec.Command(unboundRcPath, "onerestart").CombinedOutput(); err != nil {
-		return fmt.Errorf("could not restart unbound: %s: %w", string(out), err)
-	}
+	_ = exec.Command(unboundRcPath, "onerestart").Run()
+	_ = exec.Command(dnsmasqRcPath, "onerestart").Run()
+
 	return nil
 }
 
@@ -54,3 +45,22 @@ func postInstallPfsense(svc *service.Config) error {
 	}
 	return nil
 }
+
+const pfsenseInitScript = `#!/bin/sh
+
+# PROVIDE: {{.Name}}
+# REQUIRE: SERVERS
+# REQUIRE: unbound dnsmasq securelevel
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="{{.Name}}"
+{{.Name}}_env="IS_DAEMON=1"
+pidfile="/var/run/${name}.pid"
+command="/usr/sbin/daemon"
+daemon_args="-P ${pidfile} -r -t \"${name}: daemon\"{{if .WorkingDirectory}} -c {{.WorkingDirectory}}{{end}}"
+command_args="${daemon_args} {{.Path}}{{range .Arguments}} {{.}}{{end}}"
+
+run_rc_command "$1"
+`

@@ -165,11 +165,11 @@ func initCLI() {
 			initLogging()
 
 			if setupRouter {
-				s, _ := runDNSServerForNTPD()
+				s, errCh := runDNSServerForNTPD(router.ListenAddress())
 				if err := router.PreRun(); err != nil {
 					mainLog.Fatal().Err(err).Msg("failed to perform router pre-start check")
 				}
-				if err := s.Shutdown(); err != nil {
+				if err := s.Shutdown(); err != nil && errCh != nil {
 					mainLog.Fatal().Err(err).Msg("failed to shutdown dns server for ntpd")
 				}
 			}
