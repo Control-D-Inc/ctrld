@@ -13,7 +13,8 @@ import (
 
 func newService(s service.Service) service.Service {
 	// TODO: unify for other SysV system.
-	if router.IsGLiNet() {
+	switch {
+	case router.IsGLiNet(), router.IsOldOpenwrt():
 		return &sysV{s}
 	}
 	return s
