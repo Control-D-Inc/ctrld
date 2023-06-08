@@ -1,3 +1,5 @@
+//go:build linux || freebsd
+
 package main
 
 import (
@@ -42,12 +44,11 @@ func initRouterCLI() {
 			if platform == "auto" {
 				platform = router.Name()
 			}
-			switch platform {
-			case router.DDWrt, router.Merlin, router.OpenWrt, router.Ubios:
-			default:
+			if !router.IsSupported(platform) {
 				unsupportedPlatformHelp(cmd)
 				os.Exit(1)
 			}
+
 			exe, err := os.Executable()
 			if err != nil {
 				mainLog.Fatal().Msgf("could not find executable path: %v", err)
@@ -76,6 +77,8 @@ func initRouterCLI() {
 	routerCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	routerCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	routerCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
+	routerCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
+	_ = routerCmd.Flags().MarkHidden("dev")
 	routerCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 
 	tmpl := routerCmd.UsageTemplate()

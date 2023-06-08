@@ -24,14 +24,31 @@ import (
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
+// IpStackBoth ...
 const (
-	IpStackBoth  = "both"
-	IpStackV4    = "v4"
-	IpStackV6    = "v6"
+	// IpStackBoth indicates that ctrld will use either ipv4 or ipv6 for connecting to upstream,
+	// depending on which stack is available when receiving the DNS query.
+	IpStackBoth = "both"
+	// IpStackV4 indicates that ctrld will use only ipv4 for connecting to upstream.
+	IpStackV4 = "v4"
+	// IpStackV6 indicates that ctrld will use only ipv6 for connecting to upstream.
+	IpStackV6 = "v6"
+	// IpStackSplit indicates that ctrld will use either ipv4 or ipv6 for connecting to upstream,
+	// depending on the record type of the DNS query.
 	IpStackSplit = "split"
+
+	controlDComDomain = "controld.com"
+	controlDNetDomain = "controld.net"
+	controlDDevDomain = "controld.dev"
 )
 
-var controldParentDomains = []string{"controld.com", "controld.net", "controld.dev"}
+var (
+	controldParentDomains  = []string{controlDComDomain, controlDNetDomain, controlDDevDomain}
+	controldVerifiedDomain = map[string]string{
+		controlDComDomain: "verify.controld.com",
+		controlDDevDomain: "verify.controld.dev",
+	}
+)
 
 // SetConfigName set the config name that ctrld will look for.
 // DEPRECATED: use SetConfigNameWithPath instead.
@@ -201,6 +218,23 @@ func (uc *UpstreamConfig) Init() {
 	}
 }
 
+// VerifyDomain returns the domain name that could be resolved by the upstream endpoint.
+// It returns empty for non-ControlD upstream endpoint.
+func (uc *UpstreamConfig) VerifyDomain() string {
+	domain := uc.Domain
+	if domain == "" {
+		if u, err := url.Parse(uc.Endpoint); err == nil {
+			domain = u.Hostname()
+		}
+	}
+	for _, parent := range controldParentDomains {
+		if dns.IsSubDomain(parent, domain) {
+			return controldVerifiedDomain[parent]
+		}
+	}
+	return ""
+}
+
 // UpstreamSendClientInfo reports whether the upstream is
 // configured to send client info to Control D DNS server.
 //
@@ -224,6 +258,7 @@ func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
 	return false
 }
 
+// BootstrapIPs returns the bootstrap IPs list of upstreams.
 func (uc *UpstreamConfig) BootstrapIPs() []string {
 	return uc.bootstrapIPs
 }
@@ -347,9 +382,7 @@ func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
 		uc.transport = uc.newDOHTransport(uc.bootstrapIPs6)
 	case IpStackSplit:
 		uc.transport4 = uc.newDOHTransport(uc.bootstrapIPs4)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if ctrldnet.IPv6Available(ctx) {
+		if hasIPv6() {
 			uc.transport6 = uc.newDOHTransport(uc.bootstrapIPs6)
 		} else {
 			uc.transport6 = uc.transport4
@@ -419,7 +452,10 @@ func (uc *UpstreamConfig) bootstrapIPForDNSType(dnsType uint16) string {
 		case dns.TypeA:
 			return pick(uc.bootstrapIPs4)
 		default:
-			return pick(uc.bootstrapIPs6)
+			if hasIPv6() {
+				return pick(uc.bootstrapIPs6)
+			}
+			return pick(uc.bootstrapIPs4)
 		}
 	}
 	return pick(uc.bootstrapIPs)
@@ -438,7 +474,10 @@ func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
 		case dns.TypeA:
 			return "tcp4-tls", "udp4"
 		default:
-			return "tcp6-tls", "udp6"
+			if hasIPv6() {
+				return "tcp6-tls", "udp6"
+			}
+			return "tcp4-tls", "udp4"
 		}
 	}
 	return "tcp-tls", "udp"

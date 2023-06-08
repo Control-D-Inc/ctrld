@@ -109,6 +109,7 @@ type parallelDialerResult struct {
 
 type quicParallelDialer struct{}
 
+// Dial performs parallel dialing to the given address list.
 func (d *quicParallelDialer) Dial(ctx context.Context, domain string, addrs []string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 	if len(addrs) == 0 {
 		return nil, errors.New("empty addresses")

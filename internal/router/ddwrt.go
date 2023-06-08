@@ -7,9 +7,10 @@ import (
 )
 
 const (
-	nvramCtrldKeyPrefix = "ctrld_"
-	nvramCtrldSetupKey  = "ctrld_setup"
-	nvramRCStartupKey   = "rc_startup"
+	nvramCtrldKeyPrefix  = "ctrld_"
+	nvramCtrldSetupKey   = "ctrld_setup"
+	nvramCtrldInstallKey = "ctrld_install"
+	nvramRCStartupKey    = "rc_startup"
 )
 
 //lint:ignore ST1005 This error is for human.
@@ -29,14 +30,14 @@ func setupDDWrt() error {
 		return err
 	}
 
-	nvramKvMap := nvramKV()
+	nvramKvMap := nvramSetupKV()
 	nvramKvMap["dnsmasq_options"] = data
-	if err := nvramSetup(nvramKvMap); err != nil {
+	if err := nvramSetKV(nvramKvMap, nvramCtrldSetupKey); err != nil {
 		return err
 	}
 
 	// Restart dnsmasq service.
-	if err := ddwrtRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil
@@ -44,11 +45,11 @@ func setupDDWrt() error {
 
 func cleanupDDWrt() error {
 	// Restore old configs.
-	if err := nvramRestore(nvramKV()); err != nil {
+	if err := nvramRestore(nvramSetupKV(), nvramCtrldSetupKey); err != nil {
 		return err
 	}
 	// Restart dnsmasq service.
-	if err := ddwrtRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil

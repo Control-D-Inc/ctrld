@@ -50,11 +50,12 @@ func (p *prog) serveDNS(listenerNum string) error {
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
 		reqId := requestID()
-		fmtSrcToDest := fmtRemoteToLocal(listenerNum, w.RemoteAddr().String(), w.LocalAddr().String())
+		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), router.GetClientInfoByMac(macFromMsg(m)))
+		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
 		t := time.Now()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
 		ctrld.Log(ctx, mainLog.Debug(), "%s received query: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
-		upstreams, matched := p.upstreamFor(ctx, listenerNum, listenerConfig, w.RemoteAddr(), domain)
+		upstreams, matched := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, domain)
 		var answer *dns.Msg
 		if !matched && listenerConfig.Restricted {
 			answer = new(dns.Msg)
@@ -418,6 +419,28 @@ func macFromMsg(msg *dns.Msg) string {
 	return ""
 }
 
+func spoofRemoteAddr(addr net.Addr, ci *ctrld.ClientInfo) net.Addr {
+	if ci != nil && ci.IP != "" {
+		switch addr := addr.(type) {
+		case *net.UDPAddr:
+			udpAddr := &net.UDPAddr{
+				IP:   net.ParseIP(ci.IP),
+				Port: addr.Port,
+				Zone: addr.Zone,
+			}
+			return udpAddr
+		case *net.TCPAddr:
+			udpAddr := &net.TCPAddr{
+				IP:   net.ParseIP(ci.IP),
+				Port: addr.Port,
+				Zone: addr.Zone,
+			}
+			return udpAddr
+		}
+	}
+	return addr
+}
+
 // runDNSServer starts a DNS server for given address and network,
 // with the given handler. It ensures the server has started listening.
 // Any error will be reported to the caller via returned channel.
@@ -428,6 +451,54 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 		Addr:    addr,
 		Net:     network,
 		Handler: handler,
+	}
+
+	waitLock := sync.Mutex{}
+	waitLock.Lock()
+	s.NotifyStartedFunc = waitLock.Unlock
+
+	errCh := make(chan error)
+	go func() {
+		defer close(errCh)
+		if err := s.ListenAndServe(); err != nil {
+			waitLock.Unlock()
+			mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
+			errCh <- err
+		}
+	}()
+	waitLock.Lock()
+	return s, errCh
+}
+
+// runDNSServerForNTPD starts a DNS server listening on router.ListenAddress(). It must only be called when ctrld
+// running on router, before router.PreRun() to serve DNS request for NTP synchronization. The caller must call
+// s.Shutdown() explicitly when NTP is synced successfully.
+func runDNSServerForNTPD(addr string) (*dns.Server, <-chan error) {
+	if addr == "" {
+		return &dns.Server{}, nil
+	}
+	dnsResolver := ctrld.NewBootstrapResolver()
+	s := &dns.Server{
+		Addr: addr,
+		Net:  "udp",
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
+			mainLog.Debug().Msg("Serving query for ntpd")
+			resolveCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if osUpstreamConfig.Timeout > 0 {
+				timeoutCtx, cancel := context.WithTimeout(resolveCtx, time.Millisecond*time.Duration(osUpstreamConfig.Timeout))
+				defer cancel()
+				resolveCtx = timeoutCtx
+			}
+			answer, err := dnsResolver.Resolve(resolveCtx, m)
+			if err != nil {
+				mainLog.Error().Err(err).Msgf("could not resolve: %v", m)
+				return
+			}
+			if err := w.WriteMsg(answer); err != nil {
+				mainLog.Error().Err(err).Msg("runDNSServerForNTPD: failed to send DNS response")
+			}
+		}),
 	}
 
 	waitLock := sync.Mutex{}

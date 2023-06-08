@@ -12,11 +12,17 @@ import (
 )
 
 const (
-	ResolverTypeDOH    = "doh"
-	ResolverTypeDOH3   = "doh3"
-	ResolverTypeDOT    = "dot"
-	ResolverTypeDOQ    = "doq"
-	ResolverTypeOS     = "os"
+	// ResolverTypeDOH specifies DoH resolver.
+	ResolverTypeDOH = "doh"
+	// ResolverTypeDOH3 specifies DoH3 resolver.
+	ResolverTypeDOH3 = "doh3"
+	// ResolverTypeDOT specifies DoT resolver.
+	ResolverTypeDOT = "dot"
+	// ResolverTypeDOQ specifies DoQ resolver.
+	ResolverTypeDOQ = "doq"
+	// ResolverTypeOS specifies OS resolver.
+	ResolverTypeOS = "os"
+	// ResolverTypeLegacy specifies legacy resolver.
 	ResolverTypeLegacy = "legacy"
 )
 
@@ -125,7 +131,14 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 		Net:    udpNet,
 		Dialer: dialer,
 	}
-	answer, _, err := dnsClient.ExchangeContext(ctx, msg, r.uc.Endpoint)
+	endpoint := r.uc.Endpoint
+	if r.uc.BootstrapIP != "" {
+		dnsClient.Net = "udp"
+		_, port, _ := net.SplitHostPort(endpoint)
+		endpoint = net.JoinHostPort(r.uc.BootstrapIP, port)
+	}
+
+	answer, _, err := dnsClient.ExchangeContext(ctx, msg, endpoint)
 	return answer, err
 }
 
@@ -193,4 +206,18 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 		lookup(dnsType)
 	}
 	return ips
+}
+
+// NewBootstrapResolver returns an OS resolver, which use following nameservers:
+//
+//   - ControlD bootstrap DNS server.
+//   - Gateway IP address (depends on OS).
+//   - Input servers.
+func NewBootstrapResolver(servers ...string) Resolver {
+	resolver := &osResolver{nameservers: nameservers()}
+	resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
+	for _, ns := range servers {
+		resolver.nameservers = append([]string{net.JoinHostPort(ns, "53")}, resolver.nameservers...)
+	}
+	return resolver
 }

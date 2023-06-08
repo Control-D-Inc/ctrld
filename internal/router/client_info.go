@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"log"
@@ -15,14 +16,25 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 )
 
-var clientInfoFiles = []string{
-	"/tmp/dnsmasq.leases",                  // ddwrt
-	"/tmp/dhcp.leases",                     // openwrt
-	"/var/lib/misc/dnsmasq.leases",         // merlin
-	"/mnt/data/udapi-config/dnsmasq.lease", // UDM Pro
-	"/data/udapi-config/dnsmasq.lease",     // UDR
+// readClientInfoFunc represents the function for reading client info.
+type readClientInfoFunc func(name string) error
+
+// clientInfoFiles specifies client info files and how to read them on supported platforms.
+var clientInfoFiles = map[string]readClientInfoFunc{
+	"/tmp/dnsmasq.leases":                  dnsmasqReadClientInfoFile, // ddwrt
+	"/tmp/dhcp.leases":                     dnsmasqReadClientInfoFile, // openwrt
+	"/var/lib/misc/dnsmasq.leases":         dnsmasqReadClientInfoFile, // merlin
+	"/mnt/data/udapi-config/dnsmasq.lease": dnsmasqReadClientInfoFile, // UDM Pro
+	"/data/udapi-config/dnsmasq.lease":     dnsmasqReadClientInfoFile, // UDR
+	"/etc/dhcpd/dhcpd-leases.log":          dnsmasqReadClientInfoFile, // Synology
+	"/tmp/var/lib/misc/dnsmasq.leases":     dnsmasqReadClientInfoFile, // Tomato
+	"/run/dnsmasq-dhcp.leases":             dnsmasqReadClientInfoFile, // EdgeOS
+	"/run/dhcpd.leases":                    iscDHCPReadClientInfoFile, // EdgeOS
+	"/var/dhcpd/var/db/dhcpd.leases":       iscDHCPReadClientInfoFile, // Pfsense
 }
 
+// watchClientInfoTable watches changes happens in dnsmasq/dhcpd
+// lease files, perform updating to mac table if necessary.
 func (r *router) watchClientInfoTable() {
 	if r.watcher == nil {
 		return
@@ -32,14 +44,19 @@ func (r *router) watchClientInfoTable() {
 		select {
 		case <-timer.C:
 			for _, name := range r.watcher.WatchList() {
-				_ = readClientInfoFile(name)
+				_ = clientInfoFiles[name](name)
 			}
 		case event, ok := <-r.watcher.Events:
 			if !ok {
 				return
 			}
 			if event.Has(fsnotify.Write) {
-				if err := readClientInfoFile(event.Name); err != nil && !os.IsNotExist(err) {
+				readFunc := clientInfoFiles[event.Name]
+				if readFunc == nil {
+					log.Println("unknown file format:", event.Name)
+					continue
+				}
+				if err := readFunc(event.Name); err != nil && !os.IsNotExist(err) {
 					log.Println("could not read client info file:", err)
 				}
 			}
@@ -52,6 +69,7 @@ func (r *router) watchClientInfoTable() {
 	}
 }
 
+// Stop performs tasks need to be done before the router stopped.
 func Stop() error {
 	if Name() == "" {
 		return nil
@@ -65,6 +83,7 @@ func Stop() error {
 	return nil
 }
 
+// GetClientInfoByMac returns ClientInfo for the client associated with the given mac.
 func GetClientInfoByMac(mac string) *ctrld.ClientInfo {
 	if mac == "" {
 		return nil
@@ -78,21 +97,23 @@ func GetClientInfoByMac(mac string) *ctrld.ClientInfo {
 	return val.(*ctrld.ClientInfo)
 }
 
-func readClientInfoFile(name string) error {
+// dnsmasqReadClientInfoFile populates mac table with client info reading from dnsmasq lease file.
+func dnsmasqReadClientInfoFile(name string) error {
 	f, err := os.Open(name)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return readClientInfoReader(f)
+	return dnsmasqReadClientInfoReader(f)
 
 }
 
-func readClientInfoReader(reader io.Reader) error {
+// dnsmasqReadClientInfoReader likes dnsmasqReadClientInfoFile, but reading from an io.Reader instead of file.
+func dnsmasqReadClientInfoReader(reader io.Reader) error {
 	r := routerPlatform.Load()
 	return lineread.Reader(reader, func(line []byte) error {
 		fields := bytes.Fields(line)
-		if len(fields) != 5 {
+		if len(fields) < 4 {
 			return nil
 		}
 		mac := string(fields[1])
@@ -111,6 +132,57 @@ func readClientInfoReader(reader io.Reader) error {
 	})
 }
 
+// iscDHCPReadClientInfoFile populates mac table with client info reading from isc-dhcpd lease file.
+func iscDHCPReadClientInfoFile(name string) error {
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return iscDHCPReadClientInfoReader(f)
+}
+
+// iscDHCPReadClientInfoReader likes iscDHCPReadClientInfoFile, but reading from an io.Reader instead of file.
+func iscDHCPReadClientInfoReader(reader io.Reader) error {
+	r := routerPlatform.Load()
+	s := bufio.NewScanner(reader)
+	var ip, mac, hostname string
+	for s.Scan() {
+		line := s.Text()
+		if strings.HasPrefix(line, "}") {
+			if mac != "" {
+				r.mac.Store(mac, &ctrld.ClientInfo{Mac: mac, IP: ip, Hostname: hostname})
+				ip, mac, hostname = "", "", ""
+			}
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "lease":
+			ip = normalizeIP(strings.ToLower(fields[1]))
+			if net.ParseIP(ip) == nil {
+				log.Printf("invalid ip address entry: %q", ip)
+				ip = ""
+			}
+		case "hardware":
+			if len(fields) >= 3 {
+				mac = strings.ToLower(strings.TrimRight(fields[2], ";"))
+				if _, err := net.ParseMAC(mac); err != nil {
+					// Invalid mac, skip.
+					mac = ""
+				}
+			}
+		case "client-hostname":
+			hostname = strings.Trim(fields[1], `";`)
+		}
+	}
+	return nil
+}
+
+// normalizeIP normalizes the ip parsed from dnsmasq/dhcpd lease file.
 func normalizeIP(in string) string {
 	// dnsmasq may put ip with interface index in lease file, strip it here.
 	ip, _, found := strings.Cut(in, "%")

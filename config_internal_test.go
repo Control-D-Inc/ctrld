@@ -190,6 +190,39 @@ func TestUpstreamConfig_Init(t *testing.T) {
 	}
 }
 
+func TestUpstreamConfig_VerifyDomain(t *testing.T) {
+	tests := []struct {
+		name         string
+		uc           *UpstreamConfig
+		verifyDomain string
+	}{
+		{
+			controlDComDomain,
+			&UpstreamConfig{Endpoint: "https://freedns.controld.com/p2"},
+			controldVerifiedDomain[controlDComDomain],
+		},
+		{
+			controlDDevDomain,
+			&UpstreamConfig{Endpoint: "https://freedns.controld.dev/p2"},
+			controldVerifiedDomain[controlDDevDomain],
+		},
+		{
+			"non-ControlD upstream",
+			&UpstreamConfig{Endpoint: "https://dns.google/dns-query"},
+			"",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.uc.VerifyDomain(); got != tc.verifyDomain {
+				t.Errorf("unexpected verify domain, want: %q, got: %q", tc.verifyDomain, got)
+			}
+		})
+	}
+}
 func ptrBool(b bool) *bool {
 	return &b
 }

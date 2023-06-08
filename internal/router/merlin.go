@@ -35,11 +35,11 @@ func setupMerlin() error {
 		return err
 	}
 	// Restart dnsmasq service.
-	if err := merlinRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 
-	if err := nvramSetup(nvramKV()); err != nil {
+	if err := nvramSetKV(nvramSetupKV(), nvramCtrldSetupKey); err != nil {
 		return err
 	}
 
@@ -48,7 +48,7 @@ func setupMerlin() error {
 
 func cleanupMerlin() error {
 	// Restore old configs.
-	if err := nvramRestore(nvramKV()); err != nil {
+	if err := nvramRestore(nvramSetupKV(), nvramCtrldSetupKey); err != nil {
 		return err
 	}
 	buf, err := os.ReadFile(merlinDNSMasqPostConfPath)
@@ -60,7 +60,7 @@ func cleanupMerlin() error {
 		return err
 	}
 	// Restart dnsmasq service.
-	if err := merlinRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil

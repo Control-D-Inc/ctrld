@@ -36,8 +36,6 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
-const selfCheckFQDN = "verify.controld.com"
-
 var (
 	version = "dev"
 	commit  = "none"
@@ -138,16 +136,7 @@ func initCLI() {
 						mainLog.Fatal().Err(err).Msg("failed create new service")
 					}
 					s = newService(s)
-					serviceLogger, err := s.Logger(nil)
-					if err != nil {
-						mainLog.Error().Err(err).Msg("failed to get service logger")
-						return
-					}
-
 					if err := s.Run(); err != nil {
-						if sErr := serviceLogger.Error(err); sErr != nil {
-							mainLog.Error().Err(sErr).Msg("failed to write service log")
-						}
 						mainLog.Error().Err(err).Msg("failed to start service")
 					}
 				}()
@@ -176,8 +165,12 @@ func initCLI() {
 			initLogging()
 
 			if setupRouter {
-				if err := router.PreStart(); err != nil {
+				s, errCh := runDNSServerForNTPD(router.ListenAddress())
+				if err := router.PreRun(); err != nil {
 					mainLog.Fatal().Err(err).Msg("failed to perform router pre-start check")
+				}
+				if err := s.Shutdown(); err != nil && errCh != nil {
+					mainLog.Fatal().Err(err).Msg("failed to shutdown dns server for ntpd")
 				}
 			}
 
@@ -241,6 +234,8 @@ func initCLI() {
 	runCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	runCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
+	runCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
+	_ = runCmd.Flags().MarkHidden("dev")
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
@@ -298,6 +293,10 @@ func initCLI() {
 
 			processCDFlags()
 
+			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
+				mainLog.Fatal().Msgf("invalid config: %v", err)
+			}
+
 			// Explicitly passing config, so on system where home directory could not be obtained,
 			// or sub-process env is different with the parent, we still behave correctly and use
 			// the expected config file.
@@ -319,7 +318,7 @@ func initCLI() {
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
-				if err := router.PostInstall(); err != nil {
+				if err := router.PostInstall(svcConfig); err != nil {
 					mainLog.Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
 					return
 				}
@@ -329,7 +328,8 @@ func initCLI() {
 					return
 				}
 
-				status = selfCheckStatus(status)
+				domain := cfg.Upstream["0"].VerifyDomain()
+				status = selfCheckStatus(status, domain)
 				switch status {
 				case service.StatusRunning:
 					mainLog.Notice().Msg("Service started")
@@ -354,6 +354,8 @@ func initCLI() {
 	startCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
+	startCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
+	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmd.Flags().BoolVarP(&setupRouter, "router", "", false, `setup for running on router platforms`)
 	_ = startCmd.Flags().MarkHidden("router")
@@ -474,7 +476,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				}
 				prog.resetDNS()
 				mainLog.Debug().Msg("Router cleanup")
-				if err := router.Cleanup(); err != nil {
+				if err := router.Cleanup(svcConfig); err != nil {
 					mainLog.Warn().Err(err).Msg("could not cleanup router")
 				}
 				mainLog.Notice().Msg("Service uninstalled")
@@ -708,7 +710,7 @@ func processCDFlags() {
 	}
 	logger := mainLog.With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
-	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version)
+	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
 	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
 		s, err := service.New(&prog{}, svcConfig)
 		if err != nil {
@@ -854,17 +856,25 @@ func netInterface(ifaceName string) (*net.Interface, error) {
 func defaultIfaceName() string {
 	dri, err := interfaces.DefaultRouteInterface()
 	if err != nil {
+		// On WSL 1, the route table does not have any default route. But the fact that
+		// it only uses /etc/resolv.conf for setup DNS, so we can use "lo" here.
+		if oi := osinfo.New(); strings.Contains(oi.String(), "Microsoft") {
+			return "lo"
+		}
 		mainLog.Fatal().Err(err).Msg("failed to get default route interface")
 	}
 	return dri
 }
 
-func selfCheckStatus(status service.Status) service.Status {
+func selfCheckStatus(status service.Status, domain string) service.Status {
+	if domain == "" {
+		// Nothing to do, return the status as-is.
+		return status
+	}
 	c := new(dns.Client)
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 500 * time.Millisecond
 	ctx := context.Background()
-	err := errors.New("query failed")
 	maxAttempts := 20
 	mainLog.Debug().Msg("Performing self-check")
 	var (
@@ -888,16 +898,16 @@ func selfCheckStatus(status service.Status) service.Status {
 		}
 		mu.Unlock()
 		m := new(dns.Msg)
-		m.SetQuestion(selfCheckFQDN+".", dns.TypeA)
+		m.SetQuestion(domain+".", dns.TypeA)
 		m.RecursionDesired = true
-		r, _, _ := c.ExchangeContext(ctx, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
+		r, _, err := c.ExchangeContext(ctx, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
 		if r != nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
-			mainLog.Debug().Msgf("self-check against %q succeeded", selfCheckFQDN)
+			mainLog.Debug().Msgf("self-check against %q succeeded", domain)
 			return status
 		}
-		bo.BackOff(ctx, err)
+		bo.BackOff(ctx, fmt.Errorf("ExchangeContext: %w", err))
 	}
-	mainLog.Debug().Msgf("self-check against %q failed", selfCheckFQDN)
+	mainLog.Debug().Msgf("self-check against %q failed", domain)
 	return service.StatusUnknown
 }
 
@@ -907,7 +917,7 @@ func unsupportedPlatformHelp(cmd *cobra.Command) {
 
 func userHomeDir() (string, error) {
 	switch router.Name() {
-	case router.DDWrt, router.Merlin:
+	case router.DDWrt, router.Merlin, router.Tomato:
 		exe, err := os.Executable()
 		if err != nil {
 			return "", err

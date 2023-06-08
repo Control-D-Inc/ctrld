@@ -23,12 +23,21 @@ func IsGLiNet() bool {
 	return bytes.Contains(buf, []byte(" (glinet"))
 }
 
+// IsOldOpenwrt reports whether the router is an "old" version of Openwrt,
+// aka versions which don't have "service" command.
+func IsOldOpenwrt() bool {
+	if Name() != OpenWrt {
+		return false
+	}
+	cmd, _ := exec.LookPath("service")
+	return cmd == ""
+}
+
 func setupOpenWrt() error {
 	// Delete dnsmasq port if set.
 	if _, err := uci("delete", "dhcp.@dnsmasq[0].port"); err != nil && !errors.Is(err, errUCIEntryNotFound) {
 		return err
 	}
-	// Disable dnsmasq as DNS server.
 	dnsMasqConfigContent, err := dnsMasqConf()
 	if err != nil {
 		return err
@@ -41,7 +50,7 @@ func setupOpenWrt() error {
 		return err
 	}
 	// Restart dnsmasq service.
-	if err := openwrtRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil
@@ -53,7 +62,7 @@ func cleanupOpenWrt() error {
 		return err
 	}
 	// Restart dnsmasq service.
-	if err := openwrtRestartDNSMasq(); err != nil {
+	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil
