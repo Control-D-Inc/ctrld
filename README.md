@@ -153,11 +153,14 @@ For granular control of the service, run the `service` command. Each sub-command
 
 ## Router Mode
 You can run `ctrld` on any supported router, which will function similarly to the Service Mode mentioned above. The list of supported routers and firmware includes:
-- OpenWRT
-- DD-WRT
 - Asus Merlin
+- DD-WRT
+- FreshTomato
 - GL.iNet
-- Ubiquiti
+- OpenWRT
+- pfSense
+- Synology 
+- Ubiquiti (UniFi, EdgeOS)
 
 In order to start `ctrld` as a DNS provider, simply run `./ctrld setup auto` command. 
 
