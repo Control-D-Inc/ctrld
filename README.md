@@ -9,6 +9,7 @@ A highly configurable DNS forwarding proxy with support for:
 - Multiple upstreams with fallbacks
 - Multiple network policy driven DNS query steering
 - Policy driven domain based "split horizon" DNS with wildcard support
+- Integrations with common router vendors and firmware
 
 ## TLDR
 Proxy legacy DNS traffic to secure DNS upstreams in highly configurable ways. 
@@ -25,12 +26,14 @@ All DNS protocols are supported, including:
 2. Create source IP based DNS routing policies with variable secure DNS upstreams. Subnet 1 (admin) uses upstream resolver A, while Subnet 2 (employee) uses upstream resolver B.
 3. Create destination IP based DNS routing policies with variable secure DNS upstreams. Listener 1 uses upstream resolver C, while Listener 2 uses upstream resolver D.
 4. Create domain level "split horizon" DNS routing policies to send internal domains (*.company.int) to a local DNS server, while everything else goes to another upstream.
+5. Deploy on a router and create LAN client specific DNS routing policies from a web GUI (When using ControlD.com).
 
 
 ## OS Support
 - Windows (386, amd64, arm)
 - Mac (amd64, arm64)
 - Linux (386, amd64, arm, mips)
+- FreeBSD
 - Common routers (See Router Mode below)
 
 # Install
