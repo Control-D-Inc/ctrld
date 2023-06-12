@@ -131,11 +131,10 @@ func initCLI() {
 						waitCh: waitCh,
 						stopCh: stopCh,
 					}
-					s, err := service.New(p, svcConfig)
+					s, err := newService(p, svcConfig)
 					if err != nil {
 						mainLog.Fatal().Err(err).Msg("failed create new service")
 					}
-					s = newService(s)
 					if err := s.Run(); err != nil {
 						mainLog.Error().Err(err).Msg("failed to start service")
 					}
@@ -305,12 +304,11 @@ func initCLI() {
 			}
 
 			prog := &prog{}
-			s, err := service.New(prog, sc)
+			s, err := newService(prog, sc)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
-			s = newService(s)
 			tasks := []task{
 				{s.Stop, false},
 				{s.Uninstall, false},
@@ -322,7 +320,7 @@ func initCLI() {
 					mainLog.Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
 					return
 				}
-				status, err := serviceStatus(s)
+				status, err := s.Status()
 				if err != nil {
 					mainLog.Warn().Err(err).Msg("could not get service status")
 					return
@@ -370,12 +368,11 @@ func initCLI() {
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			prog := &prog{}
-			s, err := service.New(prog, svcConfig)
+			s, err := newService(prog, svcConfig)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
-			s = newService(s)
 			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
 				prog.resetDNS()
@@ -394,12 +391,11 @@ func initCLI() {
 		Short: "Restart the ctrld service",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			s, err := service.New(&prog{}, svcConfig)
+			s, err := newService(&prog{}, svcConfig)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
-			s = newService(s)
 			initLogging()
 			if doTasks([]task{{s.Restart, true}}) {
 				mainLog.Notice().Msg("Service restarted")
@@ -415,13 +411,12 @@ func initCLI() {
 			initConsoleLogging()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			s, err := service.New(&prog{}, svcConfig)
+			s, err := newService(&prog{}, svcConfig)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
-			s = newService(s)
-			status, err := serviceStatus(s)
+			status, err := s.Status()
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
 				os.Exit(1)
@@ -460,7 +455,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			prog := &prog{}
-			s, err := service.New(prog, svcConfig)
+			s, err := newService(prog, svcConfig)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
 				return
@@ -712,12 +707,11 @@ func processCDFlags() {
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
 	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
-		s, err := service.New(&prog{}, svcConfig)
+		s, err := newService(&prog{}, svcConfig)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to create new service")
 			return
 		}
-
 		if netIface, _ := netInterface(iface); netIface != nil {
 			if err := restoreNetworkManager(); err != nil {
 				logger.Error().Err(err).Msg("could not restore NetworkManager")
