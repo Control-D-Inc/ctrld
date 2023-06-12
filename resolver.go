@@ -159,15 +159,27 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 		timeoutMs = timeout
 	}
 	questionDomain := dns.Fqdn(domain)
-	ipFromRecord := func(record dns.RR) string {
+
+	// Getting the real target domain name from CNAME if presents.
+	targetDomain := func(answers []dns.RR) string {
+		for _, a := range answers {
+			switch ar := a.(type) {
+			case *dns.CNAME:
+				return ar.Target
+			}
+		}
+		return questionDomain
+	}
+	// Getting ip address from A or AAAA record.
+	ipFromRecord := func(record dns.RR, target string) string {
 		switch ar := record.(type) {
 		case *dns.A:
-			if ar.Hdr.Name != questionDomain {
+			if ar.Hdr.Name != target {
 				return ""
 			}
 			return ar.A.String()
 		case *dns.AAAA:
-			if ar.Hdr.Name != questionDomain {
+			if ar.Hdr.Name != target {
 				return ""
 			}
 			return ar.AAAA.String()
@@ -195,8 +207,9 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 			ProxyLog.Error().Msg("no answer from OS resolver")
 			return
 		}
+		target := targetDomain(r.Answer)
 		for _, a := range r.Answer {
-			if ip := ipFromRecord(a); ip != "" {
+			if ip := ipFromRecord(a, target); ip != "" {
 				ips = append(ips, ip)
 			}
 		}
