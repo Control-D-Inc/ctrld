@@ -67,6 +67,13 @@ or
 $ go install github.com/Control-D-Inc/ctrld/cmd/ctrld@latest
 ```
 
+## Docker
+
+```
+$ docker build -t controld/ctrld .
+$ docker run -d --name=ctrld -p 53:53/tcp -p 53:53/udp controld/ctrld --cd=p2 -vv
+```
+
 
 # Usage
 The cli is self documenting, so free free to run `--help` on any sub-command to get specific usages. 
