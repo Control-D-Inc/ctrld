@@ -157,6 +157,14 @@ stale cached records (regardless of their TTLs) until upstream comes online.
 - Required: no
 - Default: false
 
+### max_concurrent_requests
+The number of concurrent requests that will be handled, must be a non-negative integer. 
+Tweaking this value depends on the capacity of your system.
+
+- Type: number
+- Required: no
+- Default: 256
+
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.
 

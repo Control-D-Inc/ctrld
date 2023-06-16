@@ -75,6 +75,7 @@ func TestConfigValidation(t *testing.T) {
 		{"os upstream", configWithOsUpstream(t), false},
 		{"invalid rules", configWithInvalidRules(t), true},
 		{"invalid dns rcodes", configWithInvalidRcodes(t), true},
+		{"invalid max concurrent requests", configWithInvalidMaxConcurrentRequests(t), true},
 	}
 
 	for _, tc := range tests {
@@ -174,5 +175,12 @@ func configWithInvalidRcodes(t *testing.T) *ctrld.Config {
 		Networks:       []ctrld.Rule{{"*.com": []string{"upstream.0"}}},
 		FailoverRcodes: []string{"foo"},
 	}
+	return cfg
+}
+
+func configWithInvalidMaxConcurrentRequests(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	n := -1
+	cfg.Service.MaxConcurrentRequests = &n
 	return cfg
 }

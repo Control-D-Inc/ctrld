@@ -122,14 +122,15 @@ func (c *Config) HasUpstreamSendClientInfo() bool {
 
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
-	LogLevel         string `mapstructure:"log_level" toml:"log_level,omitempty"`
-	LogPath          string `mapstructure:"log_path" toml:"log_path,omitempty"`
-	CacheEnable      bool   `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
-	CacheSize        int    `mapstructure:"cache_size" toml:"cache_size,omitempty"`
-	CacheTTLOverride int    `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
-	CacheServeStale  bool   `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
-	Daemon           bool   `mapstructure:"-" toml:"-"`
-	AllocateIP       bool   `mapstructure:"-" toml:"-"`
+	LogLevel              string `mapstructure:"log_level" toml:"log_level,omitempty"`
+	LogPath               string `mapstructure:"log_path" toml:"log_path,omitempty"`
+	CacheEnable           bool   `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
+	CacheSize             int    `mapstructure:"cache_size" toml:"cache_size,omitempty"`
+	CacheTTLOverride      int    `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
+	CacheServeStale       bool   `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
+	MaxConcurrentRequests *int   `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
+	Daemon                bool   `mapstructure:"-" toml:"-"`
+	AllocateIP            bool   `mapstructure:"-" toml:"-"`
 }
 
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.

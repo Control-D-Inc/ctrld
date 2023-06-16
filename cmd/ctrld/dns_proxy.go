@@ -47,6 +47,8 @@ func (p *prog) serveDNS(listenerNum string) error {
 		failoverRcodes = listenerConfig.Policy.FailoverRcodeNumbers
 	}
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
+		p.sema.acquire()
+		defer p.sema.release()
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
 		reqId := requestID()
@@ -60,7 +62,6 @@ func (p *prog) serveDNS(listenerNum string) error {
 		if !matched && listenerConfig.Restricted {
 			answer = new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeRefused)
-
 		} else {
 			answer = p.proxy(ctx, upstreams, failoverRcodes, m)
 			rtt := time.Since(t)

@@ -17,6 +17,8 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
+const defaultSemaphoreCap = 256
+
 var logf = func(format string, args ...any) {
 	mainLog.Debug().Msgf(format, args...)
 }
@@ -36,6 +38,7 @@ type prog struct {
 
 	cfg   *ctrld.Config
 	cache dnscache.Cacher
+	sema  semaphore
 }
 
 func (p *prog) Start(s service.Service) error {
@@ -54,6 +57,15 @@ func (p *prog) run() {
 			mainLog.Error().Err(err).Msg("failed to create cacher, caching is disabled")
 		} else {
 			p.cache = cacher
+		}
+	}
+	p.sema = &chanSemaphore{ready: make(chan struct{}, defaultSemaphoreCap)}
+	if mcr := p.cfg.Service.MaxConcurrentRequests; mcr != nil {
+		n := *mcr
+		if n == 0 {
+			p.sema = &noopSemaphore{}
+		} else {
+			p.sema = &chanSemaphore{ready: make(chan struct{}, n)}
 		}
 	}
 	var wg sync.WaitGroup
