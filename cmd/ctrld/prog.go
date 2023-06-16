@@ -39,6 +39,10 @@ type prog struct {
 	cfg   *ctrld.Config
 	cache dnscache.Cacher
 	sema  semaphore
+
+	started   chan struct{}
+	onStarted []func()
+	onStopped []func()
 }
 
 func (p *prog) Start(s service.Service) error {
@@ -51,6 +55,8 @@ func (p *prog) run() {
 	// Wait the caller to signal that we can do our logic.
 	<-p.waitCh
 	p.preRun()
+	numListeners := len(p.cfg.Listener)
+	p.started = make(chan struct{}, numListeners)
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -143,20 +149,22 @@ func (p *prog) run() {
 		}(listenerNum)
 	}
 
+	for i := 0; i < numListeners; i++ {
+		<-p.started
+	}
+	for _, f := range p.onStarted {
+		f()
+	}
 	wg.Wait()
 }
 
 func (p *prog) Stop(s service.Service) error {
+	close(p.stopCh)
 	if err := p.deAllocateIP(); err != nil {
 		mainLog.Error().Err(err).Msg("de-allocate ip failed")
 		return err
 	}
-	p.preStop()
-	if err := router.Stop(); err != nil {
-		mainLog.Warn().Err(err).Msg("problem occurred while stopping router")
-	}
 	mainLog.Info().Msg("Service stopped")
-	close(p.stopCh)
 	return nil
 }
 

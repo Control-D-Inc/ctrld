@@ -18,5 +18,3 @@ func setDependencies(svc *service.Config) {
 }
 
 func setWorkingDirectory(svc *service.Config, dir string) {}
-
-func (p *prog) preStop() {}

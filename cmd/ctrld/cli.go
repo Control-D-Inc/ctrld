@@ -123,14 +123,14 @@ func initCLI() {
 
 			waitCh := make(chan struct{})
 			stopCh := make(chan struct{})
+			p := &prog{
+				waitCh: waitCh,
+				stopCh: stopCh,
+			}
 			if !daemon {
 				// We need to call s.Run() as soon as possible to response to the OS manager, so it
 				// can see ctrld is running and don't mark ctrld as failed service.
 				go func() {
-					p := &prog{
-						waitCh: waitCh,
-						stopCh: stopCh,
-					}
 					s, err := newService(p, svcConfig)
 					if err != nil {
 						mainLog.Fatal().Err(err).Msg("failed create new service")
@@ -163,14 +163,11 @@ func initCLI() {
 			// so it's able to log information in processCDFlags.
 			initLogging()
 
-			if setupRouter {
-				s, errCh := runDNSServerForNTPD(router.ListenAddress())
-				if err := router.PreRun(); err != nil {
-					mainLog.Fatal().Err(err).Msg("failed to perform router pre-start check")
-				}
-				if err := s.Shutdown(); err != nil && errCh != nil {
-					mainLog.Fatal().Err(err).Msg("failed to shutdown dns server for ntpd")
-				}
+			// Processing --cd flag require connecting to ControlD API, which needs valid
+			// time for validating server certificate. Some routers need NTP synchronization
+			// to set the current time, so this check must happen before processCDFlags.
+			if err := router.PreRun(); err != nil {
+				mainLog.Fatal().Err(err).Msg("failed to perform router pre-run check")
 			}
 
 			processCDFlags()
@@ -207,20 +204,34 @@ func initCLI() {
 					rootCertPool = certs.CACertPool()
 					fallthrough
 				case platform != "":
-					mainLog.Debug().Msg("Router setup")
-					err := router.Configure(&cfg)
-					if errors.Is(err, router.ErrNotSupported) {
+					if !router.IsSupported(platform) {
 						unsupportedPlatformHelp(cmd)
 						os.Exit(1)
 					}
-					if err != nil {
-						mainLog.Fatal().Err(err).Msg("failed to configure router")
-					}
+					p.onStarted = append(p.onStarted, func() {
+						mainLog.Debug().Msg("Router setup")
+						if err := router.Configure(&cfg); err != nil {
+							mainLog.Error().Err(err).Msg("could not configure router")
+						}
+					})
+					p.onStopped = append(p.onStopped, func() {
+						mainLog.Debug().Msg("Router cleanup")
+						if err := router.Cleanup(svcConfig); err != nil {
+							mainLog.Error().Err(err).Msg("could not cleanup router")
+						}
+						if err := router.Stop(); err != nil {
+							mainLog.Error().Err(err).Msg("problem occurred while stopping router")
+						}
+						p.resetDNS()
+					})
 				}
 			}
 
 			close(waitCh)
 			<-stopCh
+			for _, f := range p.onStopped {
+				f()
+			}
 		},
 	}
 	runCmd.Flags().BoolVarP(&daemon, "daemon", "d", false, "Run as daemon")
@@ -303,12 +314,16 @@ func initCLI() {
 				sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
 			}
 
-			prog := &prog{}
-			s, err := newService(prog, sc)
+			p := &prog{}
+			s, err := newService(p, sc)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
+
+			mainLog.Debug().Msg("cleaning up router before installing")
+			_ = router.Cleanup(svcConfig)
+
 			tasks := []task{
 				{s.Stop, false},
 				{s.Uninstall, false},
@@ -333,12 +348,10 @@ func initCLI() {
 					mainLog.Notice().Msg("Service started")
 				default:
 					mainLog.Error().Msg("Service did not start, please check system/service log for details error")
-					if runtime.GOOS == "linux" {
-						prog.resetDNS()
-					}
+					uninstall(p, s)
 					os.Exit(1)
 				}
-				prog.setDNS()
+				p.setDNS()
 			}
 		},
 	}
@@ -454,29 +467,16 @@ func initCLI() {
 NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			prog := &prog{}
-			s, err := newService(prog, svcConfig)
+			p := &prog{}
+			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
-			tasks := []task{
-				{s.Stop, false},
-				{s.Uninstall, true},
+			if iface == "" {
+				iface = "auto"
 			}
-			initLogging()
-			if doTasks(tasks) {
-				if iface == "" {
-					iface = "auto"
-				}
-				prog.resetDNS()
-				mainLog.Debug().Msg("Router cleanup")
-				if err := router.Cleanup(svcConfig); err != nil {
-					mainLog.Warn().Err(err).Msg("could not cleanup router")
-				}
-				mainLog.Notice().Msg("Service uninstalled")
-				return
-			}
+			uninstall(p, s)
 		},
 	}
 	uninstallCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, use "auto" for the default gateway interface`)
@@ -949,5 +949,25 @@ func tryReadingConfig(writeDefaultConfig bool) {
 		if readConfigFile(config.written) {
 			break
 		}
+	}
+}
+
+func uninstall(p *prog, s service.Service) {
+	tasks := []task{
+		{s.Stop, false},
+		{s.Uninstall, true},
+	}
+	initLogging()
+	if doTasks(tasks) {
+		// Stop already reset DNS on router.
+		if router.Name() == "" {
+			p.resetDNS()
+		}
+		mainLog.Debug().Msg("Router cleanup")
+		// Stop already did router.Cleanup and report any error if happens,
+		// ignoring error here to prevent false positive.
+		_ = router.Cleanup(svcConfig)
+		mainLog.Notice().Msg("Service uninstalled")
+		return
 	}
 }

@@ -12,5 +12,3 @@ func setWorkingDirectory(svc *service.Config, dir string) {
 	// WorkingDirectory is not supported on Windows.
 	svc.WorkingDirectory = dir
 }
-
-func (p *prog) preStop() {}

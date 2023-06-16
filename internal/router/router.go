@@ -118,7 +118,7 @@ func PreRun() (err error) {
 	switch Name() {
 	case Merlin, Tomato:
 		// Wait until `ntp_ready=1` set.
-		b := backoff.NewBackoff("PreStart", func(format string, args ...any) {}, 10*time.Second)
+		b := backoff.NewBackoff("PreRun", func(format string, args ...any) {}, 10*time.Second)
 		for {
 			out, err := nvram("get", "ntp_ready")
 			if err != nil {

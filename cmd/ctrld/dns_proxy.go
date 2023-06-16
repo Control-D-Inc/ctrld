@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -13,7 +15,9 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go4.org/mem"
 	"golang.org/x/sync/errgroup"
+	"tailscale.com/util/lineread"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
@@ -99,6 +103,12 @@ func (p *prog) serveDNS(listenerNum string) error {
 				case "tcp":
 					mainLog.Info().Msgf("Random port chosen for tcp listener.%s: %s", listenerNum, s.Listener.Addr())
 				}
+			}
+			select {
+			case err := <-errCh:
+				return err
+			case <-time.After(5 * time.Second):
+				p.started <- struct{}{}
 			}
 			select {
 			case <-ctx.Done():
@@ -463,50 +473,37 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 	return s, errCh
 }
 
-// runDNSServerForNTPD starts a DNS server listening on router.ListenAddress(). It must only be called when ctrld
-// running on router, before router.PreRun() to serve DNS request for NTP synchronization. The caller must call
-// s.Shutdown() explicitly when NTP is synced successfully.
-func runDNSServerForNTPD(addr string) (*dns.Server, <-chan error) {
-	if addr == "" {
-		return &dns.Server{}, nil
-	}
-	dnsResolver := ctrld.NewBootstrapResolver()
-	s := &dns.Server{
-		Addr: addr,
-		Net:  "udp",
-		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
-			mainLog.Debug().Msg("Serving query for ntpd")
-			resolveCtx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if osUpstreamConfig.Timeout > 0 {
-				timeoutCtx, cancel := context.WithTimeout(resolveCtx, time.Millisecond*time.Duration(osUpstreamConfig.Timeout))
-				defer cancel()
-				resolveCtx = timeoutCtx
-			}
-			answer, err := dnsResolver.Resolve(resolveCtx, m)
-			if err != nil {
-				mainLog.Error().Err(err).Msgf("could not resolve: %v", m)
-				return
-			}
-			if err := w.WriteMsg(answer); err != nil {
-				mainLog.Error().Err(err).Msg("runDNSServerForNTPD: failed to send DNS response")
-			}
-		}),
+// inContainer reports whether we're running in a container.
+//
+// Copied from https://github.com/tailscale/tailscale/blob/v1.42.0/hostinfo/hostinfo.go#L260
+// with modification for ctrld usage.
+func inContainer() bool {
+	if runtime.GOOS != "linux" {
+		return false
 	}
 
-	waitLock := sync.Mutex{}
-	waitLock.Lock()
-	s.NotifyStartedFunc = waitLock.Unlock
-
-	errCh := make(chan error)
-	go func() {
-		defer close(errCh)
-		if err := s.ListenAndServe(); err != nil {
-			waitLock.Unlock()
-			mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
-			errCh <- err
+	var ret bool
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	if _, err := os.Stat("/run/.containerenv"); err == nil {
+		// See https://github.com/cri-o/cri-o/issues/5461
+		return true
+	}
+	lineread.File("/proc/1/cgroup", func(line []byte) error {
+		if mem.Contains(mem.B(line), mem.S("/docker/")) ||
+			mem.Contains(mem.B(line), mem.S("/lxc/")) {
+			ret = true
+			return io.EOF // arbitrary non-nil error to stop loop
 		}
-	}()
-	waitLock.Lock()
-	return s, errCh
+		return nil
+	})
+	lineread.File("/proc/mounts", func(line []byte) error {
+		if mem.Contains(mem.B(line), mem.S("fuse.lxcfs")) {
+			ret = true
+			return io.EOF
+		}
+		return nil
+	})
+	return ret
 }
