@@ -19,8 +19,24 @@ import (
 )
 
 func (uc *UpstreamConfig) setupDOH3Transport() {
-	uc.setupDOH3TransportWithoutPingUpstream()
-	go uc.pingUpstream()
+	switch uc.IPStack {
+	case IpStackBoth, "":
+		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
+	case IpStackV4:
+		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs4)
+	case IpStackV6:
+		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs6)
+	case IpStackSplit:
+		uc.http3RoundTripper4 = uc.newDOH3Transport(uc.bootstrapIPs4)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if ctrldnet.IPv6Available(ctx) {
+			uc.http3RoundTripper6 = uc.newDOH3Transport(uc.bootstrapIPs6)
+		} else {
+			uc.http3RoundTripper6 = uc.http3RoundTripper4
+		}
+		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
+	}
 }
 
 func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
@@ -58,32 +74,13 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 	return rt
 }
 
-func (uc *UpstreamConfig) setupDOH3TransportWithoutPingUpstream() {
-	uc.mu.Lock()
-	defer uc.mu.Unlock()
-	switch uc.IPStack {
-	case IpStackBoth, "":
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
-	case IpStackV4:
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs4)
-	case IpStackV6:
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs6)
-	case IpStackSplit:
-		uc.http3RoundTripper4 = uc.newDOH3Transport(uc.bootstrapIPs4)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if ctrldnet.IPv6Available(ctx) {
-			uc.http3RoundTripper6 = uc.newDOH3Transport(uc.bootstrapIPs6)
-		} else {
-			uc.http3RoundTripper6 = uc.http3RoundTripper4
-		}
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
-	}
-}
-
 func (uc *UpstreamConfig) doh3Transport(dnsType uint16) http.RoundTripper {
-	uc.mu.Lock()
-	defer uc.mu.Unlock()
+	uc.transportOnce.Do(func() {
+		uc.SetupTransport()
+	})
+	if uc.rebootstrap.CompareAndSwap(true, false) {
+		uc.SetupTransport()
+	}
 	switch uc.IPStack {
 	case IpStackBoth, IpStackV4, IpStackV6:
 		return uc.http3RoundTripper

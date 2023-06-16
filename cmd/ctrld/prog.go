@@ -91,7 +91,7 @@ func (p *prog) run() {
 			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap IP for upstream.%s", n)
 		}
 		uc.SetCertPool(rootCertPool)
-		uc.SetupTransport()
+		go uc.Ping()
 	}
 
 	go p.watchLinkState()
