@@ -110,6 +110,8 @@ func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	done := make(chan struct{})
+	defer close(done)
 	ch := make(chan *parallelDialerResult, len(addrs))
 	var wg sync.WaitGroup
 	wg.Add(len(addrs))
@@ -122,7 +124,13 @@ func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs 
 		go func(addr string) {
 			defer wg.Done()
 			conn, err := d.Dialer.DialContext(ctx, network, addr)
-			ch <- &parallelDialerResult{conn: conn, err: err}
+			select {
+			case ch <- &parallelDialerResult{conn: conn, err: err}:
+			case <-done:
+				if conn != nil {
+					conn.Close()
+				}
+			}
 		}(addr)
 	}
 
@@ -134,6 +142,5 @@ func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs 
 		}
 		errs = append(errs, res.err)
 	}
-
 	return nil, errors.Join(errs...)
 }
