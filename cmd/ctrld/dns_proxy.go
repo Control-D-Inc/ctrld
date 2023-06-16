@@ -244,15 +244,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			}
 		}
 		answer, err := resolve1(n, upstreamConfig, msg)
-		// Only do re-bootstrapping if bootstrap ip is not explicitly set by user.
-		if err != nil && upstreamConfig.BootstrapIP == "" {
-			ctrld.Log(ctx, mainLog.Debug().Err(err), "could not resolve query on first attempt, retrying...")
-			// If any error occurred, re-bootstrap transport/ip, retry the request.
-			upstreamConfig.ReBootstrap()
-			answer, err = resolve1(n, upstreamConfig, msg)
-			if err == nil {
-				return answer
-			}
+		if err != nil {
 			ctrld.Log(ctx, mainLog.Error().Err(err), "failed to resolve query")
 			return nil
 		}
