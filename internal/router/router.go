@@ -19,14 +19,15 @@ import (
 )
 
 const (
-	OpenWrt  = "openwrt"
-	DDWrt    = "ddwrt"
-	Merlin   = "merlin"
-	Ubios    = "ubios"
-	Synology = "synology"
-	Tomato   = "tomato"
-	EdgeOS   = "edgeos"
-	Pfsense  = "pfsense"
+	DDWrt     = "ddwrt"
+	EdgeOS    = "edgeos"
+	Firewalla = "firewalla"
+	Merlin    = "merlin"
+	OpenWrt   = "openwrt"
+	Pfsense   = "pfsense"
+	Synology  = "synology"
+	Tomato    = "tomato"
+	Ubios     = "ubios"
 )
 
 // ErrNotSupported reports the current router is not supported error.
@@ -44,7 +45,15 @@ type router struct {
 // IsSupported reports whether the given platform is supported by ctrld.
 func IsSupported(platform string) bool {
 	switch platform {
-	case EdgeOS, DDWrt, Merlin, OpenWrt, Pfsense, Synology, Tomato, Ubios:
+	case DDWrt,
+		EdgeOS,
+		Firewalla,
+		Merlin,
+		OpenWrt,
+		Pfsense,
+		Synology,
+		Tomato,
+		Ubios:
 		return true
 	}
 	return false
@@ -52,25 +61,44 @@ func IsSupported(platform string) bool {
 
 // SupportedPlatforms return all platforms that can be configured to run with ctrld.
 func SupportedPlatforms() []string {
-	return []string{EdgeOS, DDWrt, Merlin, OpenWrt, Pfsense, Synology, Tomato, Ubios}
+	return []string{
+		DDWrt,
+		EdgeOS,
+		Firewalla,
+		Merlin,
+		OpenWrt,
+		Pfsense,
+		Synology,
+		Tomato,
+		Ubios,
+	}
 }
 
 var configureFunc = map[string]func() error{
-	EdgeOS:   setupEdgeOS,
-	DDWrt:    setupDDWrt,
-	Merlin:   setupMerlin,
-	OpenWrt:  setupOpenWrt,
-	Pfsense:  setupPfsense,
-	Synology: setupSynology,
-	Tomato:   setupTomato,
-	Ubios:    setupUbiOS,
+	DDWrt:     setupDDWrt,
+	EdgeOS:    setupEdgeOS,
+	Firewalla: setupFirewalla,
+	Merlin:    setupMerlin,
+	OpenWrt:   setupOpenWrt,
+	Pfsense:   setupPfsense,
+	Synology:  setupSynology,
+	Tomato:    setupTomato,
+	Ubios:     setupUbiOS,
 }
 
 // Configure configures things for running ctrld on the router.
 func Configure(c *ctrld.Config) error {
 	name := Name()
 	switch name {
-	case EdgeOS, DDWrt, Merlin, OpenWrt, Pfsense, Synology, Tomato, Ubios:
+	case DDWrt,
+		EdgeOS,
+		Firewalla,
+		Merlin,
+		OpenWrt,
+		Pfsense,
+		Synology,
+		Tomato,
+		Ubios:
 		if c.HasUpstreamSendClientInfo() {
 			r := routerPlatform.Load()
 			r.sendClientInfo = true
@@ -107,7 +135,7 @@ func ConfigureService(sc *service.Config) error {
 		sc.Option["SysvScript"] = openWrtScript
 	case Pfsense:
 		sc.Option["SysvScript"] = pfsenseInitScript
-	case EdgeOS, Merlin, Synology, Tomato, Ubios:
+	case EdgeOS, Firewalla, Merlin, Synology, Tomato, Ubios:
 	}
 	return nil
 }
@@ -138,10 +166,12 @@ func PreRun() (err error) {
 func PostInstall(svc *service.Config) error {
 	name := Name()
 	switch name {
-	case EdgeOS:
-		return postInstallEdgeOS()
 	case DDWrt:
 		return postInstallDDWrt()
+	case EdgeOS:
+		return postInstallEdgeOS()
+	case Firewalla:
+		return postInstallFirewalla()
 	case Merlin:
 		return postInstallMerlin()
 	case OpenWrt:
@@ -162,10 +192,12 @@ func PostInstall(svc *service.Config) error {
 func Cleanup(svc *service.Config) error {
 	name := Name()
 	switch name {
-	case EdgeOS:
-		return cleanupEdgeOS()
 	case DDWrt:
 		return cleanupDDWrt()
+	case EdgeOS:
+		return cleanupEdgeOS()
+	case Firewalla:
+		return cleanupFirewalla()
 	case Merlin:
 		return cleanupMerlin()
 	case OpenWrt:
@@ -186,7 +218,7 @@ func Cleanup(svc *service.Config) error {
 func ListenAddress() string {
 	name := Name()
 	switch name {
-	case EdgeOS, DDWrt, Merlin, OpenWrt, Synology, Tomato, Ubios:
+	case DDWrt, Firewalla, Merlin, OpenWrt, Synology, Tomato, Ubios:
 		return "127.0.0.1:5354"
 	case Pfsense:
 		// On pfsense, we run ctrld as DNS resolver.
@@ -227,6 +259,8 @@ func distroName() string {
 		return EdgeOS // For 2.x
 	case isPfsense():
 		return Pfsense
+	case haveFile("/etc/firewalla_release"):
+		return Firewalla
 	}
 	return ""
 }

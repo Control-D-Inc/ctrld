@@ -21,16 +21,17 @@ type readClientInfoFunc func(name string) error
 
 // clientInfoFiles specifies client info files and how to read them on supported platforms.
 var clientInfoFiles = map[string]readClientInfoFunc{
-	"/tmp/dnsmasq.leases":                  dnsmasqReadClientInfoFile, // ddwrt
-	"/tmp/dhcp.leases":                     dnsmasqReadClientInfoFile, // openwrt
-	"/var/lib/misc/dnsmasq.leases":         dnsmasqReadClientInfoFile, // merlin
-	"/mnt/data/udapi-config/dnsmasq.lease": dnsmasqReadClientInfoFile, // UDM Pro
-	"/data/udapi-config/dnsmasq.lease":     dnsmasqReadClientInfoFile, // UDR
-	"/etc/dhcpd/dhcpd-leases.log":          dnsmasqReadClientInfoFile, // Synology
-	"/tmp/var/lib/misc/dnsmasq.leases":     dnsmasqReadClientInfoFile, // Tomato
-	"/run/dnsmasq-dhcp.leases":             dnsmasqReadClientInfoFile, // EdgeOS
-	"/run/dhcpd.leases":                    iscDHCPReadClientInfoFile, // EdgeOS
-	"/var/dhcpd/var/db/dhcpd.leases":       iscDHCPReadClientInfoFile, // Pfsense
+	"/tmp/dnsmasq.leases":                      dnsmasqReadClientInfoFile, // ddwrt
+	"/tmp/dhcp.leases":                         dnsmasqReadClientInfoFile, // openwrt
+	"/var/lib/misc/dnsmasq.leases":             dnsmasqReadClientInfoFile, // merlin
+	"/mnt/data/udapi-config/dnsmasq.lease":     dnsmasqReadClientInfoFile, // UDM Pro
+	"/data/udapi-config/dnsmasq.lease":         dnsmasqReadClientInfoFile, // UDR
+	"/etc/dhcpd/dhcpd-leases.log":              dnsmasqReadClientInfoFile, // Synology
+	"/tmp/var/lib/misc/dnsmasq.leases":         dnsmasqReadClientInfoFile, // Tomato
+	"/run/dnsmasq-dhcp.leases":                 dnsmasqReadClientInfoFile, // EdgeOS
+	"/run/dhcpd.leases":                        iscDHCPReadClientInfoFile, // EdgeOS
+	"/var/dhcpd/var/db/dhcpd.leases":           iscDHCPReadClientInfoFile, // Pfsense
+	"/home/pi/.router/run/dhcp/dnsmasq.leases": dnsmasqReadClientInfoFile, // Firewalla
 }
 
 // watchClientInfoTable watches changes happens in dnsmasq/dhcpd

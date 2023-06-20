@@ -1,6 +1,7 @@
 package router
 
 import (
+	"fmt"
 	"strings"
 	"text/template"
 )
@@ -49,8 +50,10 @@ func dnsMasqConf() (string, error) {
 	var sb strings.Builder
 	var tmplText string
 	switch Name() {
-	case EdgeOS, DDWrt, OpenWrt, Ubios, Synology, Tomato:
+	case DDWrt, EdgeOS, OpenWrt, Ubios, Synology, Tomato:
 		tmplText = dnsMasqConfigContentTmpl
+	case Firewalla:
+		tmplText = dnsMasqConfigContentTmpl + fmt.Sprintf("listen-address=127.0.0.1\n")
 	case Merlin:
 		tmplText = merlinDNSMasqPostConfTmpl
 	}
@@ -68,10 +71,12 @@ func dnsMasqConf() (string, error) {
 
 func restartDNSMasq() error {
 	switch Name() {
-	case EdgeOS:
-		return edgeOSRestartDNSMasq()
 	case DDWrt:
 		return ddwrtRestartDNSMasq()
+	case EdgeOS:
+		return edgeOSRestartDNSMasq()
+	case Firewalla:
+		return firewallaRestartDNSMasq()
 	case Merlin:
 		return merlinRestartDNSMasq()
 	case OpenWrt:

@@ -26,6 +26,13 @@ func setDependencies(svc *service.Config) {
 		svc.Dependencies = append(svc.Dependencies, "Wants=dnsmasq.service")
 		svc.Dependencies = append(svc.Dependencies, "After=dnsmasq.service")
 	}
+	// On Firewalla, ctrld needs to start after firerouter_{dhcp,dns}, so it can read leases file.
+	if router.Name() == router.Firewalla {
+		svc.Dependencies = append(svc.Dependencies, "Wants=firerouter_dhcp.service")
+		svc.Dependencies = append(svc.Dependencies, "After=firerouter_dhcp.service")
+		svc.Dependencies = append(svc.Dependencies, "Wants=firerouter_dns.service")
+		svc.Dependencies = append(svc.Dependencies, "After=firerouter_dns.service")
+	}
 }
 
 func setWorkingDirectory(svc *service.Config, dir string) {
