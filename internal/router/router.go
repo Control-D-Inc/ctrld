@@ -220,8 +220,10 @@ func distroName() string {
 	case bytes.HasPrefix(unameO(), []byte("Tomato")):
 		return Tomato
 	case haveDir("/config/scripts/post-config.d"):
+		checkUSG()
 		return EdgeOS
 	case haveFile("/etc/ubnt/init/vyatta-router"):
+		checkUSG()
 		return EdgeOS // For 2.x
 	case isPfsense():
 		return Pfsense
@@ -252,4 +254,9 @@ func unameU() []byte {
 func isPfsense() bool {
 	b, err := os.ReadFile("/etc/platform")
 	return err == nil && bytes.HasPrefix(b, []byte("pfSense"))
+}
+
+func checkUSG() {
+	out, _ := exec.Command("mca-cli-op", "info").Output()
+	isUSG = bytes.Contains(out, []byte("UniFi-Gateway-"))
 }
