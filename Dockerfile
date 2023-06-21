@@ -18,7 +18,7 @@ COPY . .
 
 ARG tag=master
 ENV CI_COMMIT_TAG=$tag
-RUN CGO_ENABLED=0 ./scripts/build.sh linux/amd64
+RUN CTRLD_NO_QF=yes CGO_ENABLED=0 ./scripts/build.sh
 
 FROM scratch
 
@@ -27,6 +27,6 @@ COPY --from=base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=base /etc/passwd /etc/passwd
 COPY --from=base /etc/group /etc/group
 
-COPY --from=base /app/ctrld-linux-amd64-nocgo ctrld
+COPY --from=base /app/ctrld-linux-*-nocgo ctrld
 
 ENTRYPOINT ["./ctrld", "run"]
