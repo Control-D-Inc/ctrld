@@ -402,8 +402,11 @@ func needLocalIPv6Listener() bool {
 }
 
 func dnsListenAddress(lcNum string, lc *ctrld.ListenerConfig) string {
-	if addr := router.ListenAddress(); setupRouter && addr != "" && lcNum == "0" {
-		return addr
+	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
+	// If we are inside container and the listener address is localhost,
+	// Change it to 0.0.0.0:53, so user can expose the port to outside.
+	if addr == "127.0.0.1:53" && cdUID != "" && inContainer() {
+		return "0.0.0.0:53"
 	}
 	return net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
 }

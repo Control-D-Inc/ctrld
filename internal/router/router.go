@@ -214,16 +214,21 @@ func Cleanup(svc *service.Config) error {
 	return nil
 }
 
-// ListenAddress returns the listener address of ctrld on router.
-func ListenAddress() string {
+// ListenIP returns the listener IP of ctrld on router.
+func ListenIP() string {
+	return "127.0.0.1"
+}
+
+// ListenPort returns the listener port of ctrld on router.
+func ListenPort() int {
 	name := Name()
 	switch name {
 	case DDWrt, Firewalla, Merlin, OpenWrt, Synology, Tomato, Ubios:
-		return "127.0.0.1:5354"
+		return 5354
 	case Pfsense:
 		// On pfsense, we run ctrld as DNS resolver.
 	}
-	return ""
+	return 53
 }
 
 // Name returns name of the router platform.

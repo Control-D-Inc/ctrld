@@ -73,7 +73,13 @@ $ go install github.com/Control-D-Inc/ctrld/cmd/ctrld@latest
 $ docker build -t controld/ctrld .
 $ docker run -d --name=ctrld -p 53:53/tcp -p 53:53/udp controld/ctrld --cd=p2 -vv
 ```
+-----
+*NOTE*
 
+When running inside container, and listener address is set to "127.0.0.1:53", `ctrld` will change
+the listen address to "0.0.0.0:53", so users can expose the port to outside.
+
+----
 
 # Usage
 The cli is self documenting, so free free to run `--help` on any sub-command to get specific usages. 
@@ -175,6 +181,15 @@ You can run `ctrld` on any supported router, which will function similarly to th
 In order to start `ctrld` as a DNS provider, simply run `./ctrld setup auto` command. 
 
 In this mode, and when Control D upstreams are used, the router will [relay your network topology](https://docs.controld.com/docs/device-clients) to Control D (LAN IPs, MAC addresses, and hostnames), and you will be able to see your LAN devices in the web panel, view analytics and apply unique profiles to them. 
+
+----
+*NOTE*
+
+`ctrld` will try leveraging default setup on routers, so changing routers default configuration would causes things won't work as expected (For example, changing dnsmasq configuration).
+
+Advanced users who want to play around, just run `ctrld` in [Service Mode](#service-mode) with custom configuration.
+
+----
 
 ### Control D Auto Configuration
 Application can be started with a specific resolver config, instead of the default one. Simply supply your Resolver ID with a `--cd` flag, when using the `run` (foreground) or `start` (service) or `setup` (router) modes. 

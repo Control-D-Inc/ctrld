@@ -69,7 +69,7 @@ func cleanupFirewalla() error {
 
 	// Restart dnsmasq service.
 	if err := restartDNSMasq(); err != nil {
-		return fmt.Errorf("cleaupFirewalla: restartDNSMasq: %w", err)
+		return fmt.Errorf("cleanupFirewalla: restartDNSMasq: %w", err)
 	}
 
 	return nil

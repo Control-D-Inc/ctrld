@@ -316,14 +316,14 @@ IP address that serves the incoming requests. If `ip` is empty, ctrld will liste
 
 - Type: ip address string
 - Required: no
-- Default: ""
+- Default: "" or "127.0.0.1" in [Router Mode](../README.md#router-mode).
 
 ### port
 Port number that the listener will listen on for incoming requests. If `port` is `0`, a random available port will be chosen.
 
 - Type: number
 - Required: no
-- Default: 0
+- Default: 0 or 5354 in [Router Mode](../README.md#router-mode).
 
 ### restricted
 If set to `true` makes the listener `REFUSE` DNS queries from all source IP addresses that are not explicitly defined in the policy using a `network`. 

@@ -751,11 +751,10 @@ func processCDFlags() {
 				listener.Port = 53
 			}
 		}
-		// On router, we want to keep the listener address point to dnsmasq listener, aka 127.0.0.1:53.
-		if router.Name() != "" {
+		if setupRouter {
 			if lc := cfg.Listener["0"]; lc != nil {
-				lc.IP = "127.0.0.1"
-				lc.Port = 53
+				lc.IP = router.ListenIP()
+				lc.Port = router.ListenPort()
 			}
 		}
 	} else {
@@ -776,7 +775,7 @@ func processCDFlags() {
 			rules = append(rules, ctrld.Rule{domain: []string{}})
 		}
 		cfg.Listener = make(map[string]*ctrld.ListenerConfig)
-		cfg.Listener["0"] = &ctrld.ListenerConfig{
+		lc := &ctrld.ListenerConfig{
 			IP:   "127.0.0.1",
 			Port: 53,
 			Policy: &ctrld.ListenerPolicyConfig{
@@ -784,6 +783,11 @@ func processCDFlags() {
 				Rules: rules,
 			},
 		}
+		if setupRouter {
+			lc.IP = router.ListenIP()
+			lc.Port = router.ListenPort()
+		}
+		cfg.Listener["0"] = lc
 		processLogAndCacheFlags()
 	}
 
