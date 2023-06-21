@@ -7,11 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/kardianos/service"
 	"tailscale.com/logtail/backoff"
 
@@ -38,8 +36,6 @@ var routerPlatform atomic.Pointer[router]
 type router struct {
 	name           string
 	sendClientInfo bool
-	mac            sync.Map
-	watcher        *fsnotify.Watcher
 }
 
 // IsSupported reports whether the given platform is supported by ctrld.
@@ -102,16 +98,6 @@ func Configure(c *ctrld.Config) error {
 		if c.HasUpstreamSendClientInfo() {
 			r := routerPlatform.Load()
 			r.sendClientInfo = true
-			watcher, err := fsnotify.NewWatcher()
-			if err != nil {
-				return err
-			}
-			r.watcher = watcher
-			go r.watchClientInfoTable()
-			for file, readClienInfoFunc := range clientInfoFiles {
-				_ = readClienInfoFunc(file)
-				_ = r.watcher.Add(file)
-			}
 		}
 		configure := configureFunc[name]
 		if err := configure(); err != nil {

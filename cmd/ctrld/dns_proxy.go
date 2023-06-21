@@ -22,7 +22,6 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
-	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 const (
@@ -56,7 +55,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
 		reqId := requestID()
-		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), router.GetClientInfoByMac(macFromMsg(m)))
+		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), p.mt.GetClientInfoByMac(macFromMsg(m)))
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
 		t := time.Now()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
@@ -247,7 +246,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 	}
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		if upstreamConfig.UpstreamSendClientInfo() {
-			ci := router.GetClientInfoByMac(macFromMsg(msg))
+			ci := p.mt.GetClientInfoByMac(macFromMsg(msg))
 			if ci != nil {
 				ctrld.Log(ctx, mainLog.Debug(), "including client info with the request")
 				ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, ci)

@@ -13,6 +13,7 @@ import (
 	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
@@ -39,6 +40,7 @@ type prog struct {
 	cfg   *ctrld.Config
 	cache dnscache.Cacher
 	sema  semaphore
+	mt    *clientinfo.MacTable
 
 	started   chan struct{}
 	onStarted []func()
@@ -100,6 +102,16 @@ func (p *prog) run() {
 		go uc.Ping()
 	}
 
+	p.mt = clientinfo.NewMacTable()
+	if p.cfg.HasUpstreamSendClientInfo() {
+		mainLog.Debug().Msg("Sending client info enabled")
+		if err := p.mt.Init(); err == nil {
+			mainLog.Debug().Msg("Start watching client info changes")
+			go p.mt.WatchLeaseFiles()
+		} else {
+			mainLog.Warn().Err(err).Msg("could not record client info")
+		}
+	}
 	go p.watchLinkState()
 
 	for listenerNum := range p.cfg.Listener {

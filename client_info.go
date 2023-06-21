@@ -9,3 +9,11 @@ type ClientInfo struct {
 	IP       string
 	Hostname string
 }
+
+// LeaseFileFormat specifies the format of DHCP lease file.
+type LeaseFileFormat string
+
+const (
+	Dnsmasq  LeaseFileFormat = "dnsmasq"
+	IscDhcpd                 = "isc-dhcpd"
+)

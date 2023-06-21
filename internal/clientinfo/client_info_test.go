@@ -1,4 +1,4 @@
-package router
+package clientinfo
 
 import (
 	"io"
@@ -31,6 +31,7 @@ func Test_normalizeIP(t *testing.T) {
 }
 
 func Test_readClientInfoReader(t *testing.T) {
+	mt := NewMacTable()
 	tests := []struct {
 		name     string
 		in       string
@@ -41,7 +42,7 @@ func Test_readClientInfoReader(t *testing.T) {
 			"good dnsmasq",
 			`1683329857 e6:20:59:b8:c1:6d 192.168.1.186 * 01:e6:20:59:b8:c1:6d
 `,
-			dnsmasqReadClientInfoReader,
+			mt.dnsmasqReadClientInfoReader,
 			"e6:20:59:b8:c1:6d",
 		},
 		{
@@ -50,7 +51,7 @@ func Test_readClientInfoReader(t *testing.T) {
 duid 00:01:00:01:2b:e4:2e:2c:52:52:14:26:dc:1c
 1683322985 117442354 2600:4040:b0e6:b700::111 ASDASD 00:01:00:01:2a:d0:b9:81:00:07:32:4c:1c:07
 `,
-			dnsmasqReadClientInfoReader,
+			mt.dnsmasqReadClientInfoReader,
 			"e6:20:59:b8:c1:6e",
 		},
 		{
@@ -60,7 +61,7 @@ duid 00:01:00:01:2b:e4:2e:2c:52:52:14:26:dc:1c
     client-hostname "host-1";
 }
 `,
-			iscDHCPReadClientInfoReader,
+			mt.iscDHCPReadClientInfoReader,
 			"00:00:00:00:00:01",
 		},
 		{
@@ -75,25 +76,24 @@ lease 192.168.1.2 {
     client-hostname "host-2";
 }
 `,
-			iscDHCPReadClientInfoReader,
+			mt.iscDHCPReadClientInfoReader,
 			"00:00:00:00:00:02",
 		},
 		{
 			"",
 			`1685794060 00:00:00:00:00:04 192.168.0.209 cuonglm-ThinkPad-X1-Carbon-Gen-9 00:00:00:00:00:04 9`,
-			dnsmasqReadClientInfoReader,
+			mt.dnsmasqReadClientInfoReader,
 			"00:00:00:00:00:04",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := routerPlatform.Load()
-			r.mac.Delete(tc.mac)
+			mt.mac.Delete(tc.mac)
 			if err := tc.readFunc(strings.NewReader(tc.in)); err != nil {
 				t.Errorf("readClientInfoReader() error = %v", err)
 			}
-			info, existed := r.mac.Load(tc.mac)
+			info, existed := mt.mac.Load(tc.mac)
 			if !existed {
 				t.Error("client info missing")
 			}

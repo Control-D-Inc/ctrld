@@ -219,9 +219,6 @@ func initCLI() {
 						if err := router.Cleanup(svcConfig); err != nil {
 							mainLog.Error().Err(err).Msg("could not cleanup router")
 						}
-						if err := router.Stop(); err != nil {
-							mainLog.Error().Err(err).Msg("problem occurred while stopping router")
-						}
 						p.resetDNS()
 					})
 				}
