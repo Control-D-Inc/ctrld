@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -15,15 +16,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cuonglm/osinfo"
-	"github.com/fsnotify/fsnotify"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
 	"github.com/pelletier/go-toml/v2"
+	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"tailscale.com/logtail/backoff"
@@ -150,6 +150,12 @@ func initCLI() {
 				mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
 			}
 
+			processLogAndCacheFlags()
+
+			// Log config do not have thing to validate, so it's safe to init log here,
+			// so it's able to log information in processCDFlags.
+			initLogging()
+
 			mainLog.Info().Msgf("starting ctrld %s", curVersion())
 			oi := osinfo.New()
 			mainLog.Info().Msgf("os: %s", oi.String())
@@ -158,10 +164,6 @@ func initCLI() {
 			if !ctrldnet.Up() {
 				mainLog.Fatal().Msg("network is not up yet")
 			}
-			processLogAndCacheFlags()
-			// Log config do not have thing to validate, so it's safe to init log here,
-			// so it's able to log information in processCDFlags.
-			initLogging()
 
 			// Processing --cd flag require connecting to ControlD API, which needs valid
 			// time for validating server certificate. Some routers need NTP synchronization
@@ -170,7 +172,21 @@ func initCLI() {
 				mainLog.Fatal().Err(err).Msg("failed to perform router pre-run check")
 			}
 
+			oldLogPath := cfg.Service.LogPath
 			processCDFlags()
+			if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
+				// After processCDFlags, log config may change, so reset mainLog and re-init logging.
+				mainLog = zerolog.New(io.Discard)
+
+				// Copy logs written so far to new log file if possible.
+				if buf, err := os.ReadFile(oldLogPath); err == nil {
+					if err := os.WriteFile(newLogPath, buf, os.FileMode(0o600)); err != nil {
+						mainLog.Warn().Err(err).Msg("could not copy old log file")
+					}
+				}
+				initLoggingWithBackup(false)
+			}
+
 			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
 				mainLog.Fatal().Msgf("invalid config: %v", err)
 			}
@@ -293,10 +309,7 @@ func initCLI() {
 				mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
 			}
 
-			logPath := cfg.Service.LogPath
-			cfg.Service.LogPath = ""
 			initLogging()
-			cfg.Service.LogPath = logPath
 
 			processCDFlags()
 
@@ -648,6 +661,15 @@ func readBase64Config(configBase64 string) {
 	if err != nil {
 		mainLog.Fatal().Msgf("invalid base64 config: %v", err)
 	}
+
+	// readBase64Config is called when:
+	//
+	//  - "--base64_config" flag set.
+	//  - Reading custom config when "--cd" flag set.
+	//
+	// So we need to re-create viper instance to discard old one.
+	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
+	v.SetConfigType("toml")
 	if err := v.ReadConfig(bytes.NewReader(configStr)); err != nil {
 		mainLog.Fatal().Msgf("failed to read base64 config: %v", err)
 	}
@@ -734,6 +756,9 @@ func processCDFlags() {
 	}
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
+	cfg = ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{
+		"0": {Port: 53},
+	}}
 	if resolverConfig.Ctrld.CustomConfig != "" {
 		logger.Info().Msg("using defined custom config of Control-D resolver")
 		readBase64Config(resolverConfig.Ctrld.CustomConfig)
@@ -748,14 +773,27 @@ func processCDFlags() {
 				listener.Port = 53
 			}
 		}
-		if setupRouter {
+		switch {
+		case setupRouter:
 			if lc := cfg.Listener["0"]; lc != nil {
 				lc.IP = router.ListenIP()
 				lc.Port = router.ListenPort()
 			}
+		case useSystemdResolved:
+			if lc := cfg.Listener["0"]; lc != nil {
+				// systemd-resolved does not allow forwarding DNS queries from 127.0.0.53 to loopback
+				// ip address, so trying to listen on default route interface address instead.
+				if netIface, _ := net.InterfaceByName(defaultIfaceName()); netIface != nil {
+					addrs, _ := netIface.Addrs()
+					for _, addr := range addrs {
+						if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
+							lc.IP = netIP.IP.To4().String()
+						}
+					}
+				}
+			}
 		}
 	} else {
-		cfg = ctrld.Config{}
 		cfg.Network = make(map[string]*ctrld.NetworkConfig)
 		cfg.Network["0"] = &ctrld.NetworkConfig{
 			Name:  "Network 0",
@@ -785,8 +823,9 @@ func processCDFlags() {
 			lc.Port = router.ListenPort()
 		}
 		cfg.Listener["0"] = lc
-		processLogAndCacheFlags()
 	}
+
+	processLogAndCacheFlags()
 
 	if err := writeConfigFile(); err != nil {
 		logger.Fatal().Err(err).Msg("failed to write config file")
@@ -872,26 +911,9 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 	ctx := context.Background()
 	maxAttempts := 20
 	mainLog.Debug().Msg("Performing self-check")
-	var (
-		lcChanged map[string]*ctrld.ListenerConfig
-		mu        sync.Mutex
-	)
-	v.OnConfigChange(func(in fsnotify.Event) {
-		mu.Lock()
-		defer mu.Unlock()
-		if err := v.UnmarshalKey("listener", &lcChanged); err != nil {
-			mainLog.Error().Msgf("failed to unmarshal listener config: %v", err)
-			return
-		}
-	})
-	v.WatchConfig()
+
 	for i := 0; i < maxAttempts; i++ {
 		lc := cfg.Listener["0"]
-		mu.Lock()
-		if lcChanged != nil {
-			lc = lcChanged["0"]
-		}
-		mu.Unlock()
 		m := new(dns.Msg)
 		m.SetQuestion(domain+".", dns.TypeA)
 		m.RecursionDesired = true

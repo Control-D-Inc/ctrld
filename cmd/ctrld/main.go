@@ -78,7 +78,18 @@ func initConsoleLogging() {
 	}
 }
 
+// initLogging initializes global logging setup.
 func initLogging() {
+	initLoggingWithBackup(true)
+}
+
+// initLoggingWithBackup initializes log setup base on current config.
+// If doBackup is true, backup old log file with ".1" suffix.
+//
+// This is only used in runCmd for special handling in case of logging config
+// change in cd mode. Without special reason, the caller should use initLogging
+// wrapper instead of calling this function directly.
+func initLoggingWithBackup(doBackup bool) {
 	writers := []io.Writer{io.Discard}
 	if logFilePath := normalizeLogFilePath(cfg.Service.LogPath); logFilePath != "" {
 		// Create parent directory if necessary.
@@ -86,11 +97,19 @@ func initLogging() {
 			mainLog.Error().Msgf("failed to create log path: %v", err)
 			os.Exit(1)
 		}
-		// Backup old log file with .1 suffix.
-		if err := os.Rename(logFilePath, logFilePath+".1"); err != nil && !os.IsNotExist(err) {
-			mainLog.Error().Msgf("could not backup old log file: %v", err)
+
+		// Default open log file in append mode.
+		flags := os.O_CREATE | os.O_RDWR | os.O_APPEND
+		if doBackup {
+			// Backup old log file with .1 suffix.
+			if err := os.Rename(logFilePath, logFilePath+".1"); err != nil && !os.IsNotExist(err) {
+				mainLog.Error().Msgf("could not backup old log file: %v", err)
+			} else {
+				// Backup was created, set flags for truncating old log file.
+				flags = os.O_CREATE | os.O_RDWR
+			}
 		}
-		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_RDWR, os.FileMode(0o600))
+		logFile, err := os.OpenFile(logFilePath, flags, os.FileMode(0o600))
 		if err != nil {
 			mainLog.Error().Msgf("failed to create log file: %v", err)
 			os.Exit(1)

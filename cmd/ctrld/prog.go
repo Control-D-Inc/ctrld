@@ -32,6 +32,8 @@ var svcConfig = &service.Config{
 	Option:      service.KeyValue{},
 }
 
+var useSystemdResolved = false
+
 type prog struct {
 	mu     sync.Mutex
 	waitCh chan struct{}

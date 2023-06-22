@@ -3,8 +3,15 @@ package main
 import (
 	"github.com/kardianos/service"
 
+	"github.com/Control-D-Inc/ctrld/internal/dns"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
+
+func init() {
+	if r, err := dns.NewOSConfigurator(logf, "lo"); err == nil {
+		useSystemdResolved = r.Mode() == "systemd-resolved"
+	}
+}
 
 func (p *prog) preRun() {
 	if !service.Interactive() {
