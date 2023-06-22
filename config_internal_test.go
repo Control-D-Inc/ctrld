@@ -223,6 +223,61 @@ func TestUpstreamConfig_VerifyDomain(t *testing.T) {
 		})
 	}
 }
+
+func TestUpstreamConfig_UpstreamSendClientInfo(t *testing.T) {
+	tests := []struct {
+		name           string
+		uc             *UpstreamConfig
+		sendClientInfo bool
+	}{
+		{
+			"default with controld upstream DoH",
+			&UpstreamConfig{Endpoint: "https://freedns.controld.com/p2", Type: ResolverTypeDOH},
+			true,
+		},
+		{
+			"default with controld upstream DoH3",
+			&UpstreamConfig{Endpoint: "https://freedns.controld.com/p2", Type: ResolverTypeDOH3},
+			true,
+		},
+		{
+			"default with non-ControlD upstream",
+			&UpstreamConfig{Endpoint: "https://dns.google/dns-query", Type: ResolverTypeDOH},
+			false,
+		},
+		{
+			"set false with controld upstream",
+			&UpstreamConfig{Endpoint: "https://freedns.controld.com/p2", Type: ResolverTypeDOH, SendClientInfo: ptrBool(false)},
+			false,
+		},
+		{
+			"set true with controld upstream",
+			&UpstreamConfig{Endpoint: "https://freedns.controld.com/p2", SendClientInfo: ptrBool(true)},
+			true,
+		},
+		{
+			"set false with non-ControlD upstream",
+			&UpstreamConfig{Endpoint: "https://dns.google/dns-query", SendClientInfo: ptrBool(false)},
+			false,
+		},
+		{
+			"set true with non-ControlD upstream",
+			&UpstreamConfig{Endpoint: "https://dns.google/dns-query", Type: ResolverTypeDOH, SendClientInfo: ptrBool(true)},
+			true,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.uc.UpstreamSendClientInfo(); got != tc.sendClientInfo {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.sendClientInfo, got)
+			}
+		})
+	}
+}
+
 func ptrBool(b bool) *bool {
 	return &b
 }

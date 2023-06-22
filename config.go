@@ -248,11 +248,8 @@ func (uc *UpstreamConfig) VerifyDomain() string {
 //   - Lan IP
 //   - Hostname
 func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
-	if uc.SendClientInfo != nil && !(*uc.SendClientInfo) {
-		return false
-	}
-	if uc.SendClientInfo == nil {
-		return true
+	if uc.SendClientInfo != nil {
+		return *uc.SendClientInfo
 	}
 	switch uc.Type {
 	case ResolverTypeDOH, ResolverTypeDOH3:
