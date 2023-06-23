@@ -174,6 +174,24 @@ func PostInstall(svc *service.Config) error {
 	return nil
 }
 
+// PostUninstall performs task after uninstalling ctrld on router.
+func PostUninstall(svc *service.Config) error {
+	name := Name()
+	switch name {
+	case DDWrt:
+	case EdgeOS:
+	case Firewalla:
+		return postUninstallFirewalla()
+	case Merlin:
+	case OpenWrt:
+	case Pfsense:
+	case Synology:
+	case Tomato:
+	case Ubios:
+	}
+	return nil
+}
+
 // Cleanup cleans ctrld setup on the router.
 func Cleanup(svc *service.Config) error {
 	name := Name()

@@ -235,7 +235,23 @@ func (p *prog) setDNS() {
 		return
 	}
 	logger.Debug().Msg("setting DNS for interface")
-	if err := setDNS(netIface, []string{cfg.Listener["0"].IP}); err != nil {
+	ns := cfg.Listener["0"].IP
+	if router.Name() == router.Firewalla && ns == "127.0.0.1" {
+		// On Firewalla, the lo interface is excluded in all dnsmasq settings of all interfaces.
+		// Thus, we use "br0" as the nameserver in /etc/resolv.conf file.
+		logger.Warn().Msg("127.0.0.1 won't work on Firewalla")
+		if netIface, err := net.InterfaceByName("br0"); err == nil {
+			addrs, _ := netIface.Addrs()
+			for _, addr := range addrs {
+				if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
+					logger.Warn().Msg("using br0 interface IP address as DNS server")
+					ns = netIP.IP.To4().String()
+					break
+				}
+			}
+		}
+	}
+	if err := setDNS(netIface, []string{ns}); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return
 	}

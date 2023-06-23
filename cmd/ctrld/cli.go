@@ -982,6 +982,10 @@ func uninstall(p *prog, s service.Service) {
 	}
 	initLogging()
 	if doTasks(tasks) {
+		if err := router.PostUninstall(svcConfig); err != nil {
+			mainLog.Warn().Err(err).Msg("post uninstallation failed, please check system/service log for details error")
+			return
+		}
 		// Stop already reset DNS on router.
 		if router.Name() == "" {
 			p.resetDNS()
