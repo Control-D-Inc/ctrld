@@ -8,7 +8,7 @@ import (
 )
 
 func init() {
-	if r, err := dns.NewOSConfigurator(logf, "lo"); err == nil {
+	if r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, "lo"); err == nil {
 		useSystemdResolved = r.Mode() == "systemd-resolved"
 	}
 }
