@@ -25,6 +25,8 @@ func setDependencies(svc *service.Config) {
 		"After=network-online.target",
 		"Wants=NetworkManager-wait-online.service",
 		"After=NetworkManager-wait-online.service",
+		"Wants=systemd-networkd-wait-online.service",
+		"After=systemd-networkd-wait-online.service",
 	}
 	// On EdeOS, ctrld needs to start after vyatta-dhcpd, so it can read leases file.
 	if router.Name() == router.EdgeOS {

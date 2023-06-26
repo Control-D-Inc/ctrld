@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os/exec"
@@ -63,13 +64,40 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		SearchDomains: []dnsname.FQDN{},
 	}
 
+	trySystemdResolve := false
 	for i := 0; i < maxSetDNSAttempts; i++ {
 		if err := r.SetDNS(osConfig); err != nil {
+			if strings.Contains(err.Error(), "Rejected send message") &&
+				strings.Contains(err.Error(), "org.freedesktop.network1.Manager") {
+				mainLog.Warn().Msg("Interfaces are managed by systemd-networkd, switch to systemd-resolve for setting DNS")
+				trySystemdResolve = true
+				break
+			}
 			return err
 		}
 		currentNS := currentDNS(iface)
 		if reflect.DeepEqual(currentNS, nameservers) {
 			return nil
+		}
+	}
+	if trySystemdResolve {
+		// Stop systemd-networkd and retry setting DNS.
+		if out, err := exec.Command("systemctl", "stop", "systemd-networkd").CombinedOutput(); err != nil {
+			return fmt.Errorf("%s: %w", string(out), err)
+		}
+		args := []string{"--interface=" + iface.Name, "--set-domain=~"}
+		for _, nameserver := range nameservers {
+			args = append(args, "--set-dns="+nameserver)
+		}
+		for i := 0; i < maxSetDNSAttempts; i++ {
+			if out, err := exec.Command("systemd-resolve", args...).CombinedOutput(); err != nil {
+				return fmt.Errorf("%s: %w", string(out), err)
+			}
+			currentNS := currentDNS(iface)
+			if reflect.DeepEqual(currentNS, nameservers) {
+				return nil
+			}
+			time.Sleep(time.Second)
 		}
 	}
 	mainLog.Debug().Msg("DNS was not set for some reason")
@@ -80,6 +108,10 @@ func resetDNS(iface *net.Interface) (err error) {
 	defer func() {
 		if err == nil {
 			return
+		}
+		// Start systemd-networkd if present.
+		if exe, _ := exec.LookPath("/lib/systemd/systemd-networkd"); exe != "" {
+			_ = exec.Command("systemctl", "restart", "systemd-networkd").Run()
 		}
 		if r, oerr := dns.NewOSConfigurator(logf, iface.Name); oerr == nil {
 			_ = r.SetDNS(dns.OSConfig{})
@@ -139,7 +171,7 @@ func resetDNS(iface *net.Interface) (err error) {
 }
 
 func currentDNS(iface *net.Interface) []string {
-	for _, fn := range []getDNS{getDNSByResolvectl, getDNSByNmcli, resolvconffile.NameServers} {
+	for _, fn := range []getDNS{getDNSByResolvectl, getDNSBySystemdResolved, getDNSByNmcli, resolvconffile.NameServers} {
 		if ns := fn(iface.Name); len(ns) > 0 {
 			return ns
 		}
@@ -158,6 +190,36 @@ func getDNSByResolvectl(iface string) []string {
 		return parts[3:]
 	}
 	return nil
+}
+
+func getDNSBySystemdResolved(iface string) []string {
+	b, err := exec.Command("systemd-resolve", "--status", iface).Output()
+	if err != nil {
+		return nil
+	}
+	return getDNSBySystemdResolvedFromReader(bytes.NewReader(b))
+}
+
+func getDNSBySystemdResolvedFromReader(r io.Reader) []string {
+	scanner := bufio.NewScanner(r)
+	var ret []string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if len(ret) > 0 {
+			if net.ParseIP(line) != nil {
+				ret = append(ret, line)
+			}
+			continue
+		}
+		after, found := strings.CutPrefix(line, "DNS Servers: ")
+		if !found {
+			continue
+		}
+		if net.ParseIP(after) != nil {
+			ret = append(ret, after)
+		}
+	}
+	return ret
 }
 
 func getDNSByNmcli(iface string) []string {

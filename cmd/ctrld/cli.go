@@ -361,7 +361,12 @@ func initCLI() {
 					uninstall(p, s)
 					os.Exit(1)
 				}
-				p.setDNS()
+				// On Linux, Darwin, Freebsd, ctrld set DNS on startup, because the DNS setting could be
+				// reset after rebooting. On windows, we only need to set once here. See prog.preRun in
+				// prog_*.go file for dedicated code on each platforms.
+				if runtime.GOOS == "windows" {
+					p.setDNS()
+				}
 			}
 		},
 	}
@@ -781,13 +786,17 @@ func processCDFlags() {
 			}
 		case useSystemdResolved:
 			if lc := cfg.Listener["0"]; lc != nil {
-				// systemd-resolved does not allow forwarding DNS queries from 127.0.0.53 to loopback
-				// ip address, so trying to listen on default route interface address instead.
-				if netIface, _ := net.InterfaceByName(defaultIfaceName()); netIface != nil {
-					addrs, _ := netIface.Addrs()
-					for _, addr := range addrs {
-						if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
-							lc.IP = netIP.IP.To4().String()
+				if ip := net.ParseIP(lc.IP); ip != nil && ip.IsLoopback() {
+					mainLog.Warn().Msg("using loopback interface do not work with systemd-resolved")
+					// systemd-resolved does not allow forwarding DNS queries from 127.0.0.53 to loopback
+					// ip address, so trying to listen on default route interface address instead.
+					if netIface, _ := net.InterfaceByName(defaultIfaceName()); netIface != nil {
+						addrs, _ := netIface.Addrs()
+						for _, addr := range addrs {
+							if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
+								lc.IP = netIP.IP.To4().String()
+								mainLog.Warn().Msgf("use %s as listener address", lc.IP)
+							}
 						}
 					}
 				}

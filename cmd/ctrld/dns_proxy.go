@@ -501,7 +501,7 @@ func inContainer() bool {
 		return nil
 	})
 	lineread.File("/proc/mounts", func(line []byte) error {
-		if mem.Contains(mem.B(line), mem.S("fuse.lxcfs")) {
+		if mem.Contains(mem.B(line), mem.S("lxcfs /proc/cpuinfo fuse.lxcfs")) {
 			ret = true
 			return io.EOF
 		}
