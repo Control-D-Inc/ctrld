@@ -220,6 +220,13 @@ func Cleanup(svc *service.Config) error {
 
 // ListenIP returns the listener IP of ctrld on router.
 func ListenIP() string {
+	name := Name()
+	switch name {
+	case Firewalla:
+		// Firewalla excepts 127.0.0.1 in all interfaces config. So we need to listen on all interfaces,
+		// making dnsmasq to be able to forward DNS query to specific interface based on VLAN config.
+		return "0.0.0.0"
+	}
 	return "127.0.0.1"
 }
 

@@ -236,10 +236,14 @@ func (p *prog) setDNS() {
 	}
 	logger.Debug().Msg("setting DNS for interface")
 	ns := cfg.Listener["0"].IP
-	if router.Name() == router.Firewalla && ns == "127.0.0.1" {
+	if router.Name() == router.Firewalla && (ns == "127.0.0.1" || ns == "0.0.0.0" || ns == "") {
 		// On Firewalla, the lo interface is excluded in all dnsmasq settings of all interfaces.
 		// Thus, we use "br0" as the nameserver in /etc/resolv.conf file.
-		logger.Warn().Msg("127.0.0.1 won't work on Firewalla")
+		if ns == "127.0.0.1" {
+			logger.Warn().Msg("127.0.0.1 as DNS server won't work on Firewalla")
+		} else {
+			logger.Warn().Msgf("%q could not be used as DNS server", ns)
+		}
 		if netIface, err := net.InterfaceByName("br0"); err == nil {
 			addrs, _ := netIface.Addrs()
 			for _, addr := range addrs {
