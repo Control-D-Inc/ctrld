@@ -237,7 +237,7 @@ func ListenIP() string {
 func ListenPort() int {
 	name := Name()
 	switch name {
-	case DDWrt, Firewalla, Merlin, OpenWrt, Synology, Tomato, Ubios:
+	case EdgeOS, DDWrt, Firewalla, Merlin, OpenWrt, Synology, Tomato, Ubios:
 		return 5354
 	case Pfsense:
 		// On pfsense, we run ctrld as DNS resolver.
