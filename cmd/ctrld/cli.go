@@ -724,9 +724,6 @@ func processCDFlags() {
 	if cdUID == "" {
 		return
 	}
-	if iface == "" {
-		iface = "auto"
-	}
 	logger := mainLog.With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
