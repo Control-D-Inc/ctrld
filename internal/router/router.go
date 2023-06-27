@@ -127,10 +127,13 @@ func ConfigureService(sc *service.Config) error {
 }
 
 // PreRun blocks until the router is ready for running ctrld.
-func PreRun() (err error) {
+func PreRun(svc *service.Config) (err error) {
 	// On some routers, NTP may out of sync, so waiting for it to be ready.
 	switch Name() {
-	case Merlin, Tomato:
+	case DDWrt, Merlin, Tomato:
+		// Cleanup router to ensure valid DNS for NTP synchronization.
+		_ = Cleanup(svc)
+
 		// Wait until `ntp_ready=1` set.
 		b := backoff.NewBackoff("PreRun", func(format string, args ...any) {}, 10*time.Second)
 		for {

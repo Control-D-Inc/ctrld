@@ -168,7 +168,7 @@ func initCLI() {
 			// Processing --cd flag require connecting to ControlD API, which needs valid
 			// time for validating server certificate. Some routers need NTP synchronization
 			// to set the current time, so this check must happen before processCDFlags.
-			if err := router.PreRun(); err != nil {
+			if err := router.PreRun(svcConfig); err != nil {
 				mainLog.Fatal().Err(err).Msg("failed to perform router pre-run check")
 			}
 
