@@ -14,10 +14,15 @@ The config file allows for advanced configuration of the `ctrld` utility to cove
 
 
 ## Config Location
-`ctrld` uses [TOML](toml_link) format for its configuration file. Default configuration file is `config.toml` found in following order:
+`ctrld` uses [TOML](toml_link) format for its configuration file. Default configuration file is `ctrld.toml` found in following order:
 
- - `$HOME/.ctrld`
- - Current directory
+ - `/etc/controld` on *nix.
+ - User's home directory on Windows.
+ - Same directory with `ctrld` binary on these routers:
+   - `ddwrt`
+   - `merlin`
+   - `freshtomato`
+ - Current directory.
 
 The user can choose to override default value using command line `--config` or `-c`:
 
@@ -38,6 +43,8 @@ if it's existed.
     log_path = ""
     cache_enable = true
     cache_size = 4096
+    cache_ttl_override = 60
+    cache_serve_stale = true
 
 [network.0]
     cidrs = ["0.0.0.0/0"]
@@ -53,6 +60,7 @@ if it's existed.
     name = "Control D - Anti-Malware"
     timeout = 5000
     type = "doh"
+    ip_stack = "both"
 
 [upstream.1]
     bootstrap_ip = "76.76.2.11"
@@ -60,6 +68,7 @@ if it's existed.
     name = "Control D - No Ads"
     timeout = 5000
     type = "doq"
+    ip_stack = "split"
 
 [upstream.2]
     bootstrap_ip = "76.76.2.22"
@@ -67,6 +76,7 @@ if it's existed.
     name = "Control D - Private"
     timeout = 5000
     type = "dot"
+    ip_stack = "v4"
 
 [listener.0]
     ip = "127.0.0.1"
@@ -104,8 +114,8 @@ Logging level you wish to enable.
 
  - Type: string
  - Required: no
- - Valid values: `debug`, `info`, `warn`, `error`, `fatal`, `panic`
- - Default: `info`
+ - Valid values: `debug`, `info`, `warn`, `notice`, `error`, `fatal`, `panic`
+ - Default: `notice`
 
 
 ### log_path
@@ -113,12 +123,14 @@ Relative or absolute path of the log file.
 
 - Type: string
 - Required: no
+- Default: ""
 
 ### cache_enable
 When `cache_enable = true`, all resolved DNS query responses will be cached for duration of the upstream record TTLs.
 
 - Type: boolean
 - Required: no
+- Default: false
 
 ### cache_size
 The number of cached records, must be a positive integer. Tweaking this value with care depends on your available RAM. 
@@ -128,29 +140,22 @@ An invalid `cache_size` value will disable the cache, regardless of `cache_enabl
 
 - Type: int
 - Required: no
+- Default: 4096
 
 ### cache_ttl_override
 When `cache_ttl_override` is set to a positive value (in seconds), TTLs are overridden to this value and cached for this long.
 
 - Type: int
 - Required: no
+- Default: 0
 
 ### cache_serve_stale
 When `cache_serve_stale = true`, in cases of upstream failures (upstreams not reachable), `ctrld` will keep serving
 stale cached records (regardless of their TTLs) until upstream comes online.
 
-The above config will look like this at query time.
-
-```
-2022-11-14T22:18:53.808 INF Setting bootstrap IP for upstream.0 bootstrap_ip=76.76.2.11
-2022-11-14T22:18:53.808 INF Starting DNS server on listener.0: 127.0.0.1:53
-2022-11-14T22:18:56.381 DBG [9fd5d3] 127.0.0.1:53978 -> listener.0: 127.0.0.1:53: received query: verify.controld.com
-2022-11-14T22:18:56.381 INF [9fd5d3] no policy, no network, no rule -> [upstream.0]
-2022-11-14T22:18:56.381 DBG [9fd5d3] sending query to upstream.0: Control D - DOH Free
-2022-11-14T22:18:56.381 DBG [9fd5d3] debug dial context freedns.controld.com:443 - tcp - 76.76.2.0
-2022-11-14T22:18:56.381 DBG [9fd5d3] sending doh request to: 76.76.2.11:443
-2022-11-14T22:18:56.420 DBG [9fd5d3] received response of 118 bytes in 39.662597ms
-```
+- Type: boolean
+- Required: no
+- Default: false
 
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.
@@ -162,6 +167,7 @@ The `[upstream]` section specifies the DNS upstream servers that `ctrld` will fo
   name = "Control D - DOH"
   timeout = 5000
   type = "doh"
+  ip_stack = "split"
   
 [upstream.1]
   bootstrap_ip = ""
@@ -169,6 +175,7 @@ The `[upstream]` section specifies the DNS upstream servers that `ctrld` will fo
   name = "Control D - DOH3"
   timeout = 5000
   type = "doh3"
+  ip_stack = "both"
   
 [upstream.2]
   bootstrap_ip = ""
@@ -176,6 +183,7 @@ The `[upstream]` section specifies the DNS upstream servers that `ctrld` will fo
   name = "Controld D - DOT"
   timeout = 5000
   type = "dot"
+  ip_stack = "v4"
   
 [upstream.3]
   bootstrap_ip = ""
@@ -183,6 +191,7 @@ The `[upstream]` section specifies the DNS upstream servers that `ctrld` will fo
   name = "Controld D - DOT"
   timeout = 5000
   type = "doq"
+  ip_stack = "v6"
   
 [upstream.4]
   bootstrap_ip = ""
@@ -190,6 +199,7 @@ The `[upstream]` section specifies the DNS upstream servers that `ctrld` will fo
   name = "Control D - Ad Blocking"
   timeout = 5000
   type = "legacy"
+  ip_stack = "both"
 ```
 
 ### bootstrap_ip
@@ -200,6 +210,7 @@ If `bootstrap_ip` is empty, `ctrld` will resolve this itself using its own boots
 
  - type: ip address string
  - required: no
+ - Default: ""
 
 ### endpoint
 IP address, hostname or URL of upstream DNS. Used together with `Type` of the endpoint.
@@ -214,6 +225,7 @@ Human-readable name of the upstream.
 
 - Type: string
 - Required: no
+- Default: ""
 
 ### timeout
 Timeout in milliseconds before request failsover to the next upstream (if defined). 
@@ -221,7 +233,8 @@ Timeout in milliseconds before request failsover to the next upstream (if define
 Value `0` means no timeout.
 
  - Type: number
- - required: no
+ - Required: no
+ - Default: 0
 
 ### type
 The protocol that `ctrld` will use to send DNS requests to upstream.
@@ -266,12 +279,14 @@ Name of the network.
 
  - Type: string
  - Required: no
+ - Default: ""
 
 ### cidrs
 Specifies the network addresses that the `listener` will accept requests from. You will see more details in the listener policy section.
 
  - Type: array of network CIDR string
  - Required: no
+ - Default: []
 
 
 ## listener
@@ -291,18 +306,23 @@ The `[listener]` section specifies the ip and port of the local DNS server. You 
 ### ip
 IP address that serves the incoming requests. If `ip` is empty, ctrld will listen on all available addresses.
 
-- Type: ip address
+- Type: ip address string
+- Required: no
+- Default: ""
 
 ### port
 Port number that the listener will listen on for incoming requests. If `port` is `0`, a random available port will be chosen.
 
 - Type: number
+- Required: no
+- Default: 0
 
 ### restricted
 If set to `true` makes the listener `REFUSE` DNS queries from all source IP addresses that are not explicitly defined in the policy using a `network`. 
 
 - Type: bool
 - Required: no
+- Default: false
 
 ### policy
 Allows `ctrld` to set policy rules to determine which upstreams the requests will be forwarded to.
@@ -346,19 +366,30 @@ rules = [
 
 - Type: string
 - Required: no
+- Default: ""
 
 ### networks:
 `networks` is the list of network rules of the policy.
 
-- type: array of networks
+- Type: array of networks
+- Required: no
+- Default: []
 
 ### rules:
 `rules` is the list of domain rules within the policy. Domain can be either FQDN or wildcard domain.
 
-- type: array of rule
+- Type: array of rule
+- Required: no
+- Default: []
 
 ### failover_rcodes
-For non success response, `failover_rcodes` allows the request to be forwarded to next upstream, if the response `RCODE` matches any value defined in `failover_rcodes`. For example:
+For non success response, `failover_rcodes` allows the request to be forwarded to next upstream, if the response `RCODE` matches any value defined in `failover_rcodes`.
+
+- Type: array of string
+- Required: no
+- Default: []
+- 
+For example:
 
 ```toml
 [listener.0.policy]
