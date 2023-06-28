@@ -16,6 +16,10 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/internal/router"
+	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
+	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
+	"github.com/Control-D-Inc/ctrld/internal/router/openwrt"
+	"github.com/Control-D-Inc/ctrld/internal/router/ubios"
 )
 
 const defaultSemaphoreCap = 256
@@ -39,10 +43,11 @@ type prog struct {
 	waitCh chan struct{}
 	stopCh chan struct{}
 
-	cfg   *ctrld.Config
-	cache dnscache.Cacher
-	sema  semaphore
-	mt    *clientinfo.MacTable
+	cfg    *ctrld.Config
+	cache  dnscache.Cacher
+	sema   semaphore
+	mt     *clientinfo.MacTable
+	router router.Router
 
 	started   chan struct{}
 	onStarted []func()
@@ -207,7 +212,7 @@ func (p *prog) deAllocateIP() error {
 
 func (p *prog) setDNS() {
 	switch router.Name() {
-	case router.DDWrt, router.OpenWrt, router.Ubios:
+	case ddwrt.Name, openwrt.Name, ubios.Name:
 		// On router, ctrld run as a DNS forwarder, it does not have to change system DNS.
 		// Except for:
 		//   + EdgeOS, which /etc/resolv.conf could be managed by vyatta_update_resolv.pl script.
@@ -236,7 +241,7 @@ func (p *prog) setDNS() {
 	}
 	logger.Debug().Msg("setting DNS for interface")
 	ns := cfg.Listener["0"].IP
-	if router.Name() == router.Firewalla && (ns == "127.0.0.1" || ns == "0.0.0.0" || ns == "") {
+	if router.Name() == firewalla.Name && (ns == "127.0.0.1" || ns == "0.0.0.0" || ns == "") {
 		// On Firewalla, the lo interface is excluded in all dnsmasq settings of all interfaces.
 		// Thus, we use "br0" as the nameserver in /etc/resolv.conf file.
 		if ns == "127.0.0.1" {
@@ -264,7 +269,7 @@ func (p *prog) setDNS() {
 
 func (p *prog) resetDNS() {
 	switch router.Name() {
-	case router.DDWrt, router.OpenWrt, router.Ubios:
+	case ddwrt.Name, openwrt.Name, ubios.Name:
 		// See comment in p.setDNS method.
 		return
 	}

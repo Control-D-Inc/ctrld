@@ -2,34 +2,90 @@ package router
 
 import (
 	"bytes"
-	"context"
-	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"sync/atomic"
-	"time"
 
 	"github.com/kardianos/service"
-	"tailscale.com/logtail/backoff"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
+	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
+	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
+	"github.com/Control-D-Inc/ctrld/internal/router/merlin"
+	"github.com/Control-D-Inc/ctrld/internal/router/openwrt"
+	"github.com/Control-D-Inc/ctrld/internal/router/pfsense"
+	"github.com/Control-D-Inc/ctrld/internal/router/synology"
+	"github.com/Control-D-Inc/ctrld/internal/router/tomato"
+	"github.com/Control-D-Inc/ctrld/internal/router/ubios"
 )
 
-const (
-	DDWrt     = "ddwrt"
-	EdgeOS    = "edgeos"
-	Firewalla = "firewalla"
-	Merlin    = "merlin"
-	OpenWrt   = "openwrt"
-	Pfsense   = "pfsense"
-	Synology  = "synology"
-	Tomato    = "tomato"
-	Ubios     = "ubios"
-)
+// Service is the interface to manage ctrld service on router.
+type Service interface {
+	ConfigureService(*service.Config) error
+	Install(*service.Config) error
+	Uninstall(*service.Config) error
+}
 
-// ErrNotSupported reports the current router is not supported error.
-var ErrNotSupported = errors.New("unsupported platform")
+// Config is the interface to manage ctrld config on router.
+type Config interface {
+	Configure() error
+}
+
+// Router is the interface for managing ctrld running on router.
+type Router interface {
+	Service
+	Config
+
+	PreRun() error
+	Setup() error
+	Cleanup() error
+}
+
+// New returns new Router interface.
+func New(cfg *ctrld.Config) Router {
+	switch Name() {
+	case ddwrt.Name:
+		return ddwrt.New(cfg)
+	case merlin.Name:
+		return merlin.New(cfg)
+	case openwrt.Name:
+		return openwrt.New(cfg)
+	case edgeos.Name:
+		return edgeos.New(cfg)
+	case ubios.Name:
+		return ubios.New(cfg)
+	case synology.Name:
+		return synology.New(cfg)
+	case tomato.Name:
+		return tomato.New(cfg)
+	case pfsense.Name:
+		return pfsense.New(cfg)
+	case firewalla.Name:
+		return firewalla.New(cfg)
+	}
+	return NewDummyRouter()
+}
+
+// IsGLiNet reports whether the router is an GL.iNet router.
+func IsGLiNet() bool {
+	if Name() != openwrt.Name {
+		return false
+	}
+	buf, _ := os.ReadFile("/proc/version")
+	// The output of /proc/version contains "(glinet@glinet)".
+	return bytes.Contains(buf, []byte(" (glinet"))
+}
+
+// IsOldOpenwrt reports whether the router is an "old" version of Openwrt,
+// aka versions which don't have "service" command.
+func IsOldOpenwrt() bool {
+	if Name() != openwrt.Name {
+		return false
+	}
+	cmd, _ := exec.LookPath("service")
+	return cmd == ""
+}
 
 var routerPlatform atomic.Pointer[router]
 
@@ -41,15 +97,15 @@ type router struct {
 // IsSupported reports whether the given platform is supported by ctrld.
 func IsSupported(platform string) bool {
 	switch platform {
-	case DDWrt,
-		EdgeOS,
-		Firewalla,
-		Merlin,
-		OpenWrt,
-		Pfsense,
-		Synology,
-		Tomato,
-		Ubios:
+	case ddwrt.Name,
+		edgeos.Name,
+		firewalla.Name,
+		merlin.Name,
+		openwrt.Name,
+		pfsense.Name,
+		synology.Name,
+		tomato.Name,
+		ubios.Name:
 		return true
 	}
 	return false
@@ -58,191 +114,16 @@ func IsSupported(platform string) bool {
 // SupportedPlatforms return all platforms that can be configured to run with ctrld.
 func SupportedPlatforms() []string {
 	return []string{
-		DDWrt,
-		EdgeOS,
-		Firewalla,
-		Merlin,
-		OpenWrt,
-		Pfsense,
-		Synology,
-		Tomato,
-		Ubios,
+		ddwrt.Name,
+		edgeos.Name,
+		firewalla.Name,
+		merlin.Name,
+		openwrt.Name,
+		pfsense.Name,
+		synology.Name,
+		tomato.Name,
+		ubios.Name,
 	}
-}
-
-var configureFunc = map[string]func() error{
-	DDWrt:     setupDDWrt,
-	EdgeOS:    setupEdgeOS,
-	Firewalla: setupFirewalla,
-	Merlin:    setupMerlin,
-	OpenWrt:   setupOpenWrt,
-	Pfsense:   setupPfsense,
-	Synology:  setupSynology,
-	Tomato:    setupTomato,
-	Ubios:     setupUbiOS,
-}
-
-// Configure configures things for running ctrld on the router.
-func Configure(c *ctrld.Config) error {
-	name := Name()
-	switch name {
-	case DDWrt,
-		EdgeOS,
-		Firewalla,
-		Merlin,
-		OpenWrt,
-		Pfsense,
-		Synology,
-		Tomato,
-		Ubios:
-		if c.HasUpstreamSendClientInfo() {
-			r := routerPlatform.Load()
-			r.sendClientInfo = true
-		}
-		configure := configureFunc[name]
-		if err := configure(); err != nil {
-			return err
-		}
-		return nil
-	default:
-		return ErrNotSupported
-	}
-}
-
-// ConfigureService performs necessary setup for running ctrld as a service on router.
-func ConfigureService(sc *service.Config) error {
-	name := Name()
-	switch name {
-	case DDWrt:
-		if !ddwrtJff2Enabled() {
-			return errDdwrtJffs2NotEnabled
-		}
-	case OpenWrt:
-		sc.Option["SysvScript"] = openWrtScript
-	case Pfsense:
-		sc.Option["SysvScript"] = pfsenseInitScript
-	case EdgeOS, Firewalla, Merlin, Synology, Tomato, Ubios:
-	}
-	return nil
-}
-
-// PreRun blocks until the router is ready for running ctrld.
-func PreRun(svc *service.Config) (err error) {
-	// On some routers, NTP may out of sync, so waiting for it to be ready.
-	switch Name() {
-	case DDWrt, Merlin, Tomato:
-		// Cleanup router to ensure valid DNS for NTP synchronization.
-		_ = Cleanup(svc)
-
-		// Wait until `ntp_ready=1` set.
-		b := backoff.NewBackoff("PreRun", func(format string, args ...any) {}, 10*time.Second)
-		for {
-			out, err := nvram("get", "ntp_ready")
-			if err != nil {
-				return fmt.Errorf("PreStart: nvram: %w", err)
-			}
-			if out == "1" {
-				return nil
-			}
-			b.BackOff(context.Background(), errors.New("ntp not ready"))
-		}
-	default:
-		return nil
-	}
-}
-
-// PostInstall performs task after installing ctrld on router.
-func PostInstall(svc *service.Config) error {
-	name := Name()
-	switch name {
-	case DDWrt:
-		return postInstallDDWrt()
-	case EdgeOS:
-		return postInstallEdgeOS()
-	case Firewalla:
-		return postInstallFirewalla()
-	case Merlin:
-		return postInstallMerlin()
-	case OpenWrt:
-		return postInstallOpenWrt()
-	case Pfsense:
-		return postInstallPfsense(svc)
-	case Synology:
-		return postInstallSynology()
-	case Tomato:
-		return postInstallTomato()
-	case Ubios:
-		return postInstallUbiOS()
-	}
-	return nil
-}
-
-// PostUninstall performs task after uninstalling ctrld on router.
-func PostUninstall(svc *service.Config) error {
-	name := Name()
-	switch name {
-	case DDWrt:
-	case EdgeOS:
-	case Firewalla:
-		return postUninstallFirewalla()
-	case Merlin:
-	case OpenWrt:
-	case Pfsense:
-	case Synology:
-	case Tomato:
-	case Ubios:
-	}
-	return nil
-}
-
-// Cleanup cleans ctrld setup on the router.
-func Cleanup(svc *service.Config) error {
-	name := Name()
-	switch name {
-	case DDWrt:
-		return cleanupDDWrt()
-	case EdgeOS:
-		return cleanupEdgeOS()
-	case Firewalla:
-		return cleanupFirewalla()
-	case Merlin:
-		return cleanupMerlin()
-	case OpenWrt:
-		return cleanupOpenWrt()
-	case Pfsense:
-		return cleanupPfsense(svc)
-	case Synology:
-		return cleanupSynology()
-	case Tomato:
-		return cleanupTomato()
-	case Ubios:
-		return cleanupUbiOS()
-	}
-	return nil
-}
-
-// ListenIP returns the listener IP of ctrld on router.
-func ListenIP() string {
-	name := Name()
-	switch name {
-	case Firewalla:
-		// Firewalla excepts 127.0.0.1 in all interfaces config. So we need to listen on all interfaces,
-		// making dnsmasq to be able to forward DNS query to specific interface based on VLAN config.
-		return "0.0.0.0"
-	}
-	return "127.0.0.1"
-}
-
-// ListenPort returns the listener port of ctrld on router.
-func ListenPort() int {
-	name := Name()
-	switch name {
-	case EdgeOS, DDWrt, Firewalla, Merlin, OpenWrt, Synology, Tomato, Ubios:
-		return 5354
-	case Pfsense:
-		// On pfsense, we run ctrld as DNS resolver.
-	}
-	return 53
 }
 
 // Name returns name of the router platform.
@@ -259,27 +140,25 @@ func Name() string {
 func distroName() string {
 	switch {
 	case bytes.HasPrefix(unameO(), []byte("DD-WRT")):
-		return DDWrt
+		return ddwrt.Name
 	case bytes.HasPrefix(unameO(), []byte("ASUSWRT-Merlin")):
-		return Merlin
+		return merlin.Name
 	case haveFile("/etc/openwrt_version"):
-		return OpenWrt
+		return openwrt.Name
 	case haveDir("/data/unifi"):
-		return Ubios
+		return ubios.Name
 	case bytes.HasPrefix(unameU(), []byte("synology")):
-		return Synology
+		return synology.Name
 	case bytes.HasPrefix(unameO(), []byte("Tomato")):
-		return Tomato
+		return tomato.Name
 	case haveDir("/config/scripts/post-config.d"):
-		checkUSG()
-		return EdgeOS
+		return edgeos.Name
 	case haveFile("/etc/ubnt/init/vyatta-router"):
-		checkUSG()
-		return EdgeOS // For 2.x
+		return edgeos.Name // For 2.x
 	case isPfsense():
-		return Pfsense
+		return pfsense.Name
 	case haveFile("/etc/firewalla_release"):
-		return Firewalla
+		return firewalla.Name
 	}
 	return ""
 }
@@ -307,9 +186,4 @@ func unameU() []byte {
 func isPfsense() bool {
 	b, err := os.ReadFile("/etc/platform")
 	return err == nil && bytes.HasPrefix(b, []byte("pfSense"))
-}
-
-func checkUSG() {
-	out, _ := exec.Command("mca-cli-op", "info").Output()
-	isUSG = bytes.Contains(out, []byte("UniFi-Gateway-"))
 }

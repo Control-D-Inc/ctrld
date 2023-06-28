@@ -6,13 +6,18 @@ import (
 	"os/exec"
 
 	"github.com/kardianos/service"
+
+	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
+	"github.com/Control-D-Inc/ctrld/internal/router/merlin"
+	"github.com/Control-D-Inc/ctrld/internal/router/tomato"
+	"github.com/Control-D-Inc/ctrld/internal/router/ubios"
 )
 
 func init() {
 	systems := []service.System{
 		&linuxSystemService{
 			name:   "ddwrt",
-			detect: func() bool { return Name() == DDWrt },
+			detect: func() bool { return Name() == ddwrt.Name },
 			interactive: func() bool {
 				is, _ := isInteractive()
 				return is
@@ -21,7 +26,7 @@ func init() {
 		},
 		&linuxSystemService{
 			name:   "merlin",
-			detect: func() bool { return Name() == Merlin },
+			detect: func() bool { return Name() == merlin.Name },
 			interactive: func() bool {
 				is, _ := isInteractive()
 				return is
@@ -31,7 +36,7 @@ func init() {
 		&linuxSystemService{
 			name: "ubios",
 			detect: func() bool {
-				if Name() != Ubios {
+				if Name() != ubios.Name {
 					return false
 				}
 				out, err := exec.Command("ubnt-device-info", "firmware").CombinedOutput()
@@ -50,7 +55,7 @@ func init() {
 		},
 		&linuxSystemService{
 			name:   "tomato",
-			detect: func() bool { return Name() == Tomato },
+			detect: func() bool { return Name() == tomato.Name },
 			interactive: func() bool {
 				is, _ := isInteractive()
 				return is

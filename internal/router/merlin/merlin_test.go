@@ -1,17 +1,19 @@
-package router
+package merlin
 
 import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
 
 func Test_merlinParsePostConf(t *testing.T) {
 	origContent := "# foo"
 	data := strings.Join([]string{
-		merlinDNSMasqPostConfTmpl,
+		dnsmasq.MerlinPostConfTmpl,
 		"\n",
-		merlinDNSMasqPostConfMarker,
+		dnsmasq.MerlinPostConfMarker,
 		"\n",
 	}, "\n")
 

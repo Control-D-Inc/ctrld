@@ -12,6 +12,8 @@ import (
 	"text/template"
 
 	"github.com/kardianos/service"
+
+	"github.com/Control-D-Inc/ctrld/internal/router/nvram"
 )
 
 const tomatoNvramScriptWanupKey = "script_wanup"
@@ -63,10 +65,10 @@ func (s *tomatoSvc) Install() error {
 	if !strings.HasPrefix(exePath, "/jffs/") {
 		return errors.New("could not install service outside /jffs")
 	}
-	if _, err := nvram("set", "jffs2_on=1"); err != nil {
+	if _, err := nvram.Run("set", "jffs2_on=1"); err != nil {
 		return err
 	}
-	if _, err := nvram("commit"); err != nil {
+	if _, err := nvram.Run("commit"); err != nil {
 		return err
 	}
 
@@ -97,13 +99,15 @@ func (s *tomatoSvc) Install() error {
 		return fmt.Errorf("os.Chmod: startup script: %w", err)
 	}
 
-	nvramKvMap := nvramInstallKV()
-	old, err := nvram("get", tomatoNvramScriptWanupKey)
+	nvramKvMap := map[string]string{
+		tomatoNvramScriptWanupKey: "", // script to start ctrld, filled by tomatoSvc.Install method.
+	}
+	old, err := nvram.Run("get", tomatoNvramScriptWanupKey)
 	if err != nil {
 		return fmt.Errorf("nvram: %w", err)
 	}
 	nvramKvMap[tomatoNvramScriptWanupKey] = strings.Join([]string{old, s.configPath() + " start"}, "\n")
-	if err := nvramSetKV(nvramKvMap, nvramCtrldInstallKey); err != nil {
+	if err := nvram.SetKV(nvramKvMap, nvram.CtrldInstallKey); err != nil {
 		return err
 	}
 	return nil
@@ -113,8 +117,11 @@ func (s *tomatoSvc) Uninstall() error {
 	if err := os.Remove(s.configPath()); err != nil {
 		return fmt.Errorf("os.Remove: %w", err)
 	}
+	nvramKvMap := map[string]string{
+		tomatoNvramScriptWanupKey: "", // script to start ctrld, filled by tomatoSvc.Install method.
+	}
 	// Restore old configs.
-	if err := nvramRestore(nvramInstallKV(), nvramCtrldInstallKey); err != nil {
+	if err := nvram.Restore(nvramKvMap, nvram.CtrldInstallKey); err != nil {
 		return err
 	}
 	return nil

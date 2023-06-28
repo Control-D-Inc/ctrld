@@ -13,6 +13,8 @@ import (
 	"text/template"
 
 	"github.com/kardianos/service"
+
+	"github.com/Control-D-Inc/ctrld/internal/router/nvram"
 )
 
 const (
@@ -67,10 +69,10 @@ func (s *merlinSvc) Install() error {
 	if !strings.HasPrefix(exePath, "/jffs/") {
 		return errors.New("could not install service outside /jffs")
 	}
-	if _, err := nvram("set", "jffs2_scripts=1"); err != nil {
+	if _, err := nvram.Run("set", "jffs2_scripts=1"); err != nil {
 		return err
 	}
-	if _, err := nvram("commit"); err != nil {
+	if _, err := nvram.Run("commit"); err != nil {
 		return err
 	}
 

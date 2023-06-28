@@ -34,6 +34,9 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
+	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
+	"github.com/Control-D-Inc/ctrld/internal/router/merlin"
+	"github.com/Control-D-Inc/ctrld/internal/router/tomato"
 )
 
 var (
@@ -165,15 +168,20 @@ func initCLI() {
 				mainLog.Fatal().Msg("network is not up yet")
 			}
 
+			p.router = router.NewDummyRouter()
+			if setupRouter {
+				p.router = router.New(&cfg)
+			}
+
 			// Processing --cd flag require connecting to ControlD API, which needs valid
 			// time for validating server certificate. Some routers need NTP synchronization
 			// to set the current time, so this check must happen before processCDFlags.
-			if err := router.PreRun(svcConfig); err != nil {
+			if err := p.router.PreRun(); err != nil {
 				mainLog.Fatal().Err(err).Msg("failed to perform router pre-run check")
 			}
 
 			oldLogPath := cfg.Service.LogPath
-			processCDFlags()
+			processCDFlags(p)
 			if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
 				// After processCDFlags, log config may change, so reset mainLog and re-init logging.
 				mainLog = zerolog.New(io.Discard)
@@ -216,7 +224,7 @@ func initCLI() {
 
 			if setupRouter {
 				switch platform := router.Name(); {
-				case platform == router.DDWrt:
+				case platform == ddwrt.Name:
 					rootCertPool = certs.CACertPool()
 					fallthrough
 				case platform != "":
@@ -226,13 +234,13 @@ func initCLI() {
 					}
 					p.onStarted = append(p.onStarted, func() {
 						mainLog.Debug().Msg("Router setup")
-						if err := router.Configure(&cfg); err != nil {
+						if err := p.router.Setup(); err != nil {
 							mainLog.Error().Err(err).Msg("could not configure router")
 						}
 					})
 					p.onStopped = append(p.onStopped, func() {
 						mainLog.Debug().Msg("Router cleanup")
-						if err := router.Cleanup(svcConfig); err != nil {
+						if err := p.router.Cleanup(); err != nil {
 							mainLog.Error().Err(err).Msg("could not cleanup router")
 						}
 						p.resetDNS()
@@ -285,7 +293,13 @@ func initCLI() {
 			}
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
-			if err := router.ConfigureService(sc); err != nil {
+
+			p := &prog{router: router.NewDummyRouter()}
+			if setupRouter {
+				p.router = router.New(&cfg)
+			}
+
+			if err := p.router.ConfigureService(sc); err != nil {
 				mainLog.Fatal().Err(err).Msg("failed to configure service on router")
 			}
 
@@ -311,7 +325,7 @@ func initCLI() {
 
 			initLogging()
 
-			processCDFlags()
+			processCDFlags(p)
 
 			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
 				mainLog.Fatal().Msgf("invalid config: %v", err)
@@ -324,7 +338,6 @@ func initCLI() {
 				sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
 			}
 
-			p := &prog{}
 			s, err := newService(p, sc)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
@@ -332,7 +345,7 @@ func initCLI() {
 			}
 
 			mainLog.Debug().Msg("cleaning up router before installing")
-			_ = router.Cleanup(svcConfig)
+			_ = p.router.Cleanup()
 
 			tasks := []task{
 				{s.Stop, false},
@@ -341,7 +354,7 @@ func initCLI() {
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
-				if err := router.PostInstall(svcConfig); err != nil {
+				if err := p.router.Install(sc); err != nil {
 					mainLog.Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
 					return
 				}
@@ -720,7 +733,7 @@ func processNoConfigFlags(noConfigStart bool) {
 	v.Set("upstream", upstream)
 }
 
-func processCDFlags() {
+func processCDFlags(p *prog) {
 	if cdUID == "" {
 		return
 	}
@@ -778,8 +791,9 @@ func processCDFlags() {
 		switch {
 		case setupRouter:
 			if lc := cfg.Listener["0"]; lc != nil && lc.IP == "" {
-				lc.IP = router.ListenIP()
-				lc.Port = router.ListenPort()
+				if err := p.router.Configure(); err != nil {
+					mainLog.Fatal().Err(err).Msg("failed to change ctrld config for router")
+				}
 			}
 		case useSystemdResolved:
 			if lc := cfg.Listener["0"]; lc != nil {
@@ -824,11 +838,12 @@ func processCDFlags() {
 				Rules: rules,
 			},
 		}
-		if setupRouter {
-			lc.IP = router.ListenIP()
-			lc.Port = router.ListenPort()
-		}
 		cfg.Listener["0"] = lc
+		if setupRouter {
+			if err := p.router.Configure(); err != nil {
+				mainLog.Fatal().Err(err).Msg("failed to change ctrld config for router")
+			}
+		}
 	}
 
 	processLogAndCacheFlags()
@@ -940,7 +955,7 @@ func unsupportedPlatformHelp(cmd *cobra.Command) {
 
 func userHomeDir() (string, error) {
 	switch router.Name() {
-	case router.DDWrt, router.Merlin, router.Tomato:
+	case ddwrt.Name, merlin.Name, tomato.Name:
 		exe, err := os.Executable()
 		if err != nil {
 			return "", err
@@ -988,7 +1003,8 @@ func uninstall(p *prog, s service.Service) {
 	}
 	initLogging()
 	if doTasks(tasks) {
-		if err := router.PostUninstall(svcConfig); err != nil {
+		r := router.New(&cfg)
+		if err := r.Uninstall(svcConfig); err != nil {
 			mainLog.Warn().Err(err).Msg("post uninstallation failed, please check system/service log for details error")
 			return
 		}
@@ -999,7 +1015,7 @@ func uninstall(p *prog, s service.Service) {
 		mainLog.Debug().Msg("Router cleanup")
 		// Stop already did router.Cleanup and report any error if happens,
 		// ignoring error here to prevent false positive.
-		_ = router.Cleanup(svcConfig)
+		_ = r.Cleanup()
 		mainLog.Notice().Msg("Service uninstalled")
 		return
 	}

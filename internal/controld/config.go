@@ -14,6 +14,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/certs"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
+	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
 )
 
 const (
@@ -92,7 +93,7 @@ func FetchResolverConfig(uid, version string, cdDev bool) (*ResolverConfig, erro
 		return d.DialContext(ctx, network, addrs)
 	}
 
-	if router.Name() == router.DDWrt {
+	if router.Name() == ddwrt.Name {
 		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
 	}
 	client := http.Client{

@@ -5,6 +5,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
 	"github.com/Control-D-Inc/ctrld/internal/router"
+	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
 )
 
 func init() {
@@ -29,7 +30,7 @@ func setDependencies(svc *service.Config) {
 		"After=systemd-networkd-wait-online.service",
 	}
 	// On EdeOS, ctrld needs to start after vyatta-dhcpd, so it can read leases file.
-	if router.Name() == router.EdgeOS {
+	if router.Name() == edgeos.Name {
 		svc.Dependencies = append(svc.Dependencies, "Wants=vyatta-dhcpd.service")
 		svc.Dependencies = append(svc.Dependencies, "After=vyatta-dhcpd.service")
 		svc.Dependencies = append(svc.Dependencies, "Wants=dnsmasq.service")

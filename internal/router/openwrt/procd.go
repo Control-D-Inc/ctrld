@@ -1,4 +1,4 @@
-package router
+package openwrt
 
 const openWrtScript = `#!/bin/sh /etc/rc.common
 USE_PROCD=1
