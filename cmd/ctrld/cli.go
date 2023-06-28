@@ -777,7 +777,7 @@ func processCDFlags() {
 		}
 		switch {
 		case setupRouter:
-			if lc := cfg.Listener["0"]; lc != nil {
+			if lc := cfg.Listener["0"]; lc != nil && lc.IP == "" {
 				lc.IP = router.ListenIP()
 				lc.Port = router.ListenPort()
 			}
