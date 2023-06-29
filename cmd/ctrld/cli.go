@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -203,9 +204,7 @@ func initCLI() {
 				initLoggingWithBackup(false)
 			}
 
-			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
-				mainLog.Fatal().Msgf("invalid config: %v", err)
-			}
+			validateConfig(&cfg)
 			initCache()
 
 			if daemon {
@@ -359,9 +358,7 @@ func initCLI() {
 
 			processCDFlags(p)
 
-			if err := ctrld.ValidateConfig(validator.New(), &cfg); err != nil {
-				mainLog.Fatal().Msgf("invalid config: %v", err)
-			}
+			validateConfig(&cfg)
 
 			// Explicitly passing config, so on system where home directory could not be obtained,
 			// or sub-process env is different with the parent, we still behave correctly and use
@@ -704,6 +701,17 @@ func readConfigFile(writeDefaultConfig bool) bool {
 		defaultConfigWritten = true
 		return false
 	}
+
+	if _, ok := err.(viper.ConfigParseError); ok {
+		if f, _ := os.Open(v.ConfigFileUsed()); f != nil {
+			var i any
+			if err, ok := toml.NewDecoder(f).Decode(&i).(*toml.DecodeError); ok {
+				row, col := err.Position()
+				mainLog.Fatal().Msgf("failed to decode config file at line: %d, column: %d, error: %v", row, col, err)
+			}
+		}
+	}
+
 	// Otherwise, report fatal error and exit.
 	mainLog.Fatal().Msgf("failed to decode config file: %v", err)
 	return false
@@ -1057,4 +1065,49 @@ func uninstall(p *prog, s service.Service) {
 		mainLog.Notice().Msg("Service uninstalled")
 		return
 	}
+}
+
+func validateConfig(cfg *ctrld.Config) {
+	err := ctrld.ValidateConfig(validator.New(), cfg)
+	if err == nil {
+		return
+	}
+	var ve validator.ValidationErrors
+	if errors.As(err, &ve) {
+		for _, fe := range ve {
+			mainLog.Error().Msgf("invalid config: %s: %s", fe.Namespace(), fieldErrorMsg(fe))
+		}
+	}
+	os.Exit(1)
+}
+
+func fieldErrorMsg(fe validator.FieldError) string {
+	switch fe.Tag() {
+	case "oneof":
+		return fmt.Sprintf("must be one of: %q", fe.Param())
+	case "min":
+		if fe.Kind() == reflect.Map || fe.Kind() == reflect.Slice {
+			return fmt.Sprintf("must define at least %s element", fe.Param())
+		}
+		return fmt.Sprintf("minimum value: %q", fe.Param())
+	case "len":
+		if fe.Kind() == reflect.Slice {
+			return fmt.Sprintf("must have at least %s element", fe.Param())
+		}
+		return fmt.Sprintf("minimum len: %q", fe.Param())
+	case "gte":
+		return fmt.Sprintf("must be greater than or equal to: %s", fe.Param())
+	case "cidr":
+		return fmt.Sprintf("invalid value: %s", fe.Value())
+	case "required_unless", "required":
+		return fmt.Sprintf("value is required")
+	case "dnsrcode":
+		return fmt.Sprintf("invalid DNS rcode value: %s", fe.Value())
+	case "ipstack":
+		ipStacks := []string{ctrld.IpStackV4, ctrld.IpStackV6, ctrld.IpStackSplit, ctrld.IpStackBoth}
+		return fmt.Sprintf("must be one of: %q", strings.Join(ipStacks, " "))
+	case "iporempty":
+		return fmt.Sprintf("invalid IP format: %s", fe.Value())
+	}
+	return ""
 }
