@@ -22,7 +22,10 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router/ubios"
 )
 
-const defaultSemaphoreCap = 256
+const (
+	defaultSemaphoreCap = 256
+	ctrldLogUnixSock    = "ctrld_start.sock"
+)
 
 var logf = func(format string, args ...any) {
 	mainLog.Debug().Msgf(format, args...)
@@ -39,9 +42,10 @@ var svcConfig = &service.Config{
 var useSystemdResolved = false
 
 type prog struct {
-	mu     sync.Mutex
-	waitCh chan struct{}
-	stopCh chan struct{}
+	mu      sync.Mutex
+	waitCh  chan struct{}
+	stopCh  chan struct{}
+	logConn net.Conn
 
 	cfg    *ctrld.Config
 	cache  dnscache.Cacher
@@ -174,6 +178,12 @@ func (p *prog) run() {
 	for _, f := range p.onStarted {
 		f()
 	}
+	// Stop writing log to unix socket.
+	consoleWriter.Out = os.Stdout
+	initLoggingWithBackup(false)
+	if p.logConn != nil {
+		_ = p.logConn.Close()
+	}
 	wg.Wait()
 }
 
@@ -300,4 +310,26 @@ func (p *prog) resetDNS() {
 func randomLocalIP() string {
 	n := rand.Intn(254-2) + 2
 	return fmt.Sprintf("127.0.0.%d", n)
+}
+
+// runLogServer starts a unix listener, use by startCmd to gather log from runCmd.
+func runLogServer(sockPath string) net.Conn {
+	addr, err := net.ResolveUnixAddr("unix", sockPath)
+	if err != nil {
+		mainLog.Warn().Err(err).Msg("invalid log sock path")
+		return nil
+	}
+	ln, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		mainLog.Warn().Err(err).Msg("could not listen log socket")
+		return nil
+	}
+	defer ln.Close()
+
+	server, err := ln.Accept()
+	if err != nil {
+		mainLog.Warn().Err(err).Msg("could not accept connection")
+		return nil
+	}
+	return server
 }

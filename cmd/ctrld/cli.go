@@ -120,16 +120,24 @@ func initCLI() {
 			initConsoleLogging()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			if daemon && runtime.GOOS == "windows" {
-				mainLog.Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
-			}
-
 			waitCh := make(chan struct{})
 			stopCh := make(chan struct{})
 			p := &prog{
 				waitCh: waitCh,
 				stopCh: stopCh,
 			}
+			sockPath := filepath.Join(homedir, ctrldLogUnixSock)
+			if addr, err := net.ResolveUnixAddr("unix", sockPath); err == nil {
+				if conn, err := net.Dial(addr.Network(), addr.String()); err == nil {
+					consoleWriter.Out = io.MultiWriter(os.Stdout, conn)
+					p.logConn = conn
+				}
+			}
+
+			if daemon && runtime.GOOS == "windows" {
+				mainLog.Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
+			}
+
 			if !daemon {
 				// We need to call s.Run() as soon as possible to response to the OS manager, so it
 				// can see ctrld is running and don't mark ctrld as failed service.
@@ -309,12 +317,36 @@ func initCLI() {
 			if configPath != "" {
 				v.SetConfigFile(configPath)
 			}
+
+			// A buffer channel to gather log output from runCmd and report
+			// to user in case self-check process failed.
+			runCmdLogCh := make(chan string, 256)
 			if dir, err := userHomeDir(); err == nil {
 				setWorkingDirectory(sc, dir)
 				if configPath == "" && writeDefaultConfig {
 					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
 				}
 				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
+				sockPath := filepath.Join(dir, ctrldLogUnixSock)
+				_ = os.Remove(sockPath)
+				go func() {
+					defer func() {
+						close(runCmdLogCh)
+						_ = os.Remove(sockPath)
+					}()
+					if conn := runLogServer(sockPath); conn != nil {
+						// Enough buffer for log message, we don't produce
+						// such long log message, but just in case.
+						buf := make([]byte, 1024)
+						for {
+							n, err := conn.Read(buf)
+							if err != nil {
+								return
+							}
+							runCmdLogCh <- string(buf[:n])
+						}
+					}
+				}()
 			}
 
 			tryReadingConfig(writeDefaultConfig)
@@ -370,13 +402,19 @@ func initCLI() {
 				case service.StatusRunning:
 					mainLog.Notice().Msg("Service started")
 				default:
-					mainLog.Error().Msg("Service did not start, please check system/service log for details error")
+					marker := bytes.Repeat([]byte("="), 32)
+					mainLog.Error().Msg("ctrld service may not have started due to an error or misconfiguration, service log:")
+					_, _ = mainLog.Write(marker)
+					for msg := range runCmdLogCh {
+						_, _ = mainLog.Write([]byte(msg))
+					}
+					_, _ = mainLog.Write(marker)
 					uninstall(p, s)
 					os.Exit(1)
 				}
 				// On Linux, Darwin, Freebsd, ctrld set DNS on startup, because the DNS setting could be
 				// reset after rebooting. On windows, we only need to set once here. See prog.preRun in
-				// prog_*.go file for dedicated code on each platforms.
+				// prog_*.go file for dedicated code on each platform.
 				if runtime.GOOS == "windows" {
 					p.setDNS()
 				}
