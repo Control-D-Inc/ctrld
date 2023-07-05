@@ -22,7 +22,9 @@ func newService(i service.Interface, c *service.Config) (service.Service, error)
 	switch {
 	case router.IsOldOpenwrt():
 		return &procd{&sysV{s}}, nil
-	case router.IsGLiNet(): // TODO: unify for other SysV system.
+	case router.IsGLiNet():
+		return &sysV{s}, nil
+	case s.Platform() == "unix-systemv":
 		return &sysV{s}, nil
 	}
 	return s, nil
