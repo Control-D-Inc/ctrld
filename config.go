@@ -407,8 +407,12 @@ func (uc *UpstreamConfig) Ping() {
 	}
 
 	for _, typ := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		ping(uc.dohTransport(typ))
-		ping(uc.doh3Transport(typ))
+		switch uc.Type {
+		case ResolverTypeDOH:
+			ping(uc.dohTransport(typ))
+		case ResolverTypeDOH3:
+			ping(uc.doh3Transport(typ))
+		}
 	}
 }
 
