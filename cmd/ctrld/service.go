@@ -131,7 +131,8 @@ func unixSystemVServiceStatus() (service.Status, error) {
 	if err != nil {
 		return service.StatusUnknown, nil
 	}
-	switch string(bytes.TrimSpace(out)) {
+
+	switch string(bytes.ToLower(bytes.TrimSpace(out))) {
 	case "running":
 		return service.StatusRunning, nil
 	default:
