@@ -57,12 +57,6 @@ func (d *Ddwrt) PreRun() error {
 	return ntp.Wait()
 }
 
-func (d *Ddwrt) Configure() error {
-	d.cfg.Listener["0"].IP = "127.0.0.1"
-	d.cfg.Listener["0"].Port = 5354
-	return nil
-}
-
 func (d *Ddwrt) Setup() error {
 	// Already setup.
 	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {

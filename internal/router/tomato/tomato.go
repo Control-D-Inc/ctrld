@@ -52,12 +52,6 @@ func (f *FreshTomato) PreRun() error {
 	return ntp.Wait()
 }
 
-func (f *FreshTomato) Configure() error {
-	f.cfg.Listener["0"].IP = "127.0.0.1"
-	f.cfg.Listener["0"].Port = 5354
-	return nil
-}
-
 func (f *FreshTomato) Setup() error {
 	// Already setup.
 	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {

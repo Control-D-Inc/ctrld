@@ -27,15 +27,9 @@ type Service interface {
 	Uninstall(*service.Config) error
 }
 
-// Config is the interface to manage ctrld config on router.
-type Config interface {
-	Configure() error
-}
-
 // Router is the interface for managing ctrld running on router.
 type Router interface {
 	Service
-	Config
 
 	PreRun() error
 	Setup() error
@@ -64,7 +58,7 @@ func New(cfg *ctrld.Config) Router {
 	case firewalla.Name:
 		return firewalla.New(cfg)
 	}
-	return NewDummyRouter()
+	return &dummy{}
 }
 
 // IsGLiNet reports whether the router is an GL.iNet router.
@@ -92,38 +86,6 @@ var routerPlatform atomic.Pointer[router]
 type router struct {
 	name           string
 	sendClientInfo bool
-}
-
-// IsSupported reports whether the given platform is supported by ctrld.
-func IsSupported(platform string) bool {
-	switch platform {
-	case ddwrt.Name,
-		edgeos.Name,
-		firewalla.Name,
-		merlin.Name,
-		openwrt.Name,
-		pfsense.Name,
-		synology.Name,
-		tomato.Name,
-		ubios.Name:
-		return true
-	}
-	return false
-}
-
-// SupportedPlatforms return all platforms that can be configured to run with ctrld.
-func SupportedPlatforms() []string {
-	return []string{
-		ddwrt.Name,
-		edgeos.Name,
-		firewalla.Name,
-		merlin.Name,
-		openwrt.Name,
-		pfsense.Name,
-		synology.Name,
-		tomato.Name,
-		ubios.Name,
-	}
 }
 
 // Name returns name of the router platform.

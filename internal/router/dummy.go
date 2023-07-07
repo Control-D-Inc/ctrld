@@ -4,10 +4,6 @@ import "github.com/kardianos/service"
 
 type dummy struct{}
 
-func NewDummyRouter() Router {
-	return &dummy{}
-}
-
 func (d *dummy) ConfigureService(_ *service.Config) error {
 	return nil
 }

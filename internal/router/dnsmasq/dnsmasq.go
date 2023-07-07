@@ -1,6 +1,7 @@
 package dnsmasq
 
 import (
+	"errors"
 	"html/template"
 	"net"
 	"path/filepath"
@@ -60,15 +61,20 @@ type Upstream struct {
 }
 
 func ConfTmpl(tmplText string, cfg *ctrld.Config) (string, error) {
-	upstreams := make([]Upstream, 0, len(cfg.Listener))
-	for _, listener := range cfg.Listener {
-		upstreams = append(upstreams, Upstream{Ip: listener.IP, Port: listener.Port})
+	listener := cfg.FirstListener()
+	if listener == nil {
+		return "", errors.New("missing listener")
 	}
+	ip := listener.IP
+	if ip == "0.0.0.0" || ip == "::" || ip == "" {
+		ip = "127.0.0.1"
+	}
+	upstreams := []Upstream{{Ip: ip, Port: listener.Port}}
 	return confTmpl(tmplText, upstreams, cfg.HasUpstreamSendClientInfo())
 }
 
 func FirewallaConfTmpl(tmplText string, cfg *ctrld.Config) (string, error) {
-	if lc := cfg.Listener["0"]; lc != nil && lc.IP == "0.0.0.0" {
+	if lc := cfg.FirstListener(); lc != nil && (lc.IP == "0.0.0.0" || lc.IP == "") {
 		return confTmpl(tmplText, firewallaUpstreams(lc.Port), cfg.HasUpstreamSendClientInfo())
 	}
 	return ConfTmpl(tmplText, cfg)

@@ -54,6 +54,14 @@ func (p *Pfsense) ConfigureService(svc *service.Config) error {
 }
 
 func (p *Pfsense) Install(config *service.Config) error {
+	// pfsense need ".sh" extension for script to be run at boot.
+	// See: https://docs.netgate.com/pfsense/en/latest/development/boot-commands.html#shell-script-option
+	oldname := filepath.Join(rcPath, p.svcName)
+	newname := filepath.Join(rcPath, p.svcName+".sh")
+	_ = os.Remove(newname)
+	if err := os.Symlink(oldname, newname); err != nil {
+		return fmt.Errorf("os.Symlink: %w", err)
+	}
 	return nil
 }
 
@@ -62,21 +70,16 @@ func (p *Pfsense) Uninstall(config *service.Config) error {
 }
 
 func (p *Pfsense) PreRun() error {
-	return nil
-}
-
-func (p *Pfsense) Configure() error {
-	p.cfg.Listener["0"].IP = "127.0.0.1"
-	p.cfg.Listener["0"].Port = 53
-	return nil
-}
-
-func (p *Pfsense) Setup() error {
+	// TODO: remove this hacky solution.
 	// If Pfsense is in DNS Resolver mode, ensure no unbound processes running.
 	_ = exec.Command("killall", "unbound").Run()
 
 	// If Pfsense is in DNS Forwarder mode, ensure no dnsmasq processes running.
 	_ = exec.Command("killall", "dnsmasq").Run()
+	return nil
+}
+
+func (p *Pfsense) Setup() error {
 	return nil
 }
 

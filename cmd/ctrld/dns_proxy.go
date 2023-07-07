@@ -93,7 +93,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 			})
 		}
 		g.Go(func() error {
-			s, errCh := runDNSServer(dnsListenAddress(listenerNum, listenerConfig), proto, handler)
+			s, errCh := runDNSServer(dnsListenAddress(listenerConfig), proto, handler)
 			defer s.Shutdown()
 			if listenerConfig.Port == 0 {
 				switch s.Net {
@@ -400,12 +400,13 @@ func needLocalIPv6Listener() bool {
 	return ctrldnet.SupportsIPv6ListenLocal() && runtime.GOOS == "windows"
 }
 
-func dnsListenAddress(lcNum string, lc *ctrld.ListenerConfig) string {
-	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
-	// If we are inside container and the listener address is localhost,
-	// Change it to 0.0.0.0:53, so user can expose the port to outside.
-	if addr == "127.0.0.1:53" && cdUID != "" && inContainer() {
-		return "0.0.0.0:53"
+func dnsListenAddress(lc *ctrld.ListenerConfig) string {
+	// If we are inside container and the listener loopback address, change
+	// the address to something like 0.0.0.0:53, so user can expose the port to outside.
+	if inContainer() {
+		if ip := net.ParseIP(lc.IP); ip != nil && ip.IsLoopback() {
+			return net.JoinHostPort("0.0.0.0", strconv.Itoa(lc.Port))
+		}
 	}
 	return net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
 }

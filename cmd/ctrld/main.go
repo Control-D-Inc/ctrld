@@ -30,7 +30,6 @@ var (
 	cdDev             bool
 	iface             string
 	ifaceStartStop    string
-	setupRouter       bool
 
 	mainLog       = zerolog.New(io.Discard)
 	consoleWriter zerolog.ConsoleWriter
@@ -39,7 +38,6 @@ var (
 func main() {
 	ctrld.InitConfig(v, "ctrld")
 	initCLI()
-	initRouterCLI()
 	if err := rootCmd.Execute(); err != nil {
 		mainLog.Error().Msg(err.Error())
 		os.Exit(1)

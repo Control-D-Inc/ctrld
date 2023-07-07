@@ -53,12 +53,6 @@ func (f *Firewalla) PreRun() error {
 	return nil
 }
 
-func (f *Firewalla) Configure() error {
-	f.cfg.Listener["0"].IP = "0.0.0.0"
-	f.cfg.Listener["0"].Port = 5354
-	return nil
-}
-
 func (f *Firewalla) Setup() error {
 	data, err := dnsmasq.FirewallaConfTmpl(dnsmasq.ConfigContentTmpl, f.cfg)
 	if err != nil {

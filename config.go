@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -121,6 +123,25 @@ func (c *Config) HasUpstreamSendClientInfo() bool {
 		}
 	}
 	return false
+}
+
+// FirstListener returns the first listener config of current config. Listeners are sorted numerically.
+//
+// It panics if Config has no listeners configured.
+func (c *Config) FirstListener() *ListenerConfig {
+	listeners := make([]int, 0, len(c.Listener))
+	for k := range c.Listener {
+		n, err := strconv.Atoi(k)
+		if err != nil {
+			continue
+		}
+		listeners = append(listeners, n)
+	}
+	if len(listeners) == 0 {
+		panic("missing listener config")
+	}
+	sort.Ints(listeners)
+	return c.Listener[strconv.Itoa(listeners[0])]
 }
 
 // ServiceConfig specifies the general ctrld config.

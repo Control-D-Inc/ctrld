@@ -43,12 +43,6 @@ func (s *Synology) PreRun() error {
 	return nil
 }
 
-func (s *Synology) Configure() error {
-	s.cfg.Listener["0"].IP = "127.0.0.1"
-	s.cfg.Listener["0"].Port = 5354
-	return nil
-}
-
 func (s *Synology) Setup() error {
 	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, s.cfg)
 	if err != nil {

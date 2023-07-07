@@ -48,12 +48,6 @@ func (o *Openwrt) PreRun() error {
 	return nil
 }
 
-func (o *Openwrt) Configure() error {
-	o.cfg.Listener["0"].IP = "127.0.0.1"
-	o.cfg.Listener["0"].Port = 5354
-	return nil
-}
-
 func (o *Openwrt) Setup() error {
 	// Delete dnsmasq port if set.
 	if _, err := uci("delete", "dhcp.@dnsmasq[0].port"); err != nil && !errors.Is(err, errUCIEntryNotFound) {

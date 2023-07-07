@@ -48,12 +48,6 @@ func (m *Merlin) PreRun() error {
 	return ntp.Wait()
 }
 
-func (m *Merlin) Configure() error {
-	m.cfg.Listener["0"].IP = "127.0.0.1"
-	m.cfg.Listener["0"].Port = 5354
-	return nil
-}
-
 func (m *Merlin) Setup() error {
 	buf, err := os.ReadFile(dnsmasq.MerlinPostConfPath)
 	// Already setup.

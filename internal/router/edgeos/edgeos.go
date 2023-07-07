@@ -61,12 +61,6 @@ func (e *EdgeOS) PreRun() error {
 	return nil
 }
 
-func (e *EdgeOS) Configure() error {
-	e.cfg.Listener["0"].IP = "127.0.0.1"
-	e.cfg.Listener["0"].Port = 5354
-	return nil
-}
-
 func (e *EdgeOS) Setup() error {
 	if e.isUSG {
 		return e.setupUSG()

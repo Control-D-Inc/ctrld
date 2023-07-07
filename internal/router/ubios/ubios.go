@@ -46,12 +46,6 @@ func (u *Ubios) PreRun() error {
 	return nil
 }
 
-func (u *Ubios) Configure() error {
-	u.cfg.Listener["0"].IP = "127.0.0.1"
-	u.cfg.Listener["0"].Port = 5354
-	return nil
-}
-
 func (u *Ubios) Setup() error {
 	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, u.cfg)
 	if err != nil {

@@ -1,6 +1,7 @@
 package ctrld_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/go-playground/validator/v10"
@@ -54,6 +55,20 @@ func TestLoadDefaultConfig(t *testing.T) {
 	require.NoError(t, ctrld.ValidateConfig(validate, cfg))
 	assert.Len(t, cfg.Listener, 1)
 	assert.Len(t, cfg.Upstream, 2)
+}
+
+func TestConfigOverride(t *testing.T) {
+	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
+	ctrld.InitConfig(v, "test_load_config")
+	v.SetConfigType("toml")
+	require.NoError(t, v.ReadConfig(strings.NewReader(testhelper.SampleConfigStr(t))))
+	cfg := ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{
+		"0": {IP: "127.0.0.1", Port: 53},
+	}}
+	require.NoError(t, v.Unmarshal(&cfg))
+
+	assert.Equal(t, "10.10.42.69", cfg.Listener["1"].IP)
+	assert.Equal(t, 1337, cfg.Listener["1"].Port)
 }
 
 func TestConfigValidation(t *testing.T) {

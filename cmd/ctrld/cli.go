@@ -15,17 +15,21 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cuonglm/osinfo"
+	"github.com/fsnotify/fsnotify"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"tailscale.com/logtail/backoff"
 	"tailscale.com/net/interfaces"
@@ -36,6 +40,7 @@ import (
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
+	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
 	"github.com/Control-D-Inc/ctrld/internal/router/merlin"
 	"github.com/Control-D-Inc/ctrld/internal/router/tomato"
 )
@@ -126,12 +131,14 @@ func initCLI() {
 			p := &prog{
 				waitCh: waitCh,
 				stopCh: stopCh,
+				cfg:    &cfg,
 			}
 			sockPath := filepath.Join(homedir, ctrldLogUnixSock)
 			if addr, err := net.ResolveUnixAddr("unix", sockPath); err == nil {
 				if conn, err := net.Dial(addr.Network(), addr.String()); err == nil {
-					consoleWriter.Out = io.MultiWriter(os.Stdout, conn)
-					p.logConn = conn
+					lc := &logConn{conn: conn}
+					consoleWriter.Out = io.MultiWriter(os.Stdout, lc)
+					p.logConn = lc
 				}
 			}
 
@@ -177,10 +184,7 @@ func initCLI() {
 				mainLog.Fatal().Msg("network is not up yet")
 			}
 
-			p.router = router.NewDummyRouter()
-			if setupRouter {
-				p.router = router.New(&cfg)
-			}
+			p.router = router.New(&cfg)
 
 			// Processing --cd flag require connecting to ControlD API, which needs valid
 			// time for validating server certificate. Some routers need NTP synchronization
@@ -190,7 +194,22 @@ func initCLI() {
 			}
 
 			oldLogPath := cfg.Service.LogPath
-			processCDFlags(p)
+			if cdUID != "" {
+				processCDFlags()
+			}
+
+			updateListenerConfig()
+
+			if cdUID != "" {
+				processLogAndCacheFlags()
+			}
+
+			if err := writeConfigFile(); err != nil {
+				mainLog.Fatal().Err(err).Msg("failed to write config file")
+			} else {
+				mainLog.Info().Msg("writing config file to: " + defaultConfigFile)
+			}
+
 			if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
 				// After processCDFlags, log config may change, so reset mainLog and re-init logging.
 				mainLog = zerolog.New(io.Discard)
@@ -229,24 +248,38 @@ func initCLI() {
 				os.Exit(0)
 			}
 
-			if setupRouter {
-				switch platform := router.Name(); {
-				case platform == ddwrt.Name:
-					rootCertPool = certs.CACertPool()
-					fallthrough
-				case platform != "":
-					if !router.IsSupported(platform) {
-						unsupportedPlatformHelp(cmd)
-						os.Exit(1)
+			p.onStarted = append(p.onStarted, func() {
+				for _, lc := range p.cfg.Listener {
+					if shouldAllocateLoopbackIP(lc.IP) {
+						if err := allocateIP(lc.IP); err != nil {
+							mainLog.Error().Err(err).Msgf("could not allocate IP: %s", lc.IP)
+						}
 					}
+				}
+			})
+			p.onStopped = append(p.onStopped, func() {
+				for _, lc := range p.cfg.Listener {
+					if shouldAllocateLoopbackIP(lc.IP) {
+						if err := deAllocateIP(lc.IP); err != nil {
+							mainLog.Error().Err(err).Msgf("could not de-allocate IP: %s", lc.IP)
+						}
+					}
+				}
+			})
+			if platform := router.Name(); platform != "" {
+				if platform == ddwrt.Name {
+					rootCertPool = certs.CACertPool()
+				}
+				// Perform router setup/cleanup if ctrld could not be direct listener.
+				if !couldBeDirectListener(cfg.FirstListener()) {
 					p.onStarted = append(p.onStarted, func() {
-						mainLog.Debug().Msg("Router setup")
+						mainLog.Debug().Msg("router setup")
 						if err := p.router.Setup(); err != nil {
 							mainLog.Error().Err(err).Msg("could not configure router")
 						}
 					})
 					p.onStopped = append(p.onStopped, func() {
-						mainLog.Debug().Msg("Router cleanup")
+						mainLog.Debug().Msg("router cleanup")
 						if err := p.router.Cleanup(); err != nil {
 							mainLog.Error().Err(err).Msg("could not cleanup router")
 						}
@@ -278,8 +311,6 @@ func initCLI() {
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	_ = runCmd.Flags().MarkHidden("iface")
-	runCmd.Flags().BoolVarP(&setupRouter, "router", "", false, `setup for running on router platforms`)
-	_ = runCmd.Flags().MarkHidden("router")
 
 	rootCmd.AddCommand(runCmd)
 
@@ -301,11 +332,10 @@ func initCLI() {
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
 
-			p := &prog{router: router.NewDummyRouter()}
-			if setupRouter {
-				p.router = router.New(&cfg)
+			p := &prog{
+				router: router.New(&cfg),
+				cfg:    &cfg,
 			}
-
 			if err := p.router.ConfigureService(sc); err != nil {
 				mainLog.Fatal().Err(err).Msg("failed to configure service on router")
 			}
@@ -356,10 +386,6 @@ func initCLI() {
 
 			initLogging()
 
-			processCDFlags(p)
-
-			validateConfig(&cfg)
-
 			// Explicitly passing config, so on system where home directory could not be obtained,
 			// or sub-process env is different with the parent, we still behave correctly and use
 			// the expected config file.
@@ -373,8 +399,10 @@ func initCLI() {
 				return
 			}
 
-			mainLog.Debug().Msg("cleaning up router before installing")
-			_ = p.router.Cleanup()
+			if router.Name() != "" && !couldBeDirectListener(cfg.FirstListener()) {
+				mainLog.Debug().Msg("cleaning up router before installing")
+				_ = p.router.Cleanup()
+			}
 
 			tasks := []task{
 				{s.Stop, false},
@@ -431,8 +459,36 @@ func initCLI() {
 	startCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
-	startCmd.Flags().BoolVarP(&setupRouter, "router", "", false, `setup for running on router platforms`)
-	_ = startCmd.Flags().MarkHidden("router")
+
+	routerCmd := &cobra.Command{
+		Use: "setup",
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+		},
+		Run: func(cmd *cobra.Command, _ []string) {
+			exe, err := os.Executable()
+			if err != nil {
+				mainLog.Fatal().Msgf("could not find executable path: %v", err)
+				os.Exit(1)
+			}
+			flags := make([]string, 0)
+			cmd.Flags().Visit(func(flag *pflag.Flag) {
+				flags = append(flags, fmt.Sprintf("--%s=%s", flag.Name, flag.Value))
+			})
+			cmdArgs := []string{"start"}
+			cmdArgs = append(cmdArgs, flags...)
+			command := exec.Command(exe, cmdArgs...)
+			command.Stdout = os.Stdout
+			command.Stderr = os.Stderr
+			command.Stdin = os.Stdin
+			if err := command.Run(); err != nil {
+				mainLog.Fatal().Msg(err.Error())
+			}
+		},
+	}
+	routerCmd.Flags().AddFlagSet(startCmd.Flags())
+	routerCmd.Hidden = true
+	rootCmd.AddCommand(routerCmd)
 
 	stopCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
@@ -779,10 +835,7 @@ func processNoConfigFlags(noConfigStart bool) {
 	v.Set("upstream", upstream)
 }
 
-func processCDFlags(p *prog) {
-	if cdUID == "" {
-		return
-	}
+func processCDFlags() {
 	logger := mainLog.With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
@@ -817,47 +870,14 @@ func processCDFlags(p *prog) {
 	}
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
-	cfg = ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{
-		"0": {Port: 53},
-	}}
+	cfg = ctrld.Config{}
+
+	// Fetch config, unmarshal to cfg.
 	if resolverConfig.Ctrld.CustomConfig != "" {
 		logger.Info().Msg("using defined custom config of Control-D resolver")
 		readBase64Config(resolverConfig.Ctrld.CustomConfig)
 		if err := v.Unmarshal(&cfg); err != nil {
 			mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
-		}
-		for _, listener := range cfg.Listener {
-			if listener.IP == "" {
-				listener.IP = randomLocalIP()
-			}
-			if listener.Port == 0 {
-				listener.Port = 53
-			}
-		}
-		switch {
-		case setupRouter:
-			if lc := cfg.Listener["0"]; lc != nil && lc.IP == "" {
-				if err := p.router.Configure(); err != nil {
-					mainLog.Fatal().Err(err).Msg("failed to change ctrld config for router")
-				}
-			}
-		case useSystemdResolved:
-			if lc := cfg.Listener["0"]; lc != nil {
-				if ip := net.ParseIP(lc.IP); ip != nil && ip.IsLoopback() {
-					mainLog.Warn().Msg("using loopback interface do not work with systemd-resolved")
-					// systemd-resolved does not allow forwarding DNS queries from 127.0.0.53 to loopback
-					// ip address, so trying to listen on default route interface address instead.
-					if netIface, _ := net.InterfaceByName(defaultIfaceName()); netIface != nil {
-						addrs, _ := netIface.Addrs()
-						for _, addr := range addrs {
-							if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
-								lc.IP = netIP.IP.To4().String()
-								mainLog.Warn().Msgf("use %s as listener address", lc.IP)
-							}
-						}
-					}
-				}
-			}
 		}
 	} else {
 		cfg.Network = make(map[string]*ctrld.NetworkConfig)
@@ -877,27 +897,18 @@ func processCDFlags(p *prog) {
 		}
 		cfg.Listener = make(map[string]*ctrld.ListenerConfig)
 		lc := &ctrld.ListenerConfig{
-			IP:   "127.0.0.1",
-			Port: 53,
 			Policy: &ctrld.ListenerPolicyConfig{
 				Name:  "My Policy",
 				Rules: rules,
 			},
 		}
 		cfg.Listener["0"] = lc
-		if setupRouter {
-			if err := p.router.Configure(); err != nil {
-				mainLog.Fatal().Err(err).Msg("failed to change ctrld config for router")
-			}
-		}
 	}
-
-	processLogAndCacheFlags()
-
-	if err := writeConfigFile(); err != nil {
-		logger.Fatal().Err(err).Msg("failed to write config file")
-	} else {
-		logger.Info().Msg("writing config file to: " + defaultConfigFile)
+	// Set default value.
+	if len(cfg.Listener) == 0 {
+		cfg.Listener = map[string]*ctrld.ListenerConfig{
+			"0": {IP: "", Port: 0},
+		}
 	}
 }
 
@@ -924,8 +935,10 @@ func processListenFlag() {
 
 func processLogAndCacheFlags() {
 	if logPath != "" {
-		cfg.Service.LogLevel = "debug"
 		cfg.Service.LogPath = logPath
+	}
+	if logPath != "" && cfg.Service.LogLevel == "" {
+		cfg.Service.LogLevel = "debug"
 	}
 
 	if cacheSize != 0 {
@@ -979,8 +992,35 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 	maxAttempts := 20
 	mainLog.Debug().Msg("Performing self-check")
 
+	var (
+		lcChanged map[string]*ctrld.ListenerConfig
+		mu        sync.Mutex
+	)
+	curCfg := cfg
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		mainLog.Error().Err(err).Msg("could not watch config change")
+		return service.StatusUnknown
+	}
+	defer watcher.Close()
+
+	v.OnConfigChange(func(in fsnotify.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err := v.UnmarshalKey("listener", &lcChanged); err != nil {
+			mainLog.Error().Msgf("failed to unmarshal listener config: %v", err)
+			return
+		}
+	})
+	v.WatchConfig()
 	for i := 0; i < maxAttempts; i++ {
-		lc := cfg.Listener["0"]
+		mu.Lock()
+		if lcChanged != nil {
+			curCfg.Listener = lcChanged
+		}
+		mu.Unlock()
+		lc := curCfg.FirstListener()
+
 		m := new(dns.Msg)
 		m.SetQuestion(domain+".", dns.TypeA)
 		m.RecursionDesired = true
@@ -993,10 +1033,6 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 	}
 	mainLog.Debug().Msgf("self-check against %q failed", domain)
 	return service.StatusUnknown
-}
-
-func unsupportedPlatformHelp(cmd *cobra.Command) {
-	mainLog.Error().Msg("Unsupported or incorrectly chosen router platform. Please open an issue and provide all relevant information: https://github.com/Control-D-Inc/ctrld/issues/new")
 }
 
 func userHomeDir() (string, error) {
@@ -1110,4 +1146,162 @@ func fieldErrorMsg(fe validator.FieldError) string {
 		return fmt.Sprintf("invalid IP format: %s", fe.Value())
 	}
 	return ""
+}
+
+// couldBeDirectListener reports whether ctrld can be a direct listener on port 53.
+// It returns true only if ctrld can listen on port 53 for all interfaces. That means
+// there's no other software listening on port 53.
+//
+// If someone listening on port 53, or ctrld could only listen on port 53 for a specific
+// interface, ctrld could only be configured as a DNS forwarder.
+func couldBeDirectListener(lc *ctrld.ListenerConfig) bool {
+	if lc == nil || lc.Port != 53 {
+		return false
+	}
+	switch lc.IP {
+	case "", "::", "0.0.0.0":
+		return true
+	default:
+		return false
+	}
+
+}
+
+func isLoopback(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
+}
+
+func shouldAllocateLoopbackIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil || ip.To4() == nil {
+		return false
+	}
+	return ip.IsLoopback() && ip.String() != "127.0.0.1"
+}
+
+// updateListenerConfig updates the config for listeners if not defined,
+// or defined but invalid to be used, e.g: using loopback address other
+// than 127.0.0.1 with sytemd-resolved.
+func updateListenerConfig() {
+	for _, listener := range cfg.Listener {
+		if listener.IP == "" {
+			listener.IP = "0.0.0.0"
+		}
+		if listener.Port == 0 {
+			listener.Port = 53
+		}
+	}
+
+	var closers []io.Closer
+	defer func() {
+		for _, closer := range closers {
+			_ = closer.Close()
+		}
+	}()
+	// listenOk reports whether we can listen on udp/tcp of given address.
+	// Created listeners will be kept in listeners slice above, and close
+	// before function finished.
+	listenOk := func(addr string) bool {
+		udpLn, udpErr := net.ListenPacket("udp", addr)
+		if udpLn != nil {
+			closers = append(closers, udpLn)
+		}
+		tcpLn, tcpErr := net.Listen("tcp", addr)
+		if tcpLn != nil {
+			closers = append(closers, tcpLn)
+		}
+		return udpErr == nil && tcpErr == nil
+	}
+
+	listeners := make([]int, 0, len(cfg.Listener))
+	for k := range cfg.Listener {
+		n, err := strconv.Atoi(k)
+		if err != nil {
+			continue
+		}
+		listeners = append(listeners, n)
+	}
+	sort.Ints(listeners)
+
+	for _, n := range listeners {
+		listener := cfg.Listener[strconv.Itoa(n)]
+		oldIP := listener.IP
+		// Check if we could listen on the current IP + Port, if not, try following thing, pick first one success:
+		//    - Try 127.0.0.1:53
+		//    - Pick a random port until success.
+		localhostIP := func(ipStr string) string {
+			if ip := net.ParseIP(ipStr); ip != nil && ip.To4() == nil {
+				return "::1"
+			}
+			return "127.0.0.1"
+		}
+
+		// On firewalla, we don't need to check localhost, because the lo interface is excluded in dnsmasq
+		// config, so we can always listen on localhost port 53, but no traffic could be routed there.
+		tryLocalhost := !isLoopback(listener.IP) && router.Name() != firewalla.Name
+		tryPort5354 := true
+		attempts := 0
+		maxAttempts := 10
+		for {
+			if attempts == maxAttempts {
+				mainLog.Fatal().Msg("could not find available listen ip and port")
+			}
+			addr := net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port))
+			if listenOk(addr) {
+				break
+			}
+			if tryLocalhost {
+				tryLocalhost = false
+				listener.IP = localhostIP(listener.IP)
+				listener.Port = 53
+				mainLog.Warn().Msgf("could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+				continue
+			}
+			if tryPort5354 {
+				tryPort5354 = false
+				listener.IP = oldIP
+				listener.Port = 5354
+				mainLog.Warn().Msgf("could not listen on address: %s, trying port 5354", addr)
+				continue
+			}
+			listener.IP = randomLocalIP()
+			listener.Port = randomPort()
+			mainLog.Warn().Msgf("could not listen on address: %s, pick a random ip+port", addr)
+			attempts++
+		}
+	}
+
+	// Specific case for systemd-resolved.
+	if useSystemdResolved {
+		if listener := cfg.FirstListener(); listener != nil && listener.Port == 53 {
+			// systemd-resolved does not allow forwarding DNS queries from 127.0.0.53 to loopback
+			// ip address, other than "127.0.0.1", so trying to listen on default route interface
+			// address instead.
+			if ip := net.ParseIP(listener.IP); ip != nil && ip.IsLoopback() && ip.String() != "127.0.0.1" {
+				mainLog.Warn().Msg("using loopback interface do not work with systemd-resolved")
+				found := false
+				if netIface, _ := net.InterfaceByName(defaultIfaceName()); netIface != nil {
+					addrs, _ := netIface.Addrs()
+					for _, addr := range addrs {
+						if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
+							addr := net.JoinHostPort(netIP.IP.String(), strconv.Itoa(listener.Port))
+							if listenOk(addr) {
+								found = true
+								listener.IP = netIP.IP.String()
+								mainLog.Warn().Msgf("use %s as listener address", listener.IP)
+								break
+							}
+						}
+					}
+				}
+				if !found {
+					mainLog.Fatal().Msgf("could not use %q as DNS nameserver with systemd resolved", listener.IP)
+				}
+			}
+		}
+	}
 }

@@ -19,6 +19,10 @@ func SampleConfig(t *testing.T) *ctrld.Config {
 	return &cfg
 }
 
+func SampleConfigStr(t *testing.T) string {
+	return sampleConfigContent
+}
+
 var sampleConfigContent = `
 [service]
 log_level = "info"

@@ -16,10 +16,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/internal/router"
-	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
 	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
-	"github.com/Control-D-Inc/ctrld/internal/router/openwrt"
-	"github.com/Control-D-Inc/ctrld/internal/router/ubios"
 )
 
 const (
@@ -221,16 +218,7 @@ func (p *prog) deAllocateIP() error {
 }
 
 func (p *prog) setDNS() {
-	switch router.Name() {
-	case ddwrt.Name, openwrt.Name, ubios.Name:
-		// On router, ctrld run as a DNS forwarder, it does not have to change system DNS.
-		// Except for:
-		//   + EdgeOS, which /etc/resolv.conf could be managed by vyatta_update_resolv.pl script.
-		//   + Merlin/Tomato, which has WAN DNS setup on boot for NTP.
-		//   + Synology, which /etc/resolv.conf is not configured to point to localhost.
-		return
-	}
-	if cfg.Listener == nil || cfg.Listener["0"] == nil {
+	if cfg.Listener == nil {
 		return
 	}
 	if iface == "" {
@@ -238,6 +226,10 @@ func (p *prog) setDNS() {
 	}
 	if iface == "auto" {
 		iface = defaultIfaceName()
+	}
+	lc := cfg.FirstListener()
+	if lc == nil {
+		return
 	}
 	logger := mainLog.With().Str("iface", iface).Logger()
 	netIface, err := netInterface(iface)
@@ -250,23 +242,29 @@ func (p *prog) setDNS() {
 		return
 	}
 	logger.Debug().Msg("setting DNS for interface")
-	ns := cfg.Listener["0"].IP
-	if router.Name() == firewalla.Name && (ns == "127.0.0.1" || ns == "0.0.0.0" || ns == "") {
+	ns := lc.IP
+	ifaceName := defaultIfaceName()
+	isFirewalla := router.Name() == firewalla.Name
+	if isFirewalla {
 		// On Firewalla, the lo interface is excluded in all dnsmasq settings of all interfaces.
 		// Thus, we use "br0" as the nameserver in /etc/resolv.conf file.
-		if ns == "127.0.0.1" {
-			logger.Warn().Msg("127.0.0.1 as DNS server won't work on Firewalla")
-		} else {
-			logger.Warn().Msgf("%q could not be used as DNS server", ns)
+		ifaceName = "br0"
+		logger.Warn().Msg("using br0 interface IP address as DNS server")
+	}
+	if couldBeDirectListener(lc) {
+		// If ctrld is direct listener, use 127.0.0.1 as nameserver.
+		ns = "127.0.0.1"
+	} else if lc.Port != 53 {
+		logger.Warn().Msg("ctrld is not running on port 53, use default route interface as DNS server")
+		netIface, err := net.InterfaceByName(ifaceName)
+		if err != nil {
+			mainLog.Fatal().Err(err).Msg("failed to get default route interface")
 		}
-		if netIface, err := net.InterfaceByName("br0"); err == nil {
-			addrs, _ := netIface.Addrs()
-			for _, addr := range addrs {
-				if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
-					logger.Warn().Msg("using br0 interface IP address as DNS server")
-					ns = netIP.IP.To4().String()
-					break
-				}
+		addrs, _ := netIface.Addrs()
+		for _, addr := range addrs {
+			if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
+				ns = netIP.IP.To4().String()
+				break
 			}
 		}
 	}
@@ -278,11 +276,6 @@ func (p *prog) setDNS() {
 }
 
 func (p *prog) resetDNS() {
-	switch router.Name() {
-	case ddwrt.Name, openwrt.Name, ubios.Name:
-		// See comment in p.setDNS method.
-		return
-	}
 	if iface == "" {
 		return
 	}
@@ -310,6 +303,13 @@ func (p *prog) resetDNS() {
 func randomLocalIP() string {
 	n := rand.Intn(254-2) + 2
 	return fmt.Sprintf("127.0.0.%d", n)
+}
+
+func randomPort() int {
+	max := 1<<16 - 1
+	min := 1025
+	n := rand.Intn(max-min) + min
+	return n
 }
 
 // runLogServer starts a unix listener, use by startCmd to gather log from runCmd.
