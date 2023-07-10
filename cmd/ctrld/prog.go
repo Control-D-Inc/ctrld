@@ -16,6 +16,8 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/internal/router"
+	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
+	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
 	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
 )
 
@@ -243,19 +245,26 @@ func (p *prog) setDNS() {
 	}
 	logger.Debug().Msg("setting DNS for interface")
 	ns := lc.IP
-	ifaceName := defaultIfaceName()
-	isFirewalla := router.Name() == firewalla.Name
-	if isFirewalla {
-		// On Firewalla, the lo interface is excluded in all dnsmasq settings of all interfaces.
-		// Thus, we use "br0" as the nameserver in /etc/resolv.conf file.
-		ifaceName = "br0"
-		logger.Warn().Msg("using br0 interface IP address as DNS server")
-	}
 	if couldBeDirectListener(lc) {
 		// If ctrld is direct listener, use 127.0.0.1 as nameserver.
 		ns = "127.0.0.1"
 	} else if lc.Port != 53 {
-		logger.Warn().Msg("ctrld is not running on port 53, use default route interface as DNS server")
+		ifaceName := defaultIfaceName()
+		switch router.Name() {
+		case firewalla.Name:
+			// On Firewalla, the lo interface is excluded in all dnsmasq settings of all interfaces.
+			// Thus, we use "br0" as the nameserver in /etc/resolv.conf file.
+			ifaceName = "br0"
+			logger.Warn().Msg("using br0 interface IP address as DNS server")
+		case edgeos.Name:
+			// On EdgeOS, dnsmasq is run with "--local-service", so we need to get
+			// the proper interface from dnsmasq config.
+			if name, _ := dnsmasq.InterfaceNameFromConfig("/etc/dnsmasq.conf"); name != "" {
+				ifaceName = name
+				logger.Warn().Msgf("using %s interface IP address as DNS server", ifaceName)
+			}
+		}
+		logger.Warn().Msg("ctrld is not running on port 53, use interface %s IP as DNS server")
 		netIface, err := net.InterfaceByName(ifaceName)
 		if err != nil {
 			mainLog.Fatal().Err(err).Msg("failed to get default route interface")

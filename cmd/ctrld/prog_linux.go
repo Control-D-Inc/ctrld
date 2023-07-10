@@ -34,7 +34,6 @@ func setDependencies(svc *service.Config) {
 		svc.Dependencies = append(svc.Dependencies, "Wants=vyatta-dhcpd.service")
 		svc.Dependencies = append(svc.Dependencies, "After=vyatta-dhcpd.service")
 		svc.Dependencies = append(svc.Dependencies, "Wants=dnsmasq.service")
-		svc.Dependencies = append(svc.Dependencies, "After=dnsmasq.service")
 	}
 }
 
