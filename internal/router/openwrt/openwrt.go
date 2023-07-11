@@ -49,11 +49,6 @@ func (o *Openwrt) PreRun() error {
 }
 
 func (o *Openwrt) Setup() error {
-	// Delete dnsmasq port if set.
-	if _, err := uci("delete", "dhcp.@dnsmasq[0].port"); err != nil && !errors.Is(err, errUCIEntryNotFound) {
-		return err
-	}
-
 	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, o.cfg)
 	if err != nil {
 		return err

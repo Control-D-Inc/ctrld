@@ -264,7 +264,7 @@ func (p *prog) setDNS() {
 				logger.Warn().Msgf("using %s interface IP address as DNS server", ifaceName)
 			}
 		}
-		logger.Warn().Msg("ctrld is not running on port 53, use interface %s IP as DNS server")
+		logger.Warn().Msgf("ctrld is not running on port 53, use interface %s IP as DNS server", ifaceName)
 		netIface, err := net.InterfaceByName(ifaceName)
 		if err != nil {
 			mainLog.Fatal().Err(err).Msg("failed to get default route interface")

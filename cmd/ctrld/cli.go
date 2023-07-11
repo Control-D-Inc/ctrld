@@ -996,7 +996,13 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 		lcChanged map[string]*ctrld.ListenerConfig
 		mu        sync.Mutex
 	)
-	curCfg := cfg
+
+	if err := v.ReadInConfig(); err != nil {
+		mainLog.Fatal().Err(err).Msg("failed to read new config")
+	}
+	if err := v.Unmarshal(&cfg); err != nil {
+		mainLog.Fatal().Err(err).Msg("failed to update new config")
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		mainLog.Error().Err(err).Msg("could not watch config change")
@@ -1016,10 +1022,10 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 	for i := 0; i < maxAttempts; i++ {
 		mu.Lock()
 		if lcChanged != nil {
-			curCfg.Listener = lcChanged
+			cfg.Listener = lcChanged
 		}
 		mu.Unlock()
-		lc := curCfg.FirstListener()
+		lc := cfg.FirstListener()
 
 		m := new(dns.Msg)
 		m.SetQuestion(domain+".", dns.TypeA)
@@ -1183,16 +1189,31 @@ func shouldAllocateLoopbackIP(ipStr string) bool {
 	return ip.IsLoopback() && ip.String() != "127.0.0.1"
 }
 
+type listenerConfigCheck struct {
+	IP   bool
+	Port bool
+}
+
 // updateListenerConfig updates the config for listeners if not defined,
 // or defined but invalid to be used, e.g: using loopback address other
 // than 127.0.0.1 with sytemd-resolved.
 func updateListenerConfig() {
-	for _, listener := range cfg.Listener {
+	lcc := make(map[string]*listenerConfigCheck)
+	cdMode := cdUID != ""
+	for n, listener := range cfg.Listener {
+		lcc[n] = &listenerConfigCheck{}
 		if listener.IP == "" {
 			listener.IP = "0.0.0.0"
+			lcc[n].IP = true
 		}
 		if listener.Port == 0 {
 			listener.Port = 53
+			lcc[n].Port = true
+		}
+		// In cd mode, we always try to pick an ip:port pair to work.
+		if cdMode {
+			lcc[n].IP = true
+			lcc[n].Port = true
 		}
 	}
 
@@ -1229,7 +1250,10 @@ func updateListenerConfig() {
 
 	for _, n := range listeners {
 		listener := cfg.Listener[strconv.Itoa(n)]
+		check := lcc[strconv.Itoa(n)]
 		oldIP := listener.IP
+		oldPort := listener.Port
+
 		// Check if we could listen on the current IP + Port, if not, try following thing, pick first one success:
 		//    - Try 127.0.0.1:53
 		//    - Pick a random port until success.
@@ -1243,6 +1267,8 @@ func updateListenerConfig() {
 		// On firewalla, we don't need to check localhost, because the lo interface is excluded in dnsmasq
 		// config, so we can always listen on localhost port 53, but no traffic could be routed there.
 		tryLocalhost := !isLoopback(listener.IP) && router.Name() != firewalla.Name
+		tryAllPort53 := true
+		tryOldIPPort5354 := true
 		tryPort5354 := true
 		attempts := 0
 		maxAttempts := 10
@@ -1254,22 +1280,70 @@ func updateListenerConfig() {
 			if listenOk(addr) {
 				break
 			}
+			if !check.IP && !check.Port {
+				mainLog.Fatal().Msgf("failed to listen on: %s", addr)
+			}
+			if tryAllPort53 {
+				tryAllPort53 = false
+				if check.IP {
+					listener.IP = "0.0.0.0"
+				}
+				if check.Port {
+					listener.Port = 53
+				}
+				if check.IP {
+					mainLog.Warn().Msgf("could not listen on address: %s, trying: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+				}
+				continue
+			}
 			if tryLocalhost {
 				tryLocalhost = false
-				listener.IP = localhostIP(listener.IP)
-				listener.Port = 53
-				mainLog.Warn().Msgf("could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+				if check.IP {
+					listener.IP = localhostIP(listener.IP)
+				}
+				if check.Port {
+					listener.Port = 53
+				}
+				if check.IP {
+					mainLog.Warn().Msgf("could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+				}
+				continue
+			}
+			if tryOldIPPort5354 {
+				tryOldIPPort5354 = false
+				if check.IP {
+					listener.IP = oldIP
+				}
+				if check.Port {
+					listener.Port = 5354
+				}
+				mainLog.Warn().Msgf("could not listen on address: %s, trying current ip with port 5354", addr)
 				continue
 			}
 			if tryPort5354 {
 				tryPort5354 = false
-				listener.IP = oldIP
-				listener.Port = 5354
-				mainLog.Warn().Msgf("could not listen on address: %s, trying port 5354", addr)
+				if check.IP {
+					listener.IP = "0.0.0.0"
+				}
+				if check.Port {
+					listener.Port = 5354
+				}
+				mainLog.Warn().Msgf("could not listen on address: %s, trying 0.0.0.0:5354", addr)
 				continue
 			}
-			listener.IP = randomLocalIP()
-			listener.Port = randomPort()
+			if check.IP {
+				listener.IP = randomLocalIP()
+			} else {
+				listener.IP = oldIP
+			}
+			if check.Port {
+				listener.Port = randomPort()
+			} else {
+				listener.Port = oldPort
+			}
+			if listener.IP == oldIP && listener.Port == oldPort {
+				mainLog.Fatal().Msgf("could not listener on: %s", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+			}
 			mainLog.Warn().Msgf("could not listen on address: %s, pick a random ip+port", addr)
 			attempts++
 		}
