@@ -29,6 +29,13 @@ const (
 var bootstrapDNS = "76.76.2.0"
 var or = &osResolver{nameservers: nameservers()}
 
+func init() {
+	if len(or.nameservers) == 0 {
+		// Add bootstrap DNS in case we did not find any.
+		or.nameservers = []string{net.JoinHostPort(bootstrapDNS, "53")}
+	}
+}
+
 // Resolver is the interface that wraps the basic DNS operations.
 //
 // Resolve resolves the DNS query, return the result and the corresponding error.
