@@ -16,9 +16,6 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/internal/router"
-	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
-	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
-	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
 )
 
 const (
@@ -249,40 +246,23 @@ func (p *prog) setDNS() {
 		logger.Error().Err(err).Msg("could not patch NetworkManager")
 		return
 	}
+
 	logger.Debug().Msg("setting DNS for interface")
 	ns := lc.IP
-	if couldBeDirectListener(lc) {
+	switch {
+	case couldBeDirectListener(lc):
 		// If ctrld is direct listener, use 127.0.0.1 as nameserver.
 		ns = "127.0.0.1"
-	} else if lc.Port != 53 {
-		ifaceName := iface
-		switch router.Name() {
-		case firewalla.Name:
-			// On Firewalla, the lo interface is excluded in all dnsmasq settings of all interfaces.
-			// Thus, we use "br0" as the nameserver in /etc/resolv.conf file.
-			ifaceName = "br0"
-			logger.Warn().Msg("using br0 interface IP address as DNS server")
-		case edgeos.Name:
-			// On EdgeOS, dnsmasq is run with "--local-service", so we need to get
-			// the proper interface from dnsmasq config.
-			if name, _ := dnsmasq.InterfaceNameFromConfig("/etc/dnsmasq.conf"); name != "" {
-				ifaceName = name
-				logger.Warn().Msgf("using %s interface IP address as DNS server", ifaceName)
-			}
+	case lc.Port != 53:
+		ns = "127.0.0.1"
+		if resolver := router.LocalResolverIP(); resolver != "" {
+			ns = resolver
 		}
-		logger.Warn().Msgf("ctrld is not running on port 53, use interface %s IP as DNS server", ifaceName)
-		netIface, err := net.InterfaceByName(ifaceName)
-		if err != nil {
-			mainLog.Fatal().Err(err).Msg("failed to get default route interface")
-		}
-		addrs, _ := netIface.Addrs()
-		for _, addr := range addrs {
-			if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
-				ns = netIP.IP.To4().String()
-				break
-			}
-		}
+	default:
+		// If we ever reach here, it means ctrld is running on lc.IP port 53,
+		// so we could just use lc.IP as nameserver.
 	}
+
 	if err := setDNS(netIface, []string{ns}); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return

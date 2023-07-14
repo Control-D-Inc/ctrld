@@ -35,15 +35,9 @@ import (
 	"tailscale.com/net/interfaces"
 
 	"github.com/Control-D-Inc/ctrld"
-	"github.com/Control-D-Inc/ctrld/internal/certs"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
-	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
-	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
-	"github.com/Control-D-Inc/ctrld/internal/router/merlin"
-	"github.com/Control-D-Inc/ctrld/internal/router/tomato"
-	"github.com/Control-D-Inc/ctrld/internal/router/ubios"
 )
 
 var (
@@ -278,8 +272,8 @@ func initCLI() {
 				}
 			})
 			if platform := router.Name(); platform != "" {
-				if platform == ddwrt.Name {
-					rootCertPool = certs.CACertPool()
+				if cp := router.CertPool(); cp != nil {
+					rootCertPool = cp
 				}
 				// Perform router setup/cleanup if ctrld could not be direct listener.
 				if !couldBeDirectListener(cfg.FirstListener()) {
@@ -979,15 +973,14 @@ func netInterface(ifaceName string) (*net.Interface, error) {
 }
 
 func defaultIfaceName() string {
+	if ifaceName := router.DefaultInterfaceName(); ifaceName != "" {
+		return ifaceName
+	}
 	dri, err := interfaces.DefaultRouteInterface()
 	if err != nil {
 		// On WSL 1, the route table does not have any default route. But the fact that
 		// it only uses /etc/resolv.conf for setup DNS, so we can use "lo" here.
 		if oi := osinfo.New(); strings.Contains(oi.String(), "Microsoft") {
-			return "lo"
-		}
-		// Same as WSL case above.
-		if router.Name() == ubios.Name {
 			return "lo"
 		}
 		mainLog.Fatal().Err(err).Msg("failed to get default route interface")
@@ -1057,19 +1050,18 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 }
 
 func userHomeDir() (string, error) {
-	switch router.Name() {
-	case ddwrt.Name, merlin.Name, tomato.Name:
-		exe, err := os.Executable()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Dir(exe), nil
+	dir, err := router.HomeDir()
+	if err != nil {
+		return "", err
+	}
+	if dir != "" {
+		return dir, nil
 	}
 	// viper will expand for us.
 	if runtime.GOOS == "windows" {
 		return os.UserHomeDir()
 	}
-	dir := "/etc/controld"
+	dir = "/etc/controld"
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return "", err
 	}
@@ -1291,7 +1283,7 @@ func updateListenerConfig() {
 
 		// On firewalla, we don't need to check localhost, because the lo interface is excluded in dnsmasq
 		// config, so we can always listen on localhost port 53, but no traffic could be routed there.
-		tryLocalhost := !isLoopback(listener.IP) && router.Name() != firewalla.Name
+		tryLocalhost := !isLoopback(listener.IP) && router.CanListenLocalhost()
 		tryAllPort53 := true
 		tryOldIPPort5354 := true
 		tryPort5354 := true

@@ -111,7 +111,7 @@ func resetDNS(iface *net.Interface) (err error) {
 		}
 		// Start systemd-networkd if present.
 		if exe, _ := exec.LookPath("/lib/systemd/systemd-networkd"); exe != "" {
-			_ = exec.Command("systemctl", "restart", "systemd-networkd").Run()
+			_ = exec.Command("systemctl", "start", "systemd-networkd").Run()
 		}
 		if r, oerr := dns.NewOSConfigurator(logf, iface.Name); oerr == nil {
 			_ = r.SetDNS(dns.OSConfig{})

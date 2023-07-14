@@ -2,14 +2,19 @@ package router
 
 import (
 	"bytes"
+	"crypto/x509"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync/atomic"
 
 	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/certs"
 	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
+	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
 	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
 	"github.com/Control-D-Inc/ctrld/internal/router/merlin"
@@ -97,6 +102,86 @@ func Name() string {
 	r.name = distroName()
 	routerPlatform.Store(r)
 	return r.name
+}
+
+// DefaultInterfaceName returns the default interface name of the current router.
+func DefaultInterfaceName() string {
+	switch Name() {
+	case ubios.Name:
+		return "lo"
+	}
+	return ""
+}
+
+// LocalResolverIP returns the IP that could be used as nameserver in /etc/resolv.conf file.
+func LocalResolverIP() string {
+	var iface string
+	switch Name() {
+	case edgeos.Name:
+		// On EdgeOS, dnsmasq is run with "--local-service", so we need to get
+		// the proper interface from dnsmasq config.
+		if name, _ := dnsmasq.InterfaceNameFromConfig("/etc/dnsmasq.conf"); name != "" {
+			iface = name
+		}
+	case firewalla.Name:
+		// On Firewalla, the lo interface is excluded in all dnsmasq settings of all interfaces.
+		// Thus, we use "br0" as the nameserver in /etc/resolv.conf file.
+		iface = "br0"
+	}
+	if netIface, _ := net.InterfaceByName(iface); netIface != nil {
+		addrs, _ := netIface.Addrs()
+		for _, addr := range addrs {
+			if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
+				return netIP.IP.To4().String()
+			}
+		}
+	}
+	return ""
+}
+
+// HomeDir returns the home directory of ctrld on current router.
+func HomeDir() (string, error) {
+	switch Name() {
+	case ddwrt.Name, merlin.Name, tomato.Name:
+		exe, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Dir(exe), nil
+	}
+	return "", nil
+}
+
+// CertPool returns the system certificate pool of the current router.
+func CertPool() *x509.CertPool {
+	if Name() == ddwrt.Name {
+		return certs.CACertPool()
+	}
+	return nil
+}
+
+// CanListenLocalhost reports whether the ctrld can listen on localhost with current host.
+func CanListenLocalhost() bool {
+	switch {
+	case Name() == firewalla.Name:
+		return false
+	default:
+		return true
+	}
+}
+
+// ServiceDependencies returns list of dependencies that ctrld services needs on this router.
+// See https://pkg.go.dev/github.com/kardianos/service#Config for list format.
+func ServiceDependencies() []string {
+	if Name() == edgeos.Name {
+		// On EdeOS, ctrld needs to start after vyatta-dhcpd, so it can read leases file.
+		return []string{
+			"Wants=vyatta-dhcpd.service",
+			"After=vyatta-dhcpd.service",
+			"Wants=dnsmasq.service",
+		}
+	}
+	return nil
 }
 
 func distroName() string {
