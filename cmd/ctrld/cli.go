@@ -1238,6 +1238,12 @@ func updateListenerConfig() {
 		return udpErr == nil && tcpErr == nil
 	}
 
+	logMsg := func(e *zerolog.Event, listenerNum int, format string, v ...any) {
+		e.MsgFunc(func() string {
+			return fmt.Sprintf("listener.%d %s", listenerNum, fmt.Sprintf(format, v...))
+		})
+	}
+
 	listeners := make([]int, 0, len(cfg.Listener))
 	for k := range cfg.Listener {
 		n, err := strconv.Atoi(k)
@@ -1275,14 +1281,14 @@ func updateListenerConfig() {
 		maxAttempts := 10
 		for {
 			if attempts == maxAttempts {
-				mainLog.Fatal().Msg("could not find available listen ip and port")
+				logMsg(mainLog.Fatal(), n, "could not find available listen ip and port")
 			}
 			addr := net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port))
 			if listenOk(addr) {
 				break
 			}
 			if !check.IP && !check.Port {
-				mainLog.Fatal().Msgf("failed to listen on: %s", addr)
+				logMsg(mainLog.Fatal(), n, "failed to listen on: %s", addr)
 			}
 			if tryAllPort53 {
 				tryAllPort53 = false
@@ -1293,7 +1299,7 @@ func updateListenerConfig() {
 					listener.Port = 53
 				}
 				if check.IP {
-					mainLog.Warn().Msgf("could not listen on address: %s, trying: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+					logMsg(mainLog.Warn(), n, "could not listen on address: %s, trying: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 				}
 				continue
 			}
@@ -1306,7 +1312,7 @@ func updateListenerConfig() {
 					listener.Port = 53
 				}
 				if check.IP {
-					mainLog.Warn().Msgf("could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+					logMsg(mainLog.Warn(), n, "could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 				}
 				continue
 			}
@@ -1318,7 +1324,7 @@ func updateListenerConfig() {
 				if check.Port {
 					listener.Port = 5354
 				}
-				mainLog.Warn().Msgf("could not listen on address: %s, trying current ip with port 5354", addr)
+				logMsg(mainLog.Warn(), n, "could not listen on address: %s, trying current ip with port 5354", addr)
 				continue
 			}
 			if tryPort5354 {
@@ -1329,7 +1335,7 @@ func updateListenerConfig() {
 				if check.Port {
 					listener.Port = 5354
 				}
-				mainLog.Warn().Msgf("could not listen on address: %s, trying 0.0.0.0:5354", addr)
+				logMsg(mainLog.Warn(), n, "could not listen on address: %s, trying 0.0.0.0:5354", addr)
 				continue
 			}
 			if check.IP && !isZeroIP { // for "0.0.0.0" or "::", we only need to try new port.
@@ -1343,9 +1349,9 @@ func updateListenerConfig() {
 				listener.Port = oldPort
 			}
 			if listener.IP == oldIP && listener.Port == oldPort {
-				mainLog.Fatal().Msgf("could not listener on: %s", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+				logMsg(mainLog.Fatal(), n, "could not listener on: %s", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 			}
-			mainLog.Warn().Msgf("could not listen on address: %s, pick a random ip+port", addr)
+			logMsg(mainLog.Warn(), n, "could not listen on address: %s, pick a random ip+port", addr)
 			attempts++
 		}
 	}
@@ -1353,11 +1359,12 @@ func updateListenerConfig() {
 	// Specific case for systemd-resolved.
 	if useSystemdResolved {
 		if listener := cfg.FirstListener(); listener != nil && listener.Port == 53 {
+			n := listeners[0]
 			// systemd-resolved does not allow forwarding DNS queries from 127.0.0.53 to loopback
 			// ip address, other than "127.0.0.1", so trying to listen on default route interface
 			// address instead.
 			if ip := net.ParseIP(listener.IP); ip != nil && ip.IsLoopback() && ip.String() != "127.0.0.1" {
-				mainLog.Warn().Msg("using loopback interface do not work with systemd-resolved")
+				logMsg(mainLog.Warn(), n, "using loopback interface do not work with systemd-resolved")
 				found := false
 				if netIface, _ := net.InterfaceByName(defaultIfaceName()); netIface != nil {
 					addrs, _ := netIface.Addrs()
@@ -1367,14 +1374,14 @@ func updateListenerConfig() {
 							if listenOk(addr) {
 								found = true
 								listener.IP = netIP.IP.String()
-								mainLog.Warn().Msgf("use %s as listener address", listener.IP)
+								logMsg(mainLog.Warn(), n, "use %s as listener address", listener.IP)
 								break
 							}
 						}
 					}
 				}
 				if !found {
-					mainLog.Fatal().Msgf("could not use %q as DNS nameserver with systemd resolved", listener.IP)
+					logMsg(mainLog.Fatal(), n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
 				}
 			}
 		}
