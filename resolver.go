@@ -110,18 +110,6 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	return nil, errors.Join(errs...)
 }
 
-func newDialer(dnsAddress string) *net.Dialer {
-	return &net.Dialer{
-		Resolver: &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				d := net.Dialer{}
-				return d.DialContext(ctx, network, dnsAddress)
-			},
-		},
-	}
-}
-
 type legacyResolver struct {
 	uc *UpstreamConfig
 }
@@ -149,6 +137,14 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 	return answer, err
 }
 
+type dummyResolver struct{}
+
+func (d dummyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	ans := new(dns.Msg)
+	ans.SetReply(msg)
+	return ans, nil
+}
+
 // LookupIP looks up host using OS resolver.
 // It returns a slice of that host's IPv4 and IPv6 addresses.
 func LookupIP(domain string) []string {
@@ -160,7 +156,7 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 	if withBootstrapDNS {
 		resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
 	}
-	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", domain, resolver.nameservers)
+	ProxyLog.Debug().Msgf("resolving %q using bootstrap DNS %q", domain, resolver.nameservers)
 	timeoutMs := 2000
 	if timeout > 0 && timeout < timeoutMs {
 		timeoutMs = timeout
@@ -230,7 +226,6 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 
 // NewBootstrapResolver returns an OS resolver, which use following nameservers:
 //
-//   - ControlD bootstrap DNS server.
 //   - Gateway IP address (depends on OS).
 //   - Input servers.
 func NewBootstrapResolver(servers ...string) Resolver {
@@ -240,4 +235,37 @@ func NewBootstrapResolver(servers ...string) Resolver {
 		resolver.nameservers = append([]string{net.JoinHostPort(ns, "53")}, resolver.nameservers...)
 	}
 	return resolver
+}
+
+// NewPrivateResolver returns an OS resolver, which includes only private DNS servers.
+// This is useful for doing PTR lookup in LAN network.
+func NewPrivateResolver() Resolver {
+	nss := nameservers()
+	n := 0
+	for _, ns := range nss {
+		host, _, _ := net.SplitHostPort(ns)
+		ip := net.ParseIP(host)
+		if ip != nil && ip.IsPrivate() && !ip.IsLoopback() {
+			nss[n] = ns
+			n++
+		}
+	}
+	nss = nss[:n]
+	if len(nss) == 0 {
+		return &dummyResolver{}
+	}
+	resolver := &osResolver{nameservers: nss}
+	return resolver
+}
+
+func newDialer(dnsAddress string) *net.Dialer {
+	return &net.Dialer{
+		Resolver: &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{}
+				return d.DialContext(ctx, network, dnsAddress)
+			},
+		},
+	}
 }

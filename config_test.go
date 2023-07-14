@@ -1,6 +1,7 @@
 package ctrld_test
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -91,6 +92,9 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid rules", configWithInvalidRules(t), true},
 		{"invalid dns rcodes", configWithInvalidRcodes(t), true},
 		{"invalid max concurrent requests", configWithInvalidMaxConcurrentRequests(t), true},
+		{"non-existed lease file", configWithNonExistedLeaseFile(t), true},
+		{"lease file format required if lease file exist", configWithExistedLeaseFile(t), true},
+		{"invalid lease file format", configWithInvalidLeaseFileFormat(t), true},
 	}
 
 	for _, tc := range tests {
@@ -197,5 +201,27 @@ func configWithInvalidMaxConcurrentRequests(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	n := -1
 	cfg.Service.MaxConcurrentRequests = &n
+	return cfg
+}
+
+func configWithNonExistedLeaseFile(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Service.DHCPLeaseFile = "non-existed"
+	return cfg
+}
+
+func configWithExistedLeaseFile(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Service.DHCPLeaseFile = exe
+	return cfg
+}
+
+func configWithInvalidLeaseFileFormat(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Service.DHCPLeaseFileFormat = "invalid"
 	return cfg
 }

@@ -48,11 +48,11 @@ type prog struct {
 	logConn net.Conn
 	cs      *controlServer
 
-	cfg    *ctrld.Config
-	cache  dnscache.Cacher
-	sema   semaphore
-	mt     *clientinfo.MacTable
-	router router.Router
+	cfg     *ctrld.Config
+	cache   dnscache.Cacher
+	sema    semaphore
+	ciTable *clientinfo.Table
+	router  router.Router
 
 	started   chan struct{}
 	onStarted []func()
@@ -106,24 +106,22 @@ func (p *prog) run() {
 		uc.Init()
 		if uc.BootstrapIP == "" {
 			uc.SetupBootstrapIP()
-			mainLog.Info().Msgf("Bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
+			mainLog.Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
 		} else {
-			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap IP for upstream.%s", n)
+			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("using bootstrap IP for upstream.%s", n)
 		}
 		uc.SetCertPool(rootCertPool)
 		go uc.Ping()
 	}
 
-	p.mt = clientinfo.NewMacTable()
-	if p.cfg.HasUpstreamSendClientInfo() {
-		mainLog.Debug().Msg("Sending client info enabled")
-		if err := p.mt.Init(); err == nil {
-			mainLog.Debug().Msg("Start watching client info changes")
-			go p.mt.WatchLeaseFiles()
-		} else {
-			mainLog.Warn().Err(err).Msg("could not record client info")
-		}
+	p.ciTable = clientinfo.NewTable(&cfg)
+	if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
+		mainLog.Debug().Msgf("watching custom lease file: %s", leaseFile)
+		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
+		p.ciTable.AddLeaseFile(leaseFile, format)
 	}
+	p.ciTable.Init()
+	go p.ciTable.RefreshLoop(p.stopCh)
 	go p.watchLinkState()
 
 	for listenerNum := range p.cfg.Listener {
@@ -136,7 +134,7 @@ func (p *prog) run() {
 				mainLog.Warn().Msgf("no default upstream for: [listener.%s]", listenerNum)
 			}
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
-			mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, addr)
+			mainLog.Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
 			err := p.serveDNS(listenerNum)
 			if err != nil && !defaultConfigWritten && cdUID == "" {
 				mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
@@ -162,7 +160,7 @@ func (p *prog) run() {
 					p.cfg.Service.AllocateIP = true
 					p.mu.Unlock()
 					p.preRun()
-					mainLog.Info().Msgf("Starting DNS server on listener.%s: %s", listenerNum, net.JoinHostPort(ip, strconv.Itoa(port)))
+					mainLog.Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, net.JoinHostPort(ip, strconv.Itoa(port)))
 					if err := p.serveDNS(listenerNum); err != nil {
 						mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 						return

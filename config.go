@@ -153,6 +153,12 @@ type ServiceConfig struct {
 	CacheTTLOverride      int    `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
 	CacheServeStale       bool   `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
 	MaxConcurrentRequests *int   `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
+	DHCPLeaseFile         string `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
+	DHCPLeaseFileFormat   string `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
+	DiscoverMDNS          *bool  `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
+	DiscoverARP           *bool  `mapstructure:"discover_arp" toml:"discover_dhcp,omitempty"`
+	DiscoverDHCP          *bool  `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
+	DiscoverPtr           *bool  `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
 	Daemon                bool   `mapstructure:"-" toml:"-"`
 	AllocateIP            bool   `mapstructure:"-" toml:"-"`
 }
@@ -316,7 +322,7 @@ func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
 			uc.bootstrapIPs4 = append(uc.bootstrapIPs4, ip)
 		}
 	}
-	ProxyLog.Debug().Msgf("Bootstrap IPs: %v", uc.bootstrapIPs)
+	ProxyLog.Debug().Msgf("bootstrap IPs: %v", uc.bootstrapIPs)
 }
 
 // ReBootstrap re-setup the bootstrap IP and the transport.

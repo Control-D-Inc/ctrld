@@ -1138,6 +1138,7 @@ func validateConfig(cfg *ctrld.Config) {
 	os.Exit(1)
 }
 
+// NOTE: Add more case here once new validation tag is used in ctrld.Config struct.
 func fieldErrorMsg(fe validator.FieldError) string {
 	switch fe.Tag() {
 	case "oneof":
@@ -1165,6 +1166,8 @@ func fieldErrorMsg(fe validator.FieldError) string {
 		return fmt.Sprintf("must be one of: %q", strings.Join(ipStacks, " "))
 	case "iporempty":
 		return fmt.Sprintf("invalid IP format: %s", fe.Value())
+	case "file":
+		return fmt.Sprintf("filed does not exist: %s", fe.Value())
 	}
 	return ""
 }

@@ -55,7 +55,10 @@ func (p *prog) serveDNS(listenerNum string) error {
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
 		reqId := requestID()
-		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), p.mt.GetClientInfoByMac(macFromMsg(m)))
+		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
+		mac := macFromMsg(m)
+		ci := p.getClientInfo(remoteIP, mac)
+		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
 		t := time.Now()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
@@ -66,7 +69,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 			answer = new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeRefused)
 		} else {
-			answer = p.proxy(ctx, upstreams, failoverRcodes, m)
+			answer = p.proxy(ctx, upstreams, failoverRcodes, m, ci)
 			rtt := time.Since(t)
 			ctrld.Log(ctx, mainLog.Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
 		}
@@ -202,7 +205,7 @@ networkRules:
 	return upstreams, matched
 }
 
-func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []int, msg *dns.Msg) *dns.Msg {
+func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []int, msg *dns.Msg, ci *ctrld.ClientInfo) *dns.Msg {
 	var staleAnswer *dns.Msg
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
@@ -245,12 +248,9 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		return dnsResolver.Resolve(resolveCtx, msg)
 	}
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
-		if upstreamConfig.UpstreamSendClientInfo() {
-			ci := p.mt.GetClientInfoByMac(macFromMsg(msg))
-			if ci != nil {
-				ctrld.Log(ctx, mainLog.Debug(), "including client info with the request")
-				ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, ci)
-			}
+		if upstreamConfig.UpstreamSendClientInfo() && ci != nil {
+			ctrld.Log(ctx, mainLog.Debug(), "including client info with the request")
+			ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, ci)
 		}
 		answer, err := resolve1(n, upstreamConfig, msg)
 		if err != nil {
@@ -509,4 +509,17 @@ func inContainer() bool {
 		return nil
 	})
 	return ret
+}
+
+func (p *prog) getClientInfo(ip, mac string) *ctrld.ClientInfo {
+	ci := &ctrld.ClientInfo{}
+	if mac != "" {
+		ci.Mac = mac
+		ci.IP = p.ciTable.LookupIP(mac)
+	} else {
+		ci.IP = ip
+		ci.Mac = p.ciTable.LookupMac(ip)
+	}
+	ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
+	return ci
 }

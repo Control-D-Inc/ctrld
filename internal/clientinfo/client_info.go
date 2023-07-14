@@ -1,211 +1,194 @@
 package clientinfo
 
 import (
-	"bufio"
-	"bytes"
-	"fmt"
-	"io"
-	"log"
-	"net"
-	"os"
 	"strings"
-	"sync"
 	"time"
-
-	"github.com/fsnotify/fsnotify"
-	"tailscale.com/util/lineread"
 
 	"github.com/Control-D-Inc/ctrld"
 )
 
-// clientInfoFiles specifies client info files and how to read them on supported platforms.
-var clientInfoFiles = map[string]ctrld.LeaseFileFormat{
-	"/tmp/dnsmasq.leases":                      ctrld.Dnsmasq,  // ddwrt
-	"/tmp/dhcp.leases":                         ctrld.Dnsmasq,  // openwrt
-	"/var/lib/misc/dnsmasq.leases":             ctrld.Dnsmasq,  // merlin
-	"/mnt/data/udapi-config/dnsmasq.lease":     ctrld.Dnsmasq,  // UDM Pro
-	"/data/udapi-config/dnsmasq.lease":         ctrld.Dnsmasq,  // UDR
-	"/etc/dhcpd/dhcpd-leases.log":              ctrld.Dnsmasq,  // Synology
-	"/tmp/var/lib/misc/dnsmasq.leases":         ctrld.Dnsmasq,  // Tomato
-	"/run/dnsmasq-dhcp.leases":                 ctrld.Dnsmasq,  // EdgeOS
-	"/run/dhcpd.leases":                        ctrld.IscDhcpd, // EdgeOS
-	"/var/dhcpd/var/db/dhcpd.leases":           ctrld.IscDhcpd, // Pfsense
-	"/home/pi/.router/run/dhcp/dnsmasq.leases": ctrld.Dnsmasq,  // Firewalla
+// IpResolver is the interface for retrieving IP from Mac.
+type IpResolver interface {
+	LookupIP(mac string) string
 }
 
-// NewMacTable returns new Mac table to record client information.
-func NewMacTable() *MacTable {
-	return &MacTable{}
+// MacResolver is the interface for retrieving Mac from IP.
+type MacResolver interface {
+	LookupMac(ip string) string
 }
 
-// MacTable records clients information by MAC address.
-type MacTable struct {
-	mac     sync.Map
-	watcher *fsnotify.Watcher
+// HostnameByIpResolver is the interface for retrieving hostname from IP.
+type HostnameByIpResolver interface {
+	LookupHostnameByIP(ip string) string
 }
 
-// Init initializes recording client info.
-func (mt *MacTable) Init() error {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return err
-	}
-	mt.watcher = watcher
-	for file, format := range clientInfoFiles {
-		// Ignore errors for default lease files.
-		_ = mt.AddLeaseFile(file, format)
-	}
-	return nil
+// HostnameByMacResolver is the interface for retrieving hostname from Mac.
+type HostnameByMacResolver interface {
+	LookupHostnameByMac(mac string) string
 }
 
-// AddLeaseFile adds given lease file for reading/watching clients info.
-func (mt *MacTable) AddLeaseFile(name string, format ctrld.LeaseFileFormat) error {
-	if err := mt.readLeaseFile(name, format); err != nil {
-		return fmt.Errorf("could not read lease file: %w", err)
-	}
-	clientInfoFiles[name] = format
-	return mt.watcher.Add(name)
+type HostnameResolver interface {
+	HostnameByIpResolver
+	HostnameByMacResolver
 }
 
-// GetClientInfoByMac returns ClientInfo for the client associated with the given MAC address.
-func (mt *MacTable) GetClientInfoByMac(mac string) *ctrld.ClientInfo {
-	if mac == "" {
-		return nil
-	}
-	val, ok := mt.mac.Load(mac)
-	if !ok {
-		return nil
-	}
-	return val.(*ctrld.ClientInfo)
+type refresher interface {
+	refresh() error
 }
 
-// WatchLeaseFiles watches changes happens in dnsmasq/dhcpd
-// lease files, perform updating to mac table if necessary.
-func (mt *MacTable) WatchLeaseFiles() {
-	if mt.watcher == nil {
+type Table struct {
+	ipResolvers       []IpResolver
+	macResolvers      []MacResolver
+	hostnameResolvers []HostnameResolver
+	refreshers        []refresher
+
+	dhcp   *dhcp
+	merlin *merlinDiscover
+	arp    *arpDiscover
+	ptr    *ptrDiscover
+	mdns   *mdns
+	cfg    *ctrld.Config
+}
+
+func NewTable(cfg *ctrld.Config) *Table {
+	return &Table{cfg: cfg}
+}
+
+func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
+	if !t.discoverDHCP() {
 		return
 	}
+	clientInfoFiles[name] = format
+}
+
+func (t *Table) RefreshLoop(stopCh chan struct{}) {
 	timer := time.NewTicker(time.Minute * 5)
 	for {
 		select {
 		case <-timer.C:
-			for _, name := range mt.watcher.WatchList() {
-				format := clientInfoFiles[name]
-				if err := mt.readLeaseFile(name, format); err != nil {
-					ctrld.ProxyLog.Err(err).Str("file", name).Msg("failed to update lease file")
-				}
+			for _, r := range t.refreshers {
+				_ = r.refresh()
 			}
-		case event, ok := <-mt.watcher.Events:
-			if !ok {
-				return
-			}
-			if event.Has(fsnotify.Write) {
-				format := clientInfoFiles[event.Name]
-				if err := mt.readLeaseFile(event.Name, format); err != nil && !os.IsNotExist(err) {
-					ctrld.ProxyLog.Err(err).Str("file", event.Name).Msg("leases file changed but failed to update client info")
-				}
-			}
-		case err, ok := <-mt.watcher.Errors:
-			if !ok {
-				return
-			}
-			ctrld.ProxyLog.Err(err).Msg("could not watch client info file")
+		case <-stopCh:
+			return
 		}
 	}
 }
 
-// readLeaseFile reads the lease file with given format, saving client information to mac table.
-func (mt *MacTable) readLeaseFile(name string, format ctrld.LeaseFileFormat) error {
-	switch format {
-	case ctrld.Dnsmasq:
-		return mt.dnsmasqReadClientInfoFile(name)
-	case ctrld.IscDhcpd:
-		return mt.iscDHCPReadClientInfoFile(name)
+func (t *Table) Init() {
+	if t.discoverDHCP() || t.discoverARP() {
+		t.merlin = &merlinDiscover{}
+		if err := t.merlin.refresh(); err != nil {
+			ctrld.ProxyLog.Error().Err(err).Msg("could not init Merlin discover")
+		} else {
+			t.hostnameResolvers = append(t.hostnameResolvers, t.merlin)
+			t.refreshers = append(t.refreshers, t.merlin)
+		}
 	}
-	return fmt.Errorf("unsupported format: %s, file: %s", format, name)
+	if t.discoverDHCP() {
+		t.dhcp = &dhcp{}
+		ctrld.ProxyLog.Debug().Msg("start dhcp discovery")
+		if err := t.dhcp.refresh(); err != nil {
+			ctrld.ProxyLog.Error().Err(err).Msg("could not init DHCP discover")
+		} else {
+			t.ipResolvers = append(t.ipResolvers, t.dhcp)
+			t.macResolvers = append(t.macResolvers, t.dhcp)
+			t.hostnameResolvers = append(t.hostnameResolvers, t.dhcp)
+			t.refreshers = append(t.refreshers, t.dhcp)
+		}
+		go t.dhcp.watchChanges()
+	}
+	if t.discoverARP() {
+		t.arp = &arpDiscover{}
+		ctrld.ProxyLog.Debug().Msg("start arp discovery")
+		if err := t.arp.refresh(); err != nil {
+			ctrld.ProxyLog.Error().Err(err).Msg("could not init ARP discover")
+		} else {
+			t.ipResolvers = append(t.ipResolvers, t.arp)
+			t.macResolvers = append(t.macResolvers, t.arp)
+			t.refreshers = append(t.refreshers, t.arp)
+		}
+	}
+	if t.discoverPTR() {
+		t.ptr = &ptrDiscover{resolver: ctrld.NewPrivateResolver()}
+		ctrld.ProxyLog.Debug().Msg("start ptr discovery")
+		if err := t.ptr.refresh(); err != nil {
+			ctrld.ProxyLog.Error().Err(err).Msg("could not init PTR discover")
+		} else {
+			t.hostnameResolvers = append(t.hostnameResolvers, t.ptr)
+			t.refreshers = append(t.refreshers, t.ptr)
+		}
+	}
+	if t.discoverMDNS() {
+		t.mdns = &mdns{}
+		ctrld.ProxyLog.Debug().Msg("start mdns discovery")
+		if err := t.mdns.init(); err != nil {
+			ctrld.ProxyLog.Error().Err(err).Msg("could not init mDNS discover")
+		} else {
+			t.hostnameResolvers = append(t.hostnameResolvers, t.mdns)
+		}
+	}
 }
 
-// dnsmasqReadClientInfoFile populates mac table with client info reading from dnsmasq lease file.
-func (mt *MacTable) dnsmasqReadClientInfoFile(name string) error {
-	f, err := os.Open(name)
-	if err != nil {
-		return err
+func (t *Table) LookupIP(mac string) string {
+	for _, r := range t.ipResolvers {
+		if ip := r.LookupIP(mac); ip != "" {
+			return ip
+		}
 	}
-	defer f.Close()
-	return mt.dnsmasqReadClientInfoReader(f)
-
+	return ""
 }
 
-// dnsmasqReadClientInfoReader likes ctrld.Dnsmasq, but reading from an io.Reader instead of file.
-func (mt *MacTable) dnsmasqReadClientInfoReader(reader io.Reader) error {
-	return lineread.Reader(reader, func(line []byte) error {
-		fields := bytes.Fields(line)
-		if len(fields) < 4 {
-			return nil
-		}
-		mac := string(fields[1])
-		if _, err := net.ParseMAC(mac); err != nil {
-			// The second field is not a mac, skip.
-			return nil
-		}
-		ip := normalizeIP(string(fields[2]))
-		if net.ParseIP(ip) == nil {
-			log.Printf("invalid ip address entry: %q", ip)
-			ip = ""
-		}
-		hostname := string(fields[3])
-		mt.mac.Store(mac, &ctrld.ClientInfo{Mac: mac, IP: ip, Hostname: hostname})
-		return nil
+func (t *Table) LookupMac(ip string) string {
+	t.arp.mac.Range(func(key, value any) bool {
+		return true
 	})
-}
-
-// iscDHCPReadClientInfoFile populates mac table with client info reading from isc-dhcpd lease file.
-func (mt *MacTable) iscDHCPReadClientInfoFile(name string) error {
-	f, err := os.Open(name)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return mt.iscDHCPReadClientInfoReader(f)
-}
-
-// iscDHCPReadClientInfoReader likes ctrld.IscDhcpd, but reading from an io.Reader instead of file.
-func (mt *MacTable) iscDHCPReadClientInfoReader(reader io.Reader) error {
-	s := bufio.NewScanner(reader)
-	var ip, mac, hostname string
-	for s.Scan() {
-		line := s.Text()
-		if strings.HasPrefix(line, "}") {
-			if mac != "" {
-				mt.mac.Store(mac, &ctrld.ClientInfo{Mac: mac, IP: ip, Hostname: hostname})
-				ip, mac, hostname = "", "", ""
-			}
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		switch fields[0] {
-		case "lease":
-			ip = normalizeIP(strings.ToLower(fields[1]))
-			if net.ParseIP(ip) == nil {
-				log.Printf("invalid ip address entry: %q", ip)
-				ip = ""
-			}
-		case "hardware":
-			if len(fields) >= 3 {
-				mac = strings.ToLower(strings.TrimRight(fields[2], ";"))
-				if _, err := net.ParseMAC(mac); err != nil {
-					// Invalid mac, skip.
-					mac = ""
-				}
-			}
-		case "client-hostname":
-			hostname = strings.Trim(fields[1], `";`)
+	for _, r := range t.macResolvers {
+		if mac := r.LookupMac(ip); mac != "" {
+			return mac
 		}
 	}
-	return nil
+	return ""
+}
+
+func (t *Table) LookupHostname(ip, mac string) string {
+	for _, r := range t.hostnameResolvers {
+		if name := r.LookupHostnameByIP(ip); name != "" {
+			return name
+		}
+		if name := r.LookupHostnameByMac(mac); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func (t *Table) discoverDHCP() bool {
+	if t.cfg.Service.DiscoverDHCP == nil {
+		return true
+	}
+	return *t.cfg.Service.DiscoverDHCP
+}
+
+func (t *Table) discoverARP() bool {
+	if t.cfg.Service.DiscoverARP == nil {
+		return true
+	}
+	return *t.cfg.Service.DiscoverARP
+}
+
+func (t *Table) discoverMDNS() bool {
+	if t.cfg.Service.DiscoverMDNS == nil {
+		return true
+	}
+	return *t.cfg.Service.DiscoverMDNS
+}
+
+func (t *Table) discoverPTR() bool {
+	if t.cfg.Service.DiscoverPtr == nil {
+		return true
+	}
+	return *t.cfg.Service.DiscoverPtr
 }
 
 // normalizeIP normalizes the ip parsed from dnsmasq/dhcpd lease file.
@@ -216,4 +199,11 @@ func normalizeIP(in string) string {
 		return ip
 	}
 	return in
+}
+
+func normalizeHostname(name string) string {
+	if before, _, found := strings.Cut(name, "."); found {
+		return before // remove ".local.", ".lan.", ... suffix
+	}
+	return strings.ToLower(name)
 }
