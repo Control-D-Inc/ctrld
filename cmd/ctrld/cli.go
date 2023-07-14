@@ -43,6 +43,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
 	"github.com/Control-D-Inc/ctrld/internal/router/merlin"
 	"github.com/Control-D-Inc/ctrld/internal/router/tomato"
+	"github.com/Control-D-Inc/ctrld/internal/router/ubios"
 )
 
 var (
@@ -973,6 +974,10 @@ func defaultIfaceName() string {
 		// On WSL 1, the route table does not have any default route. But the fact that
 		// it only uses /etc/resolv.conf for setup DNS, so we can use "lo" here.
 		if oi := osinfo.New(); strings.Contains(oi.String(), "Microsoft") {
+			return "lo"
+		}
+		// Same as WSL case above.
+		if router.Name() == ubios.Name {
 			return "lo"
 		}
 		mainLog.Fatal().Err(err).Msg("failed to get default route interface")

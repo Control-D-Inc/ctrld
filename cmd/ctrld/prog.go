@@ -249,7 +249,7 @@ func (p *prog) setDNS() {
 		// If ctrld is direct listener, use 127.0.0.1 as nameserver.
 		ns = "127.0.0.1"
 	} else if lc.Port != 53 {
-		ifaceName := defaultIfaceName()
+		ifaceName := iface
 		switch router.Name() {
 		case firewalla.Name:
 			// On Firewalla, the lo interface is excluded in all dnsmasq settings of all interfaces.
