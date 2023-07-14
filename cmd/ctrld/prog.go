@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	defaultSemaphoreCap = 256
-	ctrldLogUnixSock    = "ctrld_start.sock"
+	defaultSemaphoreCap  = 256
+	ctrldLogUnixSock     = "ctrld_start.sock"
+	ctrldControlUnixSock = "ctrld_control.sock"
 )
 
 var logf = func(format string, args ...any) {
@@ -45,6 +46,7 @@ type prog struct {
 	waitCh  chan struct{}
 	stopCh  chan struct{}
 	logConn net.Conn
+	cs      *controlServer
 
 	cfg    *ctrld.Config
 	cache  dnscache.Cacher
@@ -182,6 +184,12 @@ func (p *prog) run() {
 	initLoggingWithBackup(false)
 	if p.logConn != nil {
 		_ = p.logConn.Close()
+	}
+	if p.cs != nil {
+		p.registerControlServerHandler()
+		if err := p.cs.start(); err != nil {
+			mainLog.Warn().Err(err).Msg("could not start control server")
+		}
 	}
 	wg.Wait()
 }

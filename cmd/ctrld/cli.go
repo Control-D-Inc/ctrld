@@ -134,6 +134,11 @@ func initCLI() {
 				stopCh: stopCh,
 				cfg:    &cfg,
 			}
+			if homedir == "" {
+				if dir, err := userHomeDir(); err == nil {
+					homedir = dir
+				}
+			}
 			sockPath := filepath.Join(homedir, ctrldLogUnixSock)
 			if addr, err := net.ResolveUnixAddr("unix", sockPath); err == nil {
 				if conn, err := net.Dial(addr.Network(), addr.String()); err == nil {
@@ -186,6 +191,11 @@ func initCLI() {
 			}
 
 			p.router = router.New(&cfg)
+			cs, err := newControlServer(filepath.Join(homedir, ctrldControlUnixSock))
+			if err != nil {
+				mainLog.Warn().Err(err).Msg("could not create control server")
+			}
+			p.cs = cs
 
 			// Processing --cd flag require connecting to ControlD API, which needs valid
 			// time for validating server certificate. Some routers need NTP synchronization
