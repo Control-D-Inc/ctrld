@@ -1253,6 +1253,7 @@ func updateListenerConfig() {
 		check := lcc[strconv.Itoa(n)]
 		oldIP := listener.IP
 		oldPort := listener.Port
+		isZeroIP := listener.IP == "0.0.0.0" || listener.IP == "::"
 
 		// Check if we could listen on the current IP + Port, if not, try following thing, pick first one success:
 		//    - Try 127.0.0.1:53
@@ -1331,7 +1332,7 @@ func updateListenerConfig() {
 				mainLog.Warn().Msgf("could not listen on address: %s, trying 0.0.0.0:5354", addr)
 				continue
 			}
-			if check.IP {
+			if check.IP && !isZeroIP { // for "0.0.0.0" or "::", we only need to try new port.
 				listener.IP = randomLocalIP()
 			} else {
 				listener.IP = oldIP
