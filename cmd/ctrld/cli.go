@@ -1063,12 +1063,25 @@ func userHomeDir() (string, error) {
 	}
 	dir = "/etc/controld"
 	if err := os.MkdirAll(dir, 0750); err != nil {
-		return "", err
+		return os.UserHomeDir() // fallback to user home directory
+	}
+	if ok, _ := dirWritable(dir); !ok {
+		return os.UserHomeDir()
 	}
 	return dir, nil
 }
 
 func tryReadingConfig(writeDefaultConfig bool) {
+	// --config is specified.
+	if configPath != "" {
+		v.SetConfigFile(configPath)
+		readConfigFile(false)
+		return
+	}
+	// no config start or base64 config mode.
+	if !writeDefaultConfig {
+		return
+	}
 	configs := []struct {
 		name    string
 		written bool
@@ -1080,7 +1093,7 @@ func tryReadingConfig(writeDefaultConfig bool) {
 
 	dir, err := userHomeDir()
 	if err != nil {
-		mainLog.Fatal().Msgf("failed to get config dir: %v", err)
+		mainLog.Fatal().Msgf("failed to get user home dir: %v", err)
 	}
 	for _, config := range configs {
 		ctrld.SetConfigNameWithPath(v, config.name, dir)
@@ -1396,4 +1409,13 @@ func updateListenerConfig() {
 			}
 		}
 	}
+}
+
+func dirWritable(dir string) (bool, error) {
+	f, err := os.CreateTemp(dir, "")
+	if err != nil {
+		return false, err
+	}
+	defer os.Remove(f.Name())
+	return true, f.Close()
 }
