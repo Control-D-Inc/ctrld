@@ -1,14 +1,12 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"math/rand"
 	"net"
 	"os"
 	"strconv"
 	"sync"
-	"syscall"
 
 	"github.com/kardianos/service"
 
@@ -27,8 +25,6 @@ const (
 var logf = func(format string, args ...any) {
 	mainLog.Debug().Msgf(format, args...)
 }
-
-var errWindowsAddrInUse = syscall.Errno(0x2740)
 
 var svcConfig = &service.Config{
 	Name:        "ctrld",
@@ -132,39 +128,9 @@ func (p *prog) run() {
 			}
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 			mainLog.Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
-			err := p.serveDNS(listenerNum)
-			if err != nil && !defaultConfigWritten && cdUID == "" {
-				mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
-				return
+			if err := p.serveDNS(listenerNum); err != nil {
+				mainLog.Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
 			}
-			if err == nil {
-				return
-			}
-
-			if opErr, ok := err.(*net.OpError); ok && listenerNum == "0" {
-				if sErr, ok := opErr.Err.(*os.SyscallError); ok && errors.Is(opErr.Err, syscall.EADDRINUSE) || errors.Is(sErr.Err, errWindowsAddrInUse) {
-					mainLog.Warn().Msgf("Address %s already in used, pick a random one", addr)
-					ip := randomLocalIP()
-					listenerConfig.IP = ip
-					port := listenerConfig.Port
-					cfg.Upstream = map[string]*ctrld.UpstreamConfig{"0": cfg.Upstream["0"]}
-					if err := writeConfigFile(); err != nil {
-						mainLog.Fatal().Err(err).Msg("failed to write config file")
-					} else {
-						mainLog.Info().Msg("writing config file to: " + defaultConfigFile)
-					}
-					p.mu.Lock()
-					p.cfg.Service.AllocateIP = true
-					p.mu.Unlock()
-					p.preRun()
-					mainLog.Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, net.JoinHostPort(ip, strconv.Itoa(port)))
-					if err := p.serveDNS(listenerNum); err != nil {
-						mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
-						return
-					}
-				}
-			}
-			mainLog.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 		}(listenerNum)
 	}
 
