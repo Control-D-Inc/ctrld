@@ -66,6 +66,9 @@ func (p *Pfsense) Install(config *service.Config) error {
 }
 
 func (p *Pfsense) Uninstall(config *service.Config) error {
+	if err := os.Remove(filepath.Join(rcPath, p.svcName+".sh")); err != nil {
+		return fmt.Errorf("os.Remove: %w", err)
+	}
 	return nil
 }
 
@@ -84,11 +87,10 @@ func (p *Pfsense) Setup() error {
 }
 
 func (p *Pfsense) Cleanup() error {
-	if err := os.Remove(filepath.Join(rcPath, p.svcName+".sh")); err != nil {
-		return fmt.Errorf("os.Remove: %w", err)
+	if p.cfg.FirstListener().IsDirectDnsListener() {
+		_ = exec.Command(unboundRcPath, "onerestart").Run()
+		_ = exec.Command(dnsmasqRcPath, "onerestart").Run()
 	}
-	_ = exec.Command(unboundRcPath, "onerestart").Run()
-	_ = exec.Command(dnsmasqRcPath, "onerestart").Run()
 
 	return nil
 }

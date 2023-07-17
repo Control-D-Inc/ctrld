@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
 	"os"
 	"strconv"
 	"sync"
+	"syscall"
 
 	"github.com/kardianos/service"
 
@@ -216,7 +218,7 @@ func (p *prog) setDNS() {
 	logger.Debug().Msg("setting DNS for interface")
 	ns := lc.IP
 	switch {
-	case couldBeDirectListener(lc):
+	case lc.IsDirectDnsListener():
 		// If ctrld is direct listener, use 127.0.0.1 as nameserver.
 		ns = "127.0.0.1"
 	case lc.Port != 53:
@@ -293,4 +295,12 @@ func runLogServer(sockPath string) net.Conn {
 		return nil
 	}
 	return server
+}
+
+func errAddrInUse(err error) bool {
+	opErr, ok := err.(*net.OpError)
+	if !ok {
+		return false
+	}
+	return errors.Is(opErr.Err, syscall.EADDRINUSE)
 }

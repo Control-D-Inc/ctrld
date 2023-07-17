@@ -54,6 +54,9 @@ func (f *Firewalla) PreRun() error {
 }
 
 func (f *Firewalla) Setup() error {
+	if f.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	data, err := dnsmasq.FirewallaConfTmpl(dnsmasq.ConfigContentTmpl, f.cfg)
 	if err != nil {
 		return fmt.Errorf("generating dnsmasq config: %w", err)
@@ -71,6 +74,9 @@ func (f *Firewalla) Setup() error {
 }
 
 func (f *Firewalla) Cleanup() error {
+	if f.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	// Removing current config.
 	if err := os.Remove(firewallaDNSMasqConfigPath); err != nil {
 		return fmt.Errorf("removing ctrld config: %w", err)

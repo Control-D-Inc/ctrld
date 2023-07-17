@@ -58,6 +58,9 @@ func (d *Ddwrt) PreRun() error {
 }
 
 func (d *Ddwrt) Setup() error {
+	if d.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	// Already setup.
 	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {
 		return nil
@@ -81,6 +84,9 @@ func (d *Ddwrt) Setup() error {
 }
 
 func (d *Ddwrt) Cleanup() error {
+	if d.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {
 		nvramKvMap["dnsmasq_options"] = ""
 		// Restore old configs.

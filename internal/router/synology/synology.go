@@ -44,6 +44,9 @@ func (s *Synology) PreRun() error {
 }
 
 func (s *Synology) Setup() error {
+	if s.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, s.cfg)
 	if err != nil {
 		return err
@@ -61,6 +64,9 @@ func (s *Synology) Setup() error {
 }
 
 func (s *Synology) Cleanup() error {
+	if s.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	// Remove the custom config files.
 	for _, f := range []string{synologyDNSMasqConfigPath, synologyDhcpdInfoPath} {
 		if err := os.Remove(f); err != nil {

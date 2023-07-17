@@ -147,7 +147,7 @@ func resetDNS(iface *net.Interface) (err error) {
 	if ctrldnet.IPv6Available(ctx) {
 		c := client6.NewClient()
 		conversation, err := c.Exchange(iface.Name)
-		if err != nil {
+		if err != nil && !errAddrInUse(err) {
 			mainLog.Debug().Err(err).Msg("could not exchange DHCPv6")
 		}
 		for _, packet := range conversation {

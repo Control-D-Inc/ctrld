@@ -275,22 +275,19 @@ func initCLI() {
 				if cp := router.CertPool(); cp != nil {
 					rootCertPool = cp
 				}
-				// Perform router setup/cleanup if ctrld could not be direct listener.
-				if !couldBeDirectListener(cfg.FirstListener()) {
-					p.onStarted = append(p.onStarted, func() {
-						mainLog.Debug().Msg("router setup")
-						if err := p.router.Setup(); err != nil {
-							mainLog.Error().Err(err).Msg("could not configure router")
-						}
-					})
-					p.onStopped = append(p.onStopped, func() {
-						mainLog.Debug().Msg("router cleanup")
-						if err := p.router.Cleanup(); err != nil {
-							mainLog.Error().Err(err).Msg("could not cleanup router")
-						}
-						p.resetDNS()
-					})
-				}
+				p.onStarted = append(p.onStarted, func() {
+					mainLog.Debug().Msg("router setup")
+					if err := p.router.Setup(); err != nil {
+						mainLog.Error().Err(err).Msg("could not configure router")
+					}
+				})
+				p.onStopped = append(p.onStopped, func() {
+					mainLog.Debug().Msg("router cleanup")
+					if err := p.router.Cleanup(); err != nil {
+						mainLog.Error().Err(err).Msg("could not cleanup router")
+					}
+					p.resetDNS()
+				})
 			}
 
 			close(waitCh)
@@ -404,7 +401,7 @@ func initCLI() {
 				return
 			}
 
-			if router.Name() != "" && !couldBeDirectListener(cfg.FirstListener()) {
+			if router.Name() != "" {
 				mainLog.Debug().Msg("cleaning up router before installing")
 				_ = p.router.Cleanup()
 			}
@@ -504,15 +501,18 @@ func initCLI() {
 		Short: "Stop the ctrld service",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			prog := &prog{}
-			s, err := newService(prog, svcConfig)
+			tryReadingConfig(false)
+			v.Unmarshal(&cfg)
+			p := &prog{router: router.New(&cfg)}
+			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
 				return
 			}
 			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
-				prog.resetDNS()
+				p.router.Cleanup()
+				p.resetDNS()
 				mainLog.Notice().Msg("Service stopped")
 			}
 		},
@@ -591,7 +591,9 @@ func initCLI() {
 NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			p := &prog{}
+			tryReadingConfig(false)
+			v.Unmarshal(&cfg)
+			p := &prog{router: router.New(&cfg)}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
@@ -1157,19 +1159,20 @@ func uninstall(p *prog, s service.Service) {
 	}
 	initLogging()
 	if doTasks(tasks) {
-		r := router.New(&cfg)
-		if err := r.Uninstall(svcConfig); err != nil {
+		if err := p.router.ConfigureService(svcConfig); err != nil {
+			mainLog.Fatal().Err(err).Msg("could not configure service")
+		}
+		if err := p.router.Uninstall(svcConfig); err != nil {
 			mainLog.Warn().Err(err).Msg("post uninstallation failed, please check system/service log for details error")
 			return
 		}
-		// Stop already reset DNS on router.
-		if router.Name() == "" {
-			p.resetDNS()
+		p.resetDNS()
+		if router.Name() != "" {
+			mainLog.Debug().Msg("Router cleanup")
 		}
-		mainLog.Debug().Msg("Router cleanup")
 		// Stop already did router.Cleanup and report any error if happens,
 		// ignoring error here to prevent false positive.
-		_ = r.Cleanup()
+		_ = p.router.Cleanup()
 		mainLog.Notice().Msg("Service uninstalled")
 		return
 	}

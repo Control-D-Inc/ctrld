@@ -207,6 +207,24 @@ type ListenerConfig struct {
 	Policy     *ListenerPolicyConfig `mapstructure:"policy" toml:"policy,omitempty"`
 }
 
+// IsDirectDnsListener reports whether ctrld can be a direct listener on port 53.
+// It returns true only if ctrld can listen on port 53 for all interfaces. That means
+// there's no other software listening on port 53.
+//
+// If someone listening on port 53, or ctrld could only listen on port 53 for a specific
+// interface, ctrld could only be configured as a DNS forwarder.
+func (lc *ListenerConfig) IsDirectDnsListener() bool {
+	if lc == nil || lc.Port != 53 {
+		return false
+	}
+	switch lc.IP {
+	case "", "::", "0.0.0.0":
+		return true
+	default:
+		return false
+	}
+}
+
 // ListenerPolicyConfig specifies the policy rules for ctrld to filter incoming requests.
 type ListenerPolicyConfig struct {
 	Name                 string   `mapstructure:"name" toml:"name,omitempty"`

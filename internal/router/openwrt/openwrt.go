@@ -49,6 +49,9 @@ func (o *Openwrt) PreRun() error {
 }
 
 func (o *Openwrt) Setup() error {
+	if o.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, o.cfg)
 	if err != nil {
 		return err
@@ -68,6 +71,9 @@ func (o *Openwrt) Setup() error {
 }
 
 func (o *Openwrt) Cleanup() error {
+	if o.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	// Remove the custom dnsmasq config
 	if err := os.Remove(openwrtDNSMasqConfigPath); err != nil {
 		return err

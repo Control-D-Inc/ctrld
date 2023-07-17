@@ -53,6 +53,9 @@ func (f *FreshTomato) PreRun() error {
 }
 
 func (f *FreshTomato) Setup() error {
+	if f.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	// Already setup.
 	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {
 		return nil
@@ -83,6 +86,9 @@ func (f *FreshTomato) Setup() error {
 }
 
 func (f *FreshTomato) Cleanup() error {
+	if f.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {
 		nvramKvMap["dnsmasq_custom"] = ""
 		// Restore old configs.

@@ -47,6 +47,9 @@ func (u *Ubios) PreRun() error {
 }
 
 func (u *Ubios) Setup() error {
+	if u.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, u.cfg)
 	if err != nil {
 		return err
@@ -62,6 +65,9 @@ func (u *Ubios) Setup() error {
 }
 
 func (u *Ubios) Cleanup() error {
+	if u.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	// Remove the custom dnsmasq config
 	if err := os.Remove(ubiosDNSMasqConfigPath); err != nil {
 		return err

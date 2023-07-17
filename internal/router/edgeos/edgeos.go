@@ -62,6 +62,9 @@ func (e *EdgeOS) PreRun() error {
 }
 
 func (e *EdgeOS) Setup() error {
+	if e.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	if e.isUSG {
 		return e.setupUSG()
 	}
@@ -69,6 +72,9 @@ func (e *EdgeOS) Setup() error {
 }
 
 func (e *EdgeOS) Cleanup() error {
+	if e.cfg.FirstListener().IsDirectDnsListener() {
+		return nil
+	}
 	if e.isUSG {
 		return e.cleanupUSG()
 	}
