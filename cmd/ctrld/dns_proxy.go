@@ -168,7 +168,11 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 			ctrld.Log(ctx, mainLog.Info(), "query refused, %s does not match any network policy", addr.String())
 			return
 		}
-		ctrld.Log(ctx, mainLog.Info(), "%s, %s, %s -> %v", matchedPolicy, matchedNetwork, matchedRule, upstreams)
+		if matched {
+			ctrld.Log(ctx, mainLog.Info(), "%s, %s, %s -> %v", matchedPolicy, matchedNetwork, matchedRule, upstreams)
+		} else {
+			ctrld.Log(ctx, mainLog.Info(), "no explicit policy matched, using default routing -> %v", upstreams)
+		}
 	}()
 
 	if lc.Policy == nil {

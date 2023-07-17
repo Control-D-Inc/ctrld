@@ -704,6 +704,52 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	stopCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
 	stopCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
 	rootCmd.AddCommand(stopCmdAlias)
+
+	restartCmdAlias := &cobra.Command{
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Use:   "restart",
+		Short: "Restart the ctrld service",
+		Run: func(cmd *cobra.Command, args []string) {
+			restartCmd.Run(cmd, args)
+		},
+	}
+	rootCmd.AddCommand(restartCmdAlias)
+
+	statusCmdAlias := &cobra.Command{
+		Use:   "status",
+		Short: "Show status of the ctrld service",
+		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+		},
+		Run: statusCmd.Run,
+	}
+	rootCmd.AddCommand(statusCmdAlias)
+
+	uninstallCmdAlias := &cobra.Command{
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Use:   "uninstall",
+		Short: "Stop and uninstall the ctrld service",
+		Long: `Stop and uninstall the ctrld service.
+
+NOTE: Uninstalling will set DNS to values provided by DHCP.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			if !cmd.Flags().Changed("iface") {
+				os.Args = append(os.Args, "--iface="+ifaceStartStop)
+			}
+			iface = ifaceStartStop
+			uninstallCmd.Run(cmd, args)
+		},
+	}
+	uninstallCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
+	uninstallCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
+	rootCmd.AddCommand(uninstallCmdAlias)
 }
 
 func writeConfigFile() error {
