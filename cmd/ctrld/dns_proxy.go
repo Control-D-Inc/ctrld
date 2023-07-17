@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"runtime"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/miekg/dns"
 	"go4.org/mem"
 	"golang.org/x/sync/errgroup"
+	"tailscale.com/net/interfaces"
 	"tailscale.com/util/lineread"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -78,6 +80,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		}
 	})
 
+	needRFC1918Listeners := listenerConfig.IP == "127.0.0.1" && listenerConfig.Port == 53
 	g, ctx := errgroup.WithContext(context.Background())
 	for _, proto := range []string{"udp", "tcp"} {
 		proto := proto
@@ -86,6 +89,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 				s, errCh := runDNSServer(net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)), proto, handler)
 				defer s.Shutdown()
 				select {
+				case <-p.stopCh:
 				case <-ctx.Done():
 				case err := <-errCh:
 					// Local ipv6 listener should not terminate ctrld.
@@ -95,17 +99,38 @@ func (p *prog) serveDNS(listenerNum string) error {
 				return nil
 			})
 		}
+		// When we spawn a listener on 127.0.0.1, also spawn listeners on the RFC1918
+		// addresses of the machine. So ctrld could receive queries from LAN clients.
+		if needRFC1918Listeners {
+			g.Go(func() error {
+				interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+					addrs, _ := i.Addrs()
+					for _, addr := range addrs {
+						ipNet, ok := addr.(*net.IPNet)
+						if !ok || !ipNet.IP.IsPrivate() {
+							continue
+						}
+						func() {
+							listenAddr := net.JoinHostPort(ipNet.IP.String(), "53")
+							s, errCh := runDNSServer(listenAddr, proto, handler)
+							defer s.Shutdown()
+							select {
+							case <-p.stopCh:
+							case <-ctx.Done():
+							case err := <-errCh:
+								// RFC1918 listener should not terminate ctrld.
+								// It's a workaround for a quirk on system with systemd-resolved.
+								mainLog.Warn().Err(err).Msgf("could not listen on %s: %s", proto, listenAddr)
+							}
+						}()
+					}
+				})
+				return nil
+			})
+		}
 		g.Go(func() error {
 			s, errCh := runDNSServer(dnsListenAddress(listenerConfig), proto, handler)
 			defer s.Shutdown()
-			if listenerConfig.Port == 0 {
-				switch s.Net {
-				case "udp":
-					mainLog.Info().Msgf("Random port chosen for udp listener.%s: %s", listenerNum, s.PacketConn.LocalAddr())
-				case "tcp":
-					mainLog.Info().Msgf("Random port chosen for tcp listener.%s: %s", listenerNum, s.Listener.Addr())
-				}
-			}
 			select {
 			case err := <-errCh:
 				return err
@@ -113,11 +138,12 @@ func (p *prog) serveDNS(listenerNum string) error {
 				p.started <- struct{}{}
 			}
 			select {
+			case <-p.stopCh:
 			case <-ctx.Done():
-				return nil
 			case err := <-errCh:
 				return err
 			}
+			return nil
 		})
 	}
 	return g.Wait()
