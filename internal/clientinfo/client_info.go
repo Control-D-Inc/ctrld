@@ -95,13 +95,12 @@ func (t *Table) Init() {
 	if t.discoverDHCP() {
 		t.dhcp = &dhcp{selfIP: t.selfIP}
 		ctrld.ProxyLog.Debug().Msg("start dhcp discovery")
-		if err := t.dhcp.refresh(); err != nil {
+		if err := t.dhcp.init(); err != nil {
 			ctrld.ProxyLog.Error().Err(err).Msg("could not init DHCP discover")
 		} else {
 			t.ipResolvers = append(t.ipResolvers, t.dhcp)
 			t.macResolvers = append(t.macResolvers, t.dhcp)
 			t.hostnameResolvers = append(t.hostnameResolvers, t.dhcp)
-			t.refreshers = append(t.refreshers, t.dhcp)
 		}
 		go t.dhcp.watchChanges()
 	}

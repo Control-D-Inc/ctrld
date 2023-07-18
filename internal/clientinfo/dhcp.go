@@ -28,7 +28,7 @@ type dhcp struct {
 	selfIP  string
 }
 
-func (d *dhcp) refresh() error {
+func (d *dhcp) init() error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
