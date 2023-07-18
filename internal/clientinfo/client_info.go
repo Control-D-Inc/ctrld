@@ -205,5 +205,5 @@ func normalizeHostname(name string) string {
 	if before, _, found := strings.Cut(name, "."); found {
 		return before // remove ".local.", ".lan.", ... suffix
 	}
-	return strings.ToLower(name)
+	return name
 }
