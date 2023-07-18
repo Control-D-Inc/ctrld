@@ -115,8 +115,11 @@ func (p *prog) run() {
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
 		p.ciTable.AddLeaseFile(leaseFile, format)
 	}
-	p.ciTable.Init()
-	go p.ciTable.RefreshLoop(p.stopCh)
+
+	go func() {
+		p.ciTable.Init()
+		p.ciTable.RefreshLoop(p.stopCh)
+	}()
 	go p.watchLinkState()
 
 	for listenerNum := range p.cfg.Listener {
