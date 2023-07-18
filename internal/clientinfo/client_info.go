@@ -48,10 +48,11 @@ type Table struct {
 	ptr    *ptrDiscover
 	mdns   *mdns
 	cfg    *ctrld.Config
+	quitCh chan struct{}
 }
 
 func NewTable(cfg *ctrld.Config) *Table {
-	return &Table{cfg: cfg}
+	return &Table{cfg: cfg, quitCh: make(chan struct{})}
 }
 
 func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
@@ -70,6 +71,7 @@ func (t *Table) RefreshLoop(stopCh chan struct{}) {
 				_ = r.refresh()
 			}
 		case <-stopCh:
+			close(t.quitCh)
 			return
 		}
 	}
@@ -122,7 +124,7 @@ func (t *Table) Init() {
 	if t.discoverMDNS() {
 		t.mdns = &mdns{}
 		ctrld.ProxyLog.Debug().Msg("start mdns discovery")
-		if err := t.mdns.init(); err != nil {
+		if err := t.mdns.init(t.quitCh); err != nil {
 			ctrld.ProxyLog.Error().Err(err).Msg("could not init mDNS discover")
 		} else {
 			t.hostnameResolvers = append(t.hostnameResolvers, t.mdns)
