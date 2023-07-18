@@ -25,6 +25,7 @@ type dhcp struct {
 	mac      sync.Map // ip  => mac
 
 	watcher *fsnotify.Watcher
+	selfIP  string
 }
 
 func (d *dhcp) refresh() error {
@@ -229,6 +230,7 @@ func (d *dhcp) addSelf() {
 	hostname = normalizeHostname(hostname)
 	d.ip2name.Store("127.0.0.1", hostname)
 	d.ip2name.Store("::1", hostname)
+	found := false
 	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
 		mac := i.HardwareAddr.String()
 		// Skip loopback interfaces, info was stored above.
@@ -237,6 +239,9 @@ func (d *dhcp) addSelf() {
 		}
 		addrs, _ := i.Addrs()
 		for _, addr := range addrs {
+			if found {
+				return
+			}
 			ipNet, ok := addr.(*net.IPNet)
 			if !ok {
 				continue
@@ -251,6 +256,10 @@ func (d *dhcp) addSelf() {
 			}
 			d.mac2name.Store(mac, hostname)
 			d.ip2name.Store(ip.String(), hostname)
+			// If we have self IP set, and this IP is it, use this IP only.
+			if ip.String() == d.selfIP {
+				found = true
+			}
 		}
 	})
 }

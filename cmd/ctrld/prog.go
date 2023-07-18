@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/kardianos/service"
+	"tailscale.com/net/interfaces"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
@@ -109,7 +110,7 @@ func (p *prog) run() {
 		go uc.Ping()
 	}
 
-	p.ciTable = clientinfo.NewTable(&cfg)
+	p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP())
 	if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
 		mainLog.Debug().Msgf("watching custom lease file: %s", leaseFile)
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
@@ -306,4 +307,31 @@ func errAddrInUse(err error) bool {
 		return false
 	}
 	return errors.Is(opErr.Err, syscall.EADDRINUSE)
+}
+
+// defaultRouteIP returns IP string of the default route if present, prefer IPv4 over IPv6.
+func defaultRouteIP() string {
+	if dr, err := interfaces.DefaultRoute(); err == nil {
+		if netIface, err := netInterface(dr.InterfaceName); err == nil {
+			addrs, _ := netIface.Addrs()
+			do := func(v4 bool) net.IP {
+				for _, addr := range addrs {
+					if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.IsPrivate() {
+						if v4 {
+							return netIP.IP.To4()
+						}
+						return netIP.IP
+					}
+				}
+				return nil
+			}
+			if ip := do(true); ip != nil {
+				return ip.String()
+			}
+			if ip := do(false); ip != nil {
+				return ip.String()
+			}
+		}
+	}
+	return ""
 }

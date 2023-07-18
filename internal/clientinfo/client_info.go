@@ -49,10 +49,15 @@ type Table struct {
 	mdns   *mdns
 	cfg    *ctrld.Config
 	quitCh chan struct{}
+	selfIP string
 }
 
-func NewTable(cfg *ctrld.Config) *Table {
-	return &Table{cfg: cfg, quitCh: make(chan struct{})}
+func NewTable(cfg *ctrld.Config, selfIP string) *Table {
+	return &Table{
+		cfg:    cfg,
+		quitCh: make(chan struct{}),
+		selfIP: selfIP,
+	}
 }
 
 func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
@@ -88,7 +93,7 @@ func (t *Table) Init() {
 		}
 	}
 	if t.discoverDHCP() {
-		t.dhcp = &dhcp{}
+		t.dhcp = &dhcp{selfIP: t.selfIP}
 		ctrld.ProxyLog.Debug().Msg("start dhcp discovery")
 		if err := t.dhcp.refresh(); err != nil {
 			ctrld.ProxyLog.Error().Err(err).Msg("could not init DHCP discover")

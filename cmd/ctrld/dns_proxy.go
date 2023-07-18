@@ -549,6 +549,9 @@ func (p *prog) getClientInfo(ip, mac string) *ctrld.ClientInfo {
 	} else {
 		ci.IP = ip
 		ci.Mac = p.ciTable.LookupMac(ip)
+		if ip == "127.0.0.1" || ip == "::1" {
+			ci.IP = p.ciTable.LookupIP(ci.Mac)
+		}
 	}
 	ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	return ci
