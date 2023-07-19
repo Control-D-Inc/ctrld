@@ -73,10 +73,11 @@ func (m *mdns) init(quitCh chan struct{}) error {
 	return nil
 }
 
+// probeLoop performs mdns probe actively to get hostname updates.
 func (m *mdns) probeLoop(conns []*net.UDPConn, remoteAddr net.Addr, quitCh chan struct{}) {
 	bo := backoff.NewBackoff("mdns probe", func(format string, args ...any) {}, time.Second*30)
 	for {
-		err := m.probe(conns, remoteAddr, quitCh)
+		err := m.probe(conns, remoteAddr)
 		if isErrNetUnreachableOrInvalid(err) {
 			ctrld.ProxyLog.Warn().Msgf("stop probing %q: network unreachable or invalid", remoteAddr)
 			break
@@ -96,6 +97,7 @@ func (m *mdns) probeLoop(conns []*net.UDPConn, remoteAddr net.Addr, quitCh chan 
 	}
 }
 
+// readLoop reads from mdns connection, save/update any hostnames found.
 func (m *mdns) readLoop(conn *net.UDPConn) {
 	defer conn.Close()
 	buf := make([]byte, dns.MaxMsgSize)
@@ -141,7 +143,8 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 	}
 }
 
-func (m *mdns) probe(conns []*net.UDPConn, remoteAddr net.Addr, quitCh chan struct{}) error {
+// probe performs mdns queries with known services.
+func (m *mdns) probe(conns []*net.UDPConn, remoteAddr net.Addr) error {
 	msg := new(dns.Msg)
 	msg.Question = make([]dns.Question, len(services))
 	for i, service := range services {
