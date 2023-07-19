@@ -1075,6 +1075,10 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 		}
 	})
 	v.WatchConfig()
+	var (
+		lastAnswer *dns.Msg
+		lastErr    error
+	)
 	for i := 0; i < maxAttempts; i++ {
 		mu.Lock()
 		if lcChanged != nil {
@@ -1091,9 +1095,25 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 			mainLog.Debug().Msgf("self-check against %q succeeded", domain)
 			return status
 		}
+		lastAnswer = r
+		lastErr = err
 		bo.BackOff(ctx, fmt.Errorf("ExchangeContext: %w", err))
 	}
 	mainLog.Debug().Msgf("self-check against %q failed", domain)
+	lc := cfg.FirstListener()
+	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
+	marker := strings.Repeat("=", 32)
+	mainLog.Debug().Msg(marker)
+	mainLog.Debug().Msgf("listener address       : %s", addr)
+	mainLog.Debug().Msgf("last error             : %v", lastErr)
+	if lastAnswer != nil {
+		mainLog.Debug().Msgf("last answer from ctrld :")
+		mainLog.Debug().Msg(marker)
+		for _, s := range strings.Split(lastAnswer.String(), "\n") {
+			mainLog.Debug().Msgf("%s", s)
+		}
+		mainLog.Debug().Msg(marker)
+	}
 	return service.StatusUnknown
 }
 
