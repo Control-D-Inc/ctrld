@@ -186,7 +186,7 @@ func initCLI() {
 				mainLog.Fatal().Msg("network is not up yet")
 			}
 
-			p.router = router.New(&cfg)
+			p.router = router.New(&cfg, cdUID != "")
 			cs, err := newControlServer(filepath.Join(homedir, ctrldControlUnixSock))
 			if err != nil {
 				mainLog.Warn().Err(err).Msg("could not create control server")
@@ -337,7 +337,7 @@ func initCLI() {
 			sc.Arguments = append([]string{"run"}, osArgs...)
 
 			p := &prog{
-				router: router.New(&cfg),
+				router: router.New(&cfg, cdUID != ""),
 				cfg:    &cfg,
 			}
 			if err := p.router.ConfigureService(sc); err != nil {
@@ -503,9 +503,9 @@ func initCLI() {
 		Short: "Stop the ctrld service",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			tryReadingConfig(false)
+			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg)}
+			p := &prog{router: router.New(&cfg, cdUID != "")}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
@@ -593,9 +593,9 @@ func initCLI() {
 NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			tryReadingConfig(false)
+			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg)}
+			p := &prog{router: router.New(&cfg, cdUID != "")}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Error().Msg(err.Error())
@@ -1212,6 +1212,10 @@ func tryReadingConfig(writeDefaultConfig bool) {
 	if !writeDefaultConfig {
 		return
 	}
+	readConfig(writeDefaultConfig)
+}
+
+func readConfig(writeDefaultConfig bool) {
 	configs := []struct {
 		name    string
 		written bool

@@ -19,7 +19,6 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
 	"github.com/Control-D-Inc/ctrld/internal/router/merlin"
 	"github.com/Control-D-Inc/ctrld/internal/router/openwrt"
-	"github.com/Control-D-Inc/ctrld/internal/router/pfsense"
 	"github.com/Control-D-Inc/ctrld/internal/router/synology"
 	"github.com/Control-D-Inc/ctrld/internal/router/tomato"
 	"github.com/Control-D-Inc/ctrld/internal/router/ubios"
@@ -27,8 +26,11 @@ import (
 
 // Service is the interface to manage ctrld service on router.
 type Service interface {
+	// ConfigureService performs works for installing ctrla as a service on router.
 	ConfigureService(*service.Config) error
+	// Install performs necessary works after service.Install done.
 	Install(*service.Config) error
+	// Uninstall performs necessary works after service.Uninstallation done.
 	Uninstall(*service.Config) error
 }
 
@@ -36,13 +38,17 @@ type Service interface {
 type Router interface {
 	Service
 
+	// PreRun performs works need to be done before ctrld being run on router.
+	// Implementation should only return if the pre-condition was met (e.g: ntp synced).
 	PreRun() error
+	// Setup configures ctrld to be run on the router.
 	Setup() error
+	// Cleanup cleans up works setup on router by ctrld.
 	Cleanup() error
 }
 
 // New returns new Router interface.
-func New(cfg *ctrld.Config) Router {
+func New(cfg *ctrld.Config, cdMode bool) Router {
 	switch Name() {
 	case ddwrt.Name:
 		return ddwrt.New(cfg)
@@ -58,12 +64,10 @@ func New(cfg *ctrld.Config) Router {
 		return synology.New(cfg)
 	case tomato.Name:
 		return tomato.New(cfg)
-	case pfsense.Name:
-		return pfsense.New(cfg)
 	case firewalla.Name:
 		return firewalla.New(cfg)
 	}
-	return &dummy{}
+	return newOsRouter(cfg, cdMode)
 }
 
 // IsGLiNet reports whether the router is an GL.iNet router.
@@ -202,12 +206,10 @@ func distroName() string {
 		return edgeos.Name
 	case haveFile("/etc/ubnt/init/vyatta-router"):
 		return edgeos.Name // For 2.x
-	case isPfsense():
-		return pfsense.Name
 	case haveFile("/etc/firewalla_release"):
 		return firewalla.Name
 	}
-	return ""
+	return osName
 }
 
 func haveFile(file string) bool {
