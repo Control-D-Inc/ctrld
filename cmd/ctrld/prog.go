@@ -50,9 +50,10 @@ type prog struct {
 	ciTable *clientinfo.Table
 	router  router.Router
 
-	started   chan struct{}
-	onStarted []func()
-	onStopped []func()
+	started       chan struct{}
+	onStartedDone chan struct{}
+	onStarted     []func()
+	onStopped     []func()
 }
 
 func (p *prog) Start(s service.Service) error {
@@ -67,6 +68,7 @@ func (p *prog) run() {
 	p.preRun()
 	numListeners := len(p.cfg.Listener)
 	p.started = make(chan struct{}, numListeners)
+	p.onStartedDone = make(chan struct{})
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -146,6 +148,8 @@ func (p *prog) run() {
 	for _, f := range p.onStarted {
 		f()
 	}
+	close(p.onStartedDone)
+
 	// Stop writing log to unix socket.
 	consoleWriter.Out = os.Stdout
 	initLoggingWithBackup(false)

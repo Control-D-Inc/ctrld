@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -1103,13 +1104,45 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 		// Nothing to do, return the status as-is.
 		return status
 	}
-	c := new(dns.Client)
+	dir, err := userHomeDir()
+	if err != nil {
+		mainLog.Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
+		return service.StatusUnknown
+	}
+
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
-	bo.LogLongerThan = 500 * time.Millisecond
+	bo.LogLongerThan = 10 * time.Second
 	ctx := context.Background()
 	maxAttempts := 20
-	mainLog.Debug().Msg("Performing self-check")
 
+	mainLog.Debug().Msg("waiting for ctrld listener to be ready")
+	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+
+	// The socket control server may not start yet, so attempt to ping
+	// it until we got a response, or maxAttempts reached.
+	for i := 0; i < maxAttempts; i++ {
+		if _, err := cc.post("/", nil); err != nil {
+			bo.BackOff(ctx, err)
+			continue
+		}
+		break
+	}
+	resp, err := cc.post(startedPath, nil)
+	if err != nil {
+		mainLog.Error().Err(err).Msg("failed to connect to control server")
+		return service.StatusUnknown
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		mainLog.Error().Msg("ctrld listener is not ready")
+		return service.StatusUnknown
+	}
+
+	mainLog.Debug().Msg("ctrld listener is ready")
+	mainLog.Debug().Msg("performing self-check")
+	bo = backoff.NewBackoff("self-check", logf, 10*time.Second)
+	bo.LogLongerThan = 500 * time.Millisecond
+	c := new(dns.Client)
 	var (
 		lcChanged map[string]*ctrld.ListenerConfig
 		mu        sync.Mutex

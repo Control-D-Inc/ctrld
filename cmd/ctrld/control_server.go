@@ -13,6 +13,7 @@ import (
 const (
 	contentTypeJson = "application/json"
 	listClientsPath = "/clients"
+	startedPath     = "/started"
 )
 
 type controlServer struct {
@@ -61,6 +62,14 @@ func (p *prog) registerControlServerHandler() {
 		if err := json.NewEncoder(w).Encode(&clients); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+	}))
+	p.cs.mux.Handle(startedPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		select {
+		case <-p.onStartedDone:
+			w.WriteHeader(http.StatusOK)
+		case <-time.After(10 * time.Second):
+			w.WriteHeader(http.StatusRequestTimeout)
 		}
 	}))
 }
