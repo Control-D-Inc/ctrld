@@ -54,7 +54,7 @@ func (s *controlServer) register(pattern string, handler http.Handler) {
 }
 
 func (p *prog) registerControlServerHandler() {
-	p.cs.mux.Handle(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	p.cs.register(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		clients := p.ciTable.ListClients()
 		sort.Slice(clients, func(i, j int) bool {
 			return clients[i].IP.Less(clients[j].IP)
@@ -64,7 +64,7 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 	}))
-	p.cs.mux.Handle(startedPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	p.cs.register(startedPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		select {
 		case <-p.onStartedDone:
 			w.WriteHeader(http.StatusOK)
