@@ -176,8 +176,7 @@ func initCLI() {
 			initLogging()
 
 			mainLog.Info().Msgf("starting ctrld %s", curVersion())
-			oi := osinfo.New()
-			mainLog.Info().Msgf("os: %s", oi.String())
+			mainLog.Info().Msgf("os: %s", osVersion())
 
 			// Wait for network up.
 			if !ctrldnet.Up() {
@@ -1487,4 +1486,14 @@ func dirWritable(dir string) (bool, error) {
 	}
 	defer os.Remove(f.Name())
 	return true, f.Close()
+}
+
+func osVersion() string {
+	oi := osinfo.New()
+	if runtime.GOOS == "freebsd" {
+		if ver, _, found := strings.Cut(oi.String(), ":"); found {
+			return ver
+		}
+	}
+	return oi.String()
 }
