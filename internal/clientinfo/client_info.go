@@ -1,6 +1,8 @@
 package clientinfo
 
 import (
+	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -9,31 +11,48 @@ import (
 
 // IpResolver is the interface for retrieving IP from Mac.
 type IpResolver interface {
+	fmt.Stringer
+	// LookupIP returns ip of the device with given mac.
 	LookupIP(mac string) string
+	// List returns list of ip known by the resolver.
+	List() []string
 }
 
 // MacResolver is the interface for retrieving Mac from IP.
 type MacResolver interface {
+	fmt.Stringer
+	// LookupMac returns mac of the device with given ip.
 	LookupMac(ip string) string
 }
 
 // HostnameByIpResolver is the interface for retrieving hostname from IP.
 type HostnameByIpResolver interface {
+	// LookupHostnameByIP returns hostname of the given ip.
 	LookupHostnameByIP(ip string) string
 }
 
 // HostnameByMacResolver is the interface for retrieving hostname from Mac.
 type HostnameByMacResolver interface {
+	// LookupHostnameByMac returns hostname of the device with given mac.
 	LookupHostnameByMac(mac string) string
 }
 
+// HostnameResolver is the interface for retrieving hostname from either IP or Mac.
 type HostnameResolver interface {
+	fmt.Stringer
 	HostnameByIpResolver
 	HostnameByMacResolver
 }
 
 type refresher interface {
 	refresh() error
+}
+
+type Client struct {
+	IP       netip.Addr
+	Mac      string
+	Hostname string
+	Source   map[string]struct{}
 }
 
 type Table struct {
@@ -146,9 +165,6 @@ func (t *Table) LookupIP(mac string) string {
 }
 
 func (t *Table) LookupMac(ip string) string {
-	t.arp.mac.Range(func(key, value any) bool {
-		return true
-	})
 	for _, r := range t.macResolvers {
 		if mac := r.LookupMac(ip); mac != "" {
 			return mac
@@ -167,6 +183,86 @@ func (t *Table) LookupHostname(ip, mac string) string {
 		}
 	}
 	return ""
+}
+
+type macEntry struct {
+	mac string
+	src string
+}
+
+type hostnameEntry struct {
+	name string
+	src  string
+}
+
+func (t *Table) lookupMacAll(ip string) []*macEntry {
+	var res []*macEntry
+	for _, r := range t.macResolvers {
+		res = append(res, &macEntry{mac: r.LookupMac(ip), src: r.String()})
+	}
+	return res
+}
+
+func (t *Table) lookupHostnameAll(ip, mac string) []*hostnameEntry {
+	var res []*hostnameEntry
+	for _, r := range t.hostnameResolvers {
+		src := r.String()
+		if name := r.LookupHostnameByIP(ip); name != "" {
+			res = append(res, &hostnameEntry{name: name, src: src})
+			continue
+		}
+		if name := r.LookupHostnameByMac(mac); name != "" {
+			res = append(res, &hostnameEntry{name: name, src: src})
+			continue
+		}
+	}
+	return res
+}
+
+// ListClients returns list of clients discovered by ctrld.
+func (t *Table) ListClients() []*Client {
+	for _, r := range t.refreshers {
+		_ = r.refresh()
+	}
+	ipMap := make(map[string]*Client)
+	for _, ir := range t.ipResolvers {
+		for _, ip := range ir.List() {
+			c, ok := ipMap[ip]
+			if !ok {
+				c = &Client{
+					IP:     netip.MustParseAddr(ip),
+					Source: map[string]struct{}{ir.String(): {}},
+				}
+				ipMap[ip] = c
+			} else {
+				c.Source[ir.String()] = struct{}{}
+			}
+		}
+	}
+	for ip := range ipMap {
+		c := ipMap[ip]
+		for _, e := range t.lookupMacAll(ip) {
+			if c.Mac == "" && e.mac != "" {
+				c.Mac = e.mac
+			}
+			if e.mac != "" {
+				c.Source[e.src] = struct{}{}
+			}
+		}
+		for _, e := range t.lookupHostnameAll(ip, c.Mac) {
+			if c.Hostname == "" && e.name != "" {
+				c.Hostname = e.name
+			}
+			if e.name != "" {
+				c.Source[e.src] = struct{}{}
+			}
+		}
+	}
+	clients := make([]*Client, 0, len(ipMap))
+	for _, c := range ipMap {
+		clients = append(clients, c)
+	}
+	return clients
 }
 
 func (t *Table) discoverDHCP() bool {

@@ -43,6 +43,10 @@ func (m *mdns) LookupHostnameByMac(mac string) string {
 	return ""
 }
 
+func (m *mdns) String() string {
+	return "mdns"
+}
+
 func (m *mdns) init(quitCh chan struct{}) error {
 	ifaces, err := multicastInterfaces()
 	if err != nil {

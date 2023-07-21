@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
+	"github.com/olekukonko/tablewriter"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
@@ -35,6 +37,7 @@ import (
 	"tailscale.com/net/interfaces"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
@@ -751,6 +754,66 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	uninstallCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
 	uninstallCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
 	rootCmd.AddCommand(uninstallCmdAlias)
+
+	listClientsCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List clients that ctrld discovered",
+		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Run: func(cmd *cobra.Command, args []string) {
+			dir, err := userHomeDir()
+			if err != nil {
+				mainLog.Fatal().Err(err).Msg("failed to find ctrld home dir")
+			}
+			cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+			resp, err := cc.post(listClientsPath, nil)
+			if err != nil {
+				mainLog.Fatal().Err(err).Msg("failed to get clients list")
+			}
+			defer resp.Body.Close()
+
+			var clients []*clientinfo.Client
+			if err := json.NewDecoder(resp.Body).Decode(&clients); err != nil {
+				mainLog.Fatal().Err(err).Msg("failed to decode clients list result")
+			}
+			map2Slice := func(m map[string]struct{}) []string {
+				s := make([]string, 0, len(m))
+				for k := range m {
+					s = append(s, k)
+				}
+				sort.Strings(s)
+				return s
+			}
+			data := make([][]string, len(clients))
+			for i, c := range clients {
+				row := []string{
+					c.IP.String(),
+					c.Hostname,
+					c.Mac,
+					strings.Join(map2Slice(c.Source), ","),
+				}
+				data[i] = row
+			}
+			table := tablewriter.NewWriter(os.Stdout)
+			table.SetHeader([]string{"IP", "Hostname", "Mac", "Discovered"})
+			table.SetAutoFormatHeaders(false)
+			table.AppendBulk(data)
+			table.Render()
+		},
+	}
+	clientsCmd := &cobra.Command{
+		Use:   "clients",
+		Short: "Manage clients",
+		Args:  cobra.OnlyValidArgs,
+		ValidArgs: []string{
+			listClientsCmd.Use,
+		},
+	}
+	clientsCmd.AddCommand(listClientsCmd)
+	rootCmd.AddCommand(clientsCmd)
 }
 
 func writeConfigFile() error {

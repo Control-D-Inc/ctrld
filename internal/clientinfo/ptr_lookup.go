@@ -36,6 +36,10 @@ func (p *ptrDiscover) LookupHostnameByMac(mac string) string {
 	return ""
 }
 
+func (p *ptrDiscover) String() string {
+	return "ptr"
+}
+
 func (p *ptrDiscover) lookupHostname(ip string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

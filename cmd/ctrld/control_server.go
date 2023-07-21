@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"time"
 )
 
-const contentTypeJson = "application/json"
+const (
+	contentTypeJson = "application/json"
+	listClientsPath = "/clients"
+)
 
 type controlServer struct {
 	server *http.Server
@@ -48,7 +53,16 @@ func (s *controlServer) register(pattern string, handler http.Handler) {
 }
 
 func (p *prog) registerControlServerHandler() {
-	// TODO: register handler here.
+	p.cs.mux.Handle(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		clients := p.ciTable.ListClients()
+		sort.Slice(clients, func(i, j int) bool {
+			return clients[i].IP.Less(clients[j].IP)
+		})
+		if err := json.NewEncoder(w).Encode(&clients); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}))
 }
 
 func jsonResponse(next http.Handler) http.Handler {

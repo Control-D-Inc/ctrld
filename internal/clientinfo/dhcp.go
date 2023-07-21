@@ -100,6 +100,23 @@ func (d *dhcp) LookupHostnameByMac(mac string) string {
 	return val.(string)
 }
 
+func (d *dhcp) String() string {
+	return "dhcp"
+}
+
+func (d *dhcp) List() []string {
+	var ips []string
+	d.ip.Range(func(key, value any) bool {
+		ips = append(ips, value.(string))
+		return true
+	})
+	d.mac.Range(func(key, value any) bool {
+		ips = append(ips, key.(string))
+		return true
+	})
+	return ips
+}
+
 // AddLeaseFile adds given lease file for reading/watching clients info.
 func (d *dhcp) addLeaseFile(name string, format ctrld.LeaseFileFormat) error {
 	if d.watcher == nil {

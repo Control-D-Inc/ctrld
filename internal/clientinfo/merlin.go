@@ -65,3 +65,7 @@ func (m *merlinDiscover) parseMerlinCustomClientList(data string) {
 		m.hostname.Store(mac, hostname)
 	}
 }
+
+func (m *merlinDiscover) String() string {
+	return "merlin"
+}

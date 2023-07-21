@@ -27,3 +27,20 @@ func (a *arpDiscover) LookupMac(ip string) string {
 	}
 	return val.(string)
 }
+
+func (a *arpDiscover) String() string {
+	return "arp"
+}
+
+func (a *arpDiscover) List() []string {
+	var ips []string
+	a.ip.Range(func(key, value any) bool {
+		ips = append(ips, value.(string))
+		return true
+	})
+	a.mac.Range(func(key, value any) bool {
+		ips = append(ips, key.(string))
+		return true
+	})
+	return ips
+}
