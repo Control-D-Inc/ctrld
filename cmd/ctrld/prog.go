@@ -239,7 +239,11 @@ func (p *prog) setDNS() {
 		// so we could just use lc.IP as nameserver.
 	}
 
-	if err := setDNS(netIface, []string{ns}); err != nil {
+	nameservers := []string{ns}
+	if needRFC1918Listeners(lc) {
+		nameservers = append(nameservers, rfc1918Addresses()...)
+	}
+	if err := setDNS(netIface, nameservers); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return
 	}

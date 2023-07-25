@@ -80,7 +80,6 @@ func (p *prog) serveDNS(listenerNum string) error {
 		}
 	})
 
-	needRFC1918Listeners := listenerConfig.IP == "127.0.0.1" && listenerConfig.Port == 53
 	g, ctx := errgroup.WithContext(context.Background())
 	for _, proto := range []string{"udp", "tcp"} {
 		proto := proto
@@ -101,30 +100,23 @@ func (p *prog) serveDNS(listenerNum string) error {
 		}
 		// When we spawn a listener on 127.0.0.1, also spawn listeners on the RFC1918
 		// addresses of the machine. So ctrld could receive queries from LAN clients.
-		if needRFC1918Listeners {
+		if needRFC1918Listeners(listenerConfig) {
 			g.Go(func() error {
-				interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
-					addrs, _ := i.Addrs()
-					for _, addr := range addrs {
-						ipNet, ok := addr.(*net.IPNet)
-						if !ok || !ipNet.IP.IsPrivate() {
-							continue
+				for _, addr := range rfc1918Addresses() {
+					func() {
+						listenAddr := net.JoinHostPort(addr, strconv.Itoa(listenerConfig.Port))
+						s, errCh := runDNSServer(listenAddr, proto, handler)
+						defer s.Shutdown()
+						select {
+						case <-p.stopCh:
+						case <-ctx.Done():
+						case err := <-errCh:
+							// RFC1918 listener should not terminate ctrld.
+							// It's a workaround for a quirk on system with systemd-resolved.
+							mainLog.Warn().Err(err).Msgf("could not listen on %s: %s", proto, listenAddr)
 						}
-						func() {
-							listenAddr := net.JoinHostPort(ipNet.IP.String(), "53")
-							s, errCh := runDNSServer(listenAddr, proto, handler)
-							defer s.Shutdown()
-							select {
-							case <-p.stopCh:
-							case <-ctx.Done():
-							case err := <-errCh:
-								// RFC1918 listener should not terminate ctrld.
-								// It's a workaround for a quirk on system with systemd-resolved.
-								mainLog.Warn().Err(err).Msgf("could not listen on %s: %s", proto, listenAddr)
-							}
-						}()
-					}
-				})
+					}()
+				}
 				return nil
 			})
 		}
@@ -555,4 +547,23 @@ func (p *prog) getClientInfo(ip, mac string) *ctrld.ClientInfo {
 	}
 	ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	return ci
+}
+
+func needRFC1918Listeners(lc *ctrld.ListenerConfig) bool {
+	return lc.IP == "127.0.0.1" && lc.Port == 53
+}
+
+func rfc1918Addresses() []string {
+	var res []string
+	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+		addrs, _ := i.Addrs()
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok || !ipNet.IP.IsPrivate() {
+				continue
+			}
+			res = append(res, ipNet.IP.String())
+		}
+	})
+	return res
 }
