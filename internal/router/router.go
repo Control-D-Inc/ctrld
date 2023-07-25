@@ -188,6 +188,16 @@ func ServiceDependencies() []string {
 	return nil
 }
 
+// SelfInterfaces return list of *net.Interface that will be source of requests from router itself.
+func SelfInterfaces() []*net.Interface {
+	switch Name() {
+	case firewalla.Name:
+		return dnsmasq.FirewallaSelfInterfaces()
+	default:
+		return nil
+	}
+}
+
 func distroName() string {
 	switch {
 	case bytes.HasPrefix(unameO(), []byte("DD-WRT")):

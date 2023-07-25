@@ -11,11 +11,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Control-D-Inc/ctrld"
+	"github.com/fsnotify/fsnotify"
 	"tailscale.com/net/interfaces"
 	"tailscale.com/util/lineread"
 
-	"github.com/fsnotify/fsnotify"
+	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 type dhcp struct {
@@ -279,4 +280,22 @@ func (d *dhcp) addSelf() {
 			}
 		}
 	})
+	for _, netIface := range router.SelfInterfaces() {
+		mac := netIface.HardwareAddr.String()
+		if mac == "" {
+			return
+		}
+		d.mac2name.Store(mac, hostname)
+		addrs, _ := netIface.Addrs()
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNet.IP
+			d.mac.LoadOrStore(ip.String(), mac)
+			d.ip.LoadOrStore(mac, ip.String())
+			d.ip2name.Store(ip.String(), hostname)
+		}
+	}
 }
