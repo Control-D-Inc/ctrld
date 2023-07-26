@@ -112,7 +112,7 @@ func (p *prog) run() {
 		go uc.Ping()
 	}
 
-	p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP())
+	p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP(), cdUID)
 	if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
 		mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)

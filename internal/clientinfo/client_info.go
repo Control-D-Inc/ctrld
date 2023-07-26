@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
 
 // IpResolver is the interface for retrieving IP from Mac.
@@ -60,6 +62,7 @@ type Table struct {
 	macResolvers      []MacResolver
 	hostnameResolvers []HostnameResolver
 	refreshers        []refresher
+	initOnce          sync.Once
 
 	dhcp   *dhcp
 	merlin *merlinDiscover
@@ -69,13 +72,15 @@ type Table struct {
 	cfg    *ctrld.Config
 	quitCh chan struct{}
 	selfIP string
+	cdUID  string
 }
 
-func NewTable(cfg *ctrld.Config, selfIP string) *Table {
+func NewTable(cfg *ctrld.Config, selfIP, cdUID string) *Table {
 	return &Table{
 		cfg:    cfg,
 		quitCh: make(chan struct{}),
 		selfIP: selfIP,
+		cdUID:  cdUID,
 	}
 }
 
@@ -88,6 +93,7 @@ func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
 
 func (t *Table) RefreshLoop(stopCh chan struct{}) {
 	timer := time.NewTicker(time.Minute * 5)
+	defer timer.Stop()
 	for {
 		select {
 		case <-timer.C:
@@ -102,6 +108,19 @@ func (t *Table) RefreshLoop(stopCh chan struct{}) {
 }
 
 func (t *Table) Init() {
+	t.initOnce.Do(t.init)
+}
+
+func (t *Table) init() {
+	if _, clientID := controld.ParseRawUID(t.cdUID); clientID != "" {
+		ctrld.ProxyLogger.Load().Debug().Msg("start self discovery")
+		t.dhcp = &dhcp{selfIP: t.selfIP}
+		t.dhcp.addSelf()
+		t.ipResolvers = append(t.ipResolvers, t.dhcp)
+		t.macResolvers = append(t.macResolvers, t.dhcp)
+		t.hostnameResolvers = append(t.hostnameResolvers, t.dhcp)
+		return
+	}
 	if t.discoverDHCP() || t.discoverARP() {
 		t.merlin = &merlinDiscover{}
 		if err := t.merlin.refresh(); err != nil {
@@ -156,6 +175,7 @@ func (t *Table) Init() {
 }
 
 func (t *Table) LookupIP(mac string) string {
+	t.initOnce.Do(t.init)
 	for _, r := range t.ipResolvers {
 		if ip := r.LookupIP(mac); ip != "" {
 			return ip
@@ -165,6 +185,7 @@ func (t *Table) LookupIP(mac string) string {
 }
 
 func (t *Table) LookupMac(ip string) string {
+	t.initOnce.Do(t.init)
 	for _, r := range t.macResolvers {
 		if mac := r.LookupMac(ip); mac != "" {
 			return mac
@@ -174,6 +195,7 @@ func (t *Table) LookupMac(ip string) string {
 }
 
 func (t *Table) LookupHostname(ip, mac string) string {
+	t.initOnce.Do(t.init)
 	for _, r := range t.hostnameResolvers {
 		if name := r.LookupHostnameByIP(ip); name != "" {
 			return name
