@@ -30,12 +30,12 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 func resetDNS(iface *net.Interface) error {
 	if ctrldnet.SupportsIPv6ListenLocal() {
 		if output, err := netsh("interface", "ipv6", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp"); err != nil {
-			mainLog.Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))
+			mainLog.Load().Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))
 		}
 	}
 	output, err := netsh("interface", "ipv4", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp")
 	if err != nil {
-		mainLog.Error().Err(err).Msgf("failed to reset ipv4 DNS: %s", string(output))
+		mainLog.Load().Error().Err(err).Msgf("failed to reset ipv4 DNS: %s", string(output))
 		return err
 	}
 	return nil
@@ -49,7 +49,7 @@ func setPrimaryDNS(iface *net.Interface, dns string) error {
 	idx := strconv.Itoa(iface.Index)
 	output, err := netsh("interface", ipVer, "set", "dnsserver", idx, "static", dns)
 	if err != nil {
-		mainLog.Error().Err(err).Msgf("failed to set primary DNS: %s", string(output))
+		mainLog.Load().Error().Err(err).Msgf("failed to set primary DNS: %s", string(output))
 		return err
 	}
 	if ipVer == "ipv4" && ctrldnet.SupportsIPv6ListenLocal() {
@@ -67,7 +67,7 @@ func addSecondaryDNS(iface *net.Interface, dns string) error {
 	}
 	output, err := netsh("interface", ipVer, "add", "dns", strconv.Itoa(iface.Index), dns, "index=2")
 	if err != nil {
-		mainLog.Warn().Err(err).Msgf("failed to add secondary DNS: %s", string(output))
+		mainLog.Load().Warn().Err(err).Msgf("failed to add secondary DNS: %s", string(output))
 	}
 	return nil
 }
@@ -79,12 +79,12 @@ func netsh(args ...string) ([]byte, error) {
 func currentDNS(iface *net.Interface) []string {
 	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {
-		mainLog.Error().Err(err).Msg("failed to get interface LUID")
+		mainLog.Load().Error().Err(err).Msg("failed to get interface LUID")
 		return nil
 	}
 	nameservers, err := luid.DNS()
 	if err != nil {
-		mainLog.Error().Err(err).Msg("failed to get interface DNS")
+		mainLog.Load().Error().Err(err).Msg("failed to get interface DNS")
 		return nil
 	}
 	ns := make([]string, 0, len(nameservers))

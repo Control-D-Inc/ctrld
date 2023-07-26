@@ -330,7 +330,7 @@ func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
 		if len(uc.bootstrapIPs) > 0 {
 			break
 		}
-		ProxyLog.Warn().Msg("could not resolve bootstrap IPs, retrying...")
+		ProxyLogger.Load().Warn().Msg("could not resolve bootstrap IPs, retrying...")
 		b.BackOff(context.Background(), errors.New("no bootstrap IPs"))
 	}
 	for _, ip := range uc.bootstrapIPs {
@@ -340,7 +340,7 @@ func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
 			uc.bootstrapIPs4 = append(uc.bootstrapIPs4, ip)
 		}
 	}
-	ProxyLog.Debug().Msgf("bootstrap IPs: %v", uc.bootstrapIPs)
+	ProxyLogger.Load().Debug().Msgf("bootstrap IPs: %v", uc.bootstrapIPs)
 }
 
 // ReBootstrap re-setup the bootstrap IP and the transport.
@@ -351,7 +351,7 @@ func (uc *UpstreamConfig) ReBootstrap() {
 		return
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
-		ProxyLog.Debug().Msg("re-bootstrapping upstream ip")
+		ProxyLogger.Load().Debug().Msg("re-bootstrapping upstream ip")
 		uc.rebootstrap.Store(true)
 		return true, nil
 	})
@@ -405,7 +405,7 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 		if uc.BootstrapIP != "" {
 			dialer := net.Dialer{Timeout: dialerTimeout, KeepAlive: dialerTimeout}
 			addr := net.JoinHostPort(uc.BootstrapIP, port)
-			Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
+			Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", addr)
 			return dialer.DialContext(ctx, network, addr)
 		}
 		pd := &ctrldnet.ParallelDialer{}
@@ -419,7 +419,7 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 		if err != nil {
 			return nil, err
 		}
-		Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", conn.RemoteAddr())
+		Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", conn.RemoteAddr())
 		return conn, nil
 	}
 	runtime.SetFinalizer(transport, func(transport *http.Transport) {

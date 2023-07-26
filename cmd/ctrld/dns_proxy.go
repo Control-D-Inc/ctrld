@@ -44,7 +44,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
 	// make sure ip is allocated
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
-		mainLog.Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: failed to allocate listen ip")
+		mainLog.Load().Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: failed to allocate listen ip")
 		return allocErr
 	}
 	var failoverRcodes []int
@@ -64,7 +64,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
 		t := time.Now()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
-		ctrld.Log(ctx, mainLog.Debug(), "%s received query: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
+		ctrld.Log(ctx, mainLog.Load().Debug(), "%s received query: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
 		upstreams, matched := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, domain)
 		var answer *dns.Msg
 		if !matched && listenerConfig.Restricted {
@@ -73,10 +73,10 @@ func (p *prog) serveDNS(listenerNum string) error {
 		} else {
 			answer = p.proxy(ctx, upstreams, failoverRcodes, m, ci)
 			rtt := time.Since(t)
-			ctrld.Log(ctx, mainLog.Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
 		}
 		if err := w.WriteMsg(answer); err != nil {
-			ctrld.Log(ctx, mainLog.Error().Err(err), "serveUDP: failed to send DNS response to client")
+			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "serveUDP: failed to send DNS response to client")
 		}
 	})
 
@@ -93,7 +93,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 				case err := <-errCh:
 					// Local ipv6 listener should not terminate ctrld.
 					// It's a workaround for a quirk on Windows.
-					mainLog.Warn().Err(err).Msg("local ipv6 listener failed")
+					mainLog.Load().Warn().Err(err).Msg("local ipv6 listener failed")
 				}
 				return nil
 			})
@@ -113,7 +113,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 						case err := <-errCh:
 							// RFC1918 listener should not terminate ctrld.
 							// It's a workaround for a quirk on system with systemd-resolved.
-							mainLog.Warn().Err(err).Msgf("could not listen on %s: %s", proto, listenAddr)
+							mainLog.Load().Warn().Err(err).Msgf("could not listen on %s: %s", proto, listenAddr)
 						}
 					}()
 				}
@@ -157,13 +157,13 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 
 	defer func() {
 		if !matched && lc.Restricted {
-			ctrld.Log(ctx, mainLog.Info(), "query refused, %s does not match any network policy", addr.String())
+			ctrld.Log(ctx, mainLog.Load().Info(), "query refused, %s does not match any network policy", addr.String())
 			return
 		}
 		if matched {
-			ctrld.Log(ctx, mainLog.Info(), "%s, %s, %s -> %v", matchedPolicy, matchedNetwork, matchedRule, upstreams)
+			ctrld.Log(ctx, mainLog.Load().Info(), "%s, %s, %s -> %v", matchedPolicy, matchedNetwork, matchedRule, upstreams)
 		} else {
-			ctrld.Log(ctx, mainLog.Info(), "no explicit policy matched, using default routing -> %v", upstreams)
+			ctrld.Log(ctx, mainLog.Load().Info(), "no explicit policy matched, using default routing -> %v", upstreams)
 		}
 	}()
 
@@ -246,7 +246,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			answer.SetRcode(msg, answer.Rcode)
 			now := time.Now()
 			if cachedValue.Expire.After(now) {
-				ctrld.Log(ctx, mainLog.Debug(), "hit cached response")
+				ctrld.Log(ctx, mainLog.Load().Debug(), "hit cached response")
 				setCachedAnswerTTL(answer, now, cachedValue.Expire)
 				return answer
 			}
@@ -254,10 +254,10 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		}
 	}
 	resolve1 := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
-		ctrld.Log(ctx, mainLog.Debug(), "sending query to %s: %s", upstreams[n], upstreamConfig.Name)
+		ctrld.Log(ctx, mainLog.Load().Debug(), "sending query to %s: %s", upstreams[n], upstreamConfig.Name)
 		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
 		if err != nil {
-			ctrld.Log(ctx, mainLog.Error().Err(err), "failed to create resolver")
+			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
 			return nil, err
 		}
 		resolveCtx, cancel := context.WithCancel(ctx)
@@ -271,12 +271,12 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 	}
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		if upstreamConfig.UpstreamSendClientInfo() && ci != nil {
-			ctrld.Log(ctx, mainLog.Debug(), "including client info with the request")
+			ctrld.Log(ctx, mainLog.Load().Debug(), "including client info with the request")
 			ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, ci)
 		}
 		answer, err := resolve1(n, upstreamConfig, msg)
 		if err != nil {
-			ctrld.Log(ctx, mainLog.Error().Err(err), "failed to resolve query")
+			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
 			return nil
 		}
 		return answer
@@ -288,7 +288,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		answer := resolve(n, upstreamConfig, msg)
 		if answer == nil {
 			if serveStaleCache && staleAnswer != nil {
-				ctrld.Log(ctx, mainLog.Debug(), "serving stale cached response")
+				ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
 				now := time.Now()
 				setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
 				return staleAnswer
@@ -296,7 +296,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			continue
 		}
 		if answer.Rcode != dns.RcodeSuccess && len(upstreamConfigs) > 1 && containRcode(failoverRcodes, answer.Rcode) {
-			ctrld.Log(ctx, mainLog.Debug(), "failover rcode matched, process to next upstream")
+			ctrld.Log(ctx, mainLog.Load().Debug(), "failover rcode matched, process to next upstream")
 			continue
 		}
 
@@ -312,11 +312,11 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			}
 			setCachedAnswerTTL(answer, now, expired)
 			p.cache.Add(dnscache.NewKey(msg, upstreams[n]), dnscache.NewValue(answer, expired))
-			ctrld.Log(ctx, mainLog.Debug(), "add cached response")
+			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
 		}
 		return answer
 	}
-	ctrld.Log(ctx, mainLog.Error(), "all upstreams failed")
+	ctrld.Log(ctx, mainLog.Load().Error(), "all upstreams failed")
 	answer := new(dns.Msg)
 	answer.SetRcode(msg, dns.RcodeServerFailure)
 	return answer
@@ -490,7 +490,7 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 		defer close(errCh)
 		if err := s.ListenAndServe(); err != nil {
 			waitLock.Unlock()
-			mainLog.Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
+			mainLog.Load().Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
 			errCh <- err
 		}
 	}()

@@ -156,7 +156,7 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 	if withBootstrapDNS {
 		resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
 	}
-	ProxyLog.Debug().Msgf("resolving %q using bootstrap DNS %q", domain, resolver.nameservers)
+	ProxyLogger.Load().Debug().Msgf("resolving %q using bootstrap DNS %q", domain, resolver.nameservers)
 	timeoutMs := 2000
 	if timeout > 0 && timeout < timeoutMs {
 		timeoutMs = timeout
@@ -199,15 +199,15 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 
 		r, err := resolver.Resolve(ctx, m)
 		if err != nil {
-			ProxyLog.Error().Err(err).Msgf("could not lookup %q record for domain %q", dns.TypeToString[dnsType], domain)
+			ProxyLogger.Load().Error().Err(err).Msgf("could not lookup %q record for domain %q", dns.TypeToString[dnsType], domain)
 			return
 		}
 		if r.Rcode != dns.RcodeSuccess {
-			ProxyLog.Error().Msgf("could not resolve domain %q, return code: %s", domain, dns.RcodeToString[r.Rcode])
+			ProxyLogger.Load().Error().Msgf("could not resolve domain %q, return code: %s", domain, dns.RcodeToString[r.Rcode])
 			return
 		}
 		if len(r.Answer) == 0 {
-			ProxyLog.Error().Msg("no answer from OS resolver")
+			ProxyLogger.Load().Error().Msg("no answer from OS resolver")
 			return
 		}
 		target := targetDomain(r.Answer)

@@ -12,7 +12,7 @@ import (
 func allocateIP(ip string) error {
 	cmd := exec.Command("ifconfig", "lo0", "alias", ip, "up")
 	if err := cmd.Run(); err != nil {
-		mainLog.Error().Err(err).Msg("allocateIP failed")
+		mainLog.Load().Error().Err(err).Msg("allocateIP failed")
 		return err
 	}
 	return nil
@@ -21,7 +21,7 @@ func allocateIP(ip string) error {
 func deAllocateIP(ip string) error {
 	cmd := exec.Command("ifconfig", "lo0", "-alias", ip)
 	if err := cmd.Run(); err != nil {
-		mainLog.Error().Err(err).Msg("deAllocateIP failed")
+		mainLog.Load().Error().Err(err).Msg("deAllocateIP failed")
 		return err
 	}
 	return nil
@@ -36,7 +36,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	args = append(args, nameservers...)
 
 	if err := exec.Command(cmd, args...).Run(); err != nil {
-		mainLog.Error().Err(err).Msgf("setDNS failed, ips = %q", nameservers)
+		mainLog.Load().Error().Err(err).Msgf("setDNS failed, ips = %q", nameservers)
 		return err
 	}
 	return nil
@@ -48,7 +48,7 @@ func resetDNS(iface *net.Interface) error {
 	args := []string{"-setdnsservers", iface.Name, "empty"}
 
 	if err := exec.Command(cmd, args...).Run(); err != nil {
-		mainLog.Error().Err(err).Msgf("resetDNS failed")
+		mainLog.Load().Error().Err(err).Msgf("resetDNS failed")
 		return err
 	}
 	return nil

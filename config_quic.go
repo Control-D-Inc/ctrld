@@ -48,7 +48,7 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
 		if uc.BootstrapIP != "" {
 			addr = net.JoinHostPort(uc.BootstrapIP, port)
-			ProxyLog.Debug().Msgf("sending doh3 request to: %s", addr)
+			ProxyLogger.Load().Debug().Msgf("sending doh3 request to: %s", addr)
 			udpConn, err := net.ListenUDP("udp", nil)
 			if err != nil {
 				return nil, err
@@ -68,7 +68,7 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 		if err != nil {
 			return nil, err
 		}
-		ProxyLog.Debug().Msgf("sending doh3 request to: %s", conn.RemoteAddr())
+		ProxyLogger.Load().Debug().Msgf("sending doh3 request to: %s", conn.RemoteAddr())
 		return conn, err
 	}
 	return rt

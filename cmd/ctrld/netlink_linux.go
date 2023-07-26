@@ -10,7 +10,7 @@ func (p *prog) watchLinkState() {
 	done := make(chan struct{})
 	defer close(done)
 	if err := netlink.LinkSubscribe(ch, done); err != nil {
-		mainLog.Warn().Err(err).Msg("could not subscribe link")
+		mainLog.Load().Warn().Err(err).Msg("could not subscribe link")
 		return
 	}
 	for lu := range ch {
@@ -18,7 +18,7 @@ func (p *prog) watchLinkState() {
 			continue
 		}
 		if lu.Change&unix.IFF_UP != 0 {
-			mainLog.Debug().Msgf("link state changed, re-bootstrapping")
+			mainLog.Load().Debug().Msgf("link state changed, re-bootstrapping")
 			for _, uc := range p.cfg.Upstream {
 				uc.ReBootstrap()
 			}

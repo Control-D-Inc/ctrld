@@ -25,7 +25,7 @@ func (m *merlinDiscover) refresh() error {
 	if err != nil {
 		return err
 	}
-	ctrld.ProxyLog.Debug().Msg("reading Merlin custom client list")
+	ctrld.ProxyLogger.Load().Debug().Msg("reading Merlin custom client list")
 	m.parseMerlinCustomClientList(out)
 	return nil
 }

@@ -105,7 +105,7 @@ func doTasks(tasks []task) bool {
 	for _, task := range tasks {
 		if err := task.f(); err != nil {
 			if task.abortOnError {
-				mainLog.Error().Msg(errors.Join(prevErr, err).Error())
+				mainLog.Load().Error().Msg(errors.Join(prevErr, err).Error())
 				return false
 			}
 			prevErr = err
@@ -117,11 +117,11 @@ func doTasks(tasks []task) bool {
 func checkHasElevatedPrivilege() {
 	ok, err := hasElevatedPrivilege()
 	if err != nil {
-		mainLog.Error().Msgf("could not detect user privilege: %v", err)
+		mainLog.Load().Error().Msgf("could not detect user privilege: %v", err)
 		return
 	}
 	if !ok {
-		mainLog.Error().Msg("Please relaunch process with admin/root privilege.")
+		mainLog.Load().Error().Msg("Please relaunch process with admin/root privilege.")
 		os.Exit(1)
 	}
 }

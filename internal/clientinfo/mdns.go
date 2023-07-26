@@ -83,11 +83,11 @@ func (m *mdns) probeLoop(conns []*net.UDPConn, remoteAddr net.Addr, quitCh chan 
 	for {
 		err := m.probe(conns, remoteAddr)
 		if isErrNetUnreachableOrInvalid(err) {
-			ctrld.ProxyLog.Warn().Msgf("stop probing %q: network unreachable or invalid", remoteAddr)
+			ctrld.ProxyLogger.Load().Warn().Msgf("stop probing %q: network unreachable or invalid", remoteAddr)
 			break
 		}
 		if err != nil {
-			ctrld.ProxyLog.Warn().Err(err).Msg("error while probing mdns")
+			ctrld.ProxyLogger.Load().Warn().Err(err).Msg("error while probing mdns")
 			bo.BackOff(context.Background(), errors.New("mdns probe backoff"))
 		}
 		select {
@@ -113,7 +113,7 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 			if err, ok := err.(*net.OpError); ok && (err.Timeout() || err.Temporary()) {
 				continue
 			}
-			ctrld.ProxyLog.Debug().Err(err).Msg("mdns readLoop error")
+			ctrld.ProxyLogger.Load().Debug().Err(err).Msg("mdns readLoop error")
 			return
 		}
 
@@ -133,11 +133,11 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 			if ip != "" && name != "" {
 				name = normalizeHostname(name)
 				if val, loaded := m.name.LoadOrStore(ip, name); !loaded {
-					ctrld.ProxyLog.Debug().Msgf("found hostname: %q, ip: %q via mdns", name, ip)
+					ctrld.ProxyLogger.Load().Debug().Msgf("found hostname: %q, ip: %q via mdns", name, ip)
 				} else {
 					old := val.(string)
 					if old != name {
-						ctrld.ProxyLog.Debug().Msgf("update hostname: %q, ip: %q, old: %q via mdns", name, ip, old)
+						ctrld.ProxyLogger.Load().Debug().Msgf("update hostname: %q, ip: %q, old: %q via mdns", name, ip, old)
 						m.name.Store(ip, name)
 					}
 				}

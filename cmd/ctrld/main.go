@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/kardianos/service"
@@ -31,15 +32,20 @@ var (
 	iface             string
 	ifaceStartStop    string
 
-	mainLog       = zerolog.New(io.Discard)
+	mainLog       atomic.Pointer[zerolog.Logger]
 	consoleWriter zerolog.ConsoleWriter
 )
+
+func init() {
+	l := zerolog.New(io.Discard)
+	mainLog.Store(&l)
+}
 
 func main() {
 	ctrld.InitConfig(v, "ctrld")
 	initCLI()
 	if err := rootCmd.Execute(); err != nil {
-		mainLog.Error().Msg(err.Error())
+		mainLog.Load().Error().Msg(err.Error())
 		os.Exit(1)
 	}
 }
@@ -63,7 +69,8 @@ func initConsoleLogging() {
 		w.TimeFormat = time.StampMilli
 	})
 	multi := zerolog.MultiLevelWriter(consoleWriter)
-	mainLog = mainLog.Output(multi).With().Timestamp().Logger()
+	l := mainLog.Load().Output(multi).With().Timestamp().Logger()
+	mainLog.Store(&l)
 	switch {
 	case silent:
 		zerolog.SetGlobalLevel(zerolog.NoLevel)
@@ -92,7 +99,7 @@ func initLoggingWithBackup(doBackup bool) {
 	if logFilePath := normalizeLogFilePath(cfg.Service.LogPath); logFilePath != "" {
 		// Create parent directory if necessary.
 		if err := os.MkdirAll(filepath.Dir(logFilePath), 0750); err != nil {
-			mainLog.Error().Msgf("failed to create log path: %v", err)
+			mainLog.Load().Error().Msgf("failed to create log path: %v", err)
 			os.Exit(1)
 		}
 
@@ -101,7 +108,7 @@ func initLoggingWithBackup(doBackup bool) {
 		if doBackup {
 			// Backup old log file with .1 suffix.
 			if err := os.Rename(logFilePath, logFilePath+".1"); err != nil && !os.IsNotExist(err) {
-				mainLog.Error().Msgf("could not backup old log file: %v", err)
+				mainLog.Load().Error().Msgf("could not backup old log file: %v", err)
 			} else {
 				// Backup was created, set flags for truncating old log file.
 				flags = os.O_CREATE | os.O_RDWR
@@ -109,16 +116,17 @@ func initLoggingWithBackup(doBackup bool) {
 		}
 		logFile, err := os.OpenFile(logFilePath, flags, os.FileMode(0o600))
 		if err != nil {
-			mainLog.Error().Msgf("failed to create log file: %v", err)
+			mainLog.Load().Error().Msgf("failed to create log file: %v", err)
 			os.Exit(1)
 		}
 		writers = append(writers, logFile)
 	}
 	writers = append(writers, consoleWriter)
 	multi := zerolog.MultiLevelWriter(writers...)
-	mainLog = mainLog.Output(multi).With().Timestamp().Logger()
+	l := mainLog.Load().Output(multi).With().Timestamp().Logger()
+	mainLog.Store(&l)
 	// TODO: find a better way.
-	ctrld.ProxyLog = mainLog
+	ctrld.ProxyLogger.Store(&l)
 
 	zerolog.SetGlobalLevel(zerolog.NoticeLevel)
 	logLevel := cfg.Service.LogLevel
@@ -136,7 +144,7 @@ func initLoggingWithBackup(doBackup bool) {
 	}
 	level, err := zerolog.ParseLevel(logLevel)
 	if err != nil {
-		mainLog.Warn().Err(err).Msg("could not set log level")
+		mainLog.Load().Warn().Err(err).Msg("could not set log level")
 		return
 	}
 	zerolog.SetGlobalLevel(level)

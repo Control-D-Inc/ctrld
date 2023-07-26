@@ -26,7 +26,7 @@ const (
 )
 
 var logf = func(format string, args ...any) {
-	mainLog.Debug().Msgf(format, args...)
+	mainLog.Load().Debug().Msgf(format, args...)
 }
 
 var svcConfig = &service.Config{
@@ -72,7 +72,7 @@ func (p *prog) run() {
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
-			mainLog.Error().Err(err).Msg("failed to create cacher, caching is disabled")
+			mainLog.Load().Error().Err(err).Msg("failed to create cacher, caching is disabled")
 		} else {
 			p.cache = cacher
 		}
@@ -93,7 +93,7 @@ func (p *prog) run() {
 		for _, cidr := range nc.Cidrs {
 			_, ipNet, err := net.ParseCIDR(cidr)
 			if err != nil {
-				mainLog.Error().Err(err).Str("network", nc.Name).Str("cidr", cidr).Msg("invalid cidr")
+				mainLog.Load().Error().Err(err).Str("network", nc.Name).Str("cidr", cidr).Msg("invalid cidr")
 				continue
 			}
 			nc.IPNets = append(nc.IPNets, ipNet)
@@ -104,9 +104,9 @@ func (p *prog) run() {
 		uc.Init()
 		if uc.BootstrapIP == "" {
 			uc.SetupBootstrapIP()
-			mainLog.Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
+			mainLog.Load().Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
 		} else {
-			mainLog.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("using bootstrap IP for upstream.%s", n)
+			mainLog.Load().Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("using bootstrap IP for upstream.%s", n)
 		}
 		uc.SetCertPool(rootCertPool)
 		go uc.Ping()
@@ -114,7 +114,7 @@ func (p *prog) run() {
 
 	p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP())
 	if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
-		mainLog.Debug().Msgf("watching custom lease file: %s", leaseFile)
+		mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
 		p.ciTable.AddLeaseFile(leaseFile, format)
 	}
@@ -132,12 +132,12 @@ func (p *prog) run() {
 			listenerConfig := p.cfg.Listener[listenerNum]
 			upstreamConfig := p.cfg.Upstream[listenerNum]
 			if upstreamConfig == nil {
-				mainLog.Warn().Msgf("no default upstream for: [listener.%s]", listenerNum)
+				mainLog.Load().Warn().Msgf("no default upstream for: [listener.%s]", listenerNum)
 			}
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
-			mainLog.Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
+			mainLog.Load().Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
 			if err := p.serveDNS(listenerNum); err != nil {
-				mainLog.Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
+				mainLog.Load().Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
 			}
 		}(listenerNum)
 	}
@@ -159,17 +159,17 @@ func (p *prog) run() {
 	if p.cs != nil {
 		p.registerControlServerHandler()
 		if err := p.cs.start(); err != nil {
-			mainLog.Warn().Err(err).Msg("could not start control server")
+			mainLog.Load().Warn().Err(err).Msg("could not start control server")
 		}
 	}
 	wg.Wait()
 }
 
 func (p *prog) Stop(s service.Service) error {
-	mainLog.Info().Msg("Service stopped")
+	mainLog.Load().Info().Msg("Service stopped")
 	close(p.stopCh)
 	if err := p.deAllocateIP(); err != nil {
-		mainLog.Error().Err(err).Msg("de-allocate ip failed")
+		mainLog.Load().Error().Err(err).Msg("de-allocate ip failed")
 		return err
 	}
 	return nil
@@ -212,7 +212,7 @@ func (p *prog) setDNS() {
 	if lc == nil {
 		return
 	}
-	logger := mainLog.With().Str("iface", iface).Logger()
+	logger := mainLog.Load().With().Str("iface", iface).Logger()
 	netIface, err := netInterface(iface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
@@ -257,7 +257,7 @@ func (p *prog) resetDNS() {
 	if iface == "auto" {
 		iface = defaultIfaceName()
 	}
-	logger := mainLog.With().Str("iface", iface).Logger()
+	logger := mainLog.Load().With().Str("iface", iface).Logger()
 	netIface, err := netInterface(iface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
@@ -291,19 +291,19 @@ func randomPort() int {
 func runLogServer(sockPath string) net.Conn {
 	addr, err := net.ResolveUnixAddr("unix", sockPath)
 	if err != nil {
-		mainLog.Warn().Err(err).Msg("invalid log sock path")
+		mainLog.Load().Warn().Err(err).Msg("invalid log sock path")
 		return nil
 	}
 	ln, err := net.ListenUnix("unix", addr)
 	if err != nil {
-		mainLog.Warn().Err(err).Msg("could not listen log socket")
+		mainLog.Load().Warn().Err(err).Msg("could not listen log socket")
 		return nil
 	}
 	defer ln.Close()
 
 	server, err := ln.Accept()
 	if err != nil {
-		mainLog.Warn().Err(err).Msg("could not accept connection")
+		mainLog.Load().Warn().Err(err).Msg("could not accept connection")
 		return nil
 	}
 	return server

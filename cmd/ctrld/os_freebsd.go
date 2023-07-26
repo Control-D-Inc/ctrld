@@ -14,7 +14,7 @@ import (
 func allocateIP(ip string) error {
 	cmd := exec.Command("ifconfig", "lo0", ip, "alias")
 	if err := cmd.Run(); err != nil {
-		mainLog.Error().Err(err).Msg("allocateIP failed")
+		mainLog.Load().Error().Err(err).Msg("allocateIP failed")
 		return err
 	}
 	return nil
@@ -23,7 +23,7 @@ func allocateIP(ip string) error {
 func deAllocateIP(ip string) error {
 	cmd := exec.Command("ifconfig", "lo0", ip, "-alias")
 	if err := cmd.Run(); err != nil {
-		mainLog.Error().Err(err).Msg("deAllocateIP failed")
+		mainLog.Load().Error().Err(err).Msg("deAllocateIP failed")
 		return err
 	}
 	return nil
@@ -33,7 +33,7 @@ func deAllocateIP(ip string) error {
 func setDNS(iface *net.Interface, nameservers []string) error {
 	r, err := dns.NewOSConfigurator(logf, iface.Name)
 	if err != nil {
-		mainLog.Error().Err(err).Msg("failed to create DNS OS configurator")
+		mainLog.Load().Error().Err(err).Msg("failed to create DNS OS configurator")
 		return err
 	}
 
@@ -43,7 +43,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	}
 
 	if err := r.SetDNS(dns.OSConfig{Nameservers: ns}); err != nil {
-		mainLog.Error().Err(err).Msg("failed to set DNS")
+		mainLog.Load().Error().Err(err).Msg("failed to set DNS")
 		return err
 	}
 	return nil
@@ -52,12 +52,12 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 func resetDNS(iface *net.Interface) error {
 	r, err := dns.NewOSConfigurator(logf, iface.Name)
 	if err != nil {
-		mainLog.Error().Err(err).Msg("failed to create DNS OS configurator")
+		mainLog.Load().Error().Err(err).Msg("failed to create DNS OS configurator")
 		return err
 	}
 
 	if err := r.Close(); err != nil {
-		mainLog.Error().Err(err).Msg("failed to rollback DNS setting")
+		mainLog.Load().Error().Err(err).Msg("failed to rollback DNS setting")
 		return err
 	}
 	return nil

@@ -11,6 +11,7 @@ import (
 var logOutput strings.Builder
 
 func TestMain(m *testing.M) {
-	mainLog = zerolog.New(&logOutput)
+	l := zerolog.New(&logOutput)
+	mainLog.Store(&l)
 	os.Exit(m.Run())
 }

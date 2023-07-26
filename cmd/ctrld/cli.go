@@ -147,7 +147,7 @@ func initCLI() {
 			}
 
 			if daemon && runtime.GOOS == "windows" {
-				mainLog.Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
+				mainLog.Load().Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
 			}
 
 			if !daemon {
@@ -156,10 +156,10 @@ func initCLI() {
 				go func() {
 					s, err := newService(p, svcConfig)
 					if err != nil {
-						mainLog.Fatal().Err(err).Msg("failed create new service")
+						mainLog.Load().Fatal().Err(err).Msg("failed create new service")
 					}
 					if err := s.Run(); err != nil {
-						mainLog.Error().Err(err).Msg("failed to start service")
+						mainLog.Load().Error().Err(err).Msg("failed to start service")
 					}
 				}()
 			}
@@ -170,7 +170,7 @@ func initCLI() {
 			readBase64Config(configBase64)
 			processNoConfigFlags(noConfigStart)
 			if err := v.Unmarshal(&cfg); err != nil {
-				mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
+				mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 			}
 
 			processLogAndCacheFlags()
@@ -179,18 +179,18 @@ func initCLI() {
 			// so it's able to log information in processCDFlags.
 			initLogging()
 
-			mainLog.Info().Msgf("starting ctrld %s", curVersion())
-			mainLog.Info().Msgf("os: %s", osVersion())
+			mainLog.Load().Info().Msgf("starting ctrld %s", curVersion())
+			mainLog.Load().Info().Msgf("os: %s", osVersion())
 
 			// Wait for network up.
 			if !ctrldnet.Up() {
-				mainLog.Fatal().Msg("network is not up yet")
+				mainLog.Load().Fatal().Msg("network is not up yet")
 			}
 
 			p.router = router.New(&cfg, cdUID != "")
 			cs, err := newControlServer(filepath.Join(homedir, ctrldControlUnixSock))
 			if err != nil {
-				mainLog.Warn().Err(err).Msg("could not create control server")
+				mainLog.Load().Warn().Err(err).Msg("could not create control server")
 			}
 			p.cs = cs
 
@@ -198,7 +198,7 @@ func initCLI() {
 			// time for validating server certificate. Some routers need NTP synchronization
 			// to set the current time, so this check must happen before processCDFlags.
 			if err := p.router.PreRun(); err != nil {
-				mainLog.Fatal().Err(err).Msg("failed to perform router pre-run check")
+				mainLog.Load().Fatal().Err(err).Msg("failed to perform router pre-run check")
 			}
 
 			oldLogPath := cfg.Service.LogPath
@@ -213,19 +213,20 @@ func initCLI() {
 			}
 
 			if err := writeConfigFile(); err != nil {
-				mainLog.Fatal().Err(err).Msg("failed to write config file")
+				mainLog.Load().Fatal().Err(err).Msg("failed to write config file")
 			} else {
-				mainLog.Info().Msg("writing config file to: " + defaultConfigFile)
+				mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
 			}
 
 			if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
 				// After processCDFlags, log config may change, so reset mainLog and re-init logging.
-				mainLog = zerolog.New(io.Discard)
+				l := zerolog.New(io.Discard)
+				mainLog.Store(&l)
 
 				// Copy logs written so far to new log file if possible.
 				if buf, err := os.ReadFile(oldLogPath); err == nil {
 					if err := os.WriteFile(newLogPath, buf, os.FileMode(0o600)); err != nil {
-						mainLog.Warn().Err(err).Msg("could not copy old log file")
+						mainLog.Load().Warn().Err(err).Msg("could not copy old log file")
 					}
 				}
 				initLoggingWithBackup(false)
@@ -237,22 +238,22 @@ func initCLI() {
 			if daemon {
 				exe, err := os.Executable()
 				if err != nil {
-					mainLog.Error().Err(err).Msg("failed to find the binary")
+					mainLog.Load().Error().Err(err).Msg("failed to find the binary")
 					os.Exit(1)
 				}
 				curDir, err := os.Getwd()
 				if err != nil {
-					mainLog.Error().Err(err).Msg("failed to get current working directory")
+					mainLog.Load().Error().Err(err).Msg("failed to get current working directory")
 					os.Exit(1)
 				}
 				// If running as daemon, re-run the command in background, with daemon off.
 				cmd := exec.Command(exe, append(os.Args[1:], "-d=false")...)
 				cmd.Dir = curDir
 				if err := cmd.Start(); err != nil {
-					mainLog.Error().Err(err).Msg("failed to start process as daemon")
+					mainLog.Load().Error().Err(err).Msg("failed to start process as daemon")
 					os.Exit(1)
 				}
-				mainLog.Info().Int("pid", cmd.Process.Pid).Msg("DNS proxy started")
+				mainLog.Load().Info().Int("pid", cmd.Process.Pid).Msg("DNS proxy started")
 				os.Exit(0)
 			}
 
@@ -260,7 +261,7 @@ func initCLI() {
 				for _, lc := range p.cfg.Listener {
 					if shouldAllocateLoopbackIP(lc.IP) {
 						if err := allocateIP(lc.IP); err != nil {
-							mainLog.Error().Err(err).Msgf("could not allocate IP: %s", lc.IP)
+							mainLog.Load().Error().Err(err).Msgf("could not allocate IP: %s", lc.IP)
 						}
 					}
 				}
@@ -269,7 +270,7 @@ func initCLI() {
 				for _, lc := range p.cfg.Listener {
 					if shouldAllocateLoopbackIP(lc.IP) {
 						if err := deAllocateIP(lc.IP); err != nil {
-							mainLog.Error().Err(err).Msgf("could not de-allocate IP: %s", lc.IP)
+							mainLog.Load().Error().Err(err).Msgf("could not de-allocate IP: %s", lc.IP)
 						}
 					}
 				}
@@ -279,15 +280,15 @@ func initCLI() {
 					rootCertPool = cp
 				}
 				p.onStarted = append(p.onStarted, func() {
-					mainLog.Debug().Msg("router setup")
+					mainLog.Load().Debug().Msg("router setup")
 					if err := p.router.Setup(); err != nil {
-						mainLog.Error().Err(err).Msg("could not configure router")
+						mainLog.Load().Error().Err(err).Msg("could not configure router")
 					}
 				})
 				p.onStopped = append(p.onStopped, func() {
-					mainLog.Debug().Msg("router cleanup")
+					mainLog.Load().Debug().Msg("router cleanup")
 					if err := p.router.Cleanup(); err != nil {
-						mainLog.Error().Err(err).Msg("could not cleanup router")
+						mainLog.Load().Error().Err(err).Msg("could not cleanup router")
 					}
 					p.resetDNS()
 				})
@@ -342,7 +343,7 @@ func initCLI() {
 				cfg:    &cfg,
 			}
 			if err := p.router.ConfigureService(sc); err != nil {
-				mainLog.Fatal().Err(err).Msg("failed to configure service on router")
+				mainLog.Load().Fatal().Err(err).Msg("failed to configure service on router")
 			}
 
 			// No config path, generating config in HOME directory.
@@ -386,7 +387,7 @@ func initCLI() {
 			tryReadingConfig(writeDefaultConfig)
 
 			if err := v.Unmarshal(&cfg); err != nil {
-				mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
+				mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 			}
 
 			initLogging()
@@ -400,12 +401,12 @@ func initCLI() {
 
 			s, err := newService(p, sc)
 			if err != nil {
-				mainLog.Error().Msg(err.Error())
+				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
 
 			if router.Name() != "" {
-				mainLog.Debug().Msg("cleaning up router before installing")
+				mainLog.Load().Debug().Msg("cleaning up router before installing")
 				_ = p.router.Cleanup()
 			}
 
@@ -417,12 +418,12 @@ func initCLI() {
 			}
 			if doTasks(tasks) {
 				if err := p.router.Install(sc); err != nil {
-					mainLog.Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
+					mainLog.Load().Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
 					return
 				}
 				status, err := s.Status()
 				if err != nil {
-					mainLog.Warn().Err(err).Msg("could not get service status")
+					mainLog.Load().Warn().Err(err).Msg("could not get service status")
 					return
 				}
 
@@ -430,15 +431,15 @@ func initCLI() {
 				status = selfCheckStatus(status, domain)
 				switch status {
 				case service.StatusRunning:
-					mainLog.Notice().Msg("Service started")
+					mainLog.Load().Notice().Msg("Service started")
 				default:
 					marker := bytes.Repeat([]byte("="), 32)
-					mainLog.Error().Msg("ctrld service may not have started due to an error or misconfiguration, service log:")
-					_, _ = mainLog.Write(marker)
+					mainLog.Load().Error().Msg("ctrld service may not have started due to an error or misconfiguration, service log:")
+					_, _ = mainLog.Load().Write(marker)
 					for msg := range runCmdLogCh {
-						_, _ = mainLog.Write([]byte(msg))
+						_, _ = mainLog.Load().Write([]byte(msg))
 					}
-					_, _ = mainLog.Write(marker)
+					_, _ = mainLog.Load().Write(marker)
 					uninstall(p, s)
 					os.Exit(1)
 				}
@@ -473,7 +474,7 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, _ []string) {
 			exe, err := os.Executable()
 			if err != nil {
-				mainLog.Fatal().Msgf("could not find executable path: %v", err)
+				mainLog.Load().Fatal().Msgf("could not find executable path: %v", err)
 				os.Exit(1)
 			}
 			flags := make([]string, 0)
@@ -487,7 +488,7 @@ func initCLI() {
 			command.Stderr = os.Stderr
 			command.Stdin = os.Stdin
 			if err := command.Run(); err != nil {
-				mainLog.Fatal().Msg(err.Error())
+				mainLog.Load().Fatal().Msg(err.Error())
 			}
 		},
 	}
@@ -509,14 +510,14 @@ func initCLI() {
 			p := &prog{router: router.New(&cfg, cdUID != "")}
 			s, err := newService(p, svcConfig)
 			if err != nil {
-				mainLog.Error().Msg(err.Error())
+				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
 			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
 				p.router.Cleanup()
 				p.resetDNS()
-				mainLog.Notice().Msg("Service stopped")
+				mainLog.Load().Notice().Msg("Service stopped")
 			}
 		},
 	}
@@ -533,12 +534,12 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := newService(&prog{}, svcConfig)
 			if err != nil {
-				mainLog.Error().Msg(err.Error())
+				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
 			initLogging()
 			if doTasks([]task{{s.Restart, true}}) {
-				mainLog.Notice().Msg("Service restarted")
+				mainLog.Load().Notice().Msg("Service restarted")
 			}
 		},
 	}
@@ -553,23 +554,23 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := newService(&prog{}, svcConfig)
 			if err != nil {
-				mainLog.Error().Msg(err.Error())
+				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
 			status, err := s.Status()
 			if err != nil {
-				mainLog.Error().Msg(err.Error())
+				mainLog.Load().Error().Msg(err.Error())
 				os.Exit(1)
 			}
 			switch status {
 			case service.StatusUnknown:
-				mainLog.Notice().Msg("Unknown status")
+				mainLog.Load().Notice().Msg("Unknown status")
 				os.Exit(2)
 			case service.StatusRunning:
-				mainLog.Notice().Msg("Service is running")
+				mainLog.Load().Notice().Msg("Service is running")
 				os.Exit(0)
 			case service.StatusStopped:
-				mainLog.Notice().Msg("Service is stopped")
+				mainLog.Load().Notice().Msg("Service is stopped")
 				os.Exit(1)
 			}
 		},
@@ -599,7 +600,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			p := &prog{router: router.New(&cfg, cdUID != "")}
 			s, err := newService(p, svcConfig)
 			if err != nil {
-				mainLog.Error().Msg(err.Error())
+				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
 			if iface == "" {
@@ -639,7 +640,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				println()
 			})
 			if err != nil {
-				mainLog.Error().Msg(err.Error())
+				mainLog.Load().Error().Msg(err.Error())
 			}
 		},
 	}
@@ -767,18 +768,18 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			dir, err := userHomeDir()
 			if err != nil {
-				mainLog.Fatal().Err(err).Msg("failed to find ctrld home dir")
+				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
 			}
 			cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
 			resp, err := cc.post(listClientsPath, nil)
 			if err != nil {
-				mainLog.Fatal().Err(err).Msg("failed to get clients list")
+				mainLog.Load().Fatal().Err(err).Msg("failed to get clients list")
 			}
 			defer resp.Body.Close()
 
 			var clients []*clientinfo.Client
 			if err := json.NewDecoder(resp.Body).Decode(&clients); err != nil {
-				mainLog.Fatal().Err(err).Msg("failed to decode clients list result")
+				mainLog.Load().Fatal().Err(err).Msg("failed to decode clients list result")
 			}
 			map2Slice := func(m map[string]struct{}) []string {
 				s := make([]string, 0, len(m))
@@ -847,7 +848,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	// If err == nil, there's a config supplied via `--config`, no default config written.
 	err := v.ReadInConfig()
 	if err == nil {
-		mainLog.Info().Msg("loading config file from: " + v.ConfigFileUsed())
+		mainLog.Load().Info().Msg("loading config file from: " + v.ConfigFileUsed())
 		defaultConfigFile = v.ConfigFileUsed()
 		return true
 	}
@@ -859,16 +860,16 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	// If error is viper.ConfigFileNotFoundError, write default config.
 	if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 		if err := v.Unmarshal(&cfg); err != nil {
-			mainLog.Fatal().Msgf("failed to unmarshal default config: %v", err)
+			mainLog.Load().Fatal().Msgf("failed to unmarshal default config: %v", err)
 		}
 		if err := writeConfigFile(); err != nil {
-			mainLog.Fatal().Msgf("failed to write default config file: %v", err)
+			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
 		} else {
 			fp, err := filepath.Abs(defaultConfigFile)
 			if err != nil {
-				mainLog.Fatal().Msgf("failed to get default config file path: %v", err)
+				mainLog.Load().Fatal().Msgf("failed to get default config file path: %v", err)
 			}
-			mainLog.Info().Msg("writing default config file to: " + fp)
+			mainLog.Load().Info().Msg("writing default config file to: " + fp)
 		}
 		defaultConfigWritten = true
 		return false
@@ -879,13 +880,13 @@ func readConfigFile(writeDefaultConfig bool) bool {
 			var i any
 			if err, ok := toml.NewDecoder(f).Decode(&i).(*toml.DecodeError); ok {
 				row, col := err.Position()
-				mainLog.Fatal().Msgf("failed to decode config file at line: %d, column: %d, error: %v", row, col, err)
+				mainLog.Load().Fatal().Msgf("failed to decode config file at line: %d, column: %d, error: %v", row, col, err)
 			}
 		}
 	}
 
 	// Otherwise, report fatal error and exit.
-	mainLog.Fatal().Msgf("failed to decode config file: %v", err)
+	mainLog.Load().Fatal().Msgf("failed to decode config file: %v", err)
 	return false
 }
 
@@ -895,7 +896,7 @@ func readBase64Config(configBase64 string) {
 	}
 	configStr, err := base64.StdEncoding.DecodeString(configBase64)
 	if err != nil {
-		mainLog.Fatal().Msgf("invalid base64 config: %v", err)
+		mainLog.Load().Fatal().Msgf("invalid base64 config: %v", err)
 	}
 
 	// readBase64Config is called when:
@@ -907,7 +908,7 @@ func readBase64Config(configBase64 string) {
 	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	v.SetConfigType("toml")
 	if err := v.ReadConfig(bytes.NewReader(configStr)); err != nil {
-		mainLog.Fatal().Msgf("failed to read base64 config: %v", err)
+		mainLog.Load().Fatal().Msgf("failed to read base64 config: %v", err)
 	}
 }
 
@@ -916,7 +917,7 @@ func processNoConfigFlags(noConfigStart bool) {
 		return
 	}
 	if listenAddress == "" || primaryUpstream == "" {
-		mainLog.Fatal().Msg(`"listen" and "primary_upstream" flags must be set in no config mode`)
+		mainLog.Load().Fatal().Msg(`"listen" and "primary_upstream" flags must be set in no config mode`)
 	}
 	processListenFlag()
 
@@ -952,7 +953,7 @@ func processNoConfigFlags(noConfigStart bool) {
 }
 
 func processCDFlags() {
-	logger := mainLog.With().Str("mode", "cd").Logger()
+	logger := mainLog.Load().With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
 	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
@@ -993,7 +994,7 @@ func processCDFlags() {
 		logger.Info().Msg("using defined custom config of Control-D resolver")
 		readBase64Config(resolverConfig.Ctrld.CustomConfig)
 		if err := v.Unmarshal(&cfg); err != nil {
-			mainLog.Fatal().Msgf("failed to unmarshal config: %v", err)
+			mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 		}
 	} else {
 		cfg.Network = make(map[string]*ctrld.NetworkConfig)
@@ -1034,11 +1035,11 @@ func processListenFlag() {
 	}
 	host, portStr, err := net.SplitHostPort(listenAddress)
 	if err != nil {
-		mainLog.Fatal().Msgf("invalid listener address: %v", err)
+		mainLog.Load().Fatal().Msgf("invalid listener address: %v", err)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		mainLog.Fatal().Msgf("invalid port number: %v", err)
+		mainLog.Load().Fatal().Msgf("invalid port number: %v", err)
 	}
 	lc := &ctrld.ListenerConfig{
 		IP:   host,
@@ -1094,7 +1095,7 @@ func defaultIfaceName() string {
 		if oi := osinfo.New(); strings.Contains(oi.String(), "Microsoft") {
 			return "lo"
 		}
-		mainLog.Fatal().Err(err).Msg("failed to get default route interface")
+		mainLog.Load().Fatal().Err(err).Msg("failed to get default route interface")
 	}
 	return dri
 }
@@ -1106,7 +1107,7 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 	}
 	dir, err := userHomeDir()
 	if err != nil {
-		mainLog.Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
+		mainLog.Load().Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
 		return service.StatusUnknown
 	}
 
@@ -1115,7 +1116,7 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 	ctx := context.Background()
 	maxAttempts := 20
 
-	mainLog.Debug().Msg("waiting for ctrld listener to be ready")
+	mainLog.Load().Debug().Msg("waiting for ctrld listener to be ready")
 	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
 
 	// The socket control server may not start yet, so attempt to ping
@@ -1129,17 +1130,17 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 	}
 	resp, err := cc.post(startedPath, nil)
 	if err != nil {
-		mainLog.Error().Err(err).Msg("failed to connect to control server")
+		mainLog.Load().Error().Err(err).Msg("failed to connect to control server")
 		return service.StatusUnknown
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		mainLog.Error().Msg("ctrld listener is not ready")
+		mainLog.Load().Error().Msg("ctrld listener is not ready")
 		return service.StatusUnknown
 	}
 
-	mainLog.Debug().Msg("ctrld listener is ready")
-	mainLog.Debug().Msg("performing self-check")
+	mainLog.Load().Debug().Msg("ctrld listener is ready")
+	mainLog.Load().Debug().Msg("performing self-check")
 	bo = backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 500 * time.Millisecond
 	c := new(dns.Client)
@@ -1149,14 +1150,14 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 	)
 
 	if err := v.ReadInConfig(); err != nil {
-		mainLog.Fatal().Err(err).Msg("failed to read new config")
+		mainLog.Load().Fatal().Err(err).Msg("failed to read new config")
 	}
 	if err := v.Unmarshal(&cfg); err != nil {
-		mainLog.Fatal().Err(err).Msg("failed to update new config")
+		mainLog.Load().Fatal().Err(err).Msg("failed to update new config")
 	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		mainLog.Error().Err(err).Msg("could not watch config change")
+		mainLog.Load().Error().Err(err).Msg("could not watch config change")
 		return service.StatusUnknown
 	}
 	defer watcher.Close()
@@ -1165,7 +1166,7 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 		mu.Lock()
 		defer mu.Unlock()
 		if err := v.UnmarshalKey("listener", &lcChanged); err != nil {
-			mainLog.Error().Msgf("failed to unmarshal listener config: %v", err)
+			mainLog.Load().Error().Msgf("failed to unmarshal listener config: %v", err)
 			return
 		}
 	})
@@ -1187,27 +1188,27 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 		m.RecursionDesired = true
 		r, _, err := c.ExchangeContext(ctx, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
 		if r != nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
-			mainLog.Debug().Msgf("self-check against %q succeeded", domain)
+			mainLog.Load().Debug().Msgf("self-check against %q succeeded", domain)
 			return status
 		}
 		lastAnswer = r
 		lastErr = err
 		bo.BackOff(ctx, fmt.Errorf("ExchangeContext: %w", err))
 	}
-	mainLog.Debug().Msgf("self-check against %q failed", domain)
+	mainLog.Load().Debug().Msgf("self-check against %q failed", domain)
 	lc := cfg.FirstListener()
 	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
 	marker := strings.Repeat("=", 32)
-	mainLog.Debug().Msg(marker)
-	mainLog.Debug().Msgf("listener address       : %s", addr)
-	mainLog.Debug().Msgf("last error             : %v", lastErr)
+	mainLog.Load().Debug().Msg(marker)
+	mainLog.Load().Debug().Msgf("listener address       : %s", addr)
+	mainLog.Load().Debug().Msgf("last error             : %v", lastErr)
 	if lastAnswer != nil {
-		mainLog.Debug().Msgf("last answer from ctrld :")
-		mainLog.Debug().Msg(marker)
+		mainLog.Load().Debug().Msgf("last answer from ctrld :")
+		mainLog.Load().Debug().Msg(marker)
 		for _, s := range strings.Split(lastAnswer.String(), "\n") {
-			mainLog.Debug().Msgf("%s", s)
+			mainLog.Load().Debug().Msgf("%s", s)
 		}
-		mainLog.Debug().Msg(marker)
+		mainLog.Load().Debug().Msg(marker)
 	}
 	return service.StatusUnknown
 }
@@ -1260,7 +1261,7 @@ func readConfig(writeDefaultConfig bool) {
 
 	dir, err := userHomeDir()
 	if err != nil {
-		mainLog.Fatal().Msgf("failed to get user home dir: %v", err)
+		mainLog.Load().Fatal().Msgf("failed to get user home dir: %v", err)
 	}
 	for _, config := range configs {
 		ctrld.SetConfigNameWithPath(v, config.name, dir)
@@ -1279,20 +1280,20 @@ func uninstall(p *prog, s service.Service) {
 	initLogging()
 	if doTasks(tasks) {
 		if err := p.router.ConfigureService(svcConfig); err != nil {
-			mainLog.Fatal().Err(err).Msg("could not configure service")
+			mainLog.Load().Fatal().Err(err).Msg("could not configure service")
 		}
 		if err := p.router.Uninstall(svcConfig); err != nil {
-			mainLog.Warn().Err(err).Msg("post uninstallation failed, please check system/service log for details error")
+			mainLog.Load().Warn().Err(err).Msg("post uninstallation failed, please check system/service log for details error")
 			return
 		}
 		p.resetDNS()
 		if router.Name() != "" {
-			mainLog.Debug().Msg("Router cleanup")
+			mainLog.Load().Debug().Msg("Router cleanup")
 		}
 		// Stop already did router.Cleanup and report any error if happens,
 		// ignoring error here to prevent false positive.
 		_ = p.router.Cleanup()
-		mainLog.Notice().Msg("Service uninstalled")
+		mainLog.Load().Notice().Msg("Service uninstalled")
 		return
 	}
 }
@@ -1305,7 +1306,7 @@ func validateConfig(cfg *ctrld.Config) {
 	var ve validator.ValidationErrors
 	if errors.As(err, &ve) {
 		for _, fe := range ve {
-			mainLog.Error().Msgf("invalid config: %s: %s", fe.Namespace(), fieldErrorMsg(fe))
+			mainLog.Load().Error().Msgf("invalid config: %s: %s", fe.Namespace(), fieldErrorMsg(fe))
 		}
 	}
 	os.Exit(1)
@@ -1472,14 +1473,14 @@ func updateListenerConfig() {
 		maxAttempts := 10
 		for {
 			if attempts == maxAttempts {
-				logMsg(mainLog.Fatal(), n, "could not find available listen ip and port")
+				logMsg(mainLog.Load().Fatal(), n, "could not find available listen ip and port")
 			}
 			addr := net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port))
 			if listenOk(addr) {
 				break
 			}
 			if !check.IP && !check.Port {
-				logMsg(mainLog.Fatal(), n, "failed to listen on: %s", addr)
+				logMsg(mainLog.Load().Fatal(), n, "failed to listen on: %s", addr)
 			}
 			if tryAllPort53 {
 				tryAllPort53 = false
@@ -1490,7 +1491,7 @@ func updateListenerConfig() {
 					listener.Port = 53
 				}
 				if check.IP {
-					logMsg(mainLog.Warn(), n, "could not listen on address: %s, trying: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+					logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 				}
 				continue
 			}
@@ -1503,7 +1504,7 @@ func updateListenerConfig() {
 					listener.Port = 53
 				}
 				if check.IP {
-					logMsg(mainLog.Warn(), n, "could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+					logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 				}
 				continue
 			}
@@ -1515,7 +1516,7 @@ func updateListenerConfig() {
 				if check.Port {
 					listener.Port = 5354
 				}
-				logMsg(mainLog.Warn(), n, "could not listen on address: %s, trying current ip with port 5354", addr)
+				logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying current ip with port 5354", addr)
 				continue
 			}
 			if tryPort5354 {
@@ -1526,7 +1527,7 @@ func updateListenerConfig() {
 				if check.Port {
 					listener.Port = 5354
 				}
-				logMsg(mainLog.Warn(), n, "could not listen on address: %s, trying 0.0.0.0:5354", addr)
+				logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying 0.0.0.0:5354", addr)
 				continue
 			}
 			if check.IP && !isZeroIP { // for "0.0.0.0" or "::", we only need to try new port.
@@ -1540,9 +1541,9 @@ func updateListenerConfig() {
 				listener.Port = oldPort
 			}
 			if listener.IP == oldIP && listener.Port == oldPort {
-				logMsg(mainLog.Fatal(), n, "could not listener on: %s", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+				logMsg(mainLog.Load().Fatal(), n, "could not listener on: %s", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 			}
-			logMsg(mainLog.Warn(), n, "could not listen on address: %s, pick a random ip+port", addr)
+			logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, pick a random ip+port", addr)
 			attempts++
 		}
 	}
@@ -1555,7 +1556,7 @@ func updateListenerConfig() {
 			// ip address, other than "127.0.0.1", so trying to listen on default route interface
 			// address instead.
 			if ip := net.ParseIP(listener.IP); ip != nil && ip.IsLoopback() && ip.String() != "127.0.0.1" {
-				logMsg(mainLog.Warn(), n, "using loopback interface do not work with systemd-resolved")
+				logMsg(mainLog.Load().Warn(), n, "using loopback interface do not work with systemd-resolved")
 				found := false
 				if netIface, _ := net.InterfaceByName(defaultIfaceName()); netIface != nil {
 					addrs, _ := netIface.Addrs()
@@ -1565,14 +1566,14 @@ func updateListenerConfig() {
 							if listenOk(addr) {
 								found = true
 								listener.IP = netIP.IP.String()
-								logMsg(mainLog.Warn(), n, "use %s as listener address", listener.IP)
+								logMsg(mainLog.Load().Warn(), n, "use %s as listener address", listener.IP)
 								break
 							}
 						}
 					}
 				}
 				if !found {
-					logMsg(mainLog.Fatal(), n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
+					logMsg(mainLog.Load().Fatal(), n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
 				}
 			}
 		}

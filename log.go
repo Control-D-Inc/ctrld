@@ -4,13 +4,23 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync/atomic"
 
 	"github.com/rs/zerolog"
 )
 
+func init() {
+	l := zerolog.New(io.Discard)
+	ProxyLogger.Store(&l)
+}
+
 // ProxyLog emits the log record for proxy operations.
 // The caller should set it only once.
+// DEPRECATED: use ProxyLogger instead.
 var ProxyLog = zerolog.New(io.Discard)
+
+// ProxyLogger emits the log record for proxy operations.
+var ProxyLogger atomic.Pointer[zerolog.Logger]
 
 // ReqIdCtxKey is the context.Context key for a request id.
 type ReqIdCtxKey struct{}

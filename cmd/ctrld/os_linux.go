@@ -29,7 +29,7 @@ import (
 func allocateIP(ip string) error {
 	cmd := exec.Command("ip", "a", "add", ip+"/24", "dev", "lo")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		mainLog.Error().Err(err).Msgf("allocateIP failed: %s", string(out))
+		mainLog.Load().Error().Err(err).Msgf("allocateIP failed: %s", string(out))
 		return err
 	}
 	return nil
@@ -38,7 +38,7 @@ func allocateIP(ip string) error {
 func deAllocateIP(ip string) error {
 	cmd := exec.Command("ip", "a", "del", ip+"/24", "dev", "lo")
 	if err := cmd.Run(); err != nil {
-		mainLog.Error().Err(err).Msg("deAllocateIP failed")
+		mainLog.Load().Error().Err(err).Msg("deAllocateIP failed")
 		return err
 	}
 	return nil
@@ -50,7 +50,7 @@ const maxSetDNSAttempts = 5
 func setDNS(iface *net.Interface, nameservers []string) error {
 	r, err := dns.NewOSConfigurator(logf, iface.Name)
 	if err != nil {
-		mainLog.Error().Err(err).Msg("failed to create DNS OS configurator")
+		mainLog.Load().Error().Err(err).Msg("failed to create DNS OS configurator")
 		return err
 	}
 
@@ -69,7 +69,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		if err := r.SetDNS(osConfig); err != nil {
 			if strings.Contains(err.Error(), "Rejected send message") &&
 				strings.Contains(err.Error(), "org.freedesktop.network1.Manager") {
-				mainLog.Warn().Msg("Interfaces are managed by systemd-networkd, switch to systemd-resolve for setting DNS")
+				mainLog.Load().Warn().Msg("Interfaces are managed by systemd-networkd, switch to systemd-resolve for setting DNS")
 				trySystemdResolve = true
 				break
 			}
@@ -100,7 +100,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 			time.Sleep(time.Second)
 		}
 	}
-	mainLog.Debug().Msg("DNS was not set for some reason")
+	mainLog.Load().Debug().Msg("DNS was not set for some reason")
 	return nil
 }
 
@@ -116,7 +116,7 @@ func resetDNS(iface *net.Interface) (err error) {
 		if r, oerr := dns.NewOSConfigurator(logf, iface.Name); oerr == nil {
 			_ = r.SetDNS(dns.OSConfig{})
 			if err := r.Close(); err != nil {
-				mainLog.Error().Err(err).Msg("failed to rollback DNS setting")
+				mainLog.Load().Error().Err(err).Msg("failed to rollback DNS setting")
 				return
 			}
 			err = nil
@@ -148,13 +148,13 @@ func resetDNS(iface *net.Interface) (err error) {
 		c := client6.NewClient()
 		conversation, err := c.Exchange(iface.Name)
 		if err != nil && !errAddrInUse(err) {
-			mainLog.Debug().Err(err).Msg("could not exchange DHCPv6")
+			mainLog.Load().Debug().Err(err).Msg("could not exchange DHCPv6")
 		}
 		for _, packet := range conversation {
 			if packet.Type() == dhcpv6.MessageTypeReply {
 				msg, err := packet.GetInnerMessage()
 				if err != nil {
-					mainLog.Debug().Err(err).Msg("could not get inner DHCPv6 message")
+					mainLog.Load().Debug().Err(err).Msg("could not get inner DHCPv6 message")
 					return nil
 				}
 				nameservers := msg.Options.DNS()

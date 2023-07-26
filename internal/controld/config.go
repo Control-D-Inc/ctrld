@@ -80,10 +80,10 @@ func FetchResolverConfig(uid, version string, cdDev bool) (*ResolverConfig, erro
 		}
 		ips := ctrld.LookupIP(apiDomain)
 		if len(ips) == 0 {
-			ctrld.ProxyLog.Warn().Msgf("No IPs found for %s, connecting to %s", apiDomain, addr)
+			ctrld.ProxyLogger.Load().Warn().Msgf("No IPs found for %s, connecting to %s", apiDomain, addr)
 			return ctrldnet.Dialer.DialContext(ctx, network, addr)
 		}
-		ctrld.ProxyLog.Debug().Msgf("API IPs: %v", ips)
+		ctrld.ProxyLogger.Load().Debug().Msgf("API IPs: %v", ips)
 		_, port, _ := net.SplitHostPort(addr)
 		addrs := make([]string, len(ips))
 		for i := range ips {

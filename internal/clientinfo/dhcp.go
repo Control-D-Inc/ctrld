@@ -56,14 +56,14 @@ func (d *dhcp) watchChanges() {
 			if event.Has(fsnotify.Write) {
 				format := clientInfoFiles[event.Name]
 				if err := d.readLeaseFile(event.Name, format); err != nil && !os.IsNotExist(err) {
-					ctrld.ProxyLog.Err(err).Str("file", event.Name).Msg("leases file changed but failed to update client info")
+					ctrld.ProxyLogger.Load().Err(err).Str("file", event.Name).Msg("leases file changed but failed to update client info")
 				}
 			}
 		case err, ok := <-d.watcher.Errors:
 			if !ok {
 				return
 			}
-			ctrld.ProxyLog.Err(err).Msg("could not watch client info file")
+			ctrld.ProxyLogger.Load().Err(err).Msg("could not watch client info file")
 		}
 	}
 
@@ -167,7 +167,7 @@ func (d *dhcp) dnsmasqReadClientInfoReader(reader io.Reader) error {
 		}
 		ip := normalizeIP(string(fields[2]))
 		if net.ParseIP(ip) == nil {
-			ctrld.ProxyLog.Warn().Msgf("invalid ip address entry: %q", ip)
+			ctrld.ProxyLogger.Load().Warn().Msgf("invalid ip address entry: %q", ip)
 			ip = ""
 		}
 
@@ -219,7 +219,7 @@ func (d *dhcp) iscDHCPReadClientInfoReader(reader io.Reader) error {
 		case "lease":
 			ip = normalizeIP(strings.ToLower(fields[1]))
 			if net.ParseIP(ip) == nil {
-				ctrld.ProxyLog.Warn().Msgf("invalid ip address entry: %q", ip)
+				ctrld.ProxyLogger.Load().Warn().Msgf("invalid ip address entry: %q", ip)
 				ip = ""
 			}
 		case "hardware":
@@ -242,7 +242,7 @@ func (d *dhcp) iscDHCPReadClientInfoReader(reader io.Reader) error {
 func (d *dhcp) addSelf() {
 	hostname, err := os.Hostname()
 	if err != nil {
-		ctrld.ProxyLog.Err(err).Msg("could not get hostname")
+		ctrld.ProxyLogger.Load().Err(err).Msg("could not get hostname")
 		return
 	}
 	hostname = normalizeHostname(hostname)
