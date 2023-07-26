@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -53,12 +54,18 @@ func (u UtilityErrorResponse) Error() string {
 }
 
 type utilityRequest struct {
-	UID string `json:"uid"`
+	UID      string `json:"uid"`
+	ClientID string `json:"client_id,omitempty"`
 }
 
 // FetchResolverConfig fetch Control D config for given uid.
-func FetchResolverConfig(uid, version string, cdDev bool) (*ResolverConfig, error) {
-	body, _ := json.Marshal(utilityRequest{UID: uid})
+func FetchResolverConfig(rawUID, version string, cdDev bool) (*ResolverConfig, error) {
+	uid, clientID := ParseRawUID(rawUID)
+	uReq := utilityRequest{UID: uid}
+	if clientID != "" {
+		uReq.ClientID = clientID
+	}
+	body, _ := json.Marshal(uReq)
 	apiUrl := resolverDataURLCom
 	if cdDev {
 		apiUrl = resolverDataURLDev
@@ -119,4 +126,14 @@ func FetchResolverConfig(uid, version string, cdDev bool) (*ResolverConfig, erro
 		return nil, err
 	}
 	return &ur.Body.Resolver, nil
+}
+
+// ParseRawUID parse the input raw UID, returning real UID and ClientID.
+// The raw UID can have 2 forms:
+//
+// - <uid>
+// - <uid>/<client_id>
+func ParseRawUID(rawUID string) (string, string) {
+	uid, clientID, _ := strings.Cut(rawUID, "/")
+	return uid, clientID
 }
