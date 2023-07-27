@@ -1415,10 +1415,10 @@ func updateListenerConfig() {
 			_ = closer.Close()
 		}
 	}()
-	// listenOk reports whether we can listen on udp/tcp of given address.
+	// tryListen attempts to listen on given udp and tcp address.
 	// Created listeners will be kept in listeners slice above, and close
 	// before function finished.
-	listenOk := func(addr string) bool {
+	tryListen := func(addr string) error {
 		udpLn, udpErr := net.ListenPacket("udp", addr)
 		if udpLn != nil {
 			closers = append(closers, udpLn)
@@ -1427,7 +1427,7 @@ func updateListenerConfig() {
 		if tcpLn != nil {
 			closers = append(closers, tcpLn)
 		}
-		return udpErr == nil && tcpErr == nil
+		return errors.Join(udpErr, tcpErr)
 	}
 
 	logMsg := func(e *zerolog.Event, listenerNum int, format string, v ...any) {
@@ -1476,11 +1476,12 @@ func updateListenerConfig() {
 				logMsg(mainLog.Load().Fatal(), n, "could not find available listen ip and port")
 			}
 			addr := net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port))
-			if listenOk(addr) {
+			err := tryListen(addr)
+			if err == nil {
 				break
 			}
 			if !check.IP && !check.Port {
-				logMsg(mainLog.Load().Fatal(), n, "failed to listen on: %s", addr)
+				logMsg(mainLog.Load().Fatal(), n, "failed to listen: %v", err)
 			}
 			if tryAllPort53 {
 				tryAllPort53 = false
@@ -1541,7 +1542,7 @@ func updateListenerConfig() {
 				listener.Port = oldPort
 			}
 			if listener.IP == oldIP && listener.Port == oldPort {
-				logMsg(mainLog.Load().Fatal(), n, "could not listener on: %s", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+				logMsg(mainLog.Load().Fatal(), n, "could not listener on %s: %v", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)), err)
 			}
 			logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, pick a random ip+port", addr)
 			attempts++
@@ -1563,7 +1564,7 @@ func updateListenerConfig() {
 					for _, addr := range addrs {
 						if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.To4() != nil {
 							addr := net.JoinHostPort(netIP.IP.String(), strconv.Itoa(listener.Port))
-							if listenOk(addr) {
+							if err := tryListen(addr); err == nil {
 								found = true
 								listener.IP = netIP.IP.String()
 								logMsg(mainLog.Load().Warn(), n, "use %s as listener address", listener.IP)
