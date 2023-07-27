@@ -229,6 +229,14 @@ func (t *Table) lookupHostnameAll(ip, mac string) []*hostnameEntry {
 	var res []*hostnameEntry
 	for _, r := range t.hostnameResolvers {
 		src := r.String()
+		// For ptrDiscover, lookup hostname may block due to server unavailable,
+		// so only lookup from cache to prevent timeout reached.
+		if ptrResolver, ok := r.(*ptrDiscover); ok {
+			if name := ptrResolver.lookupHostnameFromCache(ip); name != "" {
+				res = append(res, &hostnameEntry{name: name, src: src})
+			}
+			continue
+		}
 		if name := r.LookupHostnameByIP(ip); name != "" {
 			res = append(res, &hostnameEntry{name: name, src: src})
 			continue

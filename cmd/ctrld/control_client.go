@@ -20,7 +20,7 @@ func newControlClient(addr string) *controlClient {
 				return d.DialContext(ctx, "unix", addr)
 			},
 		},
-		Timeout: time.Second * 5,
+		Timeout: time.Second * 30,
 	}}
 }
 
