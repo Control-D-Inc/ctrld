@@ -6,8 +6,10 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -33,6 +35,7 @@ type ResolverConfig struct {
 		CustomConfig string `json:"custom_config"`
 	} `json:"ctrld"`
 	Exclude []string `json:"exclude"`
+	UID     string   `json:"uid"`
 }
 
 type utilityResponse struct {
@@ -58,19 +61,35 @@ type utilityRequest struct {
 	ClientID string `json:"client_id,omitempty"`
 }
 
+type utilityOrgRequest struct {
+	ProvToken string `json:"prov_token"`
+	Hostname  string `json:"hostname"`
+}
+
 // FetchResolverConfig fetch Control D config for given uid.
 func FetchResolverConfig(rawUID, version string, cdDev bool) (*ResolverConfig, error) {
 	uid, clientID := ParseRawUID(rawUID)
-	uReq := utilityRequest{UID: uid}
+	req := utilityRequest{UID: uid}
 	if clientID != "" {
-		uReq.ClientID = clientID
+		req.ClientID = clientID
 	}
-	body, _ := json.Marshal(uReq)
+	body, _ := json.Marshal(req)
+	return postUtilityAPI(version, cdDev, bytes.NewReader(body))
+}
+
+// FetchResolverUID fetch resolver uid from provision token.
+func FetchResolverUID(pt, version string, cdDev bool) (*ResolverConfig, error) {
+	hostname, _ := os.Hostname()
+	body, _ := json.Marshal(utilityOrgRequest{ProvToken: pt, Hostname: hostname})
+	return postUtilityAPI(version, cdDev, bytes.NewReader(body))
+}
+
+func postUtilityAPI(version string, cdDev bool, body io.Reader) (*ResolverConfig, error) {
 	apiUrl := resolverDataURLCom
 	if cdDev {
 		apiUrl = resolverDataURLDev
 	}
-	req, err := http.NewRequest("POST", apiUrl, bytes.NewReader(body))
+	req, err := http.NewRequest("POST", apiUrl, body)
 	if err != nil {
 		return nil, fmt.Errorf("http.NewRequest: %w", err)
 	}

@@ -28,6 +28,7 @@ var (
 	verbose           int
 	silent            bool
 	cdUID             string
+	cdOrg             string
 	cdDev             bool
 	iface             string
 	ifaceStartStop    string

@@ -202,6 +202,9 @@ func initCLI() {
 			}
 
 			oldLogPath := cfg.Service.LogPath
+			if uid := cdUIDFromProvToken(); uid != "" {
+				cdUID = uid
+			}
 			if cdUID != "" {
 				processCDFlags()
 			}
@@ -311,6 +314,7 @@ func initCLI() {
 	runCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	runCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
+	runCmd.Flags().StringVarP(&cdOrg, "cd-org", "", "", "Control D provision token")
 	runCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = runCmd.Flags().MarkHidden("dev")
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
@@ -337,6 +341,12 @@ func initCLI() {
 			}
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
+			if uid := cdUIDFromProvToken(); uid != "" {
+				cdUID = uid
+				removeProvTokenFromArgs(sc)
+				// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
+				sc.Arguments = append(sc.Arguments, "--cd="+cdUID)
+			}
 
 			p := &prog{
 				router: router.New(&cfg, cdUID != ""),
@@ -427,8 +437,7 @@ func initCLI() {
 					return
 				}
 
-				domain := cfg.Upstream["0"].VerifyDomain()
-				status = selfCheckStatus(status, domain)
+				status = selfCheckStatus(status)
 				switch status {
 				case service.StatusRunning:
 					mainLog.Load().Notice().Msg("Service started")
@@ -462,6 +471,7 @@ func initCLI() {
 	startCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
+	startCmd.Flags().StringVarP(&cdOrg, "cd-org", "", "", "Control D provision token")
 	startCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
@@ -1100,11 +1110,7 @@ func defaultIfaceName() string {
 	return dri
 }
 
-func selfCheckStatus(status service.Status, domain string) service.Status {
-	if domain == "" {
-		// Nothing to do, return the status as-is.
-		return status
-	}
+func selfCheckStatus(status service.Status) service.Status {
 	dir, err := userHomeDir()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
@@ -1146,6 +1152,7 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 	c := new(dns.Client)
 	var (
 		lcChanged map[string]*ctrld.ListenerConfig
+		ucChanged map[string]*ctrld.UpstreamConfig
 		mu        sync.Mutex
 	)
 
@@ -1154,6 +1161,11 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 	}
 	if err := v.Unmarshal(&cfg); err != nil {
 		mainLog.Load().Fatal().Err(err).Msg("failed to update new config")
+	}
+	domain := cfg.FirstUpstream().VerifyDomain()
+	if domain == "" {
+		// Nothing to do, return the status as-is.
+		return status
 	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -1169,6 +1181,10 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 			mainLog.Load().Error().Msgf("failed to unmarshal listener config: %v", err)
 			return
 		}
+		if err := v.UnmarshalKey("upstream", &ucChanged); err != nil {
+			mainLog.Load().Error().Msgf("failed to unmarshal upstream config: %v", err)
+			return
+		}
 	})
 	v.WatchConfig()
 	var (
@@ -1180,8 +1196,15 @@ func selfCheckStatus(status service.Status, domain string) service.Status {
 		if lcChanged != nil {
 			cfg.Listener = lcChanged
 		}
+		if ucChanged != nil {
+			cfg.Upstream = ucChanged
+		}
 		mu.Unlock()
 		lc := cfg.FirstListener()
+		domain = cfg.FirstUpstream().VerifyDomain()
+		if domain == "" {
+			continue
+		}
 
 		m := new(dns.Msg)
 		m.SetQuestion(domain+".", dns.TypeA)
@@ -1598,4 +1621,45 @@ func osVersion() string {
 		}
 	}
 	return oi.String()
+}
+
+// cdUIDFromProvToken fetch UID from ControlD API using provision token.
+func cdUIDFromProvToken() string {
+	// --cd flag supersedes --cd-org, ignore it if both are supplied.
+	if cdUID != "" {
+		return ""
+	}
+	// --cd-org is empty, nothing to do.
+	if cdOrg == "" {
+		return ""
+	}
+	// Process provision token if provided.
+	resolverConfig, err := controld.FetchResolverUID(cdOrg, rootCmd.Version, cdDev)
+	if err != nil {
+		mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid with provision token: %s", cdOrg)
+	}
+	return resolverConfig.UID
+}
+
+// removeProvTokenFromArgs removes the --cd-org from command line arguments.
+func removeProvTokenFromArgs(sc *service.Config) {
+	a := sc.Arguments[:0]
+	skip := false
+	for _, x := range sc.Arguments {
+		if skip {
+			skip = false
+			continue
+		}
+		// For "--cd-org XXX", skip it and mark next arg skipped.
+		if x == "--cd-org" {
+			skip = true
+			continue
+		}
+		// For "--cd-org=XXX", just skip it.
+		if strings.HasPrefix(x, "--cd-org=") {
+			continue
+		}
+		a = append(a, x)
+	}
+	sc.Arguments = a
 }

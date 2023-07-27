@@ -144,6 +144,25 @@ func (c *Config) FirstListener() *ListenerConfig {
 	return c.Listener[strconv.Itoa(listeners[0])]
 }
 
+// FirstUpstream returns the first upstream of current config. Upstreams are sorted numerically.
+//
+// It panics if Config has no upstreams configured.
+func (c *Config) FirstUpstream() *UpstreamConfig {
+	upstreams := make([]int, 0, len(c.Upstream))
+	for k := range c.Upstream {
+		n, err := strconv.Atoi(k)
+		if err != nil {
+			continue
+		}
+		upstreams = append(upstreams, n)
+	}
+	if len(upstreams) == 0 {
+		panic("missing listener config")
+	}
+	sort.Ints(upstreams)
+	return c.Upstream[strconv.Itoa(upstreams[0])]
+}
+
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
 	LogLevel              string `mapstructure:"log_level" toml:"log_level,omitempty"`
