@@ -283,13 +283,13 @@ func initCLI() {
 					rootCertPool = cp
 				}
 				p.onStarted = append(p.onStarted, func() {
-					mainLog.Load().Debug().Msg("router setup")
+					mainLog.Load().Debug().Msg("router setup on start")
 					if err := p.router.Setup(); err != nil {
 						mainLog.Load().Error().Err(err).Msg("could not configure router")
 					}
 				})
 				p.onStopped = append(p.onStopped, func() {
-					mainLog.Load().Debug().Msg("router cleanup")
+					mainLog.Load().Debug().Msg("router cleanup on stop")
 					if err := p.router.Cleanup(); err != nil {
 						mainLog.Load().Error().Err(err).Msg("could not cleanup router")
 					}

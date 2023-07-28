@@ -109,7 +109,7 @@ func (or *osRouter) Setup() error {
 }
 
 func (or *osRouter) Cleanup() error {
-	if or.cfg.FirstListener().IsDirectDnsListener() {
+	if or.cdMode {
 		_ = exec.Command(unboundRcPath, "onerestart").Run()
 		_ = exec.Command(dnsmasqRcPath, "onerestart").Run()
 	}
@@ -129,9 +129,21 @@ name="{{.Name}}"
 rcvar="${name}_enable"
 {{.Name}}_env="IS_DAEMON=1"
 pidfile="/var/run/${name}.pid"
+child_pidfile="/var/run/${name}_child.pid"
 command="/usr/sbin/daemon"
-daemon_args="-P ${pidfile} -r -t \"${name}: daemon\"{{if .WorkingDirectory}} -c {{.WorkingDirectory}}{{end}}"
+daemon_args="-P ${pidfile} -p ${child_pidfile} -t \"${name}: daemon\"{{if .WorkingDirectory}} -c {{.WorkingDirectory}}{{end}}"
 command_args="${daemon_args} {{.Path}}{{range .Arguments}} {{.}}{{end}}"
+
+stop_cmd="ctrld_stop"
+
+ctrld_stop() {
+  pid=$(cat ${pidfile})
+  child_pid=$(cat ${child_pidfile})
+  if [ -e "${child_pidfile}" ]; then
+    kill -s TERM "${child_pid}"
+    wait_for_pids "${child_pid}" "${pidfile}"
+  fi
+}
 
 load_rc_config "${name}"
 run_rc_command "$1"
