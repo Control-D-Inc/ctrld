@@ -341,7 +341,11 @@ func initCLI() {
 			}
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
-			if uid := cdUIDFromProvToken(); uid != "" {
+			if cdUID != "" {
+				if _, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev); err != nil {
+					mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid: %s", cdUID)
+				}
+			} else if uid := cdUIDFromProvToken(); uid != "" {
 				cdUID = uid
 				removeProvTokenFromArgs(sc)
 				// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
