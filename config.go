@@ -343,9 +343,23 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 // SetupBootstrapIP manually find all available IPs of the upstream.
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
-	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 2*time.Second)
+	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
+	isControlD := uc.isControlD()
 	for {
 		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, withBootstrapDNS)
+		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
+		// filtering them out here to prevent weird behavior.
+		if isControlD {
+			n := 0
+			for _, ip := range uc.bootstrapIPs {
+				netIP := net.ParseIP(ip)
+				if netIP != nil && !netIP.IsPrivate() {
+					uc.bootstrapIPs[n] = ip
+					n++
+				}
+			}
+			uc.bootstrapIPs = uc.bootstrapIPs[:n]
+		}
 		if len(uc.bootstrapIPs) > 0 {
 			break
 		}

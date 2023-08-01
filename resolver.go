@@ -177,12 +177,12 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 	ipFromRecord := func(record dns.RR, target string) string {
 		switch ar := record.(type) {
 		case *dns.A:
-			if ar.Hdr.Name != target {
+			if ar.Hdr.Name != target || len(ar.A) == 0 {
 				return ""
 			}
 			return ar.A.String()
 		case *dns.AAAA:
-			if ar.Hdr.Name != target {
+			if ar.Hdr.Name != target || len(ar.AAAA) == 0 {
 				return ""
 			}
 			return ar.AAAA.String()
