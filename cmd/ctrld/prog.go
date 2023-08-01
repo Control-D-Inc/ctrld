@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"sync"
@@ -310,11 +311,41 @@ func runLogServer(sockPath string) net.Conn {
 }
 
 func errAddrInUse(err error) bool {
-	opErr, ok := err.(*net.OpError)
-	if !ok {
-		return false
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return errors.Is(opErr.Err, syscall.EADDRINUSE)
 	}
-	return errors.Is(opErr.Err, syscall.EADDRINUSE)
+	return false
+}
+
+func errUrlConnRefused(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		var opErr *net.OpError
+		if errors.As(urlErr.Err, &opErr) {
+			return errors.Is(opErr.Err, syscall.ECONNREFUSED)
+		}
+	}
+	return false
+}
+
+func errUrlNetworkError(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		var opErr *net.OpError
+		if errors.As(urlErr.Err, &opErr) {
+			if opErr.Temporary() {
+				return true
+			}
+			switch {
+			case errors.Is(opErr.Err, syscall.ECONNREFUSED),
+				errors.Is(opErr.Err, syscall.EINVAL),
+				errors.Is(opErr.Err, syscall.ENETUNREACH):
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // defaultRouteIP returns IP string of the default route if present, prefer IPv4 over IPv6.

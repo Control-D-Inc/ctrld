@@ -435,13 +435,8 @@ func initCLI() {
 					mainLog.Load().Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
 					return
 				}
-				status, err := s.Status()
-				if err != nil {
-					mainLog.Load().Warn().Err(err).Msg("could not get service status")
-					return
-				}
 
-				status = selfCheckStatus(status)
+				status := selfCheckStatus(s)
 				switch status {
 				case service.StatusRunning:
 					mainLog.Load().Notice().Msg("Service started")
@@ -969,7 +964,19 @@ func processNoConfigFlags(noConfigStart bool) {
 func processCDFlags() {
 	logger := mainLog.Load().With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
+	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
+	bo.LogLongerThan = 30 * time.Second
+	ctx := context.Background()
 	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+	for {
+		if errUrlNetworkError(err) {
+			bo.BackOff(ctx, err)
+			logger.Warn().Msg("could not fetch resolver using bootstrap DNS, retrying...")
+			resolverConfig, err = controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+			continue
+		}
+		break
+	}
 	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
 		s, err := newService(&prog{}, svcConfig)
 		if err != nil {
@@ -1114,7 +1121,16 @@ func defaultIfaceName() string {
 	return dri
 }
 
-func selfCheckStatus(status service.Status) service.Status {
+func selfCheckStatus(s service.Service) service.Status {
+	status, err := s.Status()
+	if err != nil {
+		mainLog.Load().Warn().Err(err).Msg("could not get service status")
+		return status
+	}
+	// If ctrld is not running, do nothing, just return the status as-is.
+	if status != service.StatusRunning {
+		return status
+	}
 	dir, err := userHomeDir()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
@@ -1124,17 +1140,30 @@ func selfCheckStatus(status service.Status) service.Status {
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 10 * time.Second
 	ctx := context.Background()
-	maxAttempts := 20
 
 	mainLog.Load().Debug().Msg("waiting for ctrld listener to be ready")
 	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
 
 	// The socket control server may not start yet, so attempt to ping
-	// it until we got a response, or maxAttempts reached.
-	for i := 0; i < maxAttempts; i++ {
+	// it until we got a response. For each iteration, check ctrld status
+	// to make sure ctrld is still running.
+	for {
+		curStatus, err := s.Status()
+		if err != nil {
+			mainLog.Load().Warn().Err(err).Msg("could not get service status while doing self-check")
+			return status
+		}
+		if curStatus != service.StatusRunning {
+			return curStatus
+		}
 		if _, err := cc.post("/", nil); err != nil {
-			bo.BackOff(ctx, err)
-			continue
+			// Do not count attempt if the server is not ready yet.
+			if errUrlConnRefused(err) {
+				bo.BackOff(ctx, err)
+				continue
+			}
+			mainLog.Load().Warn().Err(err).Msg("could not ping socket control server")
+			return service.StatusUnknown
 		}
 		break
 	}
@@ -1153,6 +1182,7 @@ func selfCheckStatus(status service.Status) service.Status {
 	mainLog.Load().Debug().Msg("performing self-check")
 	bo = backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 500 * time.Millisecond
+	maxAttempts := 20
 	c := new(dns.Client)
 	var (
 		lcChanged map[string]*ctrld.ListenerConfig
