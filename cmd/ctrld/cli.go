@@ -453,7 +453,7 @@ func initCLI() {
 				}
 				// On Linux, Darwin, Freebsd, ctrld set DNS on startup, because the DNS setting could be
 				// reset after rebooting. On windows, we only need to set once here. See prog.preRun in
-				// prog_*.go file for dedicated code on each platform.
+				// prog_*.go file for dedicated code on each platform. (1)
 				if runtime.GOOS == "windows" {
 					p.setDNS()
 				}
@@ -525,7 +525,10 @@ func initCLI() {
 			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
 				p.router.Cleanup()
-				p.resetDNS()
+				// See comment (1) in startCmd.
+				if runtime.GOOS != "windows" {
+					p.resetDNS()
+				}
 				mainLog.Load().Notice().Msg("Service stopped")
 			}
 		},
@@ -547,7 +550,15 @@ func initCLI() {
 				return
 			}
 			initLogging()
-			if doTasks([]task{{s.Restart, true}}) {
+			tasks := []task{{s.Restart, true}}
+			// On Windows, s.Restart will return error unless service is running.
+			if runtime.GOOS == "windows" {
+				tasks = []task{
+					{s.Start, false},
+					{s.Restart, true},
+				}
+			}
+			if doTasks(tasks) {
 				mainLog.Load().Notice().Msg("Service restarted")
 			}
 		},
