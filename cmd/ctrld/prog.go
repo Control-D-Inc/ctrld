@@ -313,17 +313,25 @@ func runLogServer(sockPath string) net.Conn {
 func errAddrInUse(err error) bool {
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
-		return errors.Is(opErr.Err, syscall.EADDRINUSE)
+		return errors.Is(opErr.Err, syscall.EADDRINUSE) || errors.Is(opErr.Err, windowsEADDRINUSE)
 	}
 	return false
 }
+
+// https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2
+var (
+	windowsECONNREFUSED = syscall.Errno(10061)
+	windowsENETUNREACH  = syscall.Errno(10051)
+	windowsEINVAL       = syscall.Errno(10022)
+	windowsEADDRINUSE   = syscall.Errno(10048)
+)
 
 func errUrlConnRefused(err error) bool {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		var opErr *net.OpError
 		if errors.As(urlErr.Err, &opErr) {
-			return errors.Is(opErr.Err, syscall.ECONNREFUSED)
+			return errors.Is(opErr.Err, syscall.ECONNREFUSED) || errors.Is(opErr.Err, windowsECONNREFUSED)
 		}
 	}
 	return false
@@ -340,7 +348,10 @@ func errUrlNetworkError(err error) bool {
 			switch {
 			case errors.Is(opErr.Err, syscall.ECONNREFUSED),
 				errors.Is(opErr.Err, syscall.EINVAL),
-				errors.Is(opErr.Err, syscall.ENETUNREACH):
+				errors.Is(opErr.Err, syscall.ENETUNREACH),
+				errors.Is(opErr.Err, windowsENETUNREACH),
+				errors.Is(opErr.Err, windowsEINVAL),
+				errors.Is(opErr.Err, windowsECONNREFUSED):
 				return true
 			}
 		}
