@@ -35,6 +35,9 @@ func newControlServer(addr string) (*controlServer, error) {
 func (s *controlServer) start() error {
 	_ = os.Remove(s.addr)
 	unixListener, err := net.Listen("unix", s.addr)
+	if l, ok := unixListener.(*net.UnixListener); ok {
+		l.SetUnlinkOnClose(true)
+	}
 	if err != nil {
 		return err
 	}

@@ -1167,16 +1167,13 @@ func selfCheckStatus(s service.Service) service.Status {
 		if curStatus != service.StatusRunning {
 			return curStatus
 		}
-		if _, err := cc.post("/", nil); err != nil {
-			// Do not count attempt if the server is not ready yet.
-			if errUrlConnRefused(err) {
-				bo.BackOff(ctx, err)
-				continue
-			}
-			mainLog.Load().Warn().Err(err).Msg("could not ping socket control server")
-			return service.StatusUnknown
+		if _, err := cc.post("/", nil); err == nil {
+			// Server was started, stop pinging.
+			break
 		}
-		break
+		// The socket control server is not ready yet, backoff for waiting it to be ready.
+		bo.BackOff(ctx, err)
+		continue
 	}
 	resp, err := cc.post(startedPath, nil)
 	if err != nil {
