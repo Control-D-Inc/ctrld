@@ -47,6 +47,15 @@ func (m *mdns) String() string {
 	return "mdns"
 }
 
+func (m *mdns) List() []string {
+	var ips []string
+	m.name.Range(func(key, value any) bool {
+		ips = append(ips, key.(string))
+		return true
+	})
+	return ips
+}
+
 func (m *mdns) init(quitCh chan struct{}) error {
 	ifaces, err := multicastInterfaces()
 	if err != nil {
@@ -123,8 +132,11 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 		}
 
 		var ip, name string
-		for _, answer := range msg.Answer {
-			switch ar := answer.(type) {
+		rrs := make([]dns.RR, 0, len(msg.Answer)+len(msg.Extra))
+		rrs = append(rrs, msg.Answer...)
+		rrs = append(rrs, msg.Extra...)
+		for _, rr := range rrs {
+			switch ar := rr.(type) {
 			case *dns.A:
 				ip, name = ar.A.String(), ar.Hdr.Name
 			case *dns.AAAA:
@@ -151,6 +163,7 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 func (m *mdns) probe(conns []*net.UDPConn, remoteAddr net.Addr) error {
 	msg := new(dns.Msg)
 	msg.Question = make([]dns.Question, len(services))
+	msg.Compress = true
 	for i, service := range services {
 		msg.Question[i] = dns.Question{
 			Name:   dns.CanonicalName(service),

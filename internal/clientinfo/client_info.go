@@ -16,8 +16,6 @@ type IpResolver interface {
 	fmt.Stringer
 	// LookupIP returns ip of the device with given mac.
 	LookupIP(mac string) string
-	// List returns list of ip known by the resolver.
-	List() []string
 }
 
 // MacResolver is the interface for retrieving Mac from IP.
@@ -48,6 +46,12 @@ type HostnameResolver interface {
 
 type refresher interface {
 	refresh() error
+}
+
+type ipLister interface {
+	fmt.Stringer
+	// List returns list of ip known by the resolver.
+	List() []string
 }
 
 type Client struct {
@@ -255,7 +259,8 @@ func (t *Table) ListClients() []*Client {
 		_ = r.refresh()
 	}
 	ipMap := make(map[string]*Client)
-	for _, ir := range t.ipResolvers {
+	il := []ipLister{t.dhcp, t.arp, t.ptr, t.mdns}
+	for _, ir := range il {
 		for _, ip := range ir.List() {
 			c, ok := ipMap[ip]
 			if !ok {

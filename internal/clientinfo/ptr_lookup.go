@@ -40,6 +40,15 @@ func (p *ptrDiscover) String() string {
 	return "ptr"
 }
 
+func (p *ptrDiscover) List() []string {
+	var ips []string
+	p.hostname.Range(func(key, value any) bool {
+		ips = append(ips, key.(string))
+		return true
+	})
+	return ips
+}
+
 func (p *ptrDiscover) lookupHostnameFromCache(ip string) string {
 	if val, ok := p.hostname.Load(ip); ok {
 		return val.(string)
