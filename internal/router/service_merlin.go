@@ -304,7 +304,7 @@ case "$1" in
       logger -c "failed to stop $name"
       exit 1
     fi
-    exit 1
+    exit 0
   ;;
   restart)
     $0 stop

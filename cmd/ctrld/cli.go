@@ -559,6 +559,15 @@ func initCLI() {
 				}
 			}
 			if doTasks(tasks) {
+				dir, err := userHomeDir()
+				if err != nil {
+					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
+					return
+				}
+				if cc := newSocketControlClient(s, dir); cc == nil {
+					mainLog.Load().Notice().Msg("Service was not restarted")
+					os.Exit(1)
+				}
 				mainLog.Load().Notice().Msg("Service restarted")
 			}
 		},
@@ -1147,34 +1156,12 @@ func selfCheckStatus(s service.Service) service.Status {
 		mainLog.Load().Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
 		return service.StatusUnknown
 	}
-
-	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
-	bo.LogLongerThan = 10 * time.Second
-	ctx := context.Background()
-
 	mainLog.Load().Debug().Msg("waiting for ctrld listener to be ready")
-	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
-
-	// The socket control server may not start yet, so attempt to ping
-	// it until we got a response. For each iteration, check ctrld status
-	// to make sure ctrld is still running.
-	for {
-		curStatus, err := s.Status()
-		if err != nil {
-			mainLog.Load().Warn().Err(err).Msg("could not get service status while doing self-check")
-			return status
-		}
-		if curStatus != service.StatusRunning {
-			return curStatus
-		}
-		if _, err := cc.post("/", nil); err == nil {
-			// Server was started, stop pinging.
-			break
-		}
-		// The socket control server is not ready yet, backoff for waiting it to be ready.
-		bo.BackOff(ctx, err)
-		continue
+	cc := newSocketControlClient(s, dir)
+	if cc == nil {
+		return service.StatusUnknown
 	}
+
 	resp, err := cc.post(startedPath, nil)
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to connect to control server")
@@ -1188,8 +1175,9 @@ func selfCheckStatus(s service.Service) service.Status {
 
 	mainLog.Load().Debug().Msg("ctrld listener is ready")
 	mainLog.Load().Debug().Msg("performing self-check")
-	bo = backoff.NewBackoff("self-check", logf, 10*time.Second)
+	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 500 * time.Millisecond
+	ctx := context.Background()
 	maxAttempts := 20
 	c := new(dns.Client)
 	var (
@@ -1704,4 +1692,36 @@ func removeProvTokenFromArgs(sc *service.Config) {
 		a = append(a, x)
 	}
 	sc.Arguments = a
+}
+
+// newSocketControlClient returns new control client after control server was started.
+func newSocketControlClient(s service.Service, dir string) *controlClient {
+	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
+	bo.LogLongerThan = 10 * time.Second
+	ctx := context.Background()
+
+	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+
+	// The socket control server may not start yet, so attempt to ping
+	// it until we got a response. For each iteration, check ctrld status
+	// to make sure ctrld is still running.
+	for {
+		curStatus, err := s.Status()
+		if err != nil {
+			mainLog.Load().Warn().Err(err).Msg("could not get service status while doing self-check")
+			return nil
+		}
+		if curStatus != service.StatusRunning {
+			return nil
+		}
+		if _, err := cc.post("/", nil); err == nil {
+			// Server was started, stop pinging.
+			break
+		}
+		// The socket control server is not ready yet, backoff for waiting it to be ready.
+		bo.BackOff(ctx, err)
+		continue
+	}
+
+	return cc
 }

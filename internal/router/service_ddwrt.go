@@ -271,7 +271,7 @@ case "$1" in
       echo "failed to stop $name"
       exit 1
     fi
-    exit 1
+    exit 0
   ;;
   restart)
     $0 stop

@@ -227,7 +227,7 @@ start() {
 stop() {
   if ! is_running; then
     elog "$NAME is not running."
-    exit 1
+    exit 0
   fi
   elog "Shutting down $NAME Services: "
   kill -SIGTERM "$(get_pid)"
