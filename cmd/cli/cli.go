@@ -1383,6 +1383,8 @@ func fieldErrorMsg(fe validator.FieldError) string {
 		return fmt.Sprintf("invalid IP format: %s", fe.Value())
 	case "file":
 		return fmt.Sprintf("filed does not exist: %s", fe.Value())
+	case "http_url":
+		return fmt.Sprintf("invalid http/https url: %s", fe.Value())
 	}
 	return ""
 }

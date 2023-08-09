@@ -193,7 +193,7 @@ type NetworkConfig struct {
 type UpstreamConfig struct {
 	Name        string `mapstructure:"name" toml:"name,omitempty"`
 	Type        string `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy"`
-	Endpoint    string `mapstructure:"endpoint" toml:"endpoint,omitempty" validate:"required_unless=Type os"`
+	Endpoint    string `mapstructure:"endpoint" toml:"endpoint,omitempty"`
 	BootstrapIP string `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
 	Domain      string `mapstructure:"-" toml:"-"`
 	IPStack     string `mapstructure:"ip_stack" toml:"ip_stack,omitempty" validate:"ipstack"`
@@ -589,6 +589,7 @@ func ValidateConfig(validate *validator.Validate, cfg *Config) error {
 	_ = validate.RegisterValidation("dnsrcode", validateDnsRcode)
 	_ = validate.RegisterValidation("ipstack", validateIpStack)
 	_ = validate.RegisterValidation("iporempty", validateIpOrEmpty)
+	validate.RegisterStructValidation(upstreamConfigStructLevelValidation, UpstreamConfig{})
 	return validate.Struct(cfg)
 }
 
@@ -611,6 +612,32 @@ func validateIpOrEmpty(fl validator.FieldLevel) bool {
 		return true
 	}
 	return net.ParseIP(val) != nil
+}
+
+func upstreamConfigStructLevelValidation(sl validator.StructLevel) {
+	uc := sl.Current().Addr().Interface().(*UpstreamConfig)
+	if uc.Type == ResolverTypeOS {
+		return
+	}
+
+	// Endpoint is required for non os resolver.
+	if uc.Endpoint == "" {
+		sl.ReportError(uc.Endpoint, "endpoint", "Endpoint", "required_unless", "")
+		return
+	}
+
+	// DoH/DoH3 requires endpoint is an HTTP url.
+	if uc.Type == ResolverTypeDOH || uc.Type == ResolverTypeDOH3 {
+		u, err := url.Parse(uc.Endpoint)
+		if err != nil || u.Host == "" {
+			sl.ReportError(uc.Endpoint, "endpoint", "Endpoint", "http_url", "")
+			return
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			sl.ReportError(uc.Endpoint, "endpoint", "Endpoint", "http_url", "")
+			return
+		}
+	}
 }
 
 func defaultPortFor(typ string) string {

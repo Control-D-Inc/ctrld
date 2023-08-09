@@ -95,6 +95,7 @@ func TestConfigValidation(t *testing.T) {
 		{"non-existed lease file", configWithNonExistedLeaseFile(t), true},
 		{"lease file format required if lease file exist", configWithExistedLeaseFile(t), true},
 		{"invalid lease file format", configWithInvalidLeaseFileFormat(t), true},
+		{"invalid doh/doh3 endpoint", configWithInvalidDoHEndpoint(t), true},
 	}
 
 	for _, tc := range tests {
@@ -223,5 +224,12 @@ func configWithExistedLeaseFile(t *testing.T) *ctrld.Config {
 func configWithInvalidLeaseFileFormat(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Service.DHCPLeaseFileFormat = "invalid"
+	return cfg
+}
+
+func configWithInvalidDoHEndpoint(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Upstream["0"].Endpoint = "1.1.1.1"
+	cfg.Upstream["0"].Type = ctrld.ResolverTypeDOH
 	return cfg
 }
