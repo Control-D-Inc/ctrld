@@ -326,17 +326,6 @@ var (
 	windowsEADDRINUSE   = syscall.Errno(10048)
 )
 
-func errUrlConnRefused(err error) bool {
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		var opErr *net.OpError
-		if errors.As(urlErr.Err, &opErr) {
-			return errors.Is(opErr.Err, syscall.ECONNREFUSED) || errors.Is(opErr.Err, windowsECONNREFUSED)
-		}
-	}
-	return false
-}
-
 func errUrlNetworkError(err error) bool {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {

@@ -93,8 +93,7 @@ func IsOldOpenwrt() bool {
 var routerPlatform atomic.Pointer[router]
 
 type router struct {
-	name           string
-	sendClientInfo bool
+	name string
 }
 
 // Name returns name of the router platform.
@@ -240,9 +239,4 @@ func unameO() []byte {
 func unameU() []byte {
 	out, _ := exec.Command("uname", "-u").Output()
 	return out
-}
-
-func isPfsense() bool {
-	b, err := os.ReadFile("/etc/platform")
-	return err == nil && bytes.HasPrefix(b, []byte("pfSense"))
 }

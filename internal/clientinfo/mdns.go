@@ -98,11 +98,9 @@ func (m *mdns) probeLoop(conns []*net.UDPConn, remoteAddr net.Addr, quitCh chan 
 		if err != nil {
 			ctrld.ProxyLogger.Load().Warn().Err(err).Msg("error while probing mdns")
 			bo.BackOff(context.Background(), errors.New("mdns probe backoff"))
+			continue
 		}
-		select {
-		case <-quitCh:
-			break
-		}
+		break
 	}
 	<-quitCh
 	for _, conn := range conns {

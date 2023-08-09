@@ -50,10 +50,9 @@ var (
 )
 
 var (
-	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
-	defaultConfigWritten = false
-	defaultConfigFile    = "ctrld.toml"
-	rootCertPool         *x509.CertPool
+	v                 = viper.NewWithOptions(viper.KeyDelimiter("::"))
+	defaultConfigFile = "ctrld.toml"
+	rootCertPool      *x509.CertPool
 )
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains"}
@@ -897,7 +896,6 @@ func readConfigFile(writeDefaultConfig bool) bool {
 			}
 			mainLog.Load().Info().Msg("writing default config file to: " + fp)
 		}
-		defaultConfigWritten = true
 		return false
 	}
 
@@ -1382,7 +1380,7 @@ func fieldErrorMsg(fe validator.FieldError) string {
 	case "cidr":
 		return fmt.Sprintf("invalid value: %s", fe.Value())
 	case "required_unless", "required":
-		return fmt.Sprintf("value is required")
+		return "value is required"
 	case "dnsrcode":
 		return fmt.Sprintf("invalid DNS rcode value: %s", fe.Value())
 	case "ipstack":
@@ -1394,25 +1392,6 @@ func fieldErrorMsg(fe validator.FieldError) string {
 		return fmt.Sprintf("filed does not exist: %s", fe.Value())
 	}
 	return ""
-}
-
-// couldBeDirectListener reports whether ctrld can be a direct listener on port 53.
-// It returns true only if ctrld can listen on port 53 for all interfaces. That means
-// there's no other software listening on port 53.
-//
-// If someone listening on port 53, or ctrld could only listen on port 53 for a specific
-// interface, ctrld could only be configured as a DNS forwarder.
-func couldBeDirectListener(lc *ctrld.ListenerConfig) bool {
-	if lc == nil || lc.Port != 53 {
-		return false
-	}
-	switch lc.IP {
-	case "", "::", "0.0.0.0":
-		return true
-	default:
-		return false
-	}
-
 }
 
 func isLoopback(ipStr string) bool {

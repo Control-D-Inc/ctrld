@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -114,6 +115,11 @@ func (or *osRouter) Cleanup() error {
 		_ = exec.Command(dnsmasqRcPath, "onerestart").Run()
 	}
 	return nil
+}
+
+func isPfsense() bool {
+	b, err := os.ReadFile("/etc/platform")
+	return err == nil && bytes.HasPrefix(b, []byte("pfSense"))
 }
 
 const bsdInitScript = `#!/bin/sh
