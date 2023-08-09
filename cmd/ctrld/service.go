@@ -63,6 +63,16 @@ func (s *sysV) Stop() error {
 	return err
 }
 
+func (s *sysV) Restart() error {
+	if !s.installed() {
+		return service.ErrNotInstalled
+	}
+	// We don't care about error returned by s.Stop,
+	// because the service may already be stopped.
+	_ = s.Stop()
+	return s.Start()
+}
+
 func (s *sysV) Status() (service.Status, error) {
 	if !s.installed() {
 		return service.StatusUnknown, service.ErrNotInstalled

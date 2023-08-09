@@ -27,7 +27,8 @@ func New(cfg *ctrld.Config) *Synology {
 	return &Synology{cfg: cfg}
 }
 
-func (s *Synology) ConfigureService(config *service.Config) error {
+func (s *Synology) ConfigureService(svc *service.Config) error {
+	svc.Option["UpstartScript"] = upstartScript
 	return nil
 }
 
@@ -86,3 +87,49 @@ func restartDNSMasq() error {
 	}
 	return nil
 }
+
+// Copied from https://github.com/kardianos/service/blob/6fe2824ee8248e776b0f8be39aaeff45a45a4f6c/service_upstart_linux.go#L232
+// With modification to wait for dhcpserver started before ctrld.
+
+// The upstart script should stop with an INT or the Go runtime will terminate
+// the program before the Stop handler can run.
+const upstartScript = `# {{.Description}}
+
+{{if .DisplayName}}description    "{{.DisplayName}}"{{end}}
+
+{{if .HasKillStanza}}kill signal INT{{end}}
+{{if .ChRoot}}chroot {{.ChRoot}}{{end}}
+{{if .WorkingDirectory}}chdir {{.WorkingDirectory}}{{end}}
+start on filesystem or runlevel [2345]
+stop on runlevel [!2345]
+
+start on started dhcpserver
+
+{{if and .UserName .HasSetUIDStanza}}setuid {{.UserName}}{{end}}
+
+respawn
+respawn limit 10 5
+umask 022
+
+console none
+
+pre-start script
+    test -x {{.Path}} || { stop; exit 0; }
+end script
+
+# Start
+script
+	{{if .LogOutput}}
+	stdout_log="/var/log/{{.Name}}.out"
+	stderr_log="/var/log/{{.Name}}.err"
+	{{end}}
+	
+	if [ -f "/etc/sysconfig/{{.Name}}" ]; then
+		set -a
+		source /etc/sysconfig/{{.Name}}
+		set +a
+	fi
+
+	exec {{if and .UserName (not .HasSetUIDStanza)}}sudo -E -u {{.UserName}} {{end}}{{.Path}}{{range .Arguments}} {{.|cmd}}{{end}}{{if .LogOutput}} >> $stdout_log 2>> $stderr_log{{end}}
+end script
+`

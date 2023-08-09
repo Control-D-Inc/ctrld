@@ -550,13 +550,10 @@ func initCLI() {
 				return
 			}
 			initLogging()
-			tasks := []task{{s.Restart, true}}
-			// On Windows, s.Restart will return error unless service is running.
-			if runtime.GOOS == "windows" {
-				tasks = []task{
-					{s.Start, false},
-					{s.Restart, true},
-				}
+
+			tasks := []task{
+				{s.Stop, false},
+				{s.Start, true},
 			}
 			if doTasks(tasks) {
 				dir, err := userHomeDir()
