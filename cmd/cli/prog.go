@@ -332,6 +332,8 @@ func errAddrInUse(err error) bool {
 	return false
 }
 
+var _ = errAddrInUse
+
 // https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2
 var (
 	windowsECONNREFUSED = syscall.Errno(10061)
