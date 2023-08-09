@@ -104,6 +104,7 @@ start on filesystem or runlevel [2345]
 stop on runlevel [!2345]
 
 start on started dhcpserver
+normal exit 0 TERM HUP
 
 {{if and .UserName .HasSetUIDStanza}}setuid {{.UserName}}{{end}}
 
