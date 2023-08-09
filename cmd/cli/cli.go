@@ -208,16 +208,18 @@ func initCLI() {
 				processCDFlags()
 			}
 
-			updateListenerConfig()
+			updated := updateListenerConfig()
 
 			if cdUID != "" {
 				processLogAndCacheFlags()
 			}
 
-			if err := writeConfigFile(); err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to write config file")
-			} else {
-				mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
+			if updated {
+				if err := writeConfigFile(); err != nil {
+					mainLog.Load().Fatal().Err(err).Msg("failed to write config file")
+				} else {
+					mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
+				}
 			}
 
 			if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
@@ -1412,8 +1414,8 @@ type listenerConfigCheck struct {
 
 // updateListenerConfig updates the config for listeners if not defined,
 // or defined but invalid to be used, e.g: using loopback address other
-// than 127.0.0.1 with sytemd-resolved.
-func updateListenerConfig() {
+// than 127.0.0.1 with systemd-resolved.
+func updateListenerConfig() (updated bool) {
 	lcc := make(map[string]*listenerConfigCheck)
 	cdMode := cdUID != ""
 	for n, listener := range cfg.Listener {
@@ -1431,6 +1433,7 @@ func updateListenerConfig() {
 			lcc[n].IP = true
 			lcc[n].Port = true
 		}
+		updated = updated || lcc[n].IP || lcc[n].Port
 	}
 
 	var closers []io.Closer
@@ -1603,6 +1606,7 @@ func updateListenerConfig() {
 			}
 		}
 	}
+	return
 }
 
 func dirWritable(dir string) (bool, error) {
