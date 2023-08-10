@@ -54,7 +54,7 @@ func (d *Ddwrt) Uninstall(_ *service.Config) error {
 
 func (d *Ddwrt) PreRun() error {
 	_ = d.Cleanup()
-	return ntp.Wait()
+	return ntp.WaitNvram()
 }
 
 func (d *Ddwrt) Setup() error {

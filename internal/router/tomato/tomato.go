@@ -49,7 +49,7 @@ func (f *FreshTomato) Uninstall(_ *service.Config) error {
 
 func (f *FreshTomato) PreRun() error {
 	_ = f.Cleanup()
-	return ntp.Wait()
+	return ntp.WaitNvram()
 }
 
 func (f *FreshTomato) Setup() error {

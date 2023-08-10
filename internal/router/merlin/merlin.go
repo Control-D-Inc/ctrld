@@ -45,7 +45,7 @@ func (m *Merlin) Uninstall(_ *service.Config) error {
 
 func (m *Merlin) PreRun() error {
 	_ = m.Cleanup()
-	return ntp.Wait()
+	return ntp.WaitNvram()
 }
 
 func (m *Merlin) Setup() error {
