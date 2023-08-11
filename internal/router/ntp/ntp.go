@@ -18,12 +18,15 @@ func WaitNvram() error {
 	// Wait until `ntp_ready=1` set.
 	b := backoff.NewBackoff("ntp.Wait", func(format string, args ...any) {}, 10*time.Second)
 	for {
-		out, err := nvram.Run("get", "ntp_ready")
-		if err != nil {
-			return fmt.Errorf("PreStart: nvram: %w", err)
-		}
-		if out == "1" {
-			return nil
+		// ddwrt use "ntp_done": https://github.com/mirror/dd-wrt/blob/a08c693527ab3204bf7bebd408a7c9a83b6ede47/src/router/rc/ntp.c#L100
+		for _, key := range []string{"ntp_ready", "ntp_done"} {
+			out, err := nvram.Run("get", key)
+			if err != nil {
+				return fmt.Errorf("PreStart: nvram: %w", err)
+			}
+			if out == "1" {
+				return nil
+			}
 		}
 		b.BackOff(context.Background(), errors.New("ntp not ready"))
 	}

@@ -52,6 +52,13 @@ func (m *Merlin) Setup() error {
 	if m.cfg.FirstListener().IsDirectDnsListener() {
 		return nil
 	}
+	// Already setup.
+	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {
+		return nil
+	}
+	if _, err := nvram.Run("set", nvram.CtrldSetupKey+"=1"); err != nil {
+		return err
+	}
 	buf, err := os.ReadFile(dnsmasq.MerlinPostConfPath)
 	// Already setup.
 	if bytes.Contains(buf, []byte(dnsmasq.MerlinPostConfMarker)) {
@@ -92,11 +99,13 @@ func (m *Merlin) Cleanup() error {
 	if m.cfg.FirstListener().IsDirectDnsListener() {
 		return nil
 	}
-	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {
-		// Restore old configs.
-		if err := nvram.Restore(nvramKvMap, nvram.CtrldSetupKey); err != nil {
-			return err
-		}
+	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val != "1" {
+		return nil // was restored, nothing to do.
+	}
+
+	// Restore old configs.
+	if err := nvram.Restore(nvramKvMap, nvram.CtrldSetupKey); err != nil {
+		return err
 	}
 
 	buf, err := os.ReadFile(dnsmasq.MerlinPostConfPath)

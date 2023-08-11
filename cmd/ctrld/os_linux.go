@@ -24,6 +24,8 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
+const resolvConfBackupFailedMsg = "open /etc/resolv.pre-ctrld-backup.conf: read-only file system"
+
 // allocate loopback ip
 // sudo ip a add 127.0.0.2/24 dev lo
 func allocateIP(ip string) error {
@@ -72,6 +74,14 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 				mainLog.Load().Warn().Msg("Interfaces are managed by systemd-networkd, switch to systemd-resolve for setting DNS")
 				trySystemdResolve = true
 				break
+			}
+			// This error happens on read-only file system, which causes ctrld failed to create backup
+			// for /etc/resolv.conf file. It is ok, because the DNS is still set anyway, and restore
+			// DNS will fallback to use DHCP if there's no backup /etc/resolv.conf file.
+			// The error format is controlled by us, so checking for error string is fine.
+			// See: ../../internal/dns/direct.go:L278
+			if r.Mode() == "direct" && strings.Contains(err.Error(), resolvConfBackupFailedMsg) {
+				return nil
 			}
 			return err
 		}

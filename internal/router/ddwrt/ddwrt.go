@@ -87,12 +87,14 @@ func (d *Ddwrt) Cleanup() error {
 	if d.cfg.FirstListener().IsDirectDnsListener() {
 		return nil
 	}
-	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {
-		nvramKvMap["dnsmasq_options"] = ""
-		// Restore old configs.
-		if err := nvram.Restore(nvramKvMap, nvram.CtrldSetupKey); err != nil {
-			return err
-		}
+	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val != "1" {
+		return nil // was restored, nothing to do.
+	}
+
+	nvramKvMap["dnsmasq_options"] = ""
+	// Restore old configs.
+	if err := nvram.Restore(nvramKvMap, nvram.CtrldSetupKey); err != nil {
+		return err
 	}
 
 	// Restart dnsmasq service.

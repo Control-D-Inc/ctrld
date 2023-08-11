@@ -89,12 +89,14 @@ func (f *FreshTomato) Cleanup() error {
 	if f.cfg.FirstListener().IsDirectDnsListener() {
 		return nil
 	}
-	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {
-		nvramKvMap["dnsmasq_custom"] = ""
-		// Restore old configs.
-		if err := nvram.Restore(nvramKvMap, nvram.CtrldSetupKey); err != nil {
-			return err
-		}
+	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val != "1" {
+		return nil // was restored, nothing to do.
+	}
+
+	nvramKvMap["dnsmasq_custom"] = ""
+	// Restore old configs.
+	if err := nvram.Restore(nvramKvMap, nvram.CtrldSetupKey); err != nil {
+		return err
 	}
 
 	// Restart dnscrypt-proxy service.
