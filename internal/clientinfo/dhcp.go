@@ -53,7 +53,7 @@ func (d *dhcp) watchChanges() {
 			if !ok {
 				return
 			}
-			if event.Has(fsnotify.Write) {
+			if event.Has(fsnotify.Write) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Chmod) || event.Has(fsnotify.Remove) {
 				format := clientInfoFiles[event.Name]
 				if err := d.readLeaseFile(event.Name, format); err != nil && !os.IsNotExist(err) {
 					ctrld.ProxyLogger.Load().Err(err).Str("file", event.Name).Msg("leases file changed but failed to update client info")

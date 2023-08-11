@@ -429,6 +429,7 @@ func initCLI() {
 				{s.Install, false},
 				{s.Start, true},
 			}
+			mainLog.Load().Notice().Msg("Starting service")
 			if doTasks(tasks) {
 				if err := p.router.Install(sc); err != nil {
 					mainLog.Load().Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
@@ -450,12 +451,7 @@ func initCLI() {
 					uninstall(p, s)
 					os.Exit(1)
 				}
-				// On Linux, Darwin, Freebsd, ctrld set DNS on startup, because the DNS setting could be
-				// reset after rebooting. On windows, we only need to set once here. See prog.preRun in
-				// prog_*.go file for dedicated code on each platform. (1)
-				if runtime.GOOS == "windows" {
-					p.setDNS()
-				}
+				p.setDNS()
 			}
 		},
 	}
@@ -524,10 +520,7 @@ func initCLI() {
 			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
 				p.router.Cleanup()
-				// See comment (1) in startCmd.
-				if runtime.GOOS != "windows" {
-					p.resetDNS()
-				}
+				p.resetDNS()
 				mainLog.Load().Notice().Msg("Service stopped")
 			}
 		},

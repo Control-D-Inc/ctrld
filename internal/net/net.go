@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"os/signal"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"tailscale.com/logtail/backoff"
@@ -13,17 +16,17 @@ import (
 
 const (
 	controldIPv6Test = "ipv6.controld.io"
-	bootstrapDNS     = "76.76.2.0:53"
+	v4BootstrapDNS   = "76.76.2.0:53"
+	v6BootstrapDNS   = "[2606:1a40::]:53"
 )
 
 var Dialer = &net.Dialer{
 	Resolver: &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{
-				Timeout: 10 * time.Second,
-			}
-			return d.DialContext(ctx, "udp", bootstrapDNS)
+			d := ParallelDialer{}
+			d.Timeout = 10 * time.Second
+			return d.DialContext(ctx, "udp", []string{v4BootstrapDNS, v6BootstrapDNS})
 		},
 	},
 }
@@ -59,14 +62,32 @@ func supportListenIPv6Local() bool {
 }
 
 func probeStack() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+		<-sigs
+		cancel()
+	}()
+
 	b := backoff.NewBackoff("probeStack", func(format string, args ...any) {}, 5*time.Second)
 	for {
-		if _, err := probeStackDialer.Dial("udp", bootstrapDNS); err == nil {
+		if _, err := probeStackDialer.DialContext(ctx, "udp", v4BootstrapDNS); err == nil {
 			hasNetworkUp = true
 			break
-		} else {
-			b.BackOff(context.Background(), err)
 		}
+		if _, err := probeStackDialer.DialContext(ctx, "udp", v6BootstrapDNS); err == nil {
+			hasNetworkUp = true
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		b.BackOff(context.Background(), errors.New("network is down"))
 	}
 	canListenIPv6Local = supportListenIPv6Local()
 }

@@ -13,12 +13,6 @@ func init() {
 	}
 }
 
-func (p *prog) preRun() {
-	if !service.Interactive() {
-		p.setDNS()
-	}
-}
-
 func setDependencies(svc *service.Config) {
 	svc.Dependencies = []string{
 		"Wants=network-online.target",

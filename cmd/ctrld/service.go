@@ -26,6 +26,8 @@ func newService(i service.Interface, c *service.Config) (service.Service, error)
 		return &sysV{s}, nil
 	case s.Platform() == "unix-systemv":
 		return &sysV{s}, nil
+	case s.Platform() == "linux-systemd":
+		return &systemd{s}, nil
 	}
 	return s, nil
 }
@@ -103,6 +105,20 @@ func (s *procd) Status() (service.Status, error) {
 		return service.StatusStopped, nil
 	}
 	return service.StatusRunning, nil
+}
+
+// procd wraps a service.Service, and provide status command to
+// report the status correctly.
+type systemd struct {
+	service.Service
+}
+
+func (s *systemd) Status() (service.Status, error) {
+	out, _ := exec.Command("systemctl", "status", "ctrld").CombinedOutput()
+	if bytes.Contains(out, []byte("/FAILURE)")) {
+		return service.StatusStopped, nil
+	}
+	return s.Service.Status()
 }
 
 type task struct {

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
@@ -61,6 +62,19 @@ func (p *prog) Start(s service.Service) error {
 	p.cfg = &cfg
 	go p.run()
 	return nil
+}
+
+func (p *prog) preRun() {
+	if !service.Interactive() {
+		p.setDNS()
+	}
+	if runtime.GOOS == "darwin" {
+		p.onStopped = append(p.onStopped, func() {
+			if !service.Interactive() {
+				p.resetDNS()
+			}
+		})
+	}
 }
 
 func (p *prog) run() {
