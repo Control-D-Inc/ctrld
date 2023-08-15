@@ -267,5 +267,5 @@ func (m *nmManager) Close() error {
 }
 
 func (m *nmManager) Mode() string {
-	return "network-maanger"
+	return "network-manager"
 }

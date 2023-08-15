@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//lint:file-ignore U1000 satisfy CI.
+//lint:file-ignore U1000 Ignore, this file is forked from upstream code.
+//lint:file-ignore ST1005 Ignore, this file is forked from upstream code.
 
 package dns
 

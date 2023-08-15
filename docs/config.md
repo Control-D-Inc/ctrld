@@ -157,6 +157,57 @@ stale cached records (regardless of their TTLs) until upstream comes online.
 - Required: no
 - Default: false
 
+### max_concurrent_requests
+The number of concurrent requests that will be handled, must be a non-negative integer. 
+Tweaking this value depends on the capacity of your system.
+
+- Type: number
+- Required: no
+- Default: 256
+
+### discover_mdns
+Perform LAN client discovery using mDNS. This will spawn a listener on port 5353. 
+
+- Type: boolean
+- Required: no
+- Default: true
+
+### discover_arp
+Perform LAN client discovery using ARP.  
+
+- Type: boolean
+- Required: no
+- Default: true
+
+### discover_dhcp
+Perform LAN client discovery using DHCP leases files. Common file locations are auto-discovered.  
+
+- Type: boolean
+- Required: no
+- Default: true
+
+### discover_ptr
+Perform LAN client discovery using PTR queries.  
+
+- Type: boolean
+- Required: no
+- Default: true
+
+### dhcp_lease_file_path
+Relative or absolute path to a custom DHCP leases file location. 
+
+- Type: string
+- Required: no
+- Default: ""
+
+### dhcp_lease_file_format
+DHCP leases file format. 
+
+- Type: string
+- Required: no
+- Valid values: `dnsmasq`, `isc-dhcp`
+- Default: ""
+
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.
 
@@ -308,14 +359,14 @@ IP address that serves the incoming requests. If `ip` is empty, ctrld will liste
 
 - Type: ip address string
 - Required: no
-- Default: ""
+- Default: "0.0.0.0" or RFC1918 addess or "127.0.0.1" (depending on platform)
 
 ### port
 Port number that the listener will listen on for incoming requests. If `port` is `0`, a random available port will be chosen.
 
 - Type: number
 - Required: no
-- Default: 0
+- Default: 0 or 53 or 5354 (depending on platform)
 
 ### restricted
 If set to `true` makes the listener `REFUSE` DNS queries from all source IP addresses that are not explicitly defined in the policy using a `network`. 

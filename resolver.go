@@ -29,6 +29,13 @@ const (
 var bootstrapDNS = "76.76.2.0"
 var or = &osResolver{nameservers: nameservers()}
 
+func init() {
+	if len(or.nameservers) == 0 {
+		// Add bootstrap DNS in case we did not find any.
+		or.nameservers = []string{net.JoinHostPort(bootstrapDNS, "53")}
+	}
+}
+
 // Resolver is the interface that wraps the basic DNS operations.
 //
 // Resolve resolves the DNS query, return the result and the corresponding error.
@@ -103,18 +110,6 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	return nil, errors.Join(errs...)
 }
 
-func newDialer(dnsAddress string) *net.Dialer {
-	return &net.Dialer{
-		Resolver: &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				d := net.Dialer{}
-				return d.DialContext(ctx, network, dnsAddress)
-			},
-		},
-	}
-}
-
 type legacyResolver struct {
 	uc *UpstreamConfig
 }
@@ -142,6 +137,14 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 	return answer, err
 }
 
+type dummyResolver struct{}
+
+func (d dummyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	ans := new(dns.Msg)
+	ans.SetReply(msg)
+	return ans, nil
+}
+
 // LookupIP looks up host using OS resolver.
 // It returns a slice of that host's IPv4 and IPv6 addresses.
 func LookupIP(domain string) []string {
@@ -153,21 +156,33 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 	if withBootstrapDNS {
 		resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
 	}
-	ProxyLog.Debug().Msgf("Resolving %q using bootstrap DNS %q", domain, resolver.nameservers)
+	ProxyLogger.Load().Debug().Msgf("resolving %q using bootstrap DNS %q", domain, resolver.nameservers)
 	timeoutMs := 2000
 	if timeout > 0 && timeout < timeoutMs {
 		timeoutMs = timeout
 	}
 	questionDomain := dns.Fqdn(domain)
-	ipFromRecord := func(record dns.RR) string {
+
+	// Getting the real target domain name from CNAME if presents.
+	targetDomain := func(answers []dns.RR) string {
+		for _, a := range answers {
+			switch ar := a.(type) {
+			case *dns.CNAME:
+				return ar.Target
+			}
+		}
+		return questionDomain
+	}
+	// Getting ip address from A or AAAA record.
+	ipFromRecord := func(record dns.RR, target string) string {
 		switch ar := record.(type) {
 		case *dns.A:
-			if ar.Hdr.Name != questionDomain {
+			if ar.Hdr.Name != target || len(ar.A) == 0 {
 				return ""
 			}
 			return ar.A.String()
 		case *dns.AAAA:
-			if ar.Hdr.Name != questionDomain {
+			if ar.Hdr.Name != target || len(ar.AAAA) == 0 {
 				return ""
 			}
 			return ar.AAAA.String()
@@ -184,19 +199,20 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 
 		r, err := resolver.Resolve(ctx, m)
 		if err != nil {
-			ProxyLog.Error().Err(err).Msgf("could not lookup %q record for domain %q", dns.TypeToString[dnsType], domain)
+			ProxyLogger.Load().Error().Err(err).Msgf("could not lookup %q record for domain %q", dns.TypeToString[dnsType], domain)
 			return
 		}
 		if r.Rcode != dns.RcodeSuccess {
-			ProxyLog.Error().Msgf("could not resolve domain %q, return code: %s", domain, dns.RcodeToString[r.Rcode])
+			ProxyLogger.Load().Error().Msgf("could not resolve domain %q, return code: %s", domain, dns.RcodeToString[r.Rcode])
 			return
 		}
 		if len(r.Answer) == 0 {
-			ProxyLog.Error().Msg("no answer from OS resolver")
+			ProxyLogger.Load().Error().Msg("no answer from OS resolver")
 			return
 		}
+		target := targetDomain(r.Answer)
 		for _, a := range r.Answer {
-			if ip := ipFromRecord(a); ip != "" {
+			if ip := ipFromRecord(a, target); ip != "" {
 				ips = append(ips, ip)
 			}
 		}
@@ -210,7 +226,6 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 
 // NewBootstrapResolver returns an OS resolver, which use following nameservers:
 //
-//   - ControlD bootstrap DNS server.
 //   - Gateway IP address (depends on OS).
 //   - Input servers.
 func NewBootstrapResolver(servers ...string) Resolver {
@@ -220,4 +235,37 @@ func NewBootstrapResolver(servers ...string) Resolver {
 		resolver.nameservers = append([]string{net.JoinHostPort(ns, "53")}, resolver.nameservers...)
 	}
 	return resolver
+}
+
+// NewPrivateResolver returns an OS resolver, which includes only private DNS servers.
+// This is useful for doing PTR lookup in LAN network.
+func NewPrivateResolver() Resolver {
+	nss := nameservers()
+	n := 0
+	for _, ns := range nss {
+		host, _, _ := net.SplitHostPort(ns)
+		ip := net.ParseIP(host)
+		if ip != nil && ip.IsPrivate() && !ip.IsLoopback() {
+			nss[n] = ns
+			n++
+		}
+	}
+	nss = nss[:n]
+	if len(nss) == 0 {
+		return &dummyResolver{}
+	}
+	resolver := &osResolver{nameservers: nss}
+	return resolver
+}
+
+func newDialer(dnsAddress string) *net.Dialer {
+	return &net.Dialer{
+		Resolver: &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{}
+				return d.DialContext(ctx, network, dnsAddress)
+			},
+		},
+	}
 }

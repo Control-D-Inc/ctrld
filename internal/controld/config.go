@@ -6,14 +6,18 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/certs"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
+	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
 )
 
 const (
@@ -31,6 +35,7 @@ type ResolverConfig struct {
 		CustomConfig string `json:"custom_config"`
 	} `json:"ctrld"`
 	Exclude []string `json:"exclude"`
+	UID     string   `json:"uid"`
 }
 
 type utilityResponse struct {
@@ -52,17 +57,39 @@ func (u UtilityErrorResponse) Error() string {
 }
 
 type utilityRequest struct {
-	UID string `json:"uid"`
+	UID      string `json:"uid"`
+	ClientID string `json:"client_id,omitempty"`
+}
+
+type utilityOrgRequest struct {
+	ProvToken string `json:"prov_token"`
+	Hostname  string `json:"hostname"`
 }
 
 // FetchResolverConfig fetch Control D config for given uid.
-func FetchResolverConfig(uid, version string, cdDev bool) (*ResolverConfig, error) {
-	body, _ := json.Marshal(utilityRequest{UID: uid})
+func FetchResolverConfig(rawUID, version string, cdDev bool) (*ResolverConfig, error) {
+	uid, clientID := ParseRawUID(rawUID)
+	req := utilityRequest{UID: uid}
+	if clientID != "" {
+		req.ClientID = clientID
+	}
+	body, _ := json.Marshal(req)
+	return postUtilityAPI(version, cdDev, bytes.NewReader(body))
+}
+
+// FetchResolverUID fetch resolver uid from provision token.
+func FetchResolverUID(pt, version string, cdDev bool) (*ResolverConfig, error) {
+	hostname, _ := os.Hostname()
+	body, _ := json.Marshal(utilityOrgRequest{ProvToken: pt, Hostname: hostname})
+	return postUtilityAPI(version, cdDev, bytes.NewReader(body))
+}
+
+func postUtilityAPI(version string, cdDev bool, body io.Reader) (*ResolverConfig, error) {
 	apiUrl := resolverDataURLCom
 	if cdDev {
 		apiUrl = resolverDataURLDev
 	}
-	req, err := http.NewRequest("POST", apiUrl, bytes.NewReader(body))
+	req, err := http.NewRequest("POST", apiUrl, body)
 	if err != nil {
 		return nil, fmt.Errorf("http.NewRequest: %w", err)
 	}
@@ -79,10 +106,10 @@ func FetchResolverConfig(uid, version string, cdDev bool) (*ResolverConfig, erro
 		}
 		ips := ctrld.LookupIP(apiDomain)
 		if len(ips) == 0 {
-			ctrld.ProxyLog.Warn().Msgf("No IPs found for %s, connecting to %s", apiDomain, addr)
+			ctrld.ProxyLogger.Load().Warn().Msgf("No IPs found for %s, connecting to %s", apiDomain, addr)
 			return ctrldnet.Dialer.DialContext(ctx, network, addr)
 		}
-		ctrld.ProxyLog.Debug().Msgf("API IPs: %v", ips)
+		ctrld.ProxyLogger.Load().Debug().Msgf("API IPs: %v", ips)
 		_, port, _ := net.SplitHostPort(addr)
 		addrs := make([]string, len(ips))
 		for i := range ips {
@@ -92,7 +119,7 @@ func FetchResolverConfig(uid, version string, cdDev bool) (*ResolverConfig, erro
 		return d.DialContext(ctx, network, addrs)
 	}
 
-	if router.Name() == router.DDWrt {
+	if router.Name() == ddwrt.Name {
 		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
 	}
 	client := http.Client{
@@ -118,4 +145,14 @@ func FetchResolverConfig(uid, version string, cdDev bool) (*ResolverConfig, erro
 		return nil, err
 	}
 	return &ur.Body.Resolver, nil
+}
+
+// ParseRawUID parse the input raw UID, returning real UID and ClientID.
+// The raw UID can have 2 forms:
+//
+// - <uid>
+// - <uid>/<client_id>
+func ParseRawUID(rawUID string) (string, string) {
+	uid, clientID, _ := strings.Cut(rawUID, "/")
+	return uid, clientID
 }

@@ -12,6 +12,8 @@ import (
 	"text/template"
 
 	"github.com/kardianos/service"
+
+	"github.com/Control-D-Inc/ctrld/internal/router/nvram"
 )
 
 type ddwrtSvc struct {
@@ -94,19 +96,19 @@ func (s *ddwrtSvc) Install() error {
 		return err
 	}
 	s.rcStartup = sb.String()
-	curVal, err := nvram("get", nvramRCStartupKey)
+	curVal, err := nvram.Run("get", nvram.RCStartupKey)
 	if err != nil {
 		return err
 	}
-	if _, err := nvram("set", nvramCtrldKeyPrefix+nvramRCStartupKey+"="+curVal); err != nil {
+	if _, err := nvram.Run("set", nvram.CtrldKeyPrefix+nvram.RCStartupKey+"="+curVal); err != nil {
 		return err
 	}
 	val := strings.Join([]string{curVal, s.rcStartup + " &", fmt.Sprintf(`echo $! > "/tmp/%s.pid"`, s.Config.Name)}, "\n")
 
-	if _, err := nvram("set", nvramRCStartupKey+"="+val); err != nil {
+	if _, err := nvram.Run("set", nvram.RCStartupKey+"="+val); err != nil {
 		return err
 	}
-	if out, err := nvram("commit"); err != nil {
+	if out, err := nvram.Run("commit"); err != nil {
 		return fmt.Errorf("%s: %w", out, err)
 	}
 
@@ -118,16 +120,16 @@ func (s *ddwrtSvc) Uninstall() error {
 		return err
 	}
 
-	ctrldStartupKey := nvramCtrldKeyPrefix + nvramRCStartupKey
-	rcStartup, err := nvram("get", ctrldStartupKey)
+	ctrldStartupKey := nvram.CtrldKeyPrefix + nvram.RCStartupKey
+	rcStartup, err := nvram.Run("get", ctrldStartupKey)
 	if err != nil {
 		return err
 	}
-	_, _ = nvram("unset", ctrldStartupKey)
-	if _, err := nvram("set", nvramRCStartupKey+"="+rcStartup); err != nil {
+	_, _ = nvram.Run("unset", ctrldStartupKey)
+	if _, err := nvram.Run("set", nvram.RCStartupKey+"="+rcStartup); err != nil {
 		return err
 	}
-	if out, err := nvram("commit"); err != nil {
+	if out, err := nvram.Run("commit"); err != nil {
 		return fmt.Errorf("%s: %w", out, err)
 	}
 
@@ -269,7 +271,7 @@ case "$1" in
       echo "failed to stop $name"
       exit 1
     fi
-    exit 1
+    exit 0
   ;;
   restart)
     $0 stop

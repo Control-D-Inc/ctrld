@@ -19,48 +19,6 @@ import (
 )
 
 func (uc *UpstreamConfig) setupDOH3Transport() {
-	uc.setupDOH3TransportWithoutPingUpstream()
-	go uc.pingUpstream()
-}
-
-func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
-	rt := &http3.RoundTripper{}
-	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
-	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
-		domain := addr
-		_, port, _ := net.SplitHostPort(addr)
-		// if we have a bootstrap ip set, use it to avoid DNS lookup
-		if uc.BootstrapIP != "" {
-			addr = net.JoinHostPort(uc.BootstrapIP, port)
-			ProxyLog.Debug().Msgf("sending doh3 request to: %s", addr)
-			udpConn, err := net.ListenUDP("udp", nil)
-			if err != nil {
-				return nil, err
-			}
-			remoteAddr, err := net.ResolveUDPAddr("udp", addr)
-			if err != nil {
-				return nil, err
-			}
-			return quic.DialEarlyContext(ctx, udpConn, remoteAddr, domain, tlsCfg, cfg)
-		}
-		dialAddrs := make([]string, len(addrs))
-		for i := range addrs {
-			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
-		}
-		pd := &quicParallelDialer{}
-		conn, err := pd.Dial(ctx, domain, dialAddrs, tlsCfg, cfg)
-		if err != nil {
-			return nil, err
-		}
-		ProxyLog.Debug().Msgf("sending doh3 request to: %s", conn.RemoteAddr())
-		return conn, err
-	}
-	return rt
-}
-
-func (uc *UpstreamConfig) setupDOH3TransportWithoutPingUpstream() {
-	uc.mu.Lock()
-	defer uc.mu.Unlock()
 	switch uc.IPStack {
 	case IpStackBoth, "":
 		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
@@ -81,9 +39,48 @@ func (uc *UpstreamConfig) setupDOH3TransportWithoutPingUpstream() {
 	}
 }
 
+func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
+	rt := &http3.RoundTripper{}
+	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
+	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+		domain := addr
+		_, port, _ := net.SplitHostPort(addr)
+		// if we have a bootstrap ip set, use it to avoid DNS lookup
+		if uc.BootstrapIP != "" {
+			addr = net.JoinHostPort(uc.BootstrapIP, port)
+			ProxyLogger.Load().Debug().Msgf("sending doh3 request to: %s", addr)
+			udpConn, err := net.ListenUDP("udp", nil)
+			if err != nil {
+				return nil, err
+			}
+			remoteAddr, err := net.ResolveUDPAddr("udp", addr)
+			if err != nil {
+				return nil, err
+			}
+			return quic.DialEarlyContext(ctx, udpConn, remoteAddr, domain, tlsCfg, cfg)
+		}
+		dialAddrs := make([]string, len(addrs))
+		for i := range addrs {
+			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
+		}
+		pd := &quicParallelDialer{}
+		conn, err := pd.Dial(ctx, domain, dialAddrs, tlsCfg, cfg)
+		if err != nil {
+			return nil, err
+		}
+		ProxyLogger.Load().Debug().Msgf("sending doh3 request to: %s", conn.RemoteAddr())
+		return conn, err
+	}
+	return rt
+}
+
 func (uc *UpstreamConfig) doh3Transport(dnsType uint16) http.RoundTripper {
-	uc.mu.Lock()
-	defer uc.mu.Unlock()
+	uc.transportOnce.Do(func() {
+		uc.SetupTransport()
+	})
+	if uc.rebootstrap.CompareAndSwap(true, false) {
+		uc.SetupTransport()
+	}
 	switch uc.IPStack {
 	case IpStackBoth, IpStackV4, IpStackV6:
 		return uc.http3RoundTripper

@@ -5,13 +5,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -120,16 +125,61 @@ func (c *Config) HasUpstreamSendClientInfo() bool {
 	return false
 }
 
+// FirstListener returns the first listener config of current config. Listeners are sorted numerically.
+//
+// It panics if Config has no listeners configured.
+func (c *Config) FirstListener() *ListenerConfig {
+	listeners := make([]int, 0, len(c.Listener))
+	for k := range c.Listener {
+		n, err := strconv.Atoi(k)
+		if err != nil {
+			continue
+		}
+		listeners = append(listeners, n)
+	}
+	if len(listeners) == 0 {
+		panic("missing listener config")
+	}
+	sort.Ints(listeners)
+	return c.Listener[strconv.Itoa(listeners[0])]
+}
+
+// FirstUpstream returns the first upstream of current config. Upstreams are sorted numerically.
+//
+// It panics if Config has no upstreams configured.
+func (c *Config) FirstUpstream() *UpstreamConfig {
+	upstreams := make([]int, 0, len(c.Upstream))
+	for k := range c.Upstream {
+		n, err := strconv.Atoi(k)
+		if err != nil {
+			continue
+		}
+		upstreams = append(upstreams, n)
+	}
+	if len(upstreams) == 0 {
+		panic("missing listener config")
+	}
+	sort.Ints(upstreams)
+	return c.Upstream[strconv.Itoa(upstreams[0])]
+}
+
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
-	LogLevel         string `mapstructure:"log_level" toml:"log_level,omitempty"`
-	LogPath          string `mapstructure:"log_path" toml:"log_path,omitempty"`
-	CacheEnable      bool   `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
-	CacheSize        int    `mapstructure:"cache_size" toml:"cache_size,omitempty"`
-	CacheTTLOverride int    `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
-	CacheServeStale  bool   `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
-	Daemon           bool   `mapstructure:"-" toml:"-"`
-	AllocateIP       bool   `mapstructure:"-" toml:"-"`
+	LogLevel              string `mapstructure:"log_level" toml:"log_level,omitempty"`
+	LogPath               string `mapstructure:"log_path" toml:"log_path,omitempty"`
+	CacheEnable           bool   `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
+	CacheSize             int    `mapstructure:"cache_size" toml:"cache_size,omitempty"`
+	CacheTTLOverride      int    `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
+	CacheServeStale       bool   `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
+	MaxConcurrentRequests *int   `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
+	DHCPLeaseFile         string `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
+	DHCPLeaseFileFormat   string `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
+	DiscoverMDNS          *bool  `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
+	DiscoverARP           *bool  `mapstructure:"discover_arp" toml:"discover_dhcp,omitempty"`
+	DiscoverDHCP          *bool  `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
+	DiscoverPtr           *bool  `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
+	Daemon                bool   `mapstructure:"-" toml:"-"`
+	AllocateIP            bool   `mapstructure:"-" toml:"-"`
 }
 
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.
@@ -153,11 +203,12 @@ type UpstreamConfig struct {
 	SendClientInfo *bool `mapstructure:"send_client_info" toml:"send_client_info,omitempty"`
 
 	g                  singleflight.Group
-	mu                 sync.Mutex
+	rebootstrap        atomic.Bool
 	bootstrapIPs       []string
 	bootstrapIPs4      []string
 	bootstrapIPs6      []string
 	transport          *http.Transport
+	transportOnce      sync.Once
 	transport4         *http.Transport
 	transport6         *http.Transport
 	http3RoundTripper  http.RoundTripper
@@ -173,6 +224,24 @@ type ListenerConfig struct {
 	Port       int                   `mapstructure:"port" toml:"port,omitempty" validate:"gte=0"`
 	Restricted bool                  `mapstructure:"restricted" toml:"restricted,omitempty"`
 	Policy     *ListenerPolicyConfig `mapstructure:"policy" toml:"policy,omitempty"`
+}
+
+// IsDirectDnsListener reports whether ctrld can be a direct listener on port 53.
+// It returns true only if ctrld can listen on port 53 for all interfaces. That means
+// there's no other software listening on port 53.
+//
+// If someone listening on port 53, or ctrld could only listen on port 53 for a specific
+// interface, ctrld could only be configured as a DNS forwarder.
+func (lc *ListenerConfig) IsDirectDnsListener() bool {
+	if lc == nil || lc.Port != 53 {
+		return false
+	}
+	switch lc.IP {
+	case "", "::", "0.0.0.0":
+		return true
+	default:
+		return false
+	}
 }
 
 // ListenerPolicyConfig specifies the policy rules for ctrld to filter incoming requests.
@@ -243,11 +312,8 @@ func (uc *UpstreamConfig) VerifyDomain() string {
 //   - Lan IP
 //   - Hostname
 func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
-	if uc.SendClientInfo != nil && !(*uc.SendClientInfo) {
-		return false
-	}
-	if uc.SendClientInfo == nil {
-		return true
+	if uc.SendClientInfo != nil {
+		return *uc.SendClientInfo
 	}
 	switch uc.Type {
 	case ResolverTypeDOH, ResolverTypeDOH3:
@@ -277,13 +343,27 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 // SetupBootstrapIP manually find all available IPs of the upstream.
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
-	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 2*time.Second)
+	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
+	isControlD := uc.isControlD()
 	for {
 		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, withBootstrapDNS)
+		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
+		// filtering them out here to prevent weird behavior.
+		if isControlD {
+			n := 0
+			for _, ip := range uc.bootstrapIPs {
+				netIP := net.ParseIP(ip)
+				if netIP != nil && !netIP.IsPrivate() {
+					uc.bootstrapIPs[n] = ip
+					n++
+				}
+			}
+			uc.bootstrapIPs = uc.bootstrapIPs[:n]
+		}
 		if len(uc.bootstrapIPs) > 0 {
 			break
 		}
-		ProxyLog.Warn().Msg("could not resolve bootstrap IPs, retrying...")
+		ProxyLogger.Load().Warn().Msg("could not resolve bootstrap IPs, retrying...")
 		b.BackOff(context.Background(), errors.New("no bootstrap IPs"))
 	}
 	for _, ip := range uc.bootstrapIPs {
@@ -293,7 +373,7 @@ func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
 			uc.bootstrapIPs4 = append(uc.bootstrapIPs4, ip)
 		}
 	}
-	ProxyLog.Debug().Msgf("Bootstrap IPs: %v", uc.bootstrapIPs)
+	ProxyLogger.Load().Debug().Msgf("bootstrap IPs: %v", uc.bootstrapIPs)
 }
 
 // ReBootstrap re-setup the bootstrap IP and the transport.
@@ -304,19 +384,10 @@ func (uc *UpstreamConfig) ReBootstrap() {
 		return
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
-		ProxyLog.Debug().Msg("re-bootstrapping upstream ip")
-		uc.setupTransportWithoutPingUpstream()
+		ProxyLogger.Load().Debug().Msg("re-bootstrapping upstream ip")
+		uc.rebootstrap.Store(true)
 		return true, nil
 	})
-}
-
-func (uc *UpstreamConfig) setupTransportWithoutPingUpstream() {
-	switch uc.Type {
-	case ResolverTypeDOH:
-		uc.setupDOHTransportWithoutPingUpstream()
-	case ResolverTypeDOH3:
-		uc.setupDOH3TransportWithoutPingUpstream()
-	}
 }
 
 // SetupTransport initializes the network transport used to connect to upstream server.
@@ -331,48 +402,6 @@ func (uc *UpstreamConfig) SetupTransport() {
 }
 
 func (uc *UpstreamConfig) setupDOHTransport() {
-	uc.setupDOHTransportWithoutPingUpstream()
-	go uc.pingUpstream()
-}
-
-func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.IdleConnTimeout = 5 * time.Second
-	transport.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
-
-	dialerTimeoutMs := 2000
-	if uc.Timeout > 0 && uc.Timeout < dialerTimeoutMs {
-		dialerTimeoutMs = uc.Timeout
-	}
-	dialerTimeout := time.Duration(dialerTimeoutMs) * time.Millisecond
-	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		_, port, _ := net.SplitHostPort(addr)
-		if uc.BootstrapIP != "" {
-			dialer := net.Dialer{Timeout: dialerTimeout, KeepAlive: dialerTimeout}
-			addr := net.JoinHostPort(uc.BootstrapIP, port)
-			Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", addr)
-			return dialer.DialContext(ctx, network, addr)
-		}
-		pd := &ctrldnet.ParallelDialer{}
-		pd.Timeout = dialerTimeout
-		pd.KeepAlive = dialerTimeout
-		dialAddrs := make([]string, len(addrs))
-		for i := range addrs {
-			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
-		}
-		conn, err := pd.DialContext(ctx, network, dialAddrs)
-		if err != nil {
-			return nil, err
-		}
-		Log(ctx, ProxyLog.Debug(), "sending doh request to: %s", conn.RemoteAddr())
-		return conn, nil
-	}
-	return transport
-}
-
-func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
-	uc.mu.Lock()
-	defer uc.mu.Unlock()
 	switch uc.IPStack {
 	case IpStackBoth, "":
 		uc.transport = uc.newDOHTransport(uc.bootstrapIPs)
@@ -387,24 +416,82 @@ func (uc *UpstreamConfig) setupDOHTransportWithoutPingUpstream() {
 		} else {
 			uc.transport6 = uc.transport4
 		}
-
 		uc.transport = uc.newDOHTransport(uc.bootstrapIPs)
 	}
 }
 
-func (uc *UpstreamConfig) pingUpstream() {
-	// Warming up the transport by querying a test packet.
-	dnsResolver, err := NewResolver(uc)
-	if err != nil {
-		ProxyLog.Error().Err(err).Msgf("failed to create resolver for upstream: %s", uc.Name)
+func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = 100
+	transport.TLSClientConfig = &tls.Config{
+		RootCAs:            uc.certPool,
+		ClientSessionCache: tls.NewLRUClientSessionCache(0),
+	}
+
+	dialerTimeoutMs := 2000
+	if uc.Timeout > 0 && uc.Timeout < dialerTimeoutMs {
+		dialerTimeoutMs = uc.Timeout
+	}
+	dialerTimeout := time.Duration(dialerTimeoutMs) * time.Millisecond
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		_, port, _ := net.SplitHostPort(addr)
+		if uc.BootstrapIP != "" {
+			dialer := net.Dialer{Timeout: dialerTimeout, KeepAlive: dialerTimeout}
+			addr := net.JoinHostPort(uc.BootstrapIP, port)
+			Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", addr)
+			return dialer.DialContext(ctx, network, addr)
+		}
+		pd := &ctrldnet.ParallelDialer{}
+		pd.Timeout = dialerTimeout
+		pd.KeepAlive = dialerTimeout
+		dialAddrs := make([]string, len(addrs))
+		for i := range addrs {
+			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
+		}
+		conn, err := pd.DialContext(ctx, network, dialAddrs)
+		if err != nil {
+			return nil, err
+		}
+		Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", conn.RemoteAddr())
+		return conn, nil
+	}
+	runtime.SetFinalizer(transport, func(transport *http.Transport) {
+		transport.CloseIdleConnections()
+	})
+	return transport
+}
+
+// Ping warms up the connection to DoH/DoH3 upstream.
+func (uc *UpstreamConfig) Ping() {
+	switch uc.Type {
+	case ResolverTypeDOH, ResolverTypeDOH3:
+	default:
 		return
 	}
-	msg := new(dns.Msg)
-	msg.SetQuestion(".", dns.TypeNS)
-	msg.MsgHdr.RecursionDesired = true
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, _ = dnsResolver.Resolve(ctx, msg)
+
+	ping := func(t http.RoundTripper) {
+		if t == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		req, _ := http.NewRequestWithContext(ctx, "HEAD", uc.Endpoint, nil)
+		resp, _ := t.RoundTrip(req)
+		if resp == nil {
+			return
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+	}
+
+	for _, typ := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		switch uc.Type {
+		case ResolverTypeDOH:
+			ping(uc.dohTransport(typ))
+		case ResolverTypeDOH3:
+			ping(uc.doh3Transport(typ))
+		}
+	}
 }
 
 func (uc *UpstreamConfig) isControlD() bool {
@@ -423,8 +510,12 @@ func (uc *UpstreamConfig) isControlD() bool {
 }
 
 func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
-	uc.mu.Lock()
-	defer uc.mu.Unlock()
+	uc.transportOnce.Do(func() {
+		uc.SetupTransport()
+	})
+	if uc.rebootstrap.CompareAndSwap(true, false) {
+		uc.SetupTransport()
+	}
 	switch uc.IPStack {
 	case IpStackBoth, IpStackV4, IpStackV6:
 		return uc.transport

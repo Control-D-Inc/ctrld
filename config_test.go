@@ -1,6 +1,8 @@
 package ctrld_test
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/go-playground/validator/v10"
@@ -56,6 +58,20 @@ func TestLoadDefaultConfig(t *testing.T) {
 	assert.Len(t, cfg.Upstream, 2)
 }
 
+func TestConfigOverride(t *testing.T) {
+	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
+	ctrld.InitConfig(v, "test_load_config")
+	v.SetConfigType("toml")
+	require.NoError(t, v.ReadConfig(strings.NewReader(testhelper.SampleConfigStr(t))))
+	cfg := ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{
+		"0": {IP: "127.0.0.1", Port: 53},
+	}}
+	require.NoError(t, v.Unmarshal(&cfg))
+
+	assert.Equal(t, "10.10.42.69", cfg.Listener["1"].IP)
+	assert.Equal(t, 1337, cfg.Listener["1"].Port)
+}
+
 func TestConfigValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -75,6 +91,10 @@ func TestConfigValidation(t *testing.T) {
 		{"os upstream", configWithOsUpstream(t), false},
 		{"invalid rules", configWithInvalidRules(t), true},
 		{"invalid dns rcodes", configWithInvalidRcodes(t), true},
+		{"invalid max concurrent requests", configWithInvalidMaxConcurrentRequests(t), true},
+		{"non-existed lease file", configWithNonExistedLeaseFile(t), true},
+		{"lease file format required if lease file exist", configWithExistedLeaseFile(t), true},
+		{"invalid lease file format", configWithInvalidLeaseFileFormat(t), true},
 	}
 
 	for _, tc := range tests {
@@ -174,5 +194,34 @@ func configWithInvalidRcodes(t *testing.T) *ctrld.Config {
 		Networks:       []ctrld.Rule{{"*.com": []string{"upstream.0"}}},
 		FailoverRcodes: []string{"foo"},
 	}
+	return cfg
+}
+
+func configWithInvalidMaxConcurrentRequests(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	n := -1
+	cfg.Service.MaxConcurrentRequests = &n
+	return cfg
+}
+
+func configWithNonExistedLeaseFile(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Service.DHCPLeaseFile = "non-existed"
+	return cfg
+}
+
+func configWithExistedLeaseFile(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Service.DHCPLeaseFile = exe
+	return cfg
+}
+
+func configWithInvalidLeaseFileFormat(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Service.DHCPLeaseFileFormat = "invalid"
 	return cfg
 }
