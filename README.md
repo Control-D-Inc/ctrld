@@ -76,8 +76,8 @@ $ go install github.com/Control-D-Inc/ctrld/cmd/ctrld@latest
 or 
 
 ```
-$ docker build -t controld/ctrld .
-$ docker run -d --name=ctrld -p 53:53/tcp -p 53:53/udp controld/ctrld --cd=RESOLVER_ID_GOES_HERE -vv
+$ docker build -t controldns/ctrld .
+$ docker run -d --name=ctrld -p 53:53/tcp -p 53:53/udp controldns/ctrld --cd=RESOLVER_ID_GOES_HERE -vv
 ```
 
 
