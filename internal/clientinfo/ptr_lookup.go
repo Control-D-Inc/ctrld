@@ -62,13 +62,13 @@ func (p *ptrDiscover) lookupHostname(ip string) string {
 	msg := new(dns.Msg)
 	addr, err := dns.ReverseAddr(ip)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Error().Err(err).Msg("invalid ip address")
+		ctrld.ProxyLogger.Load().Warn().Str("discovery", "ptr").Err(err).Msg("invalid ip address")
 		return ""
 	}
 	msg.SetQuestion(addr, dns.TypePTR)
 	ans, err := p.resolver.Resolve(ctx, msg)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not lookup IP")
+		ctrld.ProxyLogger.Load().Warn().Str("discovery", "ptr").Err(err).Msg("could not lookup IP")
 		return ""
 	}
 	for _, rr := range ans.Answer {
