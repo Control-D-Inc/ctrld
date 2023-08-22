@@ -73,6 +73,7 @@ type Table struct {
 	arp    *arpDiscover
 	ptr    *ptrDiscover
 	mdns   *mdns
+	hf     *hostsFile
 	cfg    *ctrld.Config
 	quitCh chan struct{}
 	selfIP string
@@ -133,6 +134,17 @@ func (t *Table) init() {
 			t.hostnameResolvers = append(t.hostnameResolvers, t.merlin)
 			t.refreshers = append(t.refreshers, t.merlin)
 		}
+	}
+	if t.discoverHosts() {
+		t.hf = &hostsFile{}
+		ctrld.ProxyLogger.Load().Debug().Msg("start hosts file discovery")
+		if err := t.hf.init(); err != nil {
+			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init hosts file discover")
+		} else {
+			t.hostnameResolvers = append(t.hostnameResolvers, t.hf)
+			t.refreshers = append(t.refreshers, t.hf)
+		}
+		go t.hf.watchChanges()
 	}
 	if t.discoverDHCP() {
 		t.dhcp = &dhcp{selfIP: t.selfIP}
@@ -326,6 +338,13 @@ func (t *Table) discoverPTR() bool {
 		return true
 	}
 	return *t.cfg.Service.DiscoverPtr
+}
+
+func (t *Table) discoverHosts() bool {
+	if t.cfg.Service.DiscoverHosts == nil {
+		return true
+	}
+	return *t.cfg.Service.DiscoverHosts
 }
 
 // normalizeIP normalizes the ip parsed from dnsmasq/dhcpd lease file.

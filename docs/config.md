@@ -193,6 +193,13 @@ Perform LAN client discovery using PTR queries.
 - Required: no
 - Default: true
 
+### discover_hosts
+Perform LAN client discovery using hosts file.
+
+- Type: boolean
+- Required: no
+- Default: true
+
 ### dhcp_lease_file_path
 Relative or absolute path to a custom DHCP leases file location. 
 

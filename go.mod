@@ -23,6 +23,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.16.0
 	github.com/stretchr/testify v1.8.3
+	github.com/txn2/txeh v1.5.3
 	github.com/vishvananda/netlink v1.2.1-beta.2
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13
 	golang.org/x/net v0.10.0

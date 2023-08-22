@@ -178,6 +178,7 @@ type ServiceConfig struct {
 	DiscoverARP           *bool  `mapstructure:"discover_arp" toml:"discover_dhcp,omitempty"`
 	DiscoverDHCP          *bool  `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
 	DiscoverPtr           *bool  `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
+	DiscoverHosts         *bool  `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
 	Daemon                bool   `mapstructure:"-" toml:"-"`
 	AllocateIP            bool   `mapstructure:"-" toml:"-"`
 }
