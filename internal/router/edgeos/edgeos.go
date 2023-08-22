@@ -169,6 +169,13 @@ func ContentFilteringEnabled() bool {
 	return err == nil && !st.IsDir()
 }
 
+func LeaseFileDir() string {
+	if checkUSG() {
+		return ""
+	}
+	return "/run"
+}
+
 func checkUSG() bool {
 	out, _ := exec.Command("mca-cli-op", "info").Output()
 	return bytes.Contains(out, []byte("UniFi-Gateway-"))
