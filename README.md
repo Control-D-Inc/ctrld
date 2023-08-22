@@ -76,7 +76,7 @@ $ go install github.com/Control-D-Inc/ctrld/cmd/ctrld@latest
 or 
 
 ```
-$ docker build -t controldns/ctrld .
+$ docker build -t controldns/ctrld . -f docker/Dockerfile
 $ docker run -d --name=ctrld -p 53:53/tcp -p 53:53/udp controldns/ctrld --cd=RESOLVER_ID_GOES_HERE -vv
 ```
 
@@ -188,8 +188,8 @@ See [Configuration Docs](docs/config.md).
 [listener]
 
   [listener.0]
-    ip = "127.0.0.1"
-    port = 53
+    ip = ""
+    port = 0
     restricted = false
 
 [network]
@@ -219,6 +219,8 @@ See [Configuration Docs](docs/config.md).
     type = "doq"
 
 ```
+
+`ctrld` will pick a working config for `listener.0` then writing the default config to disk for the first run.
 
 ## Advanced Configuration
 The above is the most basic example, which will work out of the box. If you're looking to do advanced configurations using policies, see [Configuration Docs](docs/config.md) for complete documentation of the config file.

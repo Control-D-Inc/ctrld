@@ -882,6 +882,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 		if err := v.Unmarshal(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to unmarshal default config: %v", err)
 		}
+		_ = updateListenerConfig()
 		if err := writeConfigFile(); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
 		} else {

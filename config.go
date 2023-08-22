@@ -78,8 +78,8 @@ func SetConfigNameWithPath(v *viper.Viper, name, configPath string) {
 func InitConfig(v *viper.Viper, name string) {
 	v.SetDefault("listener", map[string]*ListenerConfig{
 		"0": {
-			IP:   "127.0.0.1",
-			Port: 53,
+			IP:   "",
+			Port: 0,
 		},
 	})
 	v.SetDefault("network", map[string]*NetworkConfig{

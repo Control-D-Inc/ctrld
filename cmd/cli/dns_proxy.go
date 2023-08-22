@@ -5,10 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -16,10 +14,8 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"go4.org/mem"
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/net/interfaces"
-	"tailscale.com/util/lineread"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
@@ -121,7 +117,8 @@ func (p *prog) serveDNS(listenerNum string) error {
 			})
 		}
 		g.Go(func() error {
-			s, errCh := runDNSServer(dnsListenAddress(listenerConfig), proto, handler)
+			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
+			s, errCh := runDNSServer(addr, proto, handler)
 			defer s.Shutdown()
 			select {
 			case err := <-errCh:
@@ -422,17 +419,6 @@ func needLocalIPv6Listener() bool {
 	return ctrldnet.SupportsIPv6ListenLocal() && runtime.GOOS == "windows"
 }
 
-func dnsListenAddress(lc *ctrld.ListenerConfig) string {
-	// If we are inside container and the listener loopback address, change
-	// the address to something like 0.0.0.0:53, so user can expose the port to outside.
-	if inContainer() {
-		if ip := net.ParseIP(lc.IP); ip != nil && ip.IsLoopback() {
-			return net.JoinHostPort("0.0.0.0", strconv.Itoa(lc.Port))
-		}
-	}
-	return net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
-}
-
 func macFromMsg(msg *dns.Msg) string {
 	if opt := msg.IsEdns0(); opt != nil {
 		for _, s := range opt.Option {
@@ -496,41 +482,6 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 	}()
 	waitLock.Lock()
 	return s, errCh
-}
-
-// inContainer reports whether we're running in a container.
-//
-// Copied from https://github.com/tailscale/tailscale/blob/v1.42.0/hostinfo/hostinfo.go#L260
-// with modification for ctrld usage.
-func inContainer() bool {
-	if runtime.GOOS != "linux" {
-		return false
-	}
-
-	var ret bool
-	if _, err := os.Stat("/.dockerenv"); err == nil {
-		return true
-	}
-	if _, err := os.Stat("/run/.containerenv"); err == nil {
-		// See https://github.com/cri-o/cri-o/issues/5461
-		return true
-	}
-	lineread.File("/proc/1/cgroup", func(line []byte) error {
-		if mem.Contains(mem.B(line), mem.S("/docker/")) ||
-			mem.Contains(mem.B(line), mem.S("/lxc/")) {
-			ret = true
-			return io.EOF // arbitrary non-nil error to stop loop
-		}
-		return nil
-	})
-	lineread.File("/proc/mounts", func(line []byte) error {
-		if mem.Contains(mem.B(line), mem.S("lxcfs /proc/cpuinfo fuse.lxcfs")) {
-			ret = true
-			return io.EOF
-		}
-		return nil
-	})
-	return ret
 }
 
 func (p *prog) getClientInfo(ip, mac string) *ctrld.ClientInfo {
