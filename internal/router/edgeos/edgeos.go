@@ -177,8 +177,8 @@ func LeaseFileDir() string {
 }
 
 func checkUSG() bool {
-	out, _ := exec.Command("mca-cli-op", "info").Output()
-	return bytes.Contains(out, []byte("UniFi-Gateway-"))
+	out, _ := os.ReadFile("/etc/version")
+	return bytes.HasPrefix(out, []byte("UniFiSecurityGateway."))
 }
 
 func restartDNSMasq() error {
