@@ -2,40 +2,51 @@ package clientinfo
 
 import (
 	"os"
+	"sync"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/txn2/txeh"
+	"github.com/jaytaylor/go-hostsfile"
 
 	"github.com/Control-D-Inc/ctrld"
 )
 
 // hostsFile provides client discovery functionality using system hosts file.
 type hostsFile struct {
-	h       *txeh.Hosts
 	watcher *fsnotify.Watcher
+	mu      sync.Mutex
+	m       map[string][]string
 }
 
 // init performs initialization works, which is necessary before hostsFile can be fully operated.
 func (hf *hostsFile) init() error {
-	h, err := txeh.NewHostsDefault()
-	if err != nil {
-		return err
-	}
-	hf.h = h
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
 	}
 	hf.watcher = watcher
-	if err := hf.watcher.Add(hf.h.ReadFilePath); err != nil {
+	if err := hf.watcher.Add(hostsfile.HostsPath); err != nil {
 		return err
 	}
+	m, err := hostsfile.ParseHosts(hostsfile.ReadHostsFile())
+	if err != nil {
+		return err
+	}
+	hf.mu.Lock()
+	hf.m = m
+	hf.mu.Unlock()
 	return nil
 }
 
 // refresh reloads hosts file entries.
 func (hf *hostsFile) refresh() error {
-	return hf.h.Reload()
+	m, err := hostsfile.ParseHosts(hostsfile.ReadHostsFile())
+	if err != nil {
+		return err
+	}
+	hf.mu.Lock()
+	hf.m = m
+	hf.mu.Unlock()
+	return nil
 }
 
 // watchChanges watches and updates hosts file data if any changes happens.
@@ -66,11 +77,10 @@ func (hf *hostsFile) watchChanges() {
 
 // LookupHostnameByIP returns hostname for given IP from current hosts file entries.
 func (hf *hostsFile) LookupHostnameByIP(ip string) string {
-	hf.h.Lock()
-	defer hf.h.Unlock()
-
-	if names := hf.h.ListHostsByIP(ip); len(names) > 0 {
-		return names[0]
+	hf.mu.Lock()
+	defer hf.mu.Unlock()
+	if names := hf.m[ip]; len(names) > 0 {
+		return normalizeHostname(names[0])
 	}
 	return ""
 }
