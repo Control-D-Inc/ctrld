@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/rand"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"runtime"
@@ -364,29 +366,58 @@ func errUrlNetworkError(err error) bool {
 	return false
 }
 
-// defaultRouteIP returns IP string of the default route if present, prefer IPv4 over IPv6.
-func defaultRouteIP() string {
-	if dr, err := interfaces.DefaultRoute(); err == nil {
-		if netIface, err := netInterface(dr.InterfaceName); err == nil {
-			addrs, _ := netIface.Addrs()
-			do := func(v4 bool) net.IP {
-				for _, addr := range addrs {
-					if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.IsPrivate() {
-						if v4 {
-							return netIP.IP.To4()
-						}
-						return netIP.IP
-					}
+func ifaceFirstPrivateIP(iface *net.Interface) string {
+	if iface == nil {
+		return ""
+	}
+	do := func(addrs []net.Addr, v4 bool) net.IP {
+		for _, addr := range addrs {
+			if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.IsPrivate() {
+				if v4 {
+					return netIP.IP.To4()
 				}
-				return nil
-			}
-			if ip := do(true); ip != nil {
-				return ip.String()
-			}
-			if ip := do(false); ip != nil {
-				return ip.String()
+				return netIP.IP
 			}
 		}
+		return nil
+	}
+	addrs, _ := iface.Addrs()
+	if ip := do(addrs, true); ip != nil {
+		return ip.String()
+	}
+	if ip := do(addrs, false); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+// defaultRouteIP returns private IP string of the default route if present, prefer IPv4 over IPv6.
+func defaultRouteIP() string {
+	dr, err := interfaces.DefaultRoute()
+	if err != nil {
+		return ""
+	}
+	drNetIface, err := netInterface(dr.InterfaceName)
+	if err != nil {
+		return ""
+	}
+	if ip := ifaceFirstPrivateIP(drNetIface); ip != "" {
+		return ip
+	}
+
+	// If we reach here, it means the default route interface is connected directly to ISP.
+	// We need to find the LAN interface with the same Mac address with drNetIface.
+	var drLanNetIface *net.Interface
+	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+		if i.Name == drNetIface.Name {
+			return
+		}
+		if bytes.Equal(i.HardwareAddr, drNetIface.HardwareAddr) {
+			drLanNetIface = i.Interface
+		}
+	})
+	if ip := ifaceFirstPrivateIP(drLanNetIface); ip != "" {
+		return ip
 	}
 	return ""
 }
