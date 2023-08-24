@@ -27,13 +27,15 @@ const (
 )
 
 var bootstrapDNS = "76.76.2.0"
-var or = &osResolver{nameservers: nameservers()}
 
-func init() {
-	if len(or.nameservers) == 0 {
-		// Add bootstrap DNS in case we did not find any.
-		or.nameservers = []string{net.JoinHostPort(bootstrapDNS, "53")}
-	}
+// or is the Resolver used for ResolverTypeOS.
+var or = &osResolver{nameservers: defaultNameservers()}
+
+// defaultNameservers returns OS nameservers plus ctrld bootstrap nameserver.
+func defaultNameservers() []string {
+	ns := nameservers()
+	ns = append(ns, net.JoinHostPort(bootstrapDNS, "53"))
+	return ns
 }
 
 // Resolver is the interface that wraps the basic DNS operations.
