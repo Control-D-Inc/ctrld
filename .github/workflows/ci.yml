@@ -1,7 +1,7 @@
 on:
   push:
     branches: [main]
-  pull_request:
+  pull_request:https://cdn168.yahutech.com/slot_mayaGold/index.html?Account=ytr42u53a409486&Host=at2-game3.yahutech.com&Port=443&Lang=vi-VN&token=04cbe14405c74458d616abe04543091b3faf69fbf18e59ff50a6efec7c1e8fdec23e7939d62f04c0342d38f3fc31c5e5027a48e8622b4c16606894baa653fcf50279c51df136f0b46e2be9931a3e2f65&au=aHR0cHM6Ly9hdDItc2VydmljZS55YWh1dGVjaC5jb20=&pid=SklH&uiVer=8d782
 
 jobs:
   test:
