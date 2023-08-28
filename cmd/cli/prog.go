@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"syscall"
@@ -401,23 +402,41 @@ func defaultRouteIP() string {
 	if err != nil {
 		return ""
 	}
+	mainLog.Load().Debug().Str("iface", drNetIface.Name).Msg("checking default route interface")
 	if ip := ifaceFirstPrivateIP(drNetIface); ip != "" {
+		mainLog.Load().Debug().Str("ip", ip).Msg("found ip with default route interface")
 		return ip
 	}
 
 	// If we reach here, it means the default route interface is connected directly to ISP.
 	// We need to find the LAN interface with the same Mac address with drNetIface.
-	var drLanNetIface *net.Interface
+	//
+	// There could be multiple LAN interfaces with the same Mac address, so we find all private
+	// IPs then using the smallest one.
+	var addrs []netip.Addr
 	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
 		if i.Name == drNetIface.Name {
 			return
 		}
 		if bytes.Equal(i.HardwareAddr, drNetIface.HardwareAddr) {
-			drLanNetIface = i.Interface
+			for _, pfx := range prefixes {
+				addr := pfx.Addr()
+				if addr.IsPrivate() {
+					addrs = append(addrs, addr)
+				}
+			}
 		}
 	})
-	if ip := ifaceFirstPrivateIP(drLanNetIface); ip != "" {
-		return ip
+
+	if len(addrs) == 0 {
+		mainLog.Load().Warn().Msg("no default route IP found")
+		return ""
 	}
-	return ""
+	sort.Slice(addrs, func(i, j int) bool {
+		return addrs[i].Less(addrs[j])
+	})
+
+	ip := addrs[0].String()
+	mainLog.Load().Debug().Str("ip", ip).Msg("found LAN interface IP")
+	return ip
 }
