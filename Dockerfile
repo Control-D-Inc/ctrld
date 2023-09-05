@@ -8,7 +8,7 @@
 # - Non-cgo ctrld binary.
 #
 # CI_COMMIT_TAG is used to set the version of ctrld binary.
-FROM golang:bullseye as base
+FROM golang:1.20-bullseye as base
 
 WORKDIR /app
 
