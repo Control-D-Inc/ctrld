@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -16,13 +17,21 @@ const (
 dns=none
 systemd-resolved=false
 `
-	nmSystemdUnitName   = "NetworkManager.service"
-	systemdEnabledState = "enabled"
+	nmSystemdUnitName = "NetworkManager.service"
 )
 
 var networkManagerCtrldConfFile = filepath.Join(nmConfDir, nmCtrldConfFilename)
 
+// hasNetworkManager reports whether NetworkManager executable found.
+func hasNetworkManager() bool {
+	exe, _ := exec.LookPath("NetworkManager")
+	return exe != ""
+}
+
 func setupNetworkManager() error {
+	if !hasNetworkManager() {
+		return nil
+	}
 	if content, _ := os.ReadFile(nmCtrldConfContent); string(content) == nmCtrldConfContent {
 		mainLog.Load().Debug().Msg("NetworkManager already setup, nothing to do")
 		return nil
@@ -43,6 +52,9 @@ func setupNetworkManager() error {
 }
 
 func restoreNetworkManager() error {
+	if !hasNetworkManager() {
+		return nil
+	}
 	err := os.Remove(networkManagerCtrldConfFile)
 	if os.IsNotExist(err) {
 		mainLog.Load().Debug().Msg("NetworkManager is not available")
@@ -71,6 +83,7 @@ func reloadNetworkManager() {
 	waitCh := make(chan string)
 	if _, err := conn.ReloadUnitContext(ctx, nmSystemdUnitName, "ignore-dependencies", waitCh); err != nil {
 		mainLog.Load().Debug().Err(err).Msg("could not reload NetworkManager")
+		return
 	}
 	<-waitCh
 }
