@@ -17,6 +17,7 @@ server={{ .IP }}#{{ .Port }}
 {{- end}}
 {{- if .SendClientInfo}}
 add-mac
+add-subnet=32,128
 {{- end}}
 `
 
@@ -39,7 +40,10 @@ if [ -n "$pid" ] && [ -f "/proc/${pid}/cmdline" ]; then
   pc_append "server={{ .IP }}#{{ .Port }}" "$config_file"
   {{- end}}
   {{- if .SendClientInfo}}
+  pc_delete "add-mac" "$config_file"
+  pc_delete "add-subnet" "$config_file"
   pc_append "add-mac" "$config_file"                # add client mac
+  pc_append "add-subnet=32,128" "$config_file"      # add client ip
   {{- end}}
   pc_delete "dnssec" "$config_file"                 # disable DNSSEC
   pc_delete "trust-anchor=" "$config_file"          # disable DNSSEC

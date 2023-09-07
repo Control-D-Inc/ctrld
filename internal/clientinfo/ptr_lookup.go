@@ -41,6 +41,9 @@ func (p *ptrDiscover) String() string {
 }
 
 func (p *ptrDiscover) List() []string {
+	if p == nil {
+		return nil
+	}
 	var ips []string
 	p.hostname.Range(func(key, value any) bool {
 		ips = append(ips, key.(string))

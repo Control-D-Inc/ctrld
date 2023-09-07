@@ -74,6 +74,7 @@ type Table struct {
 	ptr    *ptrDiscover
 	mdns   *mdns
 	hf     *hostsFile
+	vpn    *vpn
 	cfg    *ctrld.Config
 	quitCh chan struct{}
 	selfIP string
@@ -117,6 +118,7 @@ func (t *Table) Init() {
 }
 
 func (t *Table) init() {
+	// Custom client ID presents, use it as the only source.
 	if _, clientID := controld.ParseRawUID(t.cdUID); clientID != "" {
 		ctrld.ProxyLogger.Load().Debug().Msg("start self discovery")
 		t.dhcp = &dhcp{selfIP: t.selfIP}
@@ -126,6 +128,11 @@ func (t *Table) init() {
 		t.hostnameResolvers = append(t.hostnameResolvers, t.dhcp)
 		return
 	}
+
+	// Otherwise, process all possible sources in order, that means
+	// the first result of IP/MAC/Hostname lookup will be used.
+	//
+	// Merlin custom clients.
 	if t.discoverDHCP() || t.discoverARP() {
 		t.merlin = &merlinDiscover{}
 		if err := t.merlin.refresh(); err != nil {
@@ -135,6 +142,7 @@ func (t *Table) init() {
 			t.refreshers = append(t.refreshers, t.merlin)
 		}
 	}
+	// Hosts file mapping.
 	if t.discoverHosts() {
 		t.hf = &hostsFile{}
 		ctrld.ProxyLogger.Load().Debug().Msg("start hosts file discovery")
@@ -146,6 +154,7 @@ func (t *Table) init() {
 		}
 		go t.hf.watchChanges()
 	}
+	// DHCP lease files.
 	if t.discoverDHCP() {
 		t.dhcp = &dhcp{selfIP: t.selfIP}
 		ctrld.ProxyLogger.Load().Debug().Msg("start dhcp discovery")
@@ -158,6 +167,7 @@ func (t *Table) init() {
 		}
 		go t.dhcp.watchChanges()
 	}
+	// ARP table.
 	if t.discoverARP() {
 		t.arp = &arpDiscover{}
 		ctrld.ProxyLogger.Load().Debug().Msg("start arp discovery")
@@ -169,6 +179,7 @@ func (t *Table) init() {
 			t.refreshers = append(t.refreshers, t.arp)
 		}
 	}
+	// PTR lookup.
 	if t.discoverPTR() {
 		t.ptr = &ptrDiscover{resolver: ctrld.NewPrivateResolver()}
 		ctrld.ProxyLogger.Load().Debug().Msg("start ptr discovery")
@@ -179,6 +190,7 @@ func (t *Table) init() {
 			t.refreshers = append(t.refreshers, t.ptr)
 		}
 	}
+	// mdns.
 	if t.discoverMDNS() {
 		t.mdns = &mdns{}
 		ctrld.ProxyLogger.Load().Debug().Msg("start mdns discovery")
@@ -187,6 +199,11 @@ func (t *Table) init() {
 		} else {
 			t.hostnameResolvers = append(t.hostnameResolvers, t.mdns)
 		}
+	}
+	// VPN clients.
+	if t.discoverDHCP() || t.discoverARP() {
+		t.vpn = &vpn{}
+		t.hostnameResolvers = append(t.hostnameResolvers, t.vpn)
 	}
 }
 
@@ -271,7 +288,7 @@ func (t *Table) ListClients() []*Client {
 		_ = r.refresh()
 	}
 	ipMap := make(map[string]*Client)
-	il := []ipLister{t.dhcp, t.arp, t.ptr, t.mdns}
+	il := []ipLister{t.dhcp, t.arp, t.ptr, t.mdns, t.vpn}
 	for _, ir := range il {
 		for _, ip := range ir.List() {
 			c, ok := ipMap[ip]
@@ -310,6 +327,15 @@ func (t *Table) ListClients() []*Client {
 		clients = append(clients, c)
 	}
 	return clients
+}
+
+// StoreVPNClient stores client info for VPN clients.
+func (t *Table) StoreVPNClient(ci *ctrld.ClientInfo) {
+	if ci == nil || t.vpn == nil {
+		return
+	}
+	t.vpn.mac.Store(ci.IP, ci.Mac)
+	t.vpn.ip2name.Store(ci.IP, ci.Hostname)
 }
 
 func (t *Table) discoverDHCP() bool {

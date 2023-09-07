@@ -119,6 +119,9 @@ func (d *dhcp) String() string {
 }
 
 func (d *dhcp) List() []string {
+	if d == nil {
+		return nil
+	}
 	var ips []string
 	d.ip.Range(func(key, value any) bool {
 		ips = append(ips, value.(string))

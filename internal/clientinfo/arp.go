@@ -33,6 +33,9 @@ func (a *arpDiscover) String() string {
 }
 
 func (a *arpDiscover) List() []string {
+	if a == nil {
+		return nil
+	}
 	var ips []string
 	a.ip.Range(func(key, value any) bool {
 		ips = append(ips, value.(string))

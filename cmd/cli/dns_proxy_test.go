@@ -156,19 +156,27 @@ func TestCache(t *testing.T) {
 	assert.Equal(t, answer2.Rcode, got2.Rcode)
 }
 
-func Test_macFromMsg(t *testing.T) {
+func Test_ipAndMacFromMsg(t *testing.T) {
 	tests := []struct {
 		name    string
+		ip      string
+		wantIp  bool
 		mac     string
 		wantMac bool
 	}{
-		{"has mac", "4c:20:b8:ab:87:1b", true},
-		{"no mac", "4c:20:b8:ab:87:1b", false},
+		{"has ip v4 and mac", "1.2.3.4", true, "4c:20:b8:ab:87:1b", true},
+		{"has ip v6 and mac", "2606:1a40:3::1", true, "4c:20:b8:ab:87:1b", true},
+		{"no ip", "1.2.3.4", false, "4c:20:b8:ab:87:1b", false},
+		{"no mac", "1.2.3.4", false, "4c:20:b8:ab:87:1b", false},
 	}
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			ip := net.ParseIP(tc.ip)
+			if ip == nil {
+				t.Fatal("missing IP")
+			}
 			hw, err := net.ParseMAC(tc.mac)
 			if err != nil {
 				t.Fatal(err)
@@ -180,13 +188,23 @@ func Test_macFromMsg(t *testing.T) {
 				ec1 := &dns.EDNS0_LOCAL{Code: EDNS0_OPTION_MAC, Data: hw}
 				o.Option = append(o.Option, ec1)
 			}
-			m.Extra = append(m.Extra, o)
-			got := macFromMsg(m)
-			if tc.wantMac && got != tc.mac {
-				t.Errorf("mismatch, want: %q, got: %q", tc.mac, got)
+			if tc.wantIp {
+				ec2 := &dns.EDNS0_SUBNET{Address: ip}
+				o.Option = append(o.Option, ec2)
 			}
-			if !tc.wantMac && got != "" {
-				t.Errorf("unexpected mac: %q", got)
+			m.Extra = append(m.Extra, o)
+			gotIP, gotMac := ipAndMacFromMsg(m)
+			if tc.wantMac && gotMac != tc.mac {
+				t.Errorf("mismatch, want: %q, got: %q", tc.mac, gotMac)
+			}
+			if !tc.wantMac && gotMac != "" {
+				t.Errorf("unexpected mac: %q", gotMac)
+			}
+			if tc.wantIp && gotIP != tc.ip {
+				t.Errorf("mismatch, want: %q, got: %q", tc.ip, gotIP)
+			}
+			if !tc.wantIp && gotIP != "" {
+				t.Errorf("unexpected ip: %q", gotIP)
 			}
 		})
 	}

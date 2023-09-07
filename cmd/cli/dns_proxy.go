@@ -54,8 +54,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		domain := canonicalName(q.Name)
 		reqId := requestID()
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
-		mac := macFromMsg(m)
-		ci := p.getClientInfo(remoteIP, mac)
+		ci := p.getClientInfo(remoteIP, m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
 		t := time.Now()
@@ -419,18 +418,24 @@ func needLocalIPv6Listener() bool {
 	return ctrldnet.SupportsIPv6ListenLocal() && runtime.GOOS == "windows"
 }
 
-func macFromMsg(msg *dns.Msg) string {
+// ipAndMacFromMsg extracts IP and MAC information included in a DNS message, if any.
+func ipAndMacFromMsg(msg *dns.Msg) (string, string) {
+	ip, mac := "", ""
 	if opt := msg.IsEdns0(); opt != nil {
 		for _, s := range opt.Option {
 			switch e := s.(type) {
 			case *dns.EDNS0_LOCAL:
 				if e.Code == EDNS0_OPTION_MAC {
-					return net.HardwareAddr(e.Data).String()
+					mac = net.HardwareAddr(e.Data).String()
+				}
+			case *dns.EDNS0_SUBNET:
+				if len(e.Address) > 0 && !e.Address.IsLoopback() {
+					ip = e.Address.String()
 				}
 			}
 		}
 	}
-	return ""
+	return ip, mac
 }
 
 func spoofRemoteAddr(addr net.Addr, ci *ctrld.ClientInfo) net.Addr {
@@ -484,19 +489,38 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 	return s, errCh
 }
 
-func (p *prog) getClientInfo(ip, mac string) *ctrld.ClientInfo {
+func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	ci := &ctrld.ClientInfo{}
-	if mac != "" {
-		ci.Mac = mac
-		ci.IP = p.ciTable.LookupIP(mac)
-	} else {
-		ci.IP = ip
-		ci.Mac = p.ciTable.LookupMac(ip)
-		if ip == "127.0.0.1" || ip == "::1" {
-			ci.IP = p.ciTable.LookupIP(ci.Mac)
-		}
+	ci.IP, ci.Mac = ipAndMacFromMsg(msg)
+	switch {
+	case ci.IP != "" && ci.Mac != "":
+		// Nothing to do.
+	case ci.IP == "" && ci.Mac != "":
+		// Have MAC, no IP.
+		ci.IP = p.ciTable.LookupIP(ci.Mac)
+	case ci.IP == "" && ci.Mac == "":
+		// Have nothing, use remote IP then lookup MAC.
+		ci.IP = remoteIP
+		fallthrough
+	case ci.IP != "" && ci.Mac == "":
+		// Have IP, no MAC.
+		ci.Mac = p.ciTable.LookupMac(ci.IP)
 	}
-	ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
+
+	// If MAC is still empty here, that mean the requests are made from virtual interface,
+	// like VPN/Wireguard clients, so we use whatever MAC address associated with remoteIP
+	// (most likely 127.0.0.1), and ci.IP as hostname, so we can distinguish those clients.
+	if ci.Mac == "" {
+		ci.Mac = p.ciTable.LookupMac(remoteIP)
+		if hostname := p.ciTable.LookupHostname(ci.IP, ""); hostname != "" {
+			ci.Hostname = hostname
+		} else {
+			ci.Hostname = ci.IP
+			p.ciTable.StoreVPNClient(ci)
+		}
+	} else {
+		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
+	}
 	return ci
 }
 
