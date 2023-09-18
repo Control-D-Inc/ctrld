@@ -491,6 +491,12 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 
 func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	ci := &ctrld.ClientInfo{}
+	if p.appCallback != nil {
+		ci.IP = p.appCallback.LanIp()
+		ci.Mac = p.appCallback.MacAddress()
+		ci.Hostname = p.appCallback.HostName()
+		return ci
+	}
 	ci.IP, ci.Mac = ipAndMacFromMsg(msg)
 	switch {
 	case ci.IP != "" && ci.Mac != "":

@@ -49,11 +49,12 @@ type prog struct {
 	logConn net.Conn
 	cs      *controlServer
 
-	cfg     *ctrld.Config
-	cache   dnscache.Cacher
-	sema    semaphore
-	ciTable *clientinfo.Table
-	router  router.Router
+	cfg         *ctrld.Config
+	appCallback *AppCallback
+	cache       dnscache.Cacher
+	sema        semaphore
+	ciTable     *clientinfo.Table
+	router      router.Router
 
 	started       chan struct{}
 	onStartedDone chan struct{}
@@ -136,12 +137,14 @@ func (p *prog) run() {
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
 		p.ciTable.AddLeaseFile(leaseFile, format)
 	}
-
-	go func() {
-		p.ciTable.Init()
-		p.ciTable.RefreshLoop(p.stopCh)
-	}()
-	go p.watchLinkState()
+	// Newer versions of android and iOS denies permission which breaks connectivity.
+	if !isMobile() {
+		go func() {
+			p.ciTable.Init()
+			p.ciTable.RefreshLoop(p.stopCh)
+		}()
+		go p.watchLinkState()
+	}
 
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()

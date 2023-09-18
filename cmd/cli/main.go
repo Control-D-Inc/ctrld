@@ -65,7 +65,7 @@ func normalizeLogFilePath(logFilePath string) string {
 	return filepath.Join(dir, logFilePath)
 }
 
-func initConsoleLogging() {
+func InitConsoleLogging() {
 	consoleWriter = zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
 		w.TimeFormat = time.StampMilli
 	})
@@ -84,8 +84,8 @@ func initConsoleLogging() {
 	}
 }
 
-// initLogging initializes global logging setup.
-func initLogging() {
+// InitLogging initializes global logging setup.
+func InitLogging() {
 	initLoggingWithBackup(true)
 }
 
