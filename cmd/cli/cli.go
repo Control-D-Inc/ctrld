@@ -80,7 +80,7 @@ var rootCmd = &cobra.Command{
 	Short:   strings.TrimLeft(rootShortDesc, "\n"),
 	Version: curVersion(),
 	PreRun: func(cmd *cobra.Command, args []string) {
-		InitConsoleLogging()
+		initConsoleLogging()
 	},
 }
 
@@ -121,10 +121,10 @@ func initCLI() {
 		Short: "Run the DNS proxy server",
 		Args:  cobra.NoArgs,
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			Run(cmd, nil, nil, nil)
+			RunCobraCommand(cmd)
 		},
 	}
 	runCmd.Flags().BoolVarP(&daemon, "daemon", "d", false, "Run as daemon")
@@ -149,7 +149,7 @@ func initCLI() {
 
 	startCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "start",
@@ -227,7 +227,7 @@ func initCLI() {
 				mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 			}
 
-			InitLogging()
+			initLogging()
 
 			// Explicitly passing config, so on system where home directory could not be obtained,
 			// or sub-process env is different with the parent, we still behave correctly and use
@@ -297,7 +297,7 @@ func initCLI() {
 	routerCmd := &cobra.Command{
 		Use: "setup",
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 		},
 		Run: func(cmd *cobra.Command, _ []string) {
 			exe, err := os.Executable()
@@ -326,7 +326,7 @@ func initCLI() {
 
 	stopCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "stop",
@@ -341,7 +341,7 @@ func initCLI() {
 				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
-			InitLogging()
+			initLogging()
 			if doTasks([]task{{s.Stop, true}}) {
 				p.router.Cleanup()
 				p.resetDNS()
@@ -353,7 +353,7 @@ func initCLI() {
 
 	restartCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "restart",
@@ -365,7 +365,7 @@ func initCLI() {
 				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
-			InitLogging()
+			initLogging()
 
 			tasks := []task{
 				{s.Stop, false},
@@ -391,7 +391,7 @@ func initCLI() {
 		Short: "Show status of the ctrld service",
 		Args:  cobra.NoArgs,
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := newService(&prog{}, svcConfig)
@@ -420,14 +420,14 @@ func initCLI() {
 	if runtime.GOOS == "darwin" {
 		// On darwin, running status command without privileges may return wrong information.
 		statusCmd.PreRun = func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		}
 	}
 
 	uninstallCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "uninstall",
@@ -458,7 +458,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Short: "List network interfaces of the host",
 		Args:  cobra.NoArgs,
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 			err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
@@ -518,7 +518,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	rootCmd.AddCommand(serviceCmd)
 	startCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "start",
@@ -536,7 +536,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	rootCmd.AddCommand(startCmdAlias)
 	stopCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "stop",
@@ -555,7 +555,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 
 	restartCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "restart",
@@ -571,7 +571,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Short: "Show status of the ctrld service",
 		Args:  cobra.NoArgs,
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 		},
 		Run: statusCmd.Run,
 	}
@@ -579,7 +579,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 
 	uninstallCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "uninstall",
@@ -604,7 +604,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Short: "List clients that ctrld discovered",
 		Args:  cobra.NoArgs,
 		PreRun: func(cmd *cobra.Command, args []string) {
-			InitConsoleLogging()
+			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
@@ -665,15 +665,30 @@ func isMobile() bool {
 	return runtime.GOOS == "android" || runtime.GOOS == "ios"
 }
 
-func Run(cmd *cobra.Command, appConfig *AppConfig, appCallback *AppCallback, stopCh chan struct{}) {
-	if appConfig != nil {
-		homedir = appConfig.HomeDir
-		verbose = appConfig.Verbose
-		cdUID = appConfig.CdUID
-		logPath = appConfig.LogPath
+// RunCobraCommand runs ctrld cli.
+func RunCobraCommand(cmd *cobra.Command) {
+	noConfigStart = isNoConfigStart(cmd)
+	run(nil, make(chan struct{}))
+}
+
+// RunMobile runs the ctrld cli on mobile platforms.
+func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struct{}) {
+	if appConfig == nil {
+		panic("appConfig is nil")
 	}
+	initConsoleLogging()
+	noConfigStart = false
+	homedir = appConfig.HomeDir
+	verbose = appConfig.Verbose
+	cdUID = appConfig.CdUID
+	logPath = appConfig.LogPath
+	run(appCallback, stopCh)
+}
+
+// run runs ctrld cli with given app callback and stop channel.
+func run(appCallback *AppCallback, stopCh chan struct{}) {
 	if stopCh == nil {
-		stopCh = make(chan struct{})
+		mainLog.Load().Fatal().Msg("stopCh is nil")
 	}
 	waitCh := make(chan struct{})
 	p := &prog{
@@ -713,7 +728,6 @@ func Run(cmd *cobra.Command, appConfig *AppConfig, appCallback *AppCallback, sto
 			}
 		}()
 	}
-	noConfigStart := cmd != nil && isNoConfigStart(cmd)
 	writeDefaultConfig := !noConfigStart && configBase64 == ""
 	tryReadingConfig(writeDefaultConfig)
 
@@ -727,7 +741,7 @@ func Run(cmd *cobra.Command, appConfig *AppConfig, appCallback *AppCallback, sto
 
 	// Log config do not have thing to validate, so it's safe to init log here,
 	// so it's able to log information in processCDFlags.
-	InitLogging()
+	initLogging()
 
 	mainLog.Load().Info().Msgf("starting ctrld %s", curVersion())
 	mainLog.Load().Info().Msgf("os: %s", osVersion())
@@ -1353,7 +1367,7 @@ func uninstall(p *prog, s service.Service) {
 		{s.Stop, false},
 		{s.Uninstall, true},
 	}
-	InitLogging()
+	initLogging()
 	if doTasks(tasks) {
 		if err := p.router.ConfigureService(svcConfig); err != nil {
 			mainLog.Load().Fatal().Err(err).Msg("could not configure service")

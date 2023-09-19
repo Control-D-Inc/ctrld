@@ -35,6 +35,7 @@ var (
 
 	mainLog       atomic.Pointer[zerolog.Logger]
 	consoleWriter zerolog.ConsoleWriter
+	noConfigStart bool
 )
 
 func init() {
@@ -65,7 +66,8 @@ func normalizeLogFilePath(logFilePath string) string {
 	return filepath.Join(dir, logFilePath)
 }
 
-func InitConsoleLogging() {
+// initConsoleLogging initializes console logging, then storing to mainLog.
+func initConsoleLogging() {
 	consoleWriter = zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
 		w.TimeFormat = time.StampMilli
 	})
@@ -84,8 +86,8 @@ func InitConsoleLogging() {
 	}
 }
 
-// InitLogging initializes global logging setup.
-func InitLogging() {
+// initLogging initializes global logging setup.
+func initLogging() {
 	initLoggingWithBackup(true)
 }
 

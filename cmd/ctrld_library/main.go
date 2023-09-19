@@ -31,7 +31,6 @@ type AppCallback interface {
 func (c *Controller) Start(CdUID string, HomeDir string, logLevel int, logPath string) {
 	if c.stopCh == nil {
 		c.stopCh = make(chan struct{})
-		cli.InitConsoleLogging()
 		c.Config = cli.AppConfig{
 			CdUID:   CdUID,
 			HomeDir: HomeDir,
@@ -39,7 +38,7 @@ func (c *Controller) Start(CdUID string, HomeDir string, logLevel int, logPath s
 			LogPath: logPath,
 		}
 		appCallback := mapCallback(c.AppCallback)
-		cli.Run(nil, &c.Config, &appCallback, c.stopCh)
+		cli.RunMobile(&c.Config, &appCallback, c.stopCh)
 	}
 }
 
