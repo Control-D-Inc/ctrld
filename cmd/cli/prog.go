@@ -28,6 +28,8 @@ const (
 	defaultSemaphoreCap  = 256
 	ctrldLogUnixSock     = "ctrld_start.sock"
 	ctrldControlUnixSock = "ctrld_control.sock"
+	upstreamPrefix       = "upstream."
+	upstreamOS           = upstreamPrefix + "os"
 )
 
 var logf = func(format string, args ...any) {
@@ -54,6 +56,7 @@ type prog struct {
 	cache       dnscache.Cacher
 	sema        semaphore
 	ciTable     *clientinfo.Table
+	um          *upstreamMonitor
 	router      router.Router
 
 	started       chan struct{}
@@ -118,6 +121,8 @@ func (p *prog) run() {
 			nc.IPNets = append(nc.IPNets, ipNet)
 		}
 	}
+
+	p.um = newUpstreamMonitor(p.cfg)
 	for n := range p.cfg.Upstream {
 		uc := p.cfg.Upstream[n]
 		uc.Init()
@@ -351,20 +356,25 @@ var (
 func errUrlNetworkError(err error) bool {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
-		var opErr *net.OpError
-		if errors.As(urlErr.Err, &opErr) {
-			if opErr.Temporary() {
-				return true
-			}
-			switch {
-			case errors.Is(opErr.Err, syscall.ECONNREFUSED),
-				errors.Is(opErr.Err, syscall.EINVAL),
-				errors.Is(opErr.Err, syscall.ENETUNREACH),
-				errors.Is(opErr.Err, windowsENETUNREACH),
-				errors.Is(opErr.Err, windowsEINVAL),
-				errors.Is(opErr.Err, windowsECONNREFUSED):
-				return true
-			}
+		return errNetworkError(urlErr.Err)
+	}
+	return false
+}
+
+func errNetworkError(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if opErr.Temporary() {
+			return true
+		}
+		switch {
+		case errors.Is(opErr.Err, syscall.ECONNREFUSED),
+			errors.Is(opErr.Err, syscall.EINVAL),
+			errors.Is(opErr.Err, syscall.ENETUNREACH),
+			errors.Is(opErr.Err, windowsENETUNREACH),
+			errors.Is(opErr.Err, windowsEINVAL),
+			errors.Is(opErr.Err, windowsECONNREFUSED):
+			return true
 		}
 	}
 	return false

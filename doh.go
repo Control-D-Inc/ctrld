@@ -97,8 +97,10 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 func addHeader(ctx context.Context, req *http.Request, sendClientInfo bool) {
 	req.Header.Set("Content-Type", headerApplicationDNS)
 	req.Header.Set("Accept", headerApplicationDNS)
+	printed := false
 	if sendClientInfo {
 		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
+			printed = ci.Mac != "" || ci.IP != "" || ci.Hostname != ""
 			if ci.Mac != "" {
 				req.Header.Set(dohMacHeader, ci.Mac)
 			}
@@ -110,5 +112,7 @@ func addHeader(ctx context.Context, req *http.Request, sendClientInfo bool) {
 			}
 		}
 	}
-	Log(ctx, ProxyLogger.Load().Debug().Interface("header", req.Header), "sending request header")
+	if printed {
+		Log(ctx, ProxyLogger.Load().Debug().Interface("header", req.Header), "sending request header")
+	}
 }

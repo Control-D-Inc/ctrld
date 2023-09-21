@@ -145,7 +145,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 // processed later, because policy logging want to know whether a network rule
 // is disregarded in favor of the domain level rule.
 func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, domain string) ([]string, bool) {
-	upstreams := []string{"upstream." + defaultUpstreamNum}
+	upstreams := []string{upstreamPrefix + defaultUpstreamNum}
 	matchedPolicy := "no policy"
 	matchedNetwork := "no network"
 	matchedRule := "no rule"
@@ -229,7 +229,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
-		upstreams = []string{"upstream.os"}
+		upstreams = []string{upstreamOS}
 	}
 	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
 	if p.cache != nil && msg.Question[0].Qtype != dns.TypePTR {
@@ -273,12 +273,22 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		answer, err := resolve1(n, upstreamConfig, msg)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
+			if errNetworkError(err) {
+				p.um.increaseFailureCount(upstreams[n])
+				if p.um.isDown(upstreams[n]) {
+					go p.um.checkUpstream(upstreams[n], upstreamConfig)
+				}
+			}
 			return nil
 		}
 		return answer
 	}
 	for n, upstreamConfig := range upstreamConfigs {
 		if upstreamConfig == nil {
+			continue
+		}
+		if p.um.isDown(upstreams[n]) {
+			ctrld.Log(ctx, mainLog.Load().Warn(), "%s is down", upstreams[n])
 			continue
 		}
 		answer := resolve(n, upstreamConfig, msg)
@@ -312,7 +322,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		}
 		return answer
 	}
-	ctrld.Log(ctx, mainLog.Load().Error(), "all upstreams failed")
+	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
 	answer := new(dns.Msg)
 	answer.SetRcode(msg, dns.RcodeServerFailure)
 	return answer
@@ -321,7 +331,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 func (p *prog) upstreamConfigsFromUpstreamNumbers(upstreams []string) []*ctrld.UpstreamConfig {
 	upstreamConfigs := make([]*ctrld.UpstreamConfig, 0, len(upstreams))
 	for _, upstream := range upstreams {
-		upstreamNum := strings.TrimPrefix(upstream, "upstream.")
+		upstreamNum := strings.TrimPrefix(upstream, upstreamPrefix)
 		upstreamConfigs = append(upstreamConfigs, p.cfg.Upstream[upstreamNum])
 	}
 	return upstreamConfigs
