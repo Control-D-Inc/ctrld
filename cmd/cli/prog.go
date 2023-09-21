@@ -59,6 +59,9 @@ type prog struct {
 	um          *upstreamMonitor
 	router      router.Router
 
+	loopMu sync.Mutex
+	loop   map[string]bool
+
 	started       chan struct{}
 	onStartedDone chan struct{}
 	onStarted     []func()
@@ -91,6 +94,7 @@ func (p *prog) run() {
 	numListeners := len(p.cfg.Listener)
 	p.started = make(chan struct{}, numListeners)
 	p.onStartedDone = make(chan struct{})
+	p.loop = make(map[string]bool)
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -174,7 +178,12 @@ func (p *prog) run() {
 	for _, f := range p.onStarted {
 		f()
 	}
+	// Check for possible DNS loop.
+	p.checkDnsLoop()
 	close(p.onStartedDone)
+
+	// Start check DNS loop ticker.
+	go p.checkDnsLoopTicker()
 
 	// Stop writing log to unix socket.
 	consoleWriter.Out = os.Stdout

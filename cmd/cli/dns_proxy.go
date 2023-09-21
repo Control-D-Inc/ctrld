@@ -50,6 +50,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
 		p.sema.acquire()
 		defer p.sema.release()
+		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
 		reqId := requestID()
@@ -285,6 +286,10 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 	}
 	for n, upstreamConfig := range upstreamConfigs {
 		if upstreamConfig == nil {
+			continue
+		}
+		if p.isLoop(upstreamConfig) {
+			mainLog.Load().Warn().Msgf("dns loop detected, upstream: %q, endpoint: %q", upstreamConfig.Name, upstreamConfig.Endpoint)
 			continue
 		}
 		if p.um.isDown(upstreams[n]) {
