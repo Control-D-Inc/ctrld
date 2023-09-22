@@ -59,7 +59,7 @@ compress() {
 build() {
   goos=$1
   goarch=$2
-  ldflags="-s -w -X github.com/Windscribe/ctrld/cmd/cli.version="${CI_COMMIT_TAG:-dev}" -X github.com/Windscribe/ctrld/cmd/cli.commit=$(git rev-parse HEAD)"
+  ldflags="-s -w -X github.com/Control-D-Inc/ctrld/cmd/cli.version="${CI_COMMIT_TAG:-dev}" -X github.com/Control-D-Inc/ctrld/cmd/cli.commit=$(git rev-parse HEAD)"
 
   case $3 in
     5 | 6 | 7)
