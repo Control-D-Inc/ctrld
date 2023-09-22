@@ -16,6 +16,7 @@ import (
 	"github.com/miekg/dns"
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/net/interfaces"
+	"tailscale.com/net/netaddr"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
@@ -510,6 +511,7 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 		ci.IP = p.appCallback.LanIp()
 		ci.Mac = p.appCallback.MacAddress()
 		ci.Hostname = p.appCallback.HostName()
+		ci.Self = true
 		return ci
 	}
 	ci.IP, ci.Mac = ipAndMacFromMsg(msg)
@@ -542,7 +544,34 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	} else {
 		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	}
+	ci.Self = queryFromSelf(ci.IP)
 	return ci
+}
+
+// queryFromSelf reports whether the input IP is from device running ctrld.
+func queryFromSelf(ip string) bool {
+	netIP := netip.MustParseAddr(ip)
+	ifaces, err := interfaces.GetList()
+	if err != nil {
+		mainLog.Load().Warn().Err(err).Msg("could not get interfaces list")
+		return false
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			mainLog.Load().Warn().Err(err).Msgf("could not get interfaces addresses: %s", iface.Name)
+			continue
+		}
+		for _, a := range addrs {
+			switch v := a.(type) {
+			case *net.IPNet:
+				if pfx, ok := netaddr.FromStdIPNet(v); ok && pfx.Addr().Compare(netIP) == 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func needRFC1918Listeners(lc *ctrld.ListenerConfig) bool {
