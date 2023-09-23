@@ -1309,7 +1309,13 @@ func userHomeDir() (string, error) {
 	}
 	// viper will expand for us.
 	if runtime.GOOS == "windows" {
-		return os.UserHomeDir()
+		// If we're on windows, use the install path for this.
+		exePath, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+
+		return filepath.Dir(exePath), nil
 	}
 	// Mobile platform should provide a rw dir path for this.
 	if isMobile() {
