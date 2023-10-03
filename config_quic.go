@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"runtime"
 	"sync"
 	"time"
 
@@ -70,6 +71,9 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 		ProxyLogger.Load().Debug().Msgf("sending doh3 request to: %s", conn.RemoteAddr())
 		return conn, err
 	}
+	runtime.SetFinalizer(rt, func(rt *http3.RoundTripper) {
+		rt.CloseIdleConnections()
+	})
 	return rt
 }
 
@@ -113,6 +117,8 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	done := make(chan struct{})
+	defer close(done)
 	ch := make(chan *parallelDialerResult, len(addrs))
 	var wg sync.WaitGroup
 	wg.Add(len(addrs))
@@ -135,7 +141,13 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 				return
 			}
 			conn, err := quic.DialEarly(ctx, udpConn, remoteAddr, tlsCfg, cfg)
-			ch <- &parallelDialerResult{conn: conn, err: err}
+			select {
+			case ch <- &parallelDialerResult{conn: conn, err: err}:
+			case <-done:
+				if conn != nil {
+					conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+				}
+			}
 		}(addr)
 	}
 
