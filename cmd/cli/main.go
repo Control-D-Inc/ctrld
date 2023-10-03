@@ -38,6 +38,11 @@ var (
 	noConfigStart bool
 )
 
+const (
+	cdUidFlagName = "cd"
+	cdOrgFlagName = "cd-org"
+)
+
 func init() {
 	l := zerolog.New(io.Discard)
 	mainLog.Store(&l)

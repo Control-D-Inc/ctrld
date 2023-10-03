@@ -136,8 +136,8 @@ func initCLI() {
 	runCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "List of domain to apply in a split DNS policy")
 	runCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
-	runCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
-	runCmd.Flags().StringVarP(&cdOrg, "cd-org", "", "", "Control D provision token")
+	runCmd.Flags().StringVarP(&cdUID, cdUidFlagName, "", "", "Control D resolver uid")
+	runCmd.Flags().StringVarP(&cdOrg, cdOrgFlagName, "", "", "Control D provision token")
 	runCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = runCmd.Flags().MarkHidden("dev")
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
@@ -156,6 +156,8 @@ func initCLI() {
 		Short: "Install and start the ctrld service",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			checkStrFlagEmpty(cmd, cdUidFlagName)
+			checkStrFlagEmpty(cmd, cdOrgFlagName)
 			sc := &service.Config{}
 			*sc = *svcConfig
 			osArgs := os.Args[2:]
@@ -288,8 +290,8 @@ func initCLI() {
 	startCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "List of domain to apply in a split DNS policy")
 	startCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
-	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
-	startCmd.Flags().StringVarP(&cdOrg, "cd-org", "", "", "Control D provision token")
+	startCmd.Flags().StringVarP(&cdUID, cdUidFlagName, "", "", "Control D resolver uid")
+	startCmd.Flags().StringVarP(&cdOrg, cdOrgFlagName, "", "", "Control D provision token")
 	startCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
@@ -671,6 +673,8 @@ func isMobile() bool {
 // RunCobraCommand runs ctrld cli.
 func RunCobraCommand(cmd *cobra.Command) {
 	noConfigStart = isNoConfigStart(cmd)
+	checkStrFlagEmpty(cmd, cdUidFlagName)
+	checkStrFlagEmpty(cmd, cdOrgFlagName)
 	run(nil, make(chan struct{}))
 }
 
@@ -1738,12 +1742,12 @@ func removeProvTokenFromArgs(sc *service.Config) {
 			continue
 		}
 		// For "--cd-org XXX", skip it and mark next arg skipped.
-		if x == "--cd-org" {
+		if x == cdOrgFlagName {
 			skip = true
 			continue
 		}
 		// For "--cd-org=XXX", just skip it.
-		if strings.HasPrefix(x, "--cd-org=") {
+		if strings.HasPrefix(x, cdOrgFlagName+"=") {
 			continue
 		}
 		a = append(a, x)
@@ -1781,4 +1785,16 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 	}
 
 	return cc
+}
+
+// checkStrFlagEmpty validates if a string flag was set to an empty string.
+// If yes, emitting a fatal error message.
+func checkStrFlagEmpty(cmd *cobra.Command, flagName string) {
+	fl := cmd.Flags().Lookup(flagName)
+	if !fl.Changed || fl.Value.Type() != "string" {
+		return
+	}
+	if fl.Value.String() == "" {
+		mainLog.Load().Fatal().Msgf(`flag "--%s"" value must be non-empty`, fl.Name)
+	}
 }
