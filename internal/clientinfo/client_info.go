@@ -74,7 +74,7 @@ type Table struct {
 	ptr    *ptrDiscover
 	mdns   *mdns
 	hf     *hostsFile
-	vpn    *vpn
+	vni    *virtualNetworkIface
 	cfg    *ctrld.Config
 	quitCh chan struct{}
 	selfIP string
@@ -202,8 +202,8 @@ func (t *Table) init() {
 	}
 	// VPN clients.
 	if t.discoverDHCP() || t.discoverARP() {
-		t.vpn = &vpn{}
-		t.hostnameResolvers = append(t.hostnameResolvers, t.vpn)
+		t.vni = &virtualNetworkIface{}
+		t.hostnameResolvers = append(t.hostnameResolvers, t.vni)
 	}
 }
 
@@ -288,7 +288,7 @@ func (t *Table) ListClients() []*Client {
 		_ = r.refresh()
 	}
 	ipMap := make(map[string]*Client)
-	il := []ipLister{t.dhcp, t.arp, t.ptr, t.mdns, t.vpn}
+	il := []ipLister{t.dhcp, t.arp, t.ptr, t.mdns, t.vni}
 	for _, ir := range il {
 		for _, ip := range ir.List() {
 			c, ok := ipMap[ip]
@@ -331,11 +331,11 @@ func (t *Table) ListClients() []*Client {
 
 // StoreVPNClient stores client info for VPN clients.
 func (t *Table) StoreVPNClient(ci *ctrld.ClientInfo) {
-	if ci == nil || t.vpn == nil {
+	if ci == nil || t.vni == nil {
 		return
 	}
-	t.vpn.mac.Store(ci.IP, ci.Mac)
-	t.vpn.ip2name.Store(ci.IP, ci.Hostname)
+	t.vni.mac.Store(ci.IP, ci.Mac)
+	t.vni.ip2name.Store(ci.IP, ci.Hostname)
 }
 
 func (t *Table) discoverDHCP() bool {

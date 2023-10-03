@@ -626,6 +626,9 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			map2Slice := func(m map[string]struct{}) []string {
 				s := make([]string, 0, len(m))
 				for k := range m {
+					if k == "" { // skip empty source from output.
+						continue
+					}
 					s = append(s, k)
 				}
 				sort.Strings(s)
