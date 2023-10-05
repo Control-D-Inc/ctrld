@@ -58,3 +58,7 @@ func dnsFromAdapter() []string {
 	}
 	return ns
 }
+
+func nameserversFromResolvconf() []string {
+	return nil
+}

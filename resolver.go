@@ -239,13 +239,25 @@ func NewBootstrapResolver(servers ...string) Resolver {
 	return resolver
 }
 
-// NewPrivateResolver returns an OS resolver, which includes only private DNS servers.
+// NewPrivateResolver returns an OS resolver, which includes only private DNS servers,
+// excluding nameservers from /etc/resolv.conf file.
+//
 // This is useful for doing PTR lookup in LAN network.
 func NewPrivateResolver() Resolver {
 	nss := nameservers()
+	resolveConfNss := nameserversFromResolvconf()
 	n := 0
 	for _, ns := range nss {
 		host, _, _ := net.SplitHostPort(ns)
+		// Ignore nameserver from resolve.conf file, because the nameserver can be either:
+		//
+		//  - ctrld itself.
+		//  - Direct listener that has ctrld as an upstream (e.g: dnsmasq).
+		//
+		// causing the query always succeed.
+		if sliceContains(resolveConfNss, host) {
+			continue
+		}
 		ip := net.ParseIP(host)
 		if ip != nil && ip.IsPrivate() && !ip.IsLoopback() {
 			nss[n] = ns
@@ -270,4 +282,21 @@ func newDialer(dnsAddress string) *net.Dialer {
 			},
 		},
 	}
+}
+
+// TODO(cuonglm): use slices.Contains once upgrading to go1.21
+// sliceContains reports whether v is present in s.
+func sliceContains[S ~[]E, E comparable](s S, v E) bool {
+	return sliceIndex(s, v) >= 0
+}
+
+// sliceIndex returns the index of the first occurrence of v in s,
+// or -1 if not present.
+func sliceIndex[S ~[]E, E comparable](s S, v E) int {
+	for i := range s {
+		if v == s[i] {
+			return i
+		}
+	}
+	return -1
 }
