@@ -10,6 +10,12 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 )
 
+const (
+	ipv4LocalhostName = "localhost"
+	ipv6LocalhostName = "ip6-localhost"
+	ipv6LoopbackName  = "ip6-loopback"
+)
+
 // hostsFile provides client discovery functionality using system hosts file.
 type hostsFile struct {
 	watcher *fsnotify.Watcher
@@ -80,7 +86,15 @@ func (hf *hostsFile) LookupHostnameByIP(ip string) string {
 	hf.mu.Lock()
 	defer hf.mu.Unlock()
 	if names := hf.m[ip]; len(names) > 0 {
-		return normalizeHostname(names[0])
+		isLoopback := ip == "127.0.0.1" || ip == "::1"
+		for _, hostname := range names {
+			name := normalizeHostname(hostname)
+			// Ignoring ipv4/ipv6 loopback entry.
+			if isLoopback && isLocalhostName(name) {
+				continue
+			}
+			return name
+		}
 	}
 	return ""
 }
@@ -93,4 +107,14 @@ func (hf *hostsFile) LookupHostnameByMac(mac string) string {
 // String returns human-readable format of hostsFile.
 func (hf *hostsFile) String() string {
 	return "hosts"
+}
+
+// isLocalhostName reports whether the given hostname represents localhost.
+func isLocalhostName(hostname string) bool {
+	switch hostname {
+	case ipv4LocalhostName, ipv6LocalhostName, ipv6LoopbackName:
+		return true
+	default:
+		return false
+	}
 }
