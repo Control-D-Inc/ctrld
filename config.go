@@ -2,8 +2,10 @@ package ctrld
 
 import (
 	"context"
+	crand "crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"io"
 	"math/rand"
@@ -78,8 +80,8 @@ func SetConfigNameWithPath(v *viper.Viper, name, configPath string) {
 func InitConfig(v *viper.Viper, name string) {
 	v.SetDefault("listener", map[string]*ListenerConfig{
 		"0": {
-			IP:   "127.0.0.1",
-			Port: 53,
+			IP:   "",
+			Port: 0,
 		},
 	})
 	v.SetDefault("network", map[string]*NetworkConfig{
@@ -178,6 +180,7 @@ type ServiceConfig struct {
 	DiscoverARP           *bool  `mapstructure:"discover_arp" toml:"discover_dhcp,omitempty"`
 	DiscoverDHCP          *bool  `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
 	DiscoverPtr           *bool  `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
+	DiscoverHosts         *bool  `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
 	Daemon                bool   `mapstructure:"-" toml:"-"`
 	AllocateIP            bool   `mapstructure:"-" toml:"-"`
 }
@@ -216,6 +219,7 @@ type UpstreamConfig struct {
 	http3RoundTripper6 http.RoundTripper
 	certPool           *x509.CertPool
 	u                  *url.URL
+	uid                string
 }
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
@@ -260,6 +264,7 @@ type Rule map[string][]string
 
 // Init initialized necessary values for an UpstreamConfig.
 func (uc *UpstreamConfig) Init() {
+	uc.uid = upstreamUID()
 	if u, err := url.Parse(uc.Endpoint); err == nil {
 		uc.Domain = u.Host
 		switch uc.Type {
@@ -338,6 +343,11 @@ func (uc *UpstreamConfig) SetCertPool(cp *x509.CertPool) {
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) SetupBootstrapIP() {
 	uc.setupBootstrapIP(true)
+}
+
+// UID returns the unique identifier of the upstream.
+func (uc *UpstreamConfig) UID() string {
+	return uc.uid
 }
 
 // SetupBootstrapIP manually find all available IPs of the upstream.
@@ -678,4 +688,16 @@ func ResolverTypeFromEndpoint(endpoint string) string {
 
 func pick(s []string) string {
 	return s[rand.Intn(len(s))]
+}
+
+// upstreamUID generates an unique identifier for an upstream.
+func upstreamUID() string {
+	b := make([]byte, 4)
+	for {
+		if _, err := crand.Read(b); err != nil {
+			ProxyLogger.Load().Warn().Err(err).Msg("could not generate uid for upstream, retrying...")
+			continue
+		}
+		return hex.EncodeToString(b)
+	}
 }

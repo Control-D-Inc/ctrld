@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/rand"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"syscall"
@@ -25,6 +28,8 @@ const (
 	defaultSemaphoreCap  = 256
 	ctrldLogUnixSock     = "ctrld_start.sock"
 	ctrldControlUnixSock = "ctrld_control.sock"
+	upstreamPrefix       = "upstream."
+	upstreamOS           = upstreamPrefix + "os"
 )
 
 var logf = func(format string, args ...any) {
@@ -46,11 +51,16 @@ type prog struct {
 	logConn net.Conn
 	cs      *controlServer
 
-	cfg     *ctrld.Config
-	cache   dnscache.Cacher
-	sema    semaphore
-	ciTable *clientinfo.Table
-	router  router.Router
+	cfg         *ctrld.Config
+	appCallback *AppCallback
+	cache       dnscache.Cacher
+	sema        semaphore
+	ciTable     *clientinfo.Table
+	um          *upstreamMonitor
+	router      router.Router
+
+	loopMu sync.Mutex
+	loop   map[string]bool
 
 	started       chan struct{}
 	onStartedDone chan struct{}
@@ -84,6 +94,7 @@ func (p *prog) run() {
 	numListeners := len(p.cfg.Listener)
 	p.started = make(chan struct{}, numListeners)
 	p.onStartedDone = make(chan struct{})
+	p.loop = make(map[string]bool)
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -114,6 +125,8 @@ func (p *prog) run() {
 			nc.IPNets = append(nc.IPNets, ipNet)
 		}
 	}
+
+	p.um = newUpstreamMonitor(p.cfg)
 	for n := range p.cfg.Upstream {
 		uc := p.cfg.Upstream[n]
 		uc.Init()
@@ -133,12 +146,14 @@ func (p *prog) run() {
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
 		p.ciTable.AddLeaseFile(leaseFile, format)
 	}
-
-	go func() {
-		p.ciTable.Init()
-		p.ciTable.RefreshLoop(p.stopCh)
-	}()
-	go p.watchLinkState()
+	// Newer versions of android and iOS denies permission which breaks connectivity.
+	if !isMobile() {
+		go func() {
+			p.ciTable.Init()
+			p.ciTable.RefreshLoop(p.stopCh)
+		}()
+		go p.watchLinkState()
+	}
 
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()
@@ -163,7 +178,12 @@ func (p *prog) run() {
 	for _, f := range p.onStarted {
 		f()
 	}
+	// Check for possible DNS loop.
+	p.checkDnsLoop()
 	close(p.onStartedDone)
+
+	// Start check DNS loop ticker.
+	go p.checkDnsLoopTicker()
 
 	// Stop writing log to unix socket.
 	consoleWriter.Out = os.Stdout
@@ -345,48 +365,100 @@ var (
 func errUrlNetworkError(err error) bool {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
-		var opErr *net.OpError
-		if errors.As(urlErr.Err, &opErr) {
-			if opErr.Temporary() {
-				return true
-			}
-			switch {
-			case errors.Is(opErr.Err, syscall.ECONNREFUSED),
-				errors.Is(opErr.Err, syscall.EINVAL),
-				errors.Is(opErr.Err, syscall.ENETUNREACH),
-				errors.Is(opErr.Err, windowsENETUNREACH),
-				errors.Is(opErr.Err, windowsEINVAL),
-				errors.Is(opErr.Err, windowsECONNREFUSED):
-				return true
-			}
+		return errNetworkError(urlErr.Err)
+	}
+	return false
+}
+
+func errNetworkError(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if opErr.Temporary() {
+			return true
+		}
+		switch {
+		case errors.Is(opErr.Err, syscall.ECONNREFUSED),
+			errors.Is(opErr.Err, syscall.EINVAL),
+			errors.Is(opErr.Err, syscall.ENETUNREACH),
+			errors.Is(opErr.Err, windowsENETUNREACH),
+			errors.Is(opErr.Err, windowsEINVAL),
+			errors.Is(opErr.Err, windowsECONNREFUSED):
+			return true
 		}
 	}
 	return false
 }
 
-// defaultRouteIP returns IP string of the default route if present, prefer IPv4 over IPv6.
-func defaultRouteIP() string {
-	if dr, err := interfaces.DefaultRoute(); err == nil {
-		if netIface, err := netInterface(dr.InterfaceName); err == nil {
-			addrs, _ := netIface.Addrs()
-			do := func(v4 bool) net.IP {
-				for _, addr := range addrs {
-					if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.IsPrivate() {
-						if v4 {
-							return netIP.IP.To4()
-						}
-						return netIP.IP
-					}
+func ifaceFirstPrivateIP(iface *net.Interface) string {
+	if iface == nil {
+		return ""
+	}
+	do := func(addrs []net.Addr, v4 bool) net.IP {
+		for _, addr := range addrs {
+			if netIP, ok := addr.(*net.IPNet); ok && netIP.IP.IsPrivate() {
+				if v4 {
+					return netIP.IP.To4()
 				}
-				return nil
-			}
-			if ip := do(true); ip != nil {
-				return ip.String()
-			}
-			if ip := do(false); ip != nil {
-				return ip.String()
+				return netIP.IP
 			}
 		}
+		return nil
+	}
+	addrs, _ := iface.Addrs()
+	if ip := do(addrs, true); ip != nil {
+		return ip.String()
+	}
+	if ip := do(addrs, false); ip != nil {
+		return ip.String()
 	}
 	return ""
+}
+
+// defaultRouteIP returns private IP string of the default route if present, prefer IPv4 over IPv6.
+func defaultRouteIP() string {
+	dr, err := interfaces.DefaultRoute()
+	if err != nil {
+		return ""
+	}
+	drNetIface, err := netInterface(dr.InterfaceName)
+	if err != nil {
+		return ""
+	}
+	mainLog.Load().Debug().Str("iface", drNetIface.Name).Msg("checking default route interface")
+	if ip := ifaceFirstPrivateIP(drNetIface); ip != "" {
+		mainLog.Load().Debug().Str("ip", ip).Msg("found ip with default route interface")
+		return ip
+	}
+
+	// If we reach here, it means the default route interface is connected directly to ISP.
+	// We need to find the LAN interface with the same Mac address with drNetIface.
+	//
+	// There could be multiple LAN interfaces with the same Mac address, so we find all private
+	// IPs then using the smallest one.
+	var addrs []netip.Addr
+	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+		if i.Name == drNetIface.Name {
+			return
+		}
+		if bytes.Equal(i.HardwareAddr, drNetIface.HardwareAddr) {
+			for _, pfx := range prefixes {
+				addr := pfx.Addr()
+				if addr.IsPrivate() {
+					addrs = append(addrs, addr)
+				}
+			}
+		}
+	})
+
+	if len(addrs) == 0 {
+		mainLog.Load().Warn().Msg("no default route IP found")
+		return ""
+	}
+	sort.Slice(addrs, func(i, j int) bool {
+		return addrs[i].Less(addrs[j])
+	})
+
+	ip := addrs[0].String()
+	mainLog.Load().Debug().Str("ip", ip).Msg("found LAN interface IP")
+	return ip
 }

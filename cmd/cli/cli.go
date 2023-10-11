@@ -124,185 +124,7 @@ func initCLI() {
 			initConsoleLogging()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			waitCh := make(chan struct{})
-			stopCh := make(chan struct{})
-			p := &prog{
-				waitCh: waitCh,
-				stopCh: stopCh,
-				cfg:    &cfg,
-			}
-			if homedir == "" {
-				if dir, err := userHomeDir(); err == nil {
-					homedir = dir
-				}
-			}
-			sockPath := filepath.Join(homedir, ctrldLogUnixSock)
-			if addr, err := net.ResolveUnixAddr("unix", sockPath); err == nil {
-				if conn, err := net.Dial(addr.Network(), addr.String()); err == nil {
-					lc := &logConn{conn: conn}
-					consoleWriter.Out = io.MultiWriter(os.Stdout, lc)
-					p.logConn = lc
-				}
-			}
-
-			if daemon && runtime.GOOS == "windows" {
-				mainLog.Load().Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
-			}
-
-			if !daemon {
-				// We need to call s.Run() as soon as possible to response to the OS manager, so it
-				// can see ctrld is running and don't mark ctrld as failed service.
-				go func() {
-					s, err := newService(p, svcConfig)
-					if err != nil {
-						mainLog.Load().Fatal().Err(err).Msg("failed create new service")
-					}
-					if err := s.Run(); err != nil {
-						mainLog.Load().Error().Err(err).Msg("failed to start service")
-					}
-				}()
-			}
-			noConfigStart := isNoConfigStart(cmd)
-			writeDefaultConfig := !noConfigStart && configBase64 == ""
-			tryReadingConfig(writeDefaultConfig)
-
-			readBase64Config(configBase64)
-			processNoConfigFlags(noConfigStart)
-			if err := v.Unmarshal(&cfg); err != nil {
-				mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
-			}
-
-			processLogAndCacheFlags()
-
-			// Log config do not have thing to validate, so it's safe to init log here,
-			// so it's able to log information in processCDFlags.
-			initLogging()
-
-			mainLog.Load().Info().Msgf("starting ctrld %s", curVersion())
-			mainLog.Load().Info().Msgf("os: %s", osVersion())
-
-			// Wait for network up.
-			if !ctrldnet.Up() {
-				mainLog.Load().Fatal().Msg("network is not up yet")
-			}
-
-			p.router = router.New(&cfg, cdUID != "")
-			cs, err := newControlServer(filepath.Join(homedir, ctrldControlUnixSock))
-			if err != nil {
-				mainLog.Load().Warn().Err(err).Msg("could not create control server")
-			}
-			p.cs = cs
-
-			// Processing --cd flag require connecting to ControlD API, which needs valid
-			// time for validating server certificate. Some routers need NTP synchronization
-			// to set the current time, so this check must happen before processCDFlags.
-			if err := p.router.PreRun(); err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to perform router pre-run check")
-			}
-
-			oldLogPath := cfg.Service.LogPath
-			if uid := cdUIDFromProvToken(); uid != "" {
-				cdUID = uid
-			}
-			if cdUID != "" {
-				processCDFlags()
-			}
-
-			updated := updateListenerConfig()
-
-			if cdUID != "" {
-				processLogAndCacheFlags()
-			}
-
-			if updated {
-				if err := writeConfigFile(); err != nil {
-					mainLog.Load().Fatal().Err(err).Msg("failed to write config file")
-				} else {
-					mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
-				}
-			}
-
-			if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
-				// After processCDFlags, log config may change, so reset mainLog and re-init logging.
-				l := zerolog.New(io.Discard)
-				mainLog.Store(&l)
-
-				// Copy logs written so far to new log file if possible.
-				if buf, err := os.ReadFile(oldLogPath); err == nil {
-					if err := os.WriteFile(newLogPath, buf, os.FileMode(0o600)); err != nil {
-						mainLog.Load().Warn().Err(err).Msg("could not copy old log file")
-					}
-				}
-				initLoggingWithBackup(false)
-			}
-
-			validateConfig(&cfg)
-			initCache()
-
-			if daemon {
-				exe, err := os.Executable()
-				if err != nil {
-					mainLog.Load().Error().Err(err).Msg("failed to find the binary")
-					os.Exit(1)
-				}
-				curDir, err := os.Getwd()
-				if err != nil {
-					mainLog.Load().Error().Err(err).Msg("failed to get current working directory")
-					os.Exit(1)
-				}
-				// If running as daemon, re-run the command in background, with daemon off.
-				cmd := exec.Command(exe, append(os.Args[1:], "-d=false")...)
-				cmd.Dir = curDir
-				if err := cmd.Start(); err != nil {
-					mainLog.Load().Error().Err(err).Msg("failed to start process as daemon")
-					os.Exit(1)
-				}
-				mainLog.Load().Info().Int("pid", cmd.Process.Pid).Msg("DNS proxy started")
-				os.Exit(0)
-			}
-
-			p.onStarted = append(p.onStarted, func() {
-				for _, lc := range p.cfg.Listener {
-					if shouldAllocateLoopbackIP(lc.IP) {
-						if err := allocateIP(lc.IP); err != nil {
-							mainLog.Load().Error().Err(err).Msgf("could not allocate IP: %s", lc.IP)
-						}
-					}
-				}
-			})
-			p.onStopped = append(p.onStopped, func() {
-				for _, lc := range p.cfg.Listener {
-					if shouldAllocateLoopbackIP(lc.IP) {
-						if err := deAllocateIP(lc.IP); err != nil {
-							mainLog.Load().Error().Err(err).Msgf("could not de-allocate IP: %s", lc.IP)
-						}
-					}
-				}
-			})
-			if platform := router.Name(); platform != "" {
-				if cp := router.CertPool(); cp != nil {
-					rootCertPool = cp
-				}
-				p.onStarted = append(p.onStarted, func() {
-					mainLog.Load().Debug().Msg("router setup on start")
-					if err := p.router.Setup(); err != nil {
-						mainLog.Load().Error().Err(err).Msg("could not configure router")
-					}
-				})
-				p.onStopped = append(p.onStopped, func() {
-					mainLog.Load().Debug().Msg("router cleanup on stop")
-					if err := p.router.Cleanup(); err != nil {
-						mainLog.Load().Error().Err(err).Msg("could not cleanup router")
-					}
-					p.resetDNS()
-				})
-			}
-
-			close(waitCh)
-			<-stopCh
-			for _, f := range p.onStopped {
-				f()
-			}
+			RunCobraCommand(cmd)
 		},
 	}
 	runCmd.Flags().BoolVarP(&daemon, "daemon", "d", false, "Run as daemon")
@@ -314,8 +136,8 @@ func initCLI() {
 	runCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "List of domain to apply in a split DNS policy")
 	runCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
-	runCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
-	runCmd.Flags().StringVarP(&cdOrg, "cd-org", "", "", "Control D provision token")
+	runCmd.Flags().StringVarP(&cdUID, cdUidFlagName, "", "", "Control D resolver uid")
+	runCmd.Flags().StringVarP(&cdOrg, cdOrgFlagName, "", "", "Control D provision token")
 	runCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = runCmd.Flags().MarkHidden("dev")
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
@@ -334,6 +156,8 @@ func initCLI() {
 		Short: "Install and start the ctrld service",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			checkStrFlagEmpty(cmd, cdUidFlagName)
+			checkStrFlagEmpty(cmd, cdOrgFlagName)
 			sc := &service.Config{}
 			*sc = *svcConfig
 			osArgs := os.Args[2:]
@@ -466,8 +290,8 @@ func initCLI() {
 	startCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "List of domain to apply in a split DNS policy")
 	startCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
-	startCmd.Flags().StringVarP(&cdUID, "cd", "", "", "Control D resolver uid")
-	startCmd.Flags().StringVarP(&cdOrg, "cd-org", "", "", "Control D provision token")
+	startCmd.Flags().StringVarP(&cdUID, cdUidFlagName, "", "", "Control D resolver uid")
+	startCmd.Flags().StringVarP(&cdOrg, cdOrgFlagName, "", "", "Control D provision token")
 	startCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
@@ -804,6 +628,9 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			map2Slice := func(m map[string]struct{}) []string {
 				s := make([]string, 0, len(m))
 				for k := range m {
+					if k == "" { // skip empty source from output.
+						continue
+					}
 					s = append(s, k)
 				}
 				sort.Strings(s)
@@ -836,6 +663,222 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	}
 	clientsCmd.AddCommand(listClientsCmd)
 	rootCmd.AddCommand(clientsCmd)
+}
+
+// isMobile reports whether the current OS is a mobile platform.
+func isMobile() bool {
+	return runtime.GOOS == "android" || runtime.GOOS == "ios"
+}
+
+// RunCobraCommand runs ctrld cli.
+func RunCobraCommand(cmd *cobra.Command) {
+	noConfigStart = isNoConfigStart(cmd)
+	checkStrFlagEmpty(cmd, cdUidFlagName)
+	checkStrFlagEmpty(cmd, cdOrgFlagName)
+	run(nil, make(chan struct{}))
+}
+
+// RunMobile runs the ctrld cli on mobile platforms.
+func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struct{}) {
+	if appConfig == nil {
+		panic("appConfig is nil")
+	}
+	initConsoleLogging()
+	noConfigStart = false
+	homedir = appConfig.HomeDir
+	verbose = appConfig.Verbose
+	cdUID = appConfig.CdUID
+	logPath = appConfig.LogPath
+	run(appCallback, stopCh)
+}
+
+// run runs ctrld cli with given app callback and stop channel.
+func run(appCallback *AppCallback, stopCh chan struct{}) {
+	if stopCh == nil {
+		mainLog.Load().Fatal().Msg("stopCh is nil")
+	}
+	waitCh := make(chan struct{})
+	p := &prog{
+		waitCh:      waitCh,
+		stopCh:      stopCh,
+		cfg:         &cfg,
+		appCallback: appCallback,
+	}
+	if homedir == "" {
+		if dir, err := userHomeDir(); err == nil {
+			homedir = dir
+		}
+	}
+	sockPath := filepath.Join(homedir, ctrldLogUnixSock)
+	if addr, err := net.ResolveUnixAddr("unix", sockPath); err == nil {
+		if conn, err := net.Dial(addr.Network(), addr.String()); err == nil {
+			lc := &logConn{conn: conn}
+			consoleWriter.Out = io.MultiWriter(os.Stdout, lc)
+			p.logConn = lc
+		}
+	}
+
+	if daemon && runtime.GOOS == "windows" {
+		mainLog.Load().Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
+	}
+
+	if !daemon {
+		// We need to call s.Run() as soon as possible to response to the OS manager, so it
+		// can see ctrld is running and don't mark ctrld as failed service.
+		go func() {
+			s, err := newService(p, svcConfig)
+			if err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed create new service")
+			}
+			if err := s.Run(); err != nil {
+				mainLog.Load().Error().Err(err).Msg("failed to start service")
+			}
+		}()
+	}
+	writeDefaultConfig := !noConfigStart && configBase64 == ""
+	tryReadingConfig(writeDefaultConfig)
+
+	readBase64Config(configBase64)
+	processNoConfigFlags(noConfigStart)
+	if err := v.Unmarshal(&cfg); err != nil {
+		mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
+	}
+
+	processLogAndCacheFlags()
+
+	// Log config do not have thing to validate, so it's safe to init log here,
+	// so it's able to log information in processCDFlags.
+	initLogging()
+
+	mainLog.Load().Info().Msgf("starting ctrld %s", curVersion())
+	mainLog.Load().Info().Msgf("os: %s", osVersion())
+
+	// Wait for network up.
+	if !ctrldnet.Up() {
+		mainLog.Load().Fatal().Msg("network is not up yet")
+	}
+
+	p.router = router.New(&cfg, cdUID != "")
+	cs, err := newControlServer(filepath.Join(homedir, ctrldControlUnixSock))
+	if err != nil {
+		mainLog.Load().Warn().Err(err).Msg("could not create control server")
+	}
+	p.cs = cs
+
+	// Processing --cd flag require connecting to ControlD API, which needs valid
+	// time for validating server certificate. Some routers need NTP synchronization
+	// to set the current time, so this check must happen before processCDFlags.
+	if err := p.router.PreRun(); err != nil {
+		mainLog.Load().Fatal().Err(err).Msg("failed to perform router pre-run check")
+	}
+
+	oldLogPath := cfg.Service.LogPath
+	if uid := cdUIDFromProvToken(); uid != "" {
+		cdUID = uid
+	}
+	if cdUID != "" {
+		err := processCDFlags()
+		if err != nil {
+			appCallback.Exit(err.Error())
+			return
+		}
+	}
+
+	updated := updateListenerConfig()
+
+	if cdUID != "" {
+		processLogAndCacheFlags()
+	}
+
+	if updated {
+		if err := writeConfigFile(); err != nil {
+			mainLog.Load().Fatal().Err(err).Msg("failed to write config file")
+		} else {
+			mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
+		}
+	}
+
+	if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
+		// After processCDFlags, log config may change, so reset mainLog and re-init logging.
+		l := zerolog.New(io.Discard)
+		mainLog.Store(&l)
+
+		// Copy logs written so far to new log file if possible.
+		if buf, err := os.ReadFile(oldLogPath); err == nil {
+			if err := os.WriteFile(newLogPath, buf, os.FileMode(0o600)); err != nil {
+				mainLog.Load().Warn().Err(err).Msg("could not copy old log file")
+			}
+		}
+		initLoggingWithBackup(false)
+	}
+
+	validateConfig(&cfg)
+	initCache()
+
+	if daemon {
+		exe, err := os.Executable()
+		if err != nil {
+			mainLog.Load().Error().Err(err).Msg("failed to find the binary")
+			os.Exit(1)
+		}
+		curDir, err := os.Getwd()
+		if err != nil {
+			mainLog.Load().Error().Err(err).Msg("failed to get current working directory")
+			os.Exit(1)
+		}
+		// If running as daemon, re-run the command in background, with daemon off.
+		cmd := exec.Command(exe, append(os.Args[1:], "-d=false")...)
+		cmd.Dir = curDir
+		if err := cmd.Start(); err != nil {
+			mainLog.Load().Error().Err(err).Msg("failed to start process as daemon")
+			os.Exit(1)
+		}
+		mainLog.Load().Info().Int("pid", cmd.Process.Pid).Msg("DNS proxy started")
+		os.Exit(0)
+	}
+
+	p.onStarted = append(p.onStarted, func() {
+		for _, lc := range p.cfg.Listener {
+			if shouldAllocateLoopbackIP(lc.IP) {
+				if err := allocateIP(lc.IP); err != nil {
+					mainLog.Load().Error().Err(err).Msgf("could not allocate IP: %s", lc.IP)
+				}
+			}
+		}
+	})
+	p.onStopped = append(p.onStopped, func() {
+		for _, lc := range p.cfg.Listener {
+			if shouldAllocateLoopbackIP(lc.IP) {
+				if err := deAllocateIP(lc.IP); err != nil {
+					mainLog.Load().Error().Err(err).Msgf("could not de-allocate IP: %s", lc.IP)
+				}
+			}
+		}
+	})
+	if platform := router.Name(); platform != "" {
+		if cp := router.CertPool(); cp != nil {
+			rootCertPool = cp
+		}
+		p.onStarted = append(p.onStarted, func() {
+			mainLog.Load().Debug().Msg("router setup on start")
+			if err := p.router.Setup(); err != nil {
+				mainLog.Load().Error().Err(err).Msg("could not configure router")
+			}
+		})
+		p.onStopped = append(p.onStopped, func() {
+			mainLog.Load().Debug().Msg("router cleanup on stop")
+			if err := p.router.Cleanup(); err != nil {
+				mainLog.Load().Error().Err(err).Msg("could not cleanup router")
+			}
+			p.resetDNS()
+		})
+	}
+
+	close(waitCh)
+	<-stopCh
+	for _, f := range p.onStopped {
+		f()
+	}
 }
 
 func writeConfigFile() error {
@@ -882,6 +925,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 		if err := v.Unmarshal(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to unmarshal default config: %v", err)
 		}
+		_ = updateListenerConfig()
 		if err := writeConfigFile(); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
 		} else {
@@ -971,7 +1015,7 @@ func processNoConfigFlags(noConfigStart bool) {
 	v.Set("upstream", upstream)
 }
 
-func processCDFlags() {
+func processCDFlags() error {
 	logger := mainLog.Load().With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
@@ -991,12 +1035,12 @@ func processCDFlags() {
 		s, err := newService(&prog{}, svcConfig)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to create new service")
-			return
+			return nil
 		}
 		if netIface, _ := netInterface(iface); netIface != nil {
 			if err := restoreNetworkManager(); err != nil {
 				logger.Error().Err(err).Msg("could not restore NetworkManager")
-				return
+				return nil
 			}
 			logger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS for interface")
 			if err := resetDNS(netIface); err != nil {
@@ -1010,11 +1054,16 @@ func processCDFlags() {
 		if doTasks(tasks) {
 			logger.Info().Msg("uninstalled service")
 		}
-		logger.Fatal().Err(uer).Msg("failed to fetch resolver config")
+		event := logger.Fatal()
+		if isMobile() {
+			event = logger.Warn()
+		}
+		event.Err(uer).Msg("failed to fetch resolver config")
+		return uer
 	}
 	if err != nil {
 		logger.Warn().Err(err).Msg("could not fetch resolver config")
-		return
+		return nil
 	}
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
@@ -1058,6 +1107,7 @@ func processCDFlags() {
 			"0": {IP: "", Port: 0},
 		}
 	}
+	return nil
 }
 
 func processListenFlag() {
@@ -1266,7 +1316,17 @@ func userHomeDir() (string, error) {
 	}
 	// viper will expand for us.
 	if runtime.GOOS == "windows" {
-		return os.UserHomeDir()
+		// If we're on windows, use the install path for this.
+		exePath, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+
+		return filepath.Dir(exePath), nil
+	}
+	// Mobile platform should provide a rw dir path for this.
+	if isMobile() {
+		return homedir, nil
 	}
 	dir = "/etc/controld"
 	if err := os.MkdirAll(dir, 0750); err != nil {
@@ -1412,6 +1472,14 @@ type listenerConfigCheck struct {
 	Port bool
 }
 
+// mobileListenerPort returns hardcoded port for mobile platforms.
+func mobileListenerPort() int {
+	if runtime.GOOS == "ios" {
+		return 53
+	}
+	return 5354
+}
+
 // updateListenerConfig updates the config for listeners if not defined,
 // or defined but invalid to be used, e.g: using loopback address other
 // than 127.0.0.1 with systemd-resolved.
@@ -1435,7 +1503,25 @@ func updateListenerConfig() (updated bool) {
 		}
 		updated = updated || lcc[n].IP || lcc[n].Port
 	}
-
+	if isMobile() {
+		// On Mobile, only use first listener, ignore others.
+		firstLn := cfg.FirstListener()
+		for k := range cfg.Listener {
+			if cfg.Listener[k] != firstLn {
+				delete(cfg.Listener, k)
+			}
+		}
+		// In cd mode, always use 127.0.0.1:5354.
+		if cdMode {
+			firstLn.IP = "127.0.0.1" // Mobile platforms allows running listener only on loop back address.
+			firstLn.Port = mobileListenerPort()
+			// TODO: use clear(lcc) once upgrading to go 1.21
+			for k := range lcc {
+				delete(lcc, k)
+			}
+			updated = true
+		}
+	}
 	var closers []io.Closer
 	defer func() {
 		for _, closer := range closers {
@@ -1656,12 +1742,12 @@ func removeProvTokenFromArgs(sc *service.Config) {
 			continue
 		}
 		// For "--cd-org XXX", skip it and mark next arg skipped.
-		if x == "--cd-org" {
+		if x == cdOrgFlagName {
 			skip = true
 			continue
 		}
 		// For "--cd-org=XXX", just skip it.
-		if strings.HasPrefix(x, "--cd-org=") {
+		if strings.HasPrefix(x, cdOrgFlagName+"=") {
 			continue
 		}
 		a = append(a, x)
@@ -1699,4 +1785,16 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 	}
 
 	return cc
+}
+
+// checkStrFlagEmpty validates if a string flag was set to an empty string.
+// If yes, emitting a fatal error message.
+func checkStrFlagEmpty(cmd *cobra.Command, flagName string) {
+	fl := cmd.Flags().Lookup(flagName)
+	if !fl.Changed || fl.Value.Type() != "string" {
+		return
+	}
+	if fl.Value.String() == "" {
+		mainLog.Load().Fatal().Msgf(`flag "--%s"" value must be non-empty`, fl.Name)
+	}
 }

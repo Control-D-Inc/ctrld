@@ -8,6 +8,7 @@ type ClientInfo struct {
 	Mac      string
 	IP       string
 	Hostname string
+	Self     bool
 }
 
 // LeaseFileFormat specifies the format of DHCP lease file.

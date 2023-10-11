@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/netip"
 	"os/exec"
-	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -85,8 +84,13 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 			}
 			return err
 		}
+		if useSystemdResolved {
+			if out, err := exec.Command("systemctl", "restart", "systemd-resolved").CombinedOutput(); err != nil {
+				mainLog.Load().Warn().Err(err).Msgf("could not restart systemd-resolved: %s", string(out))
+			}
+		}
 		currentNS := currentDNS(iface)
-		if reflect.DeepEqual(currentNS, nameservers) {
+		if isSubSet(nameservers, currentNS) {
 			return nil
 		}
 	}
@@ -104,7 +108,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 				return fmt.Errorf("%s: %w", string(out), err)
 			}
 			currentNS := currentDNS(iface)
-			if reflect.DeepEqual(currentNS, nameservers) {
+			if isSubSet(nameservers, currentNS) {
 				return nil
 			}
 			time.Sleep(time.Second)
@@ -264,4 +268,34 @@ func ignoringEINTR(fn func() error) error {
 			return err
 		}
 	}
+}
+
+// isSubSet reports whether s2 contains all elements of s1.
+func isSubSet(s1, s2 []string) bool {
+	ok := true
+	for _, ns := range s1 {
+		// TODO(cuonglm): use slices.Contains once upgrading to go1.21
+		if sliceContains(s2, ns) {
+			continue
+		}
+		ok = false
+		break
+	}
+	return ok
+}
+
+// sliceContains reports whether v is present in s.
+func sliceContains[S ~[]E, E comparable](s S, v E) bool {
+	return sliceIndex(s, v) >= 0
+}
+
+// sliceIndex returns the index of the first occurrence of v in s,
+// or -1 if not present.
+func sliceIndex[S ~[]E, E comparable](s S, v E) int {
+	for i := range s {
+		if v == s[i] {
+			return i
+		}
+	}
+	return -1
 }

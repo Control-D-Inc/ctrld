@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"runtime"
 	"sync"
 	"time"
 
@@ -43,7 +44,6 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 	rt := &http3.RoundTripper{}
 	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
-		domain := addr
 		_, port, _ := net.SplitHostPort(addr)
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
 		if uc.BootstrapIP != "" {
@@ -57,20 +57,23 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 			if err != nil {
 				return nil, err
 			}
-			return quic.DialEarlyContext(ctx, udpConn, remoteAddr, domain, tlsCfg, cfg)
+			return quic.DialEarly(ctx, udpConn, remoteAddr, tlsCfg, cfg)
 		}
 		dialAddrs := make([]string, len(addrs))
 		for i := range addrs {
 			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
 		}
 		pd := &quicParallelDialer{}
-		conn, err := pd.Dial(ctx, domain, dialAddrs, tlsCfg, cfg)
+		conn, err := pd.Dial(ctx, dialAddrs, tlsCfg, cfg)
 		if err != nil {
 			return nil, err
 		}
 		ProxyLogger.Load().Debug().Msgf("sending doh3 request to: %s", conn.RemoteAddr())
 		return conn, err
 	}
+	runtime.SetFinalizer(rt, func(rt *http3.RoundTripper) {
+		rt.CloseIdleConnections()
+	})
 	return rt
 }
 
@@ -107,13 +110,15 @@ type parallelDialerResult struct {
 type quicParallelDialer struct{}
 
 // Dial performs parallel dialing to the given address list.
-func (d *quicParallelDialer) Dial(ctx context.Context, domain string, addrs []string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 	if len(addrs) == 0 {
 		return nil, errors.New("empty addresses")
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	done := make(chan struct{})
+	defer close(done)
 	ch := make(chan *parallelDialerResult, len(addrs))
 	var wg sync.WaitGroup
 	wg.Add(len(addrs))
@@ -135,9 +140,14 @@ func (d *quicParallelDialer) Dial(ctx context.Context, domain string, addrs []st
 				ch <- &parallelDialerResult{conn: nil, err: err}
 				return
 			}
-
-			conn, err := quic.DialEarlyContext(ctx, udpConn, remoteAddr, domain, tlsCfg, cfg)
-			ch <- &parallelDialerResult{conn: conn, err: err}
+			conn, err := quic.DialEarly(ctx, udpConn, remoteAddr, tlsCfg, cfg)
+			select {
+			case ch <- &parallelDialerResult{conn: conn, err: err}:
+			case <-done:
+				if conn != nil {
+					conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+				}
+			}
 		}(addr)
 	}
 

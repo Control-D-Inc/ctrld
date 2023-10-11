@@ -48,6 +48,9 @@ func (m *mdns) String() string {
 }
 
 func (m *mdns) List() []string {
+	if m == nil {
+		return nil
+	}
 	var ips []string
 	m.name.Range(func(key, value any) bool {
 		ips = append(ips, key.(string))

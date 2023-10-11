@@ -5,10 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -16,10 +14,9 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"go4.org/mem"
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/net/interfaces"
-	"tailscale.com/util/lineread"
+	"tailscale.com/net/netaddr"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
@@ -54,12 +51,12 @@ func (p *prog) serveDNS(listenerNum string) error {
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
 		p.sema.acquire()
 		defer p.sema.release()
+		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
 		reqId := requestID()
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
-		mac := macFromMsg(m)
-		ci := p.getClientInfo(remoteIP, mac)
+		ci := p.getClientInfo(remoteIP, m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
 		t := time.Now()
@@ -121,7 +118,8 @@ func (p *prog) serveDNS(listenerNum string) error {
 			})
 		}
 		g.Go(func() error {
-			s, errCh := runDNSServer(dnsListenAddress(listenerConfig), proto, handler)
+			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
+			s, errCh := runDNSServer(addr, proto, handler)
 			defer s.Shutdown()
 			select {
 			case err := <-errCh:
@@ -149,7 +147,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 // processed later, because policy logging want to know whether a network rule
 // is disregarded in favor of the domain level rule.
 func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, domain string) ([]string, bool) {
-	upstreams := []string{"upstream." + defaultUpstreamNum}
+	upstreams := []string{upstreamPrefix + defaultUpstreamNum}
 	matchedPolicy := "no policy"
 	matchedNetwork := "no network"
 	matchedRule := "no rule"
@@ -233,7 +231,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
-		upstreams = []string{"upstream.os"}
+		upstreams = []string{upstreamOS}
 	}
 	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
 	if p.cache != nil && msg.Question[0].Qtype != dns.TypePTR {
@@ -277,12 +275,26 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		answer, err := resolve1(n, upstreamConfig, msg)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
+			if errNetworkError(err) {
+				p.um.increaseFailureCount(upstreams[n])
+				if p.um.isDown(upstreams[n]) {
+					go p.um.checkUpstream(upstreams[n], upstreamConfig)
+				}
+			}
 			return nil
 		}
 		return answer
 	}
 	for n, upstreamConfig := range upstreamConfigs {
 		if upstreamConfig == nil {
+			continue
+		}
+		if p.isLoop(upstreamConfig) {
+			mainLog.Load().Warn().Msgf("dns loop detected, upstream: %q, endpoint: %q", upstreamConfig.Name, upstreamConfig.Endpoint)
+			continue
+		}
+		if p.um.isDown(upstreams[n]) {
+			ctrld.Log(ctx, mainLog.Load().Warn(), "%s is down", upstreams[n])
 			continue
 		}
 		answer := resolve(n, upstreamConfig, msg)
@@ -316,7 +328,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		}
 		return answer
 	}
-	ctrld.Log(ctx, mainLog.Load().Error(), "all upstreams failed")
+	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
 	answer := new(dns.Msg)
 	answer.SetRcode(msg, dns.RcodeServerFailure)
 	return answer
@@ -325,7 +337,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 func (p *prog) upstreamConfigsFromUpstreamNumbers(upstreams []string) []*ctrld.UpstreamConfig {
 	upstreamConfigs := make([]*ctrld.UpstreamConfig, 0, len(upstreams))
 	for _, upstream := range upstreams {
-		upstreamNum := strings.TrimPrefix(upstream, "upstream.")
+		upstreamNum := strings.TrimPrefix(upstream, upstreamPrefix)
 		upstreamConfigs = append(upstreamConfigs, p.cfg.Upstream[upstreamNum])
 	}
 	return upstreamConfigs
@@ -422,29 +434,24 @@ func needLocalIPv6Listener() bool {
 	return ctrldnet.SupportsIPv6ListenLocal() && runtime.GOOS == "windows"
 }
 
-func dnsListenAddress(lc *ctrld.ListenerConfig) string {
-	// If we are inside container and the listener loopback address, change
-	// the address to something like 0.0.0.0:53, so user can expose the port to outside.
-	if inContainer() {
-		if ip := net.ParseIP(lc.IP); ip != nil && ip.IsLoopback() {
-			return net.JoinHostPort("0.0.0.0", strconv.Itoa(lc.Port))
-		}
-	}
-	return net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
-}
-
-func macFromMsg(msg *dns.Msg) string {
+// ipAndMacFromMsg extracts IP and MAC information included in a DNS message, if any.
+func ipAndMacFromMsg(msg *dns.Msg) (string, string) {
+	ip, mac := "", ""
 	if opt := msg.IsEdns0(); opt != nil {
 		for _, s := range opt.Option {
 			switch e := s.(type) {
 			case *dns.EDNS0_LOCAL:
 				if e.Code == EDNS0_OPTION_MAC {
-					return net.HardwareAddr(e.Data).String()
+					mac = net.HardwareAddr(e.Data).String()
+				}
+			case *dns.EDNS0_SUBNET:
+				if len(e.Address) > 0 && !e.Address.IsLoopback() {
+					ip = e.Address.String()
 				}
 			}
 		}
 	}
-	return ""
+	return ip, mac
 }
 
 func spoofRemoteAddr(addr net.Addr, ci *ctrld.ClientInfo) net.Addr {
@@ -498,55 +505,73 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 	return s, errCh
 }
 
-// inContainer reports whether we're running in a container.
-//
-// Copied from https://github.com/tailscale/tailscale/blob/v1.42.0/hostinfo/hostinfo.go#L260
-// with modification for ctrld usage.
-func inContainer() bool {
-	if runtime.GOOS != "linux" {
-		return false
+func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
+	ci := &ctrld.ClientInfo{}
+	if p.appCallback != nil {
+		ci.IP = p.appCallback.LanIp()
+		ci.Mac = p.appCallback.MacAddress()
+		ci.Hostname = p.appCallback.HostName()
+		ci.Self = true
+		return ci
+	}
+	ci.IP, ci.Mac = ipAndMacFromMsg(msg)
+	switch {
+	case ci.IP != "" && ci.Mac != "":
+		// Nothing to do.
+	case ci.IP == "" && ci.Mac != "":
+		// Have MAC, no IP.
+		ci.IP = p.ciTable.LookupIP(ci.Mac)
+	case ci.IP == "" && ci.Mac == "":
+		// Have nothing, use remote IP then lookup MAC.
+		ci.IP = remoteIP
+		fallthrough
+	case ci.IP != "" && ci.Mac == "":
+		// Have IP, no MAC.
+		ci.Mac = p.ciTable.LookupMac(ci.IP)
 	}
 
-	var ret bool
-	if _, err := os.Stat("/.dockerenv"); err == nil {
-		return true
-	}
-	if _, err := os.Stat("/run/.containerenv"); err == nil {
-		// See https://github.com/cri-o/cri-o/issues/5461
-		return true
-	}
-	lineread.File("/proc/1/cgroup", func(line []byte) error {
-		if mem.Contains(mem.B(line), mem.S("/docker/")) ||
-			mem.Contains(mem.B(line), mem.S("/lxc/")) {
-			ret = true
-			return io.EOF // arbitrary non-nil error to stop loop
+	// If MAC is still empty here, that mean the requests are made from virtual interface,
+	// like VPN/Wireguard clients, so we use whatever MAC address associated with remoteIP
+	// (most likely 127.0.0.1), and ci.IP as hostname, so we can distinguish those clients.
+	if ci.Mac == "" {
+		ci.Mac = p.ciTable.LookupMac(remoteIP)
+		if hostname := p.ciTable.LookupHostname(ci.IP, ""); hostname != "" {
+			ci.Hostname = hostname
+		} else {
+			ci.Hostname = ci.IP
+			p.ciTable.StoreVPNClient(ci)
 		}
-		return nil
-	})
-	lineread.File("/proc/mounts", func(line []byte) error {
-		if mem.Contains(mem.B(line), mem.S("lxcfs /proc/cpuinfo fuse.lxcfs")) {
-			ret = true
-			return io.EOF
-		}
-		return nil
-	})
-	return ret
+	} else {
+		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
+	}
+	ci.Self = queryFromSelf(ci.IP)
+	return ci
 }
 
-func (p *prog) getClientInfo(ip, mac string) *ctrld.ClientInfo {
-	ci := &ctrld.ClientInfo{}
-	if mac != "" {
-		ci.Mac = mac
-		ci.IP = p.ciTable.LookupIP(mac)
-	} else {
-		ci.IP = ip
-		ci.Mac = p.ciTable.LookupMac(ip)
-		if ip == "127.0.0.1" || ip == "::1" {
-			ci.IP = p.ciTable.LookupIP(ci.Mac)
+// queryFromSelf reports whether the input IP is from device running ctrld.
+func queryFromSelf(ip string) bool {
+	netIP := netip.MustParseAddr(ip)
+	ifaces, err := interfaces.GetList()
+	if err != nil {
+		mainLog.Load().Warn().Err(err).Msg("could not get interfaces list")
+		return false
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			mainLog.Load().Warn().Err(err).Msgf("could not get interfaces addresses: %s", iface.Name)
+			continue
+		}
+		for _, a := range addrs {
+			switch v := a.(type) {
+			case *net.IPNet:
+				if pfx, ok := netaddr.FromStdIPNet(v); ok && pfx.Addr().Compare(netIP) == 0 {
+					return true
+				}
+			}
 		}
 	}
-	ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
-	return ci
+	return false
 }
 
 func needRFC1918Listeners(lc *ctrld.ListenerConfig) bool {

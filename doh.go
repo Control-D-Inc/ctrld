@@ -8,6 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
+	"strings"
+	"sync"
+
+	"github.com/cuonglm/osinfo"
 
 	"github.com/miekg/dns"
 )
@@ -16,8 +21,55 @@ const (
 	dohMacHeader         = "x-cd-mac"
 	dohIPHeader          = "x-cd-ip"
 	dohHostHeader        = "x-cd-host"
+	dohOsHeader          = "x-cd-os"
 	headerApplicationDNS = "application/dns-message"
 )
+
+// EncodeOsNameMap provides mapping from OS name to a shorter string, used for encoding x-cd-os value.
+var EncodeOsNameMap = map[string]string{
+	"windows": "1",
+	"darwin":  "2",
+	"linux":   "3",
+	"freebsd": "4",
+}
+
+// DecodeOsNameMap provides mapping from encoded OS name to real value, used for decoding x-cd-os value.
+var DecodeOsNameMap = map[string]string{}
+
+// EncodeArchNameMap provides mapping from OS arch to a shorter string, used for encoding x-cd-os value.
+var EncodeArchNameMap = map[string]string{
+	"amd64":  "1",
+	"arm64":  "2",
+	"arm":    "3",
+	"386":    "4",
+	"mips":   "5",
+	"mipsle": "6",
+	"mips64": "7",
+}
+
+// DecodeArchNameMap provides mapping from encoded OS arch to real value, used for decoding x-cd-os value.
+var DecodeArchNameMap = map[string]string{}
+
+func init() {
+	for k, v := range EncodeOsNameMap {
+		DecodeOsNameMap[v] = k
+	}
+	for k, v := range EncodeArchNameMap {
+		DecodeArchNameMap[v] = k
+	}
+}
+
+// TODO: use sync.OnceValue when upgrading to go1.21
+var xCdOsValueOnce sync.Once
+var xCdOsValue string
+
+func dohOsHeaderValue() string {
+	xCdOsValueOnce.Do(func() {
+		oi := osinfo.New()
+		xCdOsValue = strings.Join([]string{EncodeOsNameMap[runtime.GOOS], EncodeArchNameMap[runtime.GOARCH], oi.Dist}, "-")
+	})
+	return xCdOsValue
+}
 
 func newDohResolver(uc *UpstreamConfig) *dohResolver {
 	r := &dohResolver{
@@ -97,8 +149,12 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 func addHeader(ctx context.Context, req *http.Request, sendClientInfo bool) {
 	req.Header.Set("Content-Type", headerApplicationDNS)
 	req.Header.Set("Accept", headerApplicationDNS)
+	req.Header.Set(dohOsHeader, dohOsHeaderValue())
+
+	printed := false
 	if sendClientInfo {
 		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
+			printed = ci.Mac != "" || ci.IP != "" || ci.Hostname != ""
 			if ci.Mac != "" {
 				req.Header.Set(dohMacHeader, ci.Mac)
 			}
@@ -108,7 +164,12 @@ func addHeader(ctx context.Context, req *http.Request, sendClientInfo bool) {
 			if ci.Hostname != "" {
 				req.Header.Set(dohHostHeader, ci.Hostname)
 			}
+			if ci.Self {
+				req.Header.Set(dohOsHeader, dohOsHeaderValue())
+			}
 		}
 	}
-	Log(ctx, ProxyLogger.Load().Debug().Interface("header", req.Header), "sending request header")
+	if printed {
+		Log(ctx, ProxyLogger.Load().Debug().Interface("header", req.Header), "sending request header")
+	}
 }

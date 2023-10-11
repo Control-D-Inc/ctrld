@@ -185,6 +185,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			tc.uc.Init()
+			tc.uc.uid = "" // we don't care about the uid.
 			assert.Equal(t, tc.expected, tc.uc)
 		})
 	}

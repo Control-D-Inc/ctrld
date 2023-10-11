@@ -173,20 +173,6 @@ func CanListenLocalhost() bool {
 	}
 }
 
-// ServiceDependencies returns list of dependencies that ctrld services needs on this router.
-// See https://pkg.go.dev/github.com/kardianos/service#Config for list format.
-func ServiceDependencies() []string {
-	if Name() == edgeos.Name {
-		// On EdeOS, ctrld needs to start after vyatta-dhcpd, so it can read leases file.
-		return []string{
-			"Wants=vyatta-dhcpd.service",
-			"After=vyatta-dhcpd.service",
-			"Wants=dnsmasq.service",
-		}
-	}
-	return nil
-}
-
 // SelfInterfaces return list of *net.Interface that will be source of requests from router itself.
 func SelfInterfaces() []*net.Interface {
 	switch Name() {
@@ -195,6 +181,14 @@ func SelfInterfaces() []*net.Interface {
 	default:
 		return nil
 	}
+}
+
+// LeaseFilesDir is the directory which contains lease files.
+func LeaseFilesDir() string {
+	if Name() == edgeos.Name {
+		edgeos.LeaseFileDir()
+	}
+	return ""
 }
 
 func distroName() string {

@@ -3,16 +3,19 @@ package clientinfo
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
+	"tailscale.com/logtail/backoff"
 
 	"github.com/Control-D-Inc/ctrld"
 )
 
 type ptrDiscover struct {
-	hostname sync.Map // ip => hostname
-	resolver ctrld.Resolver
+	hostname   sync.Map // ip => hostname
+	resolver   ctrld.Resolver
+	serverDown atomic.Bool
 }
 
 func (p *ptrDiscover) refresh() error {
@@ -41,6 +44,9 @@ func (p *ptrDiscover) String() string {
 }
 
 func (p *ptrDiscover) List() []string {
+	if p == nil {
+		return nil
+	}
 	var ips []string
 	p.hostname.Range(func(key, value any) bool {
 		ips = append(ips, key.(string))
@@ -57,18 +63,24 @@ func (p *ptrDiscover) lookupHostnameFromCache(ip string) string {
 }
 
 func (p *ptrDiscover) lookupHostname(ip string) string {
+	// If nameserver is down, do nothing.
+	if p.serverDown.Load() {
+		return ""
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	msg := new(dns.Msg)
 	addr, err := dns.ReverseAddr(ip)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Error().Err(err).Msg("invalid ip address")
+		ctrld.ProxyLogger.Load().Warn().Str("discovery", "ptr").Err(err).Msg("invalid ip address")
 		return ""
 	}
 	msg.SetQuestion(addr, dns.TypePTR)
 	ans, err := p.resolver.Resolve(ctx, msg)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not lookup IP")
+		ctrld.ProxyLogger.Load().Warn().Str("discovery", "ptr").Err(err).Msg("could not perform PTR lookup")
+		p.serverDown.Store(true)
+		go p.checkServer()
 		return ""
 	}
 	for _, rr := range ans.Answer {
@@ -79,4 +91,26 @@ func (p *ptrDiscover) lookupHostname(ip string) string {
 		}
 	}
 	return ""
+}
+
+// checkServer monitors if the resolver can reach its nameserver. When the nameserver
+// is reachable, set p.serverDown to false, so p.lookupHostname can continue working.
+func (p *ptrDiscover) checkServer() {
+	bo := backoff.NewBackoff("ptrDiscover", func(format string, args ...any) {}, time.Minute*5)
+	m := new(dns.Msg)
+	m.SetQuestion(".", dns.TypeNS)
+	ping := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := p.resolver.Resolve(ctx, m)
+		return err
+	}
+	for {
+		if err := ping(); err != nil {
+			bo.BackOff(context.Background(), err)
+			continue
+		}
+		break
+	}
+	p.serverDown.Store(false)
 }

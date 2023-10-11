@@ -47,11 +47,24 @@ func (d *dhcp) watchChanges() {
 	if d.watcher == nil {
 		return
 	}
+	if dir := router.LeaseFilesDir(); dir != "" {
+		if err := d.watcher.Add(dir); err != nil {
+			ctrld.ProxyLogger.Load().Err(err).Str("dir", dir).Msg("could not watch lease dir")
+		}
+	}
 	for {
 		select {
 		case event, ok := <-d.watcher.Events:
 			if !ok {
 				return
+			}
+			if event.Has(fsnotify.Create) {
+				if format, ok := clientInfoFiles[event.Name]; ok {
+					if err := d.addLeaseFile(event.Name, format); err != nil {
+						ctrld.ProxyLogger.Load().Err(err).Str("file", event.Name).Msg("could not add lease file")
+					}
+				}
+				continue
 			}
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Chmod) || event.Has(fsnotify.Remove) {
 				format := clientInfoFiles[event.Name]
@@ -106,6 +119,9 @@ func (d *dhcp) String() string {
 }
 
 func (d *dhcp) List() []string {
+	if d == nil {
+		return nil
+	}
 	var ips []string
 	d.ip.Range(func(key, value any) bool {
 		ips = append(ips, value.(string))

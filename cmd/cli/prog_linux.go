@@ -4,7 +4,6 @@ import (
 	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
-	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 func init() {
@@ -21,9 +20,8 @@ func setDependencies(svc *service.Config) {
 		"After=NetworkManager-wait-online.service",
 		"Wants=systemd-networkd-wait-online.service",
 		"After=systemd-networkd-wait-online.service",
-	}
-	if routerDeps := router.ServiceDependencies(); len(routerDeps) > 0 {
-		svc.Dependencies = append(svc.Dependencies, routerDeps...)
+		"Wants=nss-lookup.target",
+		"After=nss-lookup.target",
 	}
 }
 
