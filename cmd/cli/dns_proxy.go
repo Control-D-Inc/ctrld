@@ -62,7 +62,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		t := time.Now()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s received query: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
-		upstreams, matched := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, domain)
+		upstreams, matched := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, ci.Mac, domain)
 		var answer *dns.Msg
 		if !matched && listenerConfig.Restricted {
 			answer = new(dns.Msg)
@@ -146,7 +146,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 // Though domain policy has higher priority than network policy, it is still
 // processed later, because policy logging want to know whether a network rule
 // is disregarded in favor of the domain level rule.
-func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, domain string) ([]string, bool) {
+func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, srcMac, domain string) ([]string, bool) {
 	upstreams := []string{upstreamPrefix + defaultUpstreamNum}
 	matchedPolicy := "no policy"
 	matchedNetwork := "no network"
@@ -198,6 +198,19 @@ networkRules:
 					matched = true
 					break networkRules
 				}
+			}
+		}
+	}
+
+macRules:
+	for _, rule := range lc.Policy.Macs {
+		for source, targets := range rule {
+			if source != "" && strings.EqualFold(source, srcMac) {
+				matchedPolicy = lc.Policy.Name
+				matchedNetwork = source
+				networkTargets = targets
+				matched = true
+				break macRules
 			}
 		}
 	}

@@ -253,6 +253,7 @@ type ListenerPolicyConfig struct {
 	Name                 string   `mapstructure:"name" toml:"name,omitempty"`
 	Networks             []Rule   `mapstructure:"networks" toml:"networks,omitempty,inline,multiline" validate:"dive,len=1"`
 	Rules                []Rule   `mapstructure:"rules" toml:"rules,omitempty,inline,multiline" validate:"dive,len=1"`
+	Macs                 []Rule   `mapstructure:"macs" toml:"macs,omitempty,inline,multiline" validate:"dive,len=1"`
 	FailoverRcodes       []string `mapstructure:"failover_rcodes" toml:"failover_rcodes,omitempty" validate:"dive,dnsrcode"`
 	FailoverRcodeNumbers []int    `mapstructure:"-" toml:"-"`
 }

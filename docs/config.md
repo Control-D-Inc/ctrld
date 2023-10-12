@@ -386,7 +386,15 @@ If set to `true` makes the listener `REFUSE` DNS queries from all source IP addr
 Allows `ctrld` to set policy rules to determine which upstreams the requests will be forwarded to.
 If no `policy` is defined or the requests do not match any policy rules, it will be forwarded to corresponding upstream of the listener. For example, the request to `listener.0` will be forwarded to `upstream.0`.
 
-The policy `rule` syntax is a simple `toml` inline table with exactly one key/value pair per rule. `key` is either the `network` or a domain. Value is the list of the upstreams. For example:
+The policy `rule` syntax is a simple `toml` inline table with exactly one key/value pair per rule. `key` is either:
+
+ - Network.
+ - Domain.
+ - Mac Address.
+
+Value is the list of the upstreams.
+
+For example:
 
 ```toml
 [listener.0.policy]
@@ -400,12 +408,18 @@ rules = [
     {"*.local" = ["upstream.1"]},
     {"test.com" = ["upstream.2", "upstream.1"]},
 ]
+
+macs = [
+    {"14:54:4a:8e:08:2d" = ["upstream.3"]},
+]
 ```
 
 Above policy will:
-- Forward requests on `listener.0` from `network.0` to `upstream.1`.
+
 - Forward requests on `listener.0` for `.local` suffixed domains to `upstream.1`.
 - Forward requests on `listener.0` for `test.com` to `upstream.2`. If timeout is reached, retry on `upstream.1`.
+- Forward requests on `listener.0` from client with Mac `14:54:4a:8e:08:2d` to `upstream.3`.
+- Forward requests on `listener.0` from `network.0` to `upstream.1`.
 - All other requests on `listener.0` that do not match above conditions will be forwarded to `upstream.0`.
 
 An empty upstream would not route the request to any defined upstreams, and use the OS default resolver.
@@ -418,6 +432,18 @@ rules = [
     {"*.local" = []},
 ]
 ```
+
+---
+
+Note that the order of matching preference:
+
+```
+rules => macs => networks
+```
+
+And within each policy, the rules are processed from top to bottom.
+
+---
 
 #### name
 `name` is the name for the policy.
@@ -437,6 +463,13 @@ rules = [
 `rules` is the list of domain rules within the policy. Domain can be either FQDN or wildcard domain.
 
 - Type: array of rule
+- Required: no
+- Default: []
+
+### macs:
+`macs` is the list of mac rules within the policy. Mac address value is case-insensitive.
+
+- Type: array of macs
 - Required: no
 - Default: []
 

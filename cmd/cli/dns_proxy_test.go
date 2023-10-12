@@ -81,6 +81,7 @@ func Test_prog_upstreamFor(t *testing.T) {
 	tests := []struct {
 		name               string
 		ip                 string
+		mac                string
 		defaultUpstreamNum string
 		lc                 *ctrld.ListenerConfig
 		domain             string
@@ -88,11 +89,14 @@ func Test_prog_upstreamFor(t *testing.T) {
 		matched            bool
 		testLogMsg         string
 	}{
-		{"Policy map matches", "192.168.0.1:0", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.1", "upstream.0"}, true, ""},
-		{"Policy split matches", "192.168.0.1:0", "0", prog.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true, ""},
-		{"Policy map for other network matches", "192.168.1.2:0", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.0"}, true, ""},
-		{"No policy map for listener", "192.168.1.2:0", "1", prog.cfg.Listener["1"], "abc.ru", []string{"upstream.1"}, false, ""},
-		{"unenforced loging", "192.168.1.2:0", "0", prog.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true, "My Policy, network.1 (unenforced), *.ru -> [upstream.1]"},
+		{"Policy map matches", "192.168.0.1:0", "", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.1", "upstream.0"}, true, ""},
+		{"Policy split matches", "192.168.0.1:0", "", "0", prog.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true, ""},
+		{"Policy map for other network matches", "192.168.1.2:0", "", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.0"}, true, ""},
+		{"No policy map for listener", "192.168.1.2:0", "", "1", prog.cfg.Listener["1"], "abc.ru", []string{"upstream.1"}, false, ""},
+		{"unenforced loging", "192.168.1.2:0", "", "0", prog.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true, "My Policy, network.1 (unenforced), *.ru -> [upstream.1]"},
+		{"Policy Macs matches upper", "192.168.0.1:0", "14:45:A0:67:83:0A", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.2"}, true, "14:45:a0:67:83:0a"},
+		{"Policy Macs matches lower", "192.168.0.1:0", "14:54:4a:8e:08:2d", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.2"}, true, "14:54:4a:8e:08:2d"},
+		{"Policy Macs matches case-insensitive", "192.168.0.1:0", "14:54:4A:8E:08:2D", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.2"}, true, "14:54:4a:8e:08:2d"},
 	}
 
 	for _, tc := range tests {
@@ -111,7 +115,7 @@ func Test_prog_upstreamFor(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, addr)
 				ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, requestID())
-				upstreams, matched := prog.upstreamFor(ctx, tc.defaultUpstreamNum, tc.lc, addr, tc.domain)
+				upstreams, matched := prog.upstreamFor(ctx, tc.defaultUpstreamNum, tc.lc, addr, tc.mac, tc.domain)
 				assert.Equal(t, tc.matched, matched)
 				assert.Equal(t, tc.upstreams, upstreams)
 				if tc.testLogMsg != "" {
