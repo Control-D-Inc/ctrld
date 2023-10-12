@@ -1,9 +1,12 @@
 package dnsmasq
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"html/template"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -19,6 +22,7 @@ server={{ .IP }}#{{ .Port }}
 add-mac
 add-subnet=32,128
 {{- end}}
+cache-size=0
 `
 
 const MerlinPostConfPath = "/jffs/scripts/dnsmasq.postconf"
@@ -47,6 +51,8 @@ if [ -n "$pid" ] && [ -f "/proc/${pid}/cmdline" ]; then
   {{- end}}
   pc_delete "dnssec" "$config_file"                 # disable DNSSEC
   pc_delete "trust-anchor=" "$config_file"          # disable DNSSEC
+  pc_delete "cache-size=" "$config_file"
+  pc_append "cache-size=0" "$config_file"           # disable cache
 	
   # For John fork
   pc_delete "resolv-file" "$config_file"            # no WAN DNS settings
@@ -117,9 +123,28 @@ func firewallaUpstreams(port int) []Upstream {
 	return upstreams
 }
 
+// firewallaDnsmasqConfFiles returns dnsmasq config files of all firewalla interfaces.
+func firewallaDnsmasqConfFiles() ([]string, error) {
+	return filepath.Glob("/home/pi/firerouter/etc/dnsmasq.dns.*.conf")
+}
+
+// firewallUpdateConf updates all firewall config files using given function.
+func firewallUpdateConf(update func(conf string) error) error {
+	confFiles, err := firewallaDnsmasqConfFiles()
+	if err != nil {
+		return err
+	}
+	for _, conf := range confFiles {
+		if err := update(conf); err != nil {
+			return fmt.Errorf("%s: %w", conf, err)
+		}
+	}
+	return nil
+}
+
 // FirewallaSelfInterfaces returns list of interfaces that will be configured with default dnsmasq setup on Firewalla.
 func FirewallaSelfInterfaces() []*net.Interface {
-	matches, err := filepath.Glob("/home/pi/firerouter/etc/dnsmasq.dns.*.conf")
+	matches, err := firewallaDnsmasqConfFiles()
 	if err != nil {
 		return nil
 	}
@@ -132,4 +157,33 @@ func FirewallaSelfInterfaces() []*net.Interface {
 		}
 	}
 	return ifaces
+}
+
+// FirewallaDisableCache comments out "cache-size" line in all firewalla dnsmasq config files.
+func FirewallaDisableCache() error {
+	return firewallUpdateConf(DisableCache)
+}
+
+// FirewallaEnableCache un-comments out "cache-size" line in all firewalla dnsmasq config files.
+func FirewallaEnableCache() error {
+	return firewallUpdateConf(EnableCache)
+}
+
+// DisableCache comments out "cache-size" line in dnsmasq config file.
+func DisableCache(conf string) error {
+	return replaceFileContent(conf, "\ncache-size=", "\n#cache-size=")
+}
+
+// EnableCache un-comments "cache-size" line in dnsmasq config file.
+func EnableCache(conf string) error {
+	return replaceFileContent(conf, "\n#cache-size=", "\ncache-size=")
+}
+
+func replaceFileContent(filename, old, new string) error {
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+	content = bytes.ReplaceAll(content, []byte(old), []byte(new))
+	return os.WriteFile(filename, content, 0644)
 }

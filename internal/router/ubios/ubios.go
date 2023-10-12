@@ -5,16 +5,17 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
+	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
-	"github.com/kardianos/service"
 )
 
 const (
-	Name                   = "ubios"
-	ubiosDNSMasqConfigPath = "/run/dnsmasq.conf.d/zzzctrld.conf"
+	Name                      = "ubios"
+	ubiosDNSMasqConfigPath    = "/run/dnsmasq.conf.d/zzzctrld.conf"
+	ubiosDNSMasqDnsConfigPath = "/run/dnsmasq.conf.d/dns.conf"
 )
 
 type Ubios struct {
@@ -57,6 +58,10 @@ func (u *Ubios) Setup() error {
 	if err := os.WriteFile(ubiosDNSMasqConfigPath, []byte(data), 0600); err != nil {
 		return err
 	}
+	// Disable dnsmasq cache.
+	if err := dnsmasq.DisableCache(ubiosDNSMasqDnsConfigPath); err != nil {
+		return err
+	}
 	// Restart dnsmasq service.
 	if err := restartDNSMasq(); err != nil {
 		return err
@@ -70,6 +75,10 @@ func (u *Ubios) Cleanup() error {
 	}
 	// Remove the custom dnsmasq config
 	if err := os.Remove(ubiosDNSMasqConfigPath); err != nil {
+		return err
+	}
+	// Enable dnsmasq cache.
+	if err := dnsmasq.EnableCache(ubiosDNSMasqDnsConfigPath); err != nil {
 		return err
 	}
 	// Restart dnsmasq service.
