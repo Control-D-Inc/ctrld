@@ -19,7 +19,6 @@ func setDependencies(svc *service.Config) {
 		"Wants=NetworkManager-wait-online.service",
 		"After=NetworkManager-wait-online.service",
 		"Wants=systemd-networkd-wait-online.service",
-		"After=systemd-networkd-wait-online.service",
 		"Wants=nss-lookup.target",
 		"After=nss-lookup.target",
 	}
