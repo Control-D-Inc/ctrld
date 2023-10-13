@@ -323,7 +323,7 @@ func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
 	}
 	switch uc.Type {
 	case ResolverTypeDOH, ResolverTypeDOH3:
-		if uc.isControlD() {
+		if uc.isControlD() || uc.isNextDNS() {
 			return true
 		}
 	}
@@ -518,6 +518,16 @@ func (uc *UpstreamConfig) isControlD() bool {
 		}
 	}
 	return false
+}
+
+func (uc *UpstreamConfig) isNextDNS() bool {
+	domain := uc.Domain
+	if domain == "" {
+		if u, err := url.Parse(uc.Endpoint); err == nil {
+			domain = u.Hostname()
+		}
+	}
+	return domain == "dns.nextdns.io"
 }
 
 func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {

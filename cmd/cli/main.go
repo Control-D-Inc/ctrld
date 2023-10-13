@@ -32,6 +32,7 @@ var (
 	cdDev             bool
 	iface             string
 	ifaceStartStop    string
+	nextdns           string
 
 	mainLog       atomic.Pointer[zerolog.Logger]
 	consoleWriter zerolog.ConsoleWriter
@@ -39,8 +40,9 @@ var (
 )
 
 const (
-	cdUidFlagName = "cd"
-	cdOrgFlagName = "cd-org"
+	cdUidFlagName   = "cd"
+	cdOrgFlagName   = "cd-org"
+	nextdnsFlagName = "nextdns"
 )
 
 func init() {

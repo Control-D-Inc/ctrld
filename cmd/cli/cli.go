@@ -158,6 +158,7 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, args []string) {
 			checkStrFlagEmpty(cmd, cdUidFlagName)
 			checkStrFlagEmpty(cmd, cdOrgFlagName)
+			validateCdAndNextDNSFlags()
 			sc := &service.Config{}
 			*sc = *svcConfig
 			osArgs := os.Args[2:]
@@ -231,6 +232,15 @@ func initCLI() {
 
 			initLogging()
 
+			if nextdns != "" {
+				removeNextDNSFromArgs(sc)
+				generateNextDNSConfig()
+				updateListenerConfig()
+				if err := writeConfigFile(); err != nil {
+					mainLog.Load().Error().Err(err).Msg("failed to write config with NextDNS resolver")
+				}
+			}
+
 			// Explicitly passing config, so on system where home directory could not be obtained,
 			// or sub-process env is different with the parent, we still behave correctly and use
 			// the expected config file.
@@ -281,7 +291,7 @@ func initCLI() {
 			}
 		},
 	}
-	// Keep these flags in sync with runCmd above, except for "-d".
+	// Keep these flags in sync with runCmd above, except for "-d"/"--nextdns".
 	startCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
 	startCmd.Flags().StringVarP(&configBase64, "base64_config", "", "", "Base64 encoded config")
 	startCmd.Flags().StringVarP(&listenAddress, "listen", "", "", "Listener address and port, in format: address:port")
@@ -295,6 +305,7 @@ func initCLI() {
 	startCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
+	startCmd.Flags().StringVarP(&nextdns, nextdnsFlagName, "", "", "NextDNS resolver id")
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
@@ -1216,6 +1227,11 @@ func selfCheckStatus(s service.Service) service.Status {
 		return service.StatusUnknown
 	}
 
+	// Not a ctrld upstream, return status as-is.
+	if cfg.FirstUpstream().VerifyDomain() == "" {
+		return status
+	}
+
 	mainLog.Load().Debug().Msg("ctrld listener is ready")
 	mainLog.Load().Debug().Msg("performing self-check")
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
@@ -1489,6 +1505,7 @@ func mobileListenerPort() int {
 func updateListenerConfig() (updated bool) {
 	lcc := make(map[string]*listenerConfigCheck)
 	cdMode := cdUID != ""
+	nextdnsMode := nextdns != ""
 	for n, listener := range cfg.Listener {
 		lcc[n] = &listenerConfigCheck{}
 		if listener.IP == "" {
@@ -1500,7 +1517,8 @@ func updateListenerConfig() (updated bool) {
 			lcc[n].Port = true
 		}
 		// In cd mode, we always try to pick an ip:port pair to work.
-		if cdMode {
+		// Same if nextdns resolver is used.
+		if cdMode || nextdnsMode {
 			lcc[n].IP = true
 			lcc[n].Port = true
 		}
@@ -1800,4 +1818,33 @@ func checkStrFlagEmpty(cmd *cobra.Command, flagName string) {
 	if fl.Value.String() == "" {
 		mainLog.Load().Fatal().Msgf(`flag "--%s"" value must be non-empty`, fl.Name)
 	}
+}
+
+func validateCdAndNextDNSFlags() {
+	if (cdUID != "" || cdOrg != "") && nextdns != "" {
+		mainLog.Load().Fatal().Msgf("--%s/--%s could not be used with --%s", cdUidFlagName, cdOrgFlagName, nextdnsFlagName)
+	}
+}
+
+// removeNextDNSFromArgs removes the --nextdns from command line arguments.
+func removeNextDNSFromArgs(sc *service.Config) {
+	a := sc.Arguments[:0]
+	skip := false
+	for _, x := range sc.Arguments {
+		if skip {
+			skip = false
+			continue
+		}
+		// For "--nextdns XXX", skip it and mark next arg skipped.
+		if x == "--"+nextdnsFlagName {
+			skip = true
+			continue
+		}
+		// For "--nextdns=XXX", just skip it.
+		if strings.HasPrefix(x, "--"+nextdnsFlagName+"=") {
+			continue
+		}
+		a = append(a, x)
+	}
+	sc.Arguments = a
 }
