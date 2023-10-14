@@ -1062,6 +1062,9 @@ func processCDFlags() error {
 		return uer
 	}
 	if err != nil {
+		if isMobile() {
+			return errors.New("could not fetch resolver config")
+		}
 		logger.Warn().Err(err).Msg("could not fetch resolver config")
 		return nil
 	}
