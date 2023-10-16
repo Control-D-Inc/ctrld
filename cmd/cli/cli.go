@@ -144,6 +144,7 @@ func initCLI() {
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	_ = runCmd.Flags().MarkHidden("iface")
+	runCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 
 	rootCmd.AddCommand(runCmd)
 
@@ -176,6 +177,9 @@ func initCLI() {
 				removeProvTokenFromArgs(sc)
 				// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
 				sc.Arguments = append(sc.Arguments, "--cd="+cdUID)
+			}
+			if cdUID != "" {
+				validateCdUpstreamProtocol()
 			}
 
 			p := &prog{
@@ -306,6 +310,7 @@ func initCLI() {
 	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmd.Flags().StringVarP(&nextdns, nextdnsFlagName, "", "", "NextDNS resolver id")
+	startCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
@@ -788,6 +793,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		cdUID = uid
 	}
 	if cdUID != "" {
+		validateCdUpstreamProtocol()
 		err := processCDFlags()
 		if err != nil {
 			appCallback.Exit(err.Error())
@@ -1099,7 +1105,7 @@ func processCDFlags() error {
 		cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
 		cfg.Upstream["0"] = &ctrld.UpstreamConfig{
 			Endpoint: resolverConfig.DOH,
-			Type:     ctrld.ResolverTypeDOH,
+			Type:     cdUpstreamProto,
 			Timeout:  5000,
 		}
 		rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
@@ -1816,7 +1822,18 @@ func checkStrFlagEmpty(cmd *cobra.Command, flagName string) {
 		return
 	}
 	if fl.Value.String() == "" {
-		mainLog.Load().Fatal().Msgf(`flag "--%s"" value must be non-empty`, fl.Name)
+		mainLog.Load().Fatal().Msgf(`flag "--%s" value must be non-empty`, fl.Name)
+	}
+}
+
+func validateCdUpstreamProtocol() {
+	if cdUID == "" {
+		return
+	}
+	switch cdUpstreamProto {
+	case ctrld.ResolverTypeDOH, ctrld.ResolverTypeDOH3:
+	default:
+		mainLog.Load().Fatal().Msg(`flag "--protocol" must be "doh" or "doh3"`)
 	}
 }
 

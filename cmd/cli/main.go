@@ -33,6 +33,7 @@ var (
 	iface             string
 	ifaceStartStop    string
 	nextdns           string
+	cdUpstreamProto   string
 
 	mainLog       atomic.Pointer[zerolog.Logger]
 	consoleWriter zerolog.ConsoleWriter
