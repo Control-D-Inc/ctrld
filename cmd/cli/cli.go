@@ -1769,12 +1769,12 @@ func removeProvTokenFromArgs(sc *service.Config) {
 			continue
 		}
 		// For "--cd-org XXX", skip it and mark next arg skipped.
-		if x == cdOrgFlagName {
+		if x == "--"+cdOrgFlagName {
 			skip = true
 			continue
 		}
 		// For "--cd-org=XXX", just skip it.
-		if strings.HasPrefix(x, cdOrgFlagName+"=") {
+		if strings.HasPrefix(x, "--"+cdOrgFlagName+"=") {
 			continue
 		}
 		a = append(a, x)
