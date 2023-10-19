@@ -704,6 +704,7 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 	homedir = appConfig.HomeDir
 	verbose = appConfig.Verbose
 	cdUID = appConfig.CdUID
+	cdUpstreamProto = ctrld.ResolverTypeDOH
 	logPath = appConfig.LogPath
 	run(appCallback, stopCh)
 }
