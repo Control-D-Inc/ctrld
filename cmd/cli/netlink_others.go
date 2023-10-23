@@ -2,4 +2,6 @@
 
 package cli
 
-func (p *prog) watchLinkState() {}
+import "context"
+
+func (p *prog) watchLinkState(ctx context.Context) {}

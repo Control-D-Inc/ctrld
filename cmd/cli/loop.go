@@ -79,12 +79,14 @@ func (p *prog) checkDnsLoop() {
 }
 
 // checkDnsLoopTicker performs p.checkDnsLoop every minute.
-func (p *prog) checkDnsLoopTicker() {
+func (p *prog) checkDnsLoopTicker(ctx context.Context) {
 	timer := time.NewTicker(time.Minute)
 	defer timer.Stop()
 	for {
 		select {
 		case <-p.stopCh:
+			return
+		case <-ctx.Done():
 			return
 		case <-timer.C:
 			p.checkDnsLoop()

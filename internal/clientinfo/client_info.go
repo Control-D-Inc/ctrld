@@ -1,6 +1,7 @@
 package clientinfo
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -75,7 +76,7 @@ type Table struct {
 	mdns   *mdns
 	hf     *hostsFile
 	vni    *virtualNetworkIface
-	cfg    *ctrld.Config
+	svcCfg ctrld.ServiceConfig
 	quitCh chan struct{}
 	selfIP string
 	cdUID  string
@@ -83,7 +84,7 @@ type Table struct {
 
 func NewTable(cfg *ctrld.Config, selfIP, cdUID string) *Table {
 	return &Table{
-		cfg:    cfg,
+		svcCfg: cfg.Service,
 		quitCh: make(chan struct{}),
 		selfIP: selfIP,
 		cdUID:  cdUID,
@@ -97,7 +98,7 @@ func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
 	clientInfoFiles[name] = format
 }
 
-func (t *Table) RefreshLoop(stopCh chan struct{}) {
+func (t *Table) RefreshLoop(ctx context.Context) {
 	timer := time.NewTicker(time.Minute * 5)
 	defer timer.Stop()
 	for {
@@ -106,7 +107,7 @@ func (t *Table) RefreshLoop(stopCh chan struct{}) {
 			for _, r := range t.refreshers {
 				_ = r.refresh()
 			}
-		case <-stopCh:
+		case <-ctx.Done():
 			close(t.quitCh)
 			return
 		}
@@ -339,38 +340,38 @@ func (t *Table) StoreVPNClient(ci *ctrld.ClientInfo) {
 }
 
 func (t *Table) discoverDHCP() bool {
-	if t.cfg.Service.DiscoverDHCP == nil {
+	if t.svcCfg.DiscoverDHCP == nil {
 		return true
 	}
-	return *t.cfg.Service.DiscoverDHCP
+	return *t.svcCfg.DiscoverDHCP
 }
 
 func (t *Table) discoverARP() bool {
-	if t.cfg.Service.DiscoverARP == nil {
+	if t.svcCfg.DiscoverARP == nil {
 		return true
 	}
-	return *t.cfg.Service.DiscoverARP
+	return *t.svcCfg.DiscoverARP
 }
 
 func (t *Table) discoverMDNS() bool {
-	if t.cfg.Service.DiscoverMDNS == nil {
+	if t.svcCfg.DiscoverMDNS == nil {
 		return true
 	}
-	return *t.cfg.Service.DiscoverMDNS
+	return *t.svcCfg.DiscoverMDNS
 }
 
 func (t *Table) discoverPTR() bool {
-	if t.cfg.Service.DiscoverPtr == nil {
+	if t.svcCfg.DiscoverPtr == nil {
 		return true
 	}
-	return *t.cfg.Service.DiscoverPtr
+	return *t.svcCfg.DiscoverPtr
 }
 
 func (t *Table) discoverHosts() bool {
-	if t.cfg.Service.DiscoverHosts == nil {
+	if t.svcCfg.DiscoverHosts == nil {
 		return true
 	}
-	return *t.cfg.Service.DiscoverHosts
+	return *t.svcCfg.DiscoverHosts
 }
 
 // normalizeIP normalizes the ip parsed from dnsmasq/dhcpd lease file.
