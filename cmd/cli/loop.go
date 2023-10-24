@@ -56,7 +56,10 @@ func (p *prog) checkDnsLoop() {
 	mainLog.Load().Debug().Msg("start checking DNS loop")
 	upstream := make(map[string]*ctrld.UpstreamConfig)
 	p.loopMu.Lock()
-	for _, uc := range p.cfg.Upstream {
+	for n, uc := range p.cfg.Upstream {
+		if p.um.isDown("upstream." + n) {
+			continue
+		}
 		uid := uc.UID()
 		p.loop[uid] = false
 		upstream[uid] = uc

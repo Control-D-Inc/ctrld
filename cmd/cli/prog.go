@@ -282,14 +282,14 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		}
 	}
 
-	// Check for possible DNS loop.
-	p.checkDnsLoop()
 	close(p.onStartedDone)
 
-	// Start check DNS loop ticker.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		// Check for possible DNS loop.
+		p.checkDnsLoop()
+		// Start check DNS loop ticker.
 		p.checkDnsLoopTicker(ctx)
 	}()
 
