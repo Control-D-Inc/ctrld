@@ -573,7 +573,21 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	}
 	ci.Self = queryFromSelf(ci.IP)
+	p.spoofLoopbackIpInClientInfo(ci)
 	return ci
+}
+
+// spoofLoopbackIpInClientInfo replaces loopback IPs in client info.
+//
+// - Preference IPv4.
+// - Preference RFC1918.
+func (p *prog) spoofLoopbackIpInClientInfo(ci *ctrld.ClientInfo) {
+	if ip := net.ParseIP(ci.IP); ip == nil || !ip.IsLoopback() {
+		return
+	}
+	if ip := p.ciTable.LookupRFC1918IPv4(ci.Mac); ip != "" {
+		ci.IP = ip
+	}
 }
 
 // queryFromSelf reports whether the input IP is from device running ctrld.

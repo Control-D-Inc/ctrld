@@ -241,6 +241,21 @@ func (t *Table) LookupHostname(ip, mac string) string {
 	return ""
 }
 
+// LookupRFC1918IPv4 returns the RFC1918 IPv4 address for the given MAC address, if any.
+func (t *Table) LookupRFC1918IPv4(mac string) string {
+	t.initOnce.Do(t.init)
+	for _, r := range t.ipResolvers {
+		ip, err := netip.ParseAddr(r.LookupIP(mac))
+		if err != nil || ip.Is6() {
+			continue
+		}
+		if ip.IsPrivate() {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
 type macEntry struct {
 	mac string
 	src string
