@@ -123,6 +123,10 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 			if err, ok := err.(*net.OpError); ok && (err.Timeout() || err.Temporary()) {
 				continue
 			}
+			// Do not complain about use of closed network connection.
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			ctrld.ProxyLogger.Load().Debug().Err(err).Msg("mdns readLoop error")
 			return
 		}
