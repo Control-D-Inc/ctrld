@@ -38,6 +38,12 @@ var osUpstreamConfig = &ctrld.UpstreamConfig{
 	Timeout: 2000,
 }
 
+var privateUpstreamConfig = &ctrld.UpstreamConfig{
+	Name:    "Private resolver",
+	Type:    ctrld.ResolverTypePrivate,
+	Timeout: 2000,
+}
+
 var errReload = errors.New("reload")
 
 func (p *prog) serveDNS(listenerNum string, reload bool, reloadCh chan struct{}) error {
@@ -54,6 +60,11 @@ func (p *prog) serveDNS(listenerNum string, reload bool, reloadCh chan struct{})
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
 		p.sema.acquire()
 		defer p.sema.release()
+		if len(m.Question) == 0 {
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeFormatError)
+			return
+		}
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
@@ -259,6 +270,11 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+		upstreams = []string{upstreamOS}
+	}
+	if isPrivatePtrLookup(msg) {
+		ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup -> [%s]", upstreamOS)
+		upstreamConfigs = []*ctrld.UpstreamConfig{privateUpstreamConfig}
 		upstreams = []string{upstreamOS}
 	}
 	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
@@ -633,4 +649,53 @@ func rfc1918Addresses() []string {
 		}
 	})
 	return res
+}
+
+// ipFromARPA parses a FQDN arpa domain and return the IP address if valid.
+func ipFromARPA(arpa string) net.IP {
+	if arpa, ok := strings.CutSuffix(arpa, ".in-addr.arpa."); ok {
+		if ptrIP := net.ParseIP(arpa); ptrIP != nil {
+			return net.IP{ptrIP[15], ptrIP[14], ptrIP[13], ptrIP[12]}
+		}
+	}
+	if arpa, ok := strings.CutSuffix(arpa, ".ip6.arpa."); ok {
+		l := net.IPv6len * 2
+		base := 16
+		ip := make(net.IP, net.IPv6len)
+		for i := 0; i < l && arpa != ""; i++ {
+			idx := strings.LastIndexByte(arpa, '.')
+			off := idx + 1
+			if idx == -1 {
+				idx = 0
+				off = 0
+			} else if idx == len(arpa)-1 {
+				return nil
+			}
+			n, err := strconv.ParseUint(arpa[off:], base, 8)
+			if err != nil {
+				return nil
+			}
+			b := byte(n)
+			ii := i / 2
+			if i&1 == 1 {
+				b |= ip[ii] << 4
+			}
+			ip[ii] = b
+			arpa = arpa[:idx]
+		}
+		return ip
+	}
+	return nil
+}
+
+// isPrivatePtrLookup reports whether DNS message is an PTR query for LAN network.
+func isPrivatePtrLookup(m *dns.Msg) bool {
+	if m == nil || len(m.Question) == 0 {
+		return false
+	}
+	q := m.Question[0]
+	if ip := ipFromARPA(q.Name); ip != nil {
+		return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+	}
+	return false
 }

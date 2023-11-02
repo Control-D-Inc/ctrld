@@ -24,6 +24,8 @@ const (
 	ResolverTypeOS = "os"
 	// ResolverTypeLegacy specifies legacy resolver.
 	ResolverTypeLegacy = "legacy"
+	// ResolverTypePrivate is like ResolverTypeOS, but use for local resolver only.
+	ResolverTypePrivate = "private"
 )
 
 var bootstrapDNS = "76.76.2.0"
@@ -61,6 +63,8 @@ func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 		return or, nil
 	case ResolverTypeLegacy:
 		return &legacyResolver{uc: uc}, nil
+	case ResolverTypePrivate:
+		return NewPrivateResolver(), nil
 	}
 	return nil, fmt.Errorf("%w: %s", errUnknownResolver, typ)
 }

@@ -238,3 +238,30 @@ func Test_remoteAddrFromMsg(t *testing.T) {
 		})
 	}
 }
+
+func Test_ipFromARPA(t *testing.T) {
+	tests := []struct {
+		IP   string
+		ARPA string
+	}{
+		{"1.2.3.4", "4.3.2.1.in-addr.arpa."},
+		{"245.110.36.114", "114.36.110.245.in-addr.arpa."},
+		{"::ffff:12.34.56.78", "78.56.34.12.in-addr.arpa."},
+		{"::1", "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa."},
+		{"1::", "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1.0.0.0.ip6.arpa."},
+		{"1234:567::89a:bcde", "e.d.c.b.a.9.8.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.7.6.5.0.4.3.2.1.ip6.arpa."},
+		{"1234:567:fefe:bcbc:adad:9e4a:89a:bcde", "e.d.c.b.a.9.8.0.a.4.e.9.d.a.d.a.c.b.c.b.e.f.e.f.7.6.5.0.4.3.2.1.ip6.arpa."},
+		{"", "asd.in-addr.arpa."},
+		{"", "asd.ip6.arpa."},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.IP, func(t *testing.T) {
+			t.Parallel()
+			if got := ipFromARPA(tc.ARPA); !got.Equal(net.ParseIP(tc.IP)) {
+				t.Errorf("unexpected ip, want: %s, got: %s", tc.IP, got)
+			}
+		})
+	}
+}
