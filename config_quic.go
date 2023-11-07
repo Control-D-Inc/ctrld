@@ -10,13 +10,10 @@ import (
 	"net/http"
 	"runtime"
 	"sync"
-	"time"
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-
-	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 func (uc *UpstreamConfig) setupDOH3Transport() {
@@ -29,9 +26,7 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs6)
 	case IpStackSplit:
 		uc.http3RoundTripper4 = uc.newDOH3Transport(uc.bootstrapIPs4)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if ctrldnet.IPv6Available(ctx) {
+		if hasIPv6() {
 			uc.http3RoundTripper6 = uc.newDOH3Transport(uc.bootstrapIPs6)
 		} else {
 			uc.http3RoundTripper6 = uc.http3RoundTripper4
