@@ -127,15 +127,15 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 		close(ch)
 	}()
 
-	udpConn, err := net.ListenUDP("udp", nil)
-	if err != nil {
-		return nil, err
-	}
-
 	for _, addr := range addrs {
 		go func(addr string) {
 			defer wg.Done()
 			remoteAddr, err := net.ResolveUDPAddr("udp", addr)
+			if err != nil {
+				ch <- &parallelDialerResult{conn: nil, err: err}
+				return
+			}
+			udpConn, err := net.ListenUDP("udp", nil)
 			if err != nil {
 				ch <- &parallelDialerResult{conn: nil, err: err}
 				return
@@ -146,6 +146,9 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 			case <-done:
 				if conn != nil {
 					conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+				}
+				if udpConn != nil {
+					udpConn.Close()
 				}
 			}
 		}(addr)
