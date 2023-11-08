@@ -265,3 +265,45 @@ func Test_ipFromARPA(t *testing.T) {
 		})
 	}
 }
+
+func newDnsMsgWithClientIP(ip string) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	o := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+	o.Option = append(o.Option, &dns.EDNS0_SUBNET{Address: net.ParseIP(ip)})
+	m.Extra = append(m.Extra, o)
+	return m
+}
+func Test_stripClientSubnet(t *testing.T) {
+	tests := []struct {
+		name       string
+		msg        *dns.Msg
+		wantSubnet bool
+	}{
+		{"no edns0", new(dns.Msg), false},
+		{"loopback IP v4", newDnsMsgWithClientIP("127.0.0.1"), false},
+		{"loopback IP v6", newDnsMsgWithClientIP("::1"), false},
+		{"private IP v4", newDnsMsgWithClientIP("192.168.1.123"), false},
+		{"private IP v6", newDnsMsgWithClientIP("fd12:3456:789a:1::1"), false},
+		{"public IP", newDnsMsgWithClientIP("1.1.1.1"), true},
+		{"invalid IP", newDnsMsgWithClientIP(""), true},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stripClientSubnet(tc.msg)
+			hasSubnet := false
+			if opt := tc.msg.IsEdns0(); opt != nil {
+				for _, s := range opt.Option {
+					if _, ok := s.(*dns.EDNS0_SUBNET); ok {
+						hasSubnet = true
+					}
+				}
+			}
+			if tc.wantSubnet != hasSubnet {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.wantSubnet, hasSubnet)
+			}
+		})
+	}
+}

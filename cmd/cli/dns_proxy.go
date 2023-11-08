@@ -71,6 +71,7 @@ func (p *prog) serveDNS(listenerNum string, reload bool, reloadCh chan struct{})
 		reqId := requestID()
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 		ci := p.getClientInfo(remoteIP, m)
+		stripClientSubnet(m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
 		t := time.Now()
@@ -496,6 +497,23 @@ func ipAndMacFromMsg(msg *dns.Msg) (string, string) {
 		}
 	}
 	return ip, mac
+}
+
+// stripClientSubnet removes EDNS0_SUBNET from DNS message if the IP is RFC1918 or loopback address,
+// passing them to upstream is pointless, these cannot be used by anything on the WAN.
+func stripClientSubnet(msg *dns.Msg) {
+	if opt := msg.IsEdns0(); opt != nil {
+		opts := make([]dns.EDNS0, 0, len(opt.Option))
+		for _, s := range opt.Option {
+			if e, ok := s.(*dns.EDNS0_SUBNET); ok && (e.Address.IsPrivate() || e.Address.IsLoopback()) {
+				continue
+			}
+			opts = append(opts, s)
+		}
+		if len(opts) != len(opt.Option) {
+			opt.Option = opts
+		}
+	}
 }
 
 func spoofRemoteAddr(addr net.Addr, ci *ctrld.ClientInfo) net.Addr {
