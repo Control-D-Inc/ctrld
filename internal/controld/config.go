@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -119,7 +120,7 @@ func postUtilityAPI(version string, cdDev bool, body io.Reader) (*ResolverConfig
 		return d.DialContext(ctx, network, addrs)
 	}
 
-	if router.Name() == ddwrt.Name {
+	if router.Name() == ddwrt.Name || runtime.GOOS == "android" {
 		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
 	}
 	client := http.Client{
