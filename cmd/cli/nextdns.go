@@ -8,8 +8,8 @@ import (
 
 const nextdnsURL = "https://dns.nextdns.io"
 
-func generateNextDNSConfig() {
-	if nextdns == "" {
+func generateNextDNSConfig(uid string) {
+	if uid == "" {
 		return
 	}
 	mainLog.Load().Info().Msg("generating ctrld config for NextDNS resolver")
@@ -23,7 +23,7 @@ func generateNextDNSConfig() {
 		Upstream: map[string]*ctrld.UpstreamConfig{
 			"0": {
 				Type:     ctrld.ResolverTypeDOH3,
-				Endpoint: fmt.Sprintf("%s/%s", nextdnsURL, nextdns),
+				Endpoint: fmt.Sprintf("%s/%s", nextdnsURL, uid),
 				Timeout:  5000,
 			},
 		},

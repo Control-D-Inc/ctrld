@@ -135,7 +135,7 @@ func (p *prog) runWait() {
 
 		waitOldRunDone()
 
-		_, ok := tryUpdateListenerConfig(newCfg, false)
+		_, ok := tryUpdateListenerConfig(newCfg, nil, false)
 		if !ok {
 			logger.Error().Msg("could not update listener config")
 			continue

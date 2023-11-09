@@ -238,11 +238,6 @@ func initCLI() {
 
 			if nextdns != "" {
 				removeNextDNSFromArgs(sc)
-				generateNextDNSConfig()
-				updateListenerConfig(&cfg)
-				if err := writeConfigFile(); err != nil {
-					mainLog.Load().Error().Err(err).Msg("failed to write config with NextDNS resolver")
-				}
 			}
 
 			// Explicitly passing config, so on system where home directory could not be obtained,
@@ -265,6 +260,7 @@ func initCLI() {
 
 			tasks := []task{
 				{s.Stop, false},
+				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
 				{s.Uninstall, false},
 				{s.Install, false},
 				{s.Start, true},
@@ -1044,7 +1040,8 @@ func readConfigFile(writeDefaultConfig bool) bool {
 		if err := v.Unmarshal(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to unmarshal default config: %v", err)
 		}
-		_ = updateListenerConfig(&cfg)
+		nop := zerolog.Nop()
+		_, _ = tryUpdateListenerConfig(&cfg, &nop, true)
 		if err := writeConfigFile(); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
 		} else {
@@ -1580,14 +1577,14 @@ func mobileListenerPort() int {
 // or defined but invalid to be used, e.g: using loopback address other
 // than 127.0.0.1 with systemd-resolved.
 func updateListenerConfig(cfg *ctrld.Config) bool {
-	updated, _ := tryUpdateListenerConfig(cfg, true)
+	updated, _ := tryUpdateListenerConfig(cfg, nil, true)
 	return updated
 }
 
 // tryUpdateListenerConfig tries updating listener config with a working one.
 // If fatal is true, and there's listen address conflicted, the function do
 // fatal error.
-func tryUpdateListenerConfig(cfg *ctrld.Config, fatal bool) (updated, ok bool) {
+func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fatal bool) (updated, ok bool) {
 	ok = true
 	lcc := make(map[string]*listenerConfigCheck)
 	cdMode := cdUID != ""
@@ -1609,6 +1606,10 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, fatal bool) (updated, ok bool) {
 			lcc[n].Port = true
 		}
 		updated = updated || lcc[n].IP || lcc[n].Port
+	}
+	il := mainLog.Load()
+	if infoLogger != nil {
+		il = infoLogger
 	}
 	if isMobile() {
 		// On Mobile, only use first listener, ignore others.
@@ -1716,7 +1717,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, fatal bool) (updated, ok bool) {
 					listener.Port = 53
 				}
 				if check.IP {
-					logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+					logMsg(il.Info(), n, "could not listen on address: %s, trying: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 				}
 				continue
 			}
@@ -1729,7 +1730,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, fatal bool) (updated, ok bool) {
 					listener.Port = 53
 				}
 				if check.IP {
-					logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+					logMsg(il.Info(), n, "could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 				}
 				continue
 			}
@@ -1741,7 +1742,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, fatal bool) (updated, ok bool) {
 				if check.Port {
 					listener.Port = 5354
 				}
-				logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying current ip with port 5354", addr)
+				logMsg(il.Info(), n, "could not listen on address: %s, trying current ip with port 5354", addr)
 				continue
 			}
 			if tryPort5354 {
@@ -1752,7 +1753,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, fatal bool) (updated, ok bool) {
 				if check.Port {
 					listener.Port = 5354
 				}
-				logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying 0.0.0.0:5354", addr)
+				logMsg(il.Info(), n, "could not listen on address: %s, trying 0.0.0.0:5354", addr)
 				continue
 			}
 			if check.IP && !isZeroIP { // for "0.0.0.0" or "::", we only need to try new port.
@@ -1772,7 +1773,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, fatal bool) (updated, ok bool) {
 				ok = false
 				break
 			}
-			logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, pick a random ip+port", addr)
+			logMsg(il.Info(), n, "could not listen on address: %s, pick a random ip+port", addr)
 			attempts++
 		}
 	}
@@ -1788,7 +1789,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, fatal bool) (updated, ok bool) {
 			// ip address, other than "127.0.0.1", so trying to listen on default route interface
 			// address instead.
 			if ip := net.ParseIP(listener.IP); ip != nil && ip.IsLoopback() && ip.String() != "127.0.0.1" {
-				logMsg(mainLog.Load().Warn(), n, "using loopback interface do not work with systemd-resolved")
+				logMsg(il.Info(), n, "using loopback interface do not work with systemd-resolved")
 				found := false
 				if netIface, _ := net.InterfaceByName(defaultIfaceName()); netIface != nil {
 					addrs, _ := netIface.Addrs()
@@ -1798,7 +1799,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, fatal bool) (updated, ok bool) {
 							if err := tryListen(addr); err == nil {
 								found = true
 								listener.IP = netIP.IP.String()
-								logMsg(mainLog.Load().Warn(), n, "use %s as listener address", listener.IP)
+								logMsg(il.Info(), n, "use %s as listener address", listener.IP)
 								break
 							}
 						}
@@ -1955,4 +1956,15 @@ func removeNextDNSFromArgs(sc *service.Config) {
 		a = append(a, x)
 	}
 	sc.Arguments = a
+}
+
+// doGenerateNextDNSConfig generates a working config with nextdns resolver.
+func doGenerateNextDNSConfig(uid string) error {
+	if uid == "" {
+		return nil
+	}
+	mainLog.Load().Notice().Msgf("Generating nextdns config: %s", defaultConfigFile)
+	generateNextDNSConfig(uid)
+	updateListenerConfig(&cfg)
+	return writeConfigFile()
 }
