@@ -135,15 +135,31 @@ func (p *prog) runWait() {
 
 		waitOldRunDone()
 
-		_, ok := tryUpdateListenerConfig(newCfg, nil, false)
-		if !ok {
-			logger.Error().Msg("could not update listener config")
-			continue
+		p.mu.Lock()
+		curListener := p.cfg.Listener
+		p.mu.Unlock()
+
+		for n, lc := range newCfg.Listener {
+			curLc := curListener[n]
+			if curLc == nil {
+				continue
+			}
+			if lc.IP == "" {
+				lc.IP = curLc.IP
+			}
+			if lc.Port == 0 {
+				lc.Port = curLc.Port
+			}
 		}
 		if err := validateConfig(newCfg); err != nil {
 			logger.Err(err).Msg("invalid config")
 			continue
 		}
+
+		// This needs to be done here, otherwise, the DNS handler may observe an invalid
+		// upstream config because its initialization function have not been called yet.
+		mainLog.Load().Debug().Msg("setup upstream with new config")
+		setupUpstream(newCfg)
 
 		p.mu.Lock()
 		*p.cfg = *newCfg
@@ -170,6 +186,21 @@ func (p *prog) preRun() {
 	}
 }
 
+func setupUpstream(cfg *ctrld.Config) {
+	for n := range cfg.Upstream {
+		uc := cfg.Upstream[n]
+		uc.Init()
+		if uc.BootstrapIP == "" {
+			uc.SetupBootstrapIP()
+			mainLog.Load().Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
+		} else {
+			mainLog.Load().Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("using bootstrap IP for upstream.%s", n)
+		}
+		uc.SetCertPool(rootCertPool)
+		go uc.Ping()
+	}
+}
+
 // run runs the ctrld main components.
 //
 // The reload boolean indicates that the function is run when ctrld first start
@@ -183,7 +214,9 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	<-p.waitCh
 	p.preRun()
 	numListeners := len(p.cfg.Listener)
-	p.started = make(chan struct{}, numListeners)
+	if !reload {
+		p.started = make(chan struct{}, numListeners)
+	}
 	p.onStartedDone = make(chan struct{})
 	p.loop = make(map[string]bool)
 	if p.cfg.Service.CacheEnable {
@@ -194,15 +227,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			p.cache = cacher
 		}
 	}
-	p.sema = &chanSemaphore{ready: make(chan struct{}, defaultSemaphoreCap)}
-	if mcr := p.cfg.Service.MaxConcurrentRequests; mcr != nil {
-		n := *mcr
-		if n == 0 {
-			p.sema = &noopSemaphore{}
-		} else {
-			p.sema = &chanSemaphore{ready: make(chan struct{}, n)}
-		}
-	}
+
 	var wg sync.WaitGroup
 	wg.Add(len(p.cfg.Listener))
 
@@ -218,24 +243,24 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	}
 
 	p.um = newUpstreamMonitor(p.cfg)
-	for n := range p.cfg.Upstream {
-		uc := p.cfg.Upstream[n]
-		uc.Init()
-		if uc.BootstrapIP == "" {
-			uc.SetupBootstrapIP()
-			mainLog.Load().Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
-		} else {
-			mainLog.Load().Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("using bootstrap IP for upstream.%s", n)
-		}
-		uc.SetCertPool(rootCertPool)
-		go uc.Ping()
-	}
 
-	p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP(), cdUID)
-	if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
-		mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
-		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
-		p.ciTable.AddLeaseFile(leaseFile, format)
+	if !reload {
+		p.sema = &chanSemaphore{ready: make(chan struct{}, defaultSemaphoreCap)}
+		if mcr := p.cfg.Service.MaxConcurrentRequests; mcr != nil {
+			n := *mcr
+			if n == 0 {
+				p.sema = &noopSemaphore{}
+			} else {
+				p.sema = &chanSemaphore{ready: make(chan struct{}, n)}
+			}
+		}
+		setupUpstream(p.cfg)
+		p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP(), cdUID)
+		if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
+			mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
+			format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
+			p.ciTable.AddLeaseFile(leaseFile, format)
+		}
 	}
 
 	// context for managing spawn goroutines.
@@ -243,7 +268,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	defer cancelFunc()
 
 	// Newer versions of android and iOS denies permission which breaks connectivity.
-	if !isMobile() {
+	if !isMobile() && !reload {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -255,22 +280,32 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()
-		go func(listenerNum string) {
+		if !reload {
+			go func(listenerNum string) {
+				listenerConfig := p.cfg.Listener[listenerNum]
+				upstreamConfig := p.cfg.Upstream[listenerNum]
+				if upstreamConfig == nil {
+					mainLog.Load().Warn().Msgf("no default upstream for: [listener.%s]", listenerNum)
+				}
+				addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
+				mainLog.Load().Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
+				if err := p.serveDNS(listenerNum); err != nil {
+					mainLog.Load().Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
+				}
+			}(listenerNum)
+		}
+		go func() {
 			defer func() {
 				cancelFunc()
 				wg.Done()
 			}()
-			listenerConfig := p.cfg.Listener[listenerNum]
-			upstreamConfig := p.cfg.Upstream[listenerNum]
-			if upstreamConfig == nil {
-				mainLog.Load().Warn().Msgf("no default upstream for: [listener.%s]", listenerNum)
+			select {
+			case <-p.stopCh:
+			case <-ctx.Done():
+			case <-reloadCh:
 			}
-			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
-			mainLog.Load().Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
-			if err := p.serveDNS(listenerNum, reload, reloadCh); err != nil {
-				mainLog.Load().Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
-			}
-		}(listenerNum)
+			return
+		}()
 	}
 
 	if !reload {

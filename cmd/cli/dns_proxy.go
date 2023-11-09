@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -44,19 +43,14 @@ var privateUpstreamConfig = &ctrld.UpstreamConfig{
 	Timeout: 2000,
 }
 
-var errReload = errors.New("reload")
-
-func (p *prog) serveDNS(listenerNum string, reload bool, reloadCh chan struct{}) error {
+func (p *prog) serveDNS(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
 	// make sure ip is allocated
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
 		mainLog.Load().Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: failed to allocate listen ip")
 		return allocErr
 	}
-	var failoverRcodes []int
-	if listenerConfig.Policy != nil {
-		failoverRcodes = listenerConfig.Policy.FailoverRcodeNumbers
-	}
+
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
 		p.sema.acquire()
 		defer p.sema.release()
@@ -83,7 +77,7 @@ func (p *prog) serveDNS(listenerNum string, reload bool, reloadCh chan struct{})
 			answer = new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeRefused)
 		} else {
-			answer = p.proxy(ctx, upstreams, failoverRcodes, m, ci)
+			answer = p.proxy(ctx, upstreams, listenerConfig.Policy.FailoverRcodeNumbers, m, ci)
 			rtt := time.Since(t)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
 		}
@@ -93,12 +87,6 @@ func (p *prog) serveDNS(listenerNum string, reload bool, reloadCh chan struct{})
 	})
 
 	g, ctx := errgroup.WithContext(context.Background())
-	// When receiving reload signal, return a non-nil error so other
-	// goroutines in errgroup.Group could be terminated.
-	g.Go(func() error {
-		<-reloadCh
-		return errReload
-	})
 	for _, proto := range []string{"udp", "tcp"} {
 		proto := proto
 		if needLocalIPv6Listener() {
@@ -142,13 +130,11 @@ func (p *prog) serveDNS(listenerNum string, reload bool, reloadCh chan struct{})
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 			s, errCh := runDNSServer(addr, proto, handler)
 			defer s.Shutdown()
-			if !reload {
-				select {
-				case err := <-errCh:
-					return err
-				case <-time.After(5 * time.Second):
-					p.started <- struct{}{}
-				}
+			select {
+			case err := <-errCh:
+				return err
+			case <-time.After(5 * time.Second):
+				p.started <- struct{}{}
 			}
 			select {
 			case <-p.stopCh:
@@ -159,11 +145,7 @@ func (p *prog) serveDNS(listenerNum string, reload bool, reloadCh chan struct{})
 			return nil
 		})
 	}
-	err := g.Wait()
-	if errors.Is(err, errReload) { // This is an error for trigger reload, not a real error.
-		return nil
-	}
-	return err
+	return g.Wait()
 }
 
 // upstreamFor returns the list of upstreams for resolving the given domain,

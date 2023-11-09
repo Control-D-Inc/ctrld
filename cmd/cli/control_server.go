@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"time"
 
@@ -87,6 +88,7 @@ func (p *prog) registerControlServerHandler() {
 				Port: v.Port,
 			}
 		}
+		oldSvc := p.cfg.Service
 		p.mu.Unlock()
 		if err := p.sendReloadSignal(); err != nil {
 			mainLog.Load().Err(err).Msg("could not send reload signal")
@@ -102,6 +104,10 @@ func (p *prog) registerControlServerHandler() {
 
 		p.mu.Lock()
 		defer p.mu.Unlock()
+
+		// Checking for cases that we could not do a reload.
+
+		// 1. Listener config ip or port changes.
 		for k, v := range p.cfg.Listener {
 			l := listeners[k]
 			if l == nil || l.IP != v.IP || l.Port != v.Port {
@@ -109,6 +115,14 @@ func (p *prog) registerControlServerHandler() {
 				return
 			}
 		}
+
+		// 2. Service config changes.
+		if !reflect.DeepEqual(oldSvc, p.cfg.Service) {
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+
+		// Otherwise, reload is done.
 		w.WriteHeader(http.StatusOK)
 	}))
 }
