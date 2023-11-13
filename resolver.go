@@ -78,8 +78,9 @@ type osResolverResult struct {
 	err    error
 }
 
-// Resolve performs DNS resolvers using OS default nameservers. Nameserver is chosen from
-// available nameservers with a roundrobin algorithm.
+// Resolve resolves DNS queries using pre-configured nameservers.
+// Query is sent to all nameservers concurrently, and the first
+// success response will be returned.
 func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	numServers := len(o.nameservers)
 	if numServers == 0 {
@@ -269,11 +270,19 @@ func NewPrivateResolver() Resolver {
 		}
 	}
 	nss = nss[:n]
-	if len(nss) == 0 {
+	return NewResolverWithNameserver(nss)
+}
+
+// NewResolverWithNameserver returns an OS resolver which uses the given nameservers
+// for resolving DNS queries. If nameservers is empty, a dummy resolver will be returned.
+//
+// Each nameserver must be form "host:port". It's the caller responsibility to ensure all
+// nameservers are well formatted by using net.JoinHostPort function.
+func NewResolverWithNameserver(nameservers []string) Resolver {
+	if len(nameservers) == 0 {
 		return &dummyResolver{}
 	}
-	resolver := &osResolver{nameservers: nss}
-	return resolver
+	return &osResolver{nameservers: nameservers}
 }
 
 func newDialer(dnsAddress string) *net.Dialer {

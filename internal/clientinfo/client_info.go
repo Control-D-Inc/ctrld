@@ -3,7 +3,9 @@ package clientinfo
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -183,6 +185,25 @@ func (t *Table) init() {
 	// PTR lookup.
 	if t.discoverPTR() {
 		t.ptr = &ptrDiscover{resolver: ctrld.NewPrivateResolver()}
+		if len(t.svcCfg.DiscoverPtrEndpoints) > 0 {
+			nss := make([]string, 0, len(t.svcCfg.DiscoverPtrEndpoints))
+			for _, ns := range t.svcCfg.DiscoverPtrEndpoints {
+				host, port := ns, "53"
+				if h, p, err := net.SplitHostPort(ns); err == nil {
+					host, port = h, p
+				}
+				// Only use valid ip:port pair.
+				if _, portErr := strconv.Atoi(port); portErr == nil && port != "0" && net.ParseIP(host) != nil {
+					nss = append(nss, net.JoinHostPort(host, port))
+				} else {
+					ctrld.ProxyLogger.Load().Warn().Msgf("ignoring invalid nameserver for ptr discover: %q", ns)
+				}
+			}
+			if len(nss) > 0 {
+				t.ptr.resolver = ctrld.NewResolverWithNameserver(nss)
+				ctrld.ProxyLogger.Load().Debug().Msgf("using nameservers %v for ptr discovery", nss)
+			}
+		}
 		ctrld.ProxyLogger.Load().Debug().Msg("start ptr discovery")
 		if err := t.ptr.refresh(); err != nil {
 			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init PTR discover")

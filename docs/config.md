@@ -193,6 +193,22 @@ Perform LAN client discovery using PTR queries.
 - Required: no
 - Default: true
 
+### discover_ptr_endpoints
+List of DNS nameservers used for PTR discovery.
+
+Each entry can be either "ip" (default port 53) or "ip:port" pair. Invalid entry will be ignored.
+
+- Type: array of string
+- Required: no
+- Default: []
+
+Example:
+
+```toml
+[service]
+discover_ptr_endpoints = ["192.168.1.1", "192.168.2.1:5354"]
+```
+
 ### discover_hosts
 Perform LAN client discovery using hosts file.
 
