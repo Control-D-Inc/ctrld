@@ -14,26 +14,28 @@ import (
 )
 
 var (
-	configPath        string
-	configBase64      string
-	daemon            bool
-	listenAddress     string
-	primaryUpstream   string
-	secondaryUpstream string
-	domains           []string
-	logPath           string
-	homedir           string
-	cacheSize         int
-	cfg               ctrld.Config
-	verbose           int
-	silent            bool
-	cdUID             string
-	cdOrg             string
-	cdDev             bool
-	iface             string
-	ifaceStartStop    string
-	nextdns           string
-	cdUpstreamProto   string
+	configPath           string
+	configBase64         string
+	daemon               bool
+	listenAddress        string
+	primaryUpstream      string
+	secondaryUpstream    string
+	domains              []string
+	logPath              string
+	homedir              string
+	cacheSize            int
+	cfg                  ctrld.Config
+	verbose              int
+	silent               bool
+	cdUID                string
+	cdOrg                string
+	cdDev                bool
+	iface                string
+	ifaceStartStop       string
+	nextdns              string
+	cdUpstreamProto      string
+	setupRouter          bool
+	setupRouterStartStop bool
 
 	mainLog       atomic.Pointer[zerolog.Logger]
 	consoleWriter zerolog.ConsoleWriter
