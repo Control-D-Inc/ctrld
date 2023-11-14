@@ -212,7 +212,9 @@ func setupUpstream(cfg *ctrld.Config) {
 func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	// Wait the caller to signal that we can do our logic.
 	<-p.waitCh
-	p.preRun()
+	if !reload {
+		p.preRun()
+	}
 	numListeners := len(p.cfg.Listener)
 	if !reload {
 		p.started = make(chan struct{}, numListeners)
