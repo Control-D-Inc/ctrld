@@ -77,7 +77,11 @@ func (p *prog) serveDNS(listenerNum string) error {
 			answer = new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeRefused)
 		} else {
-			answer = p.proxy(ctx, upstreams, listenerConfig.Policy.FailoverRcodeNumbers, m, ci)
+			var failoverRcode []int
+			if listenerConfig.Policy != nil {
+				failoverRcode = listenerConfig.Policy.FailoverRcodeNumbers
+			}
+			answer = p.proxy(ctx, upstreams, failoverRcode, m, ci)
 			rtt := time.Since(t)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
 		}
