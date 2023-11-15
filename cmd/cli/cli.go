@@ -266,6 +266,9 @@ func initCLI() {
 				{s.Uninstall, false},
 				{s.Install, false},
 				{s.Start, true},
+				// Note that startCmd do not actually write ControlD config, but the config file was
+				// generated after s.Start, so we notice users here for consistent with nextdns mode.
+				{noticeWritingControlDConfig, false},
 			}
 			mainLog.Load().Notice().Msg("Starting service")
 			if doTasks(tasks) {
@@ -1042,6 +1045,7 @@ func readConfigFile(writeDefaultConfig bool) bool {
 	// If err == nil, there's a config supplied via `--config`, no default config written.
 	err := v.ReadInConfig()
 	if err == nil {
+		mainLog.Load().Notice().Msg("Reading config: " + v.ConfigFileUsed())
 		mainLog.Load().Info().Msg("loading config file from: " + v.ConfigFileUsed())
 		defaultConfigFile = v.ConfigFileUsed()
 		return true
@@ -1983,4 +1987,11 @@ func doGenerateNextDNSConfig(uid string) error {
 	generateNextDNSConfig(uid)
 	updateListenerConfig(&cfg)
 	return writeConfigFile()
+}
+
+func noticeWritingControlDConfig() error {
+	if cdUID != "" {
+		mainLog.Load().Notice().Msgf("Generating controld config: %s", defaultConfigFile)
+	}
+	return nil
 }
