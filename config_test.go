@@ -54,7 +54,12 @@ func TestLoadDefaultConfig(t *testing.T) {
 	cfg := defaultConfig(t)
 	validate := validator.New()
 	require.NoError(t, ctrld.ValidateConfig(validate, cfg))
-	assert.Len(t, cfg.Listener, 1)
+	if assert.Len(t, cfg.Listener, 1) {
+		l0 := cfg.Listener["0"]
+		require.NotNil(t, l0.Policy)
+		assert.Len(t, l0.Policy.Networks, 1)
+		assert.Len(t, l0.Policy.Rules, 2)
+	}
 	assert.Len(t, cfg.Upstream, 2)
 }
 

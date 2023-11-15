@@ -82,6 +82,16 @@ func InitConfig(v *viper.Viper, name string) {
 		"0": {
 			IP:   "",
 			Port: 0,
+			Policy: &ListenerPolicyConfig{
+				Name: "Main Policy",
+				Networks: []Rule{
+					{"network.0": []string{"upstream.0"}},
+				},
+				Rules: []Rule{
+					{"example.com": []string{"upstream.0"}},
+					{"*.ads.com": []string{"upstream.1"}},
+				},
+			},
 		},
 	})
 	v.SetDefault("network", map[string]*NetworkConfig{
