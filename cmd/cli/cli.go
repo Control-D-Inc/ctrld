@@ -230,7 +230,7 @@ func initCLI() {
 				}()
 			}
 
-			tryReadingConfig(writeDefaultConfig)
+			tryReadingConfigWithNotice(writeDefaultConfig, true)
 
 			if err := v.Unmarshal(&cfg); err != nil {
 				mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
@@ -1041,11 +1041,17 @@ func writeConfigFile() error {
 	return nil
 }
 
-func readConfigFile(writeDefaultConfig bool) bool {
+// readConfigFile reads in config file.
+//
+// - It writes default config file if config file not found if writeDefaultConfig is true.
+// - It emits notice message to user if notice is true.
+func readConfigFile(writeDefaultConfig, notice bool) bool {
 	// If err == nil, there's a config supplied via `--config`, no default config written.
 	err := v.ReadInConfig()
 	if err == nil {
-		mainLog.Load().Notice().Msg("Reading config: " + v.ConfigFileUsed())
+		if notice {
+			mainLog.Load().Notice().Msg("Reading config: " + v.ConfigFileUsed())
+		}
 		mainLog.Load().Info().Msg("loading config file from: " + v.ConfigFileUsed())
 		defaultConfigFile = v.ConfigFileUsed()
 		return true
@@ -1452,21 +1458,35 @@ func userHomeDir() (string, error) {
 	return dir, nil
 }
 
+// tryReadingConfig is like tryReadingConfigWithNotice, with notice set to false.
 func tryReadingConfig(writeDefaultConfig bool) {
+	tryReadingConfigWithNotice(writeDefaultConfig, false)
+}
+
+// tryReadingConfigWithNotice tries reading in config files, either specified by user or from default
+// locations. If notice is true, emitting a notice message to user which config file was read.
+func tryReadingConfigWithNotice(writeDefaultConfig, notice bool) {
 	// --config is specified.
 	if configPath != "" {
 		v.SetConfigFile(configPath)
-		readConfigFile(false)
+		readConfigFile(false, notice)
 		return
 	}
 	// no config start or base64 config mode.
 	if !writeDefaultConfig {
 		return
 	}
-	readConfig(writeDefaultConfig)
+	readConfigWithNotice(writeDefaultConfig, notice)
 }
 
+// readConfig calls readConfigWithNotice with notice set to false.
 func readConfig(writeDefaultConfig bool) {
+	readConfigWithNotice(writeDefaultConfig, false)
+}
+
+// readConfigWithNotice calls readConfigFile with config file set to ctrld.toml
+// or config.toml for compatible with earlier versions of ctrld.
+func readConfigWithNotice(writeDefaultConfig, notice bool) {
 	configs := []struct {
 		name    string
 		written bool
@@ -1483,7 +1503,7 @@ func readConfig(writeDefaultConfig bool) {
 	for _, config := range configs {
 		ctrld.SetConfigNameWithPath(v, config.name, dir)
 		v.SetConfigFile(configPath)
-		if readConfigFile(config.written) {
+		if readConfigFile(config.written, notice) {
 			break
 		}
 	}
