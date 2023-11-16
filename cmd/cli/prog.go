@@ -325,7 +325,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			case <-ctx.Done():
 			case <-reloadCh:
 			}
-			return
 		}()
 	}
 
