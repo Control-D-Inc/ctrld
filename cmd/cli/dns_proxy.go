@@ -586,8 +586,17 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 		if hostname := p.ciTable.LookupHostname(ci.IP, ""); hostname != "" {
 			ci.Hostname = hostname
 		} else {
-			ci.Hostname = ci.IP
-			p.ciTable.StoreVPNClient(ci)
+			// Only use IP as hostname for IPv4 clients.
+			// For Android devices, when it joins the network, it uses ctrld to resolve
+			// its private DNS once and never reaches ctrld again. For each time, it uses
+			// a different IPv6 address, which causes hundreds/thousands different client
+			// IDs created for the same device, which is pointless.
+			//
+			// TODO(cuonglm): investigate whether this can be a false positive for other clients?
+			if !ctrldnet.IsIPv6(ci.IP) {
+				ci.Hostname = ci.IP
+				p.ciTable.StoreVPNClient(ci)
+			}
 		}
 	} else {
 		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
