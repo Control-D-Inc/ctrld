@@ -1075,6 +1075,9 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 			if err != nil {
 				mainLog.Load().Fatal().Msgf("failed to get default config file path: %v", err)
 			}
+			if cdUID == "" && nextdns == "" {
+				mainLog.Load().Notice().Msg("Generating controld default config: " + fp)
+			}
 			mainLog.Load().Info().Msg("writing default config file to: " + fp)
 		}
 		return false
