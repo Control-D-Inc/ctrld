@@ -579,10 +579,8 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	}
 
 	// If MAC is still empty here, that mean the requests are made from virtual interface,
-	// like VPN/Wireguard clients, so we use whatever MAC address associated with remoteIP
-	// (most likely 127.0.0.1), and ci.IP as hostname, so we can distinguish those clients.
+	// like VPN/Wireguard clients, so we use ci.IP as hostname to distinguish those clients.
 	if ci.Mac == "" {
-		ci.Mac = p.ciTable.LookupMac(remoteIP)
 		if hostname := p.ciTable.LookupHostname(ci.IP, ""); hostname != "" {
 			ci.Hostname = hostname
 		} else {
