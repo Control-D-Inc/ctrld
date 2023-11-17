@@ -196,6 +196,29 @@ type ServiceConfig struct {
 	AllocateIP            bool     `mapstructure:"-" toml:"-"`
 }
 
+// PtrResolver returns a Resolver used for PTR lookup, based on ServiceConfig.DiscoverPtrEndpoints value.
+func (s ServiceConfig) PtrResolver() Resolver {
+	if len(s.DiscoverPtrEndpoints) > 0 {
+		nss := make([]string, 0, len(s.DiscoverPtrEndpoints))
+		for _, ns := range s.DiscoverPtrEndpoints {
+			host, port := ns, "53"
+			if h, p, err := net.SplitHostPort(ns); err == nil {
+				host, port = h, p
+			}
+			// Only use valid ip:port pair.
+			if _, portErr := strconv.Atoi(port); portErr == nil && port != "0" && net.ParseIP(host) != nil {
+				nss = append(nss, net.JoinHostPort(host, port))
+			} else {
+				ProxyLogger.Load().Warn().Msgf("ignoring invalid nameserver for PTR resolver: %q", ns)
+			}
+		}
+		if len(nss) > 0 {
+			return NewResolverWithNameserver(nss)
+		}
+	}
+	return nil
+}
+
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.
 type NetworkConfig struct {
 	Name   string       `mapstructure:"name" toml:"name,omitempty"`

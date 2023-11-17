@@ -62,6 +62,7 @@ type prog struct {
 	ciTable     *clientinfo.Table
 	um          *upstreamMonitor
 	router      router.Router
+	ptrResolver ctrld.Resolver
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -228,6 +229,9 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		} else {
 			p.cache = cacher
 		}
+	}
+	if r := p.cfg.Service.PtrResolver(); r != nil {
+		p.ptrResolver = r
 	}
 
 	var wg sync.WaitGroup

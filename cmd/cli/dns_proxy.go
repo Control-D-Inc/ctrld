@@ -285,6 +285,12 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 	resolve1 := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "sending query to %s: %s", upstreams[n], upstreamConfig.Name)
 		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
+		if upstreamConfig.Type == ctrld.ResolverTypePrivate {
+			if r := p.ptrResolver; r != nil {
+				ctrld.ProxyLogger.Load().Debug().Msgf("using nameservers %v for PTR resolver", p.cfg.Service.DiscoverPtrEndpoints)
+				dnsResolver = r
+			}
+		}
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
 			return nil, err
