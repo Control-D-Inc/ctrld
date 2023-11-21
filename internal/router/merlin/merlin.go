@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/kardianos/service"
@@ -44,8 +45,24 @@ func (m *Merlin) Uninstall(_ *service.Config) error {
 }
 
 func (m *Merlin) PreRun() error {
+	// Wait NTP ready.
 	_ = m.Cleanup()
-	return ntp.WaitNvram()
+	if err := ntp.WaitNvram(); err != nil {
+		return err
+	}
+	// Wait until directories mounted.
+	for _, dir := range []string{"/tmp", "/proc"} {
+		waitDirExists(dir)
+	}
+	// Wait dnsmasq started.
+	for {
+		out, _ := exec.Command("pidof", "dnsmasq").CombinedOutput()
+		if len(bytes.TrimSpace(out)) > 0 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	return nil
 }
 
 func (m *Merlin) Setup() error {
@@ -55,9 +72,6 @@ func (m *Merlin) Setup() error {
 	// Already setup.
 	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {
 		return nil
-	}
-	if _, err := nvram.Run("set", nvram.CtrldSetupKey+"=1"); err != nil {
-		return err
 	}
 	buf, err := os.ReadFile(dnsmasq.MerlinPostConfPath)
 	// Already setup.
@@ -139,4 +153,13 @@ func merlinParsePostConf(buf []byte) []byte {
 		return bytes.TrimLeftFunc(parts[1], unicode.IsSpace)
 	}
 	return buf
+}
+
+func waitDirExists(dir string) {
+	for {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(time.Second)
+	}
 }
