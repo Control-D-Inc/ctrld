@@ -8,19 +8,18 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
+	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld"
-	"github.com/kardianos/service"
+	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
 
 const (
-	Name                           = "edgeos"
-	edgeOSDNSMasqDefaultConfigPath = "/etc/dnsmasq.conf"
-	edgeOSDNSMasqConfigPath        = "/etc/dnsmasq.d/dnsmasq-zzz-ctrld.conf"
-	usgDNSMasqConfigPath           = "/etc/dnsmasq.conf"
-	usgDNSMasqBackupConfigPath     = "/etc/dnsmasq.conf.bak"
-	toggleContentFilteringLink     = "https://community.ui.com/questions/UDM-Pro-disable-enable-DNS-filtering/e2cc4060-e56a-4139-b200-62d7f773ff8f"
+	Name                       = "edgeos"
+	edgeOSDNSMasqConfigPath    = "/etc/dnsmasq.d/dnsmasq-zzz-ctrld.conf"
+	usgDNSMasqConfigPath       = "/etc/dnsmasq.conf"
+	usgDNSMasqBackupConfigPath = "/etc/dnsmasq.conf.bak"
+	toggleContentFilteringLink = "https://community.ui.com/questions/UDM-Pro-disable-enable-DNS-filtering/e2cc4060-e56a-4139-b200-62d7f773ff8f"
 )
 
 var ErrContentFilteringEnabled = fmt.Errorf(`the "Content Filtering" feature" is enabled, which is conflicted with ctrld.\n
@@ -107,13 +106,10 @@ func (e *EdgeOS) setupUSG() error {
 		if strings.HasPrefix(line, "all-servers") {
 			continue
 		}
-		if strings.HasPrefix(line, "cache-size") {
-			continue
-		}
 		sb.WriteString(line)
 	}
 
-	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, e.cfg)
+	data, err := dnsmasq.ConfTmplWitchCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
 	if err != nil {
 		return err
 	}
@@ -131,11 +127,7 @@ func (e *EdgeOS) setupUSG() error {
 }
 
 func (e *EdgeOS) setupUDM() error {
-	// Disable dnsmasq cache.
-	if err := dnsmasq.DisableCache(edgeOSDNSMasqDefaultConfigPath); err != nil {
-		return err
-	}
-	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, e.cfg)
+	data, err := dnsmasq.ConfTmplWitchCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
 	if err != nil {
 		return err
 	}
@@ -161,10 +153,6 @@ func (e *EdgeOS) cleanupUSG() error {
 }
 
 func (e *EdgeOS) cleanupUDM() error {
-	// Enable dnsmasq cache.
-	if err := dnsmasq.EnableCache(edgeOSDNSMasqDefaultConfigPath); err != nil {
-		return err
-	}
 	// Remove the custom dnsmasq config
 	if err := os.Remove(edgeOSDNSMasqConfigPath); err != nil {
 		return fmt.Errorf("cleanupUDM: os.Remove: %w", err)

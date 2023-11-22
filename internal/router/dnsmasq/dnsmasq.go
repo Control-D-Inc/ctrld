@@ -22,7 +22,9 @@ server={{ .IP }}#{{ .Port }}
 add-mac
 add-subnet=32,128
 {{- end}}
+{{- if .CacheDisabled}}
 cache-size=0
+{{- end}}
 `
 
 const MerlinPostConfPath = "/jffs/scripts/dnsmasq.postconf"
@@ -71,6 +73,10 @@ type Upstream struct {
 }
 
 func ConfTmpl(tmplText string, cfg *ctrld.Config) (string, error) {
+	return ConfTmplWitchCacheDisabled(tmplText, cfg, true)
+}
+
+func ConfTmplWitchCacheDisabled(tmplText string, cfg *ctrld.Config, cacheDisabled bool) (string, error) {
 	listener := cfg.FirstListener()
 	if listener == nil {
 		return "", errors.New("missing listener")
@@ -80,24 +86,26 @@ func ConfTmpl(tmplText string, cfg *ctrld.Config) (string, error) {
 		ip = "127.0.0.1"
 	}
 	upstreams := []Upstream{{IP: ip, Port: listener.Port}}
-	return confTmpl(tmplText, upstreams, cfg.HasUpstreamSendClientInfo())
+	return confTmpl(tmplText, upstreams, cfg.HasUpstreamSendClientInfo(), cacheDisabled)
 }
 
 func FirewallaConfTmpl(tmplText string, cfg *ctrld.Config) (string, error) {
 	if lc := cfg.FirstListener(); lc != nil && (lc.IP == "0.0.0.0" || lc.IP == "") {
-		return confTmpl(tmplText, firewallaUpstreams(lc.Port), cfg.HasUpstreamSendClientInfo())
+		return confTmpl(tmplText, firewallaUpstreams(lc.Port), cfg.HasUpstreamSendClientInfo(), true)
 	}
 	return ConfTmpl(tmplText, cfg)
 }
 
-func confTmpl(tmplText string, upstreams []Upstream, sendClientInfo bool) (string, error) {
+func confTmpl(tmplText string, upstreams []Upstream, sendClientInfo, cacheDisabled bool) (string, error) {
 	tmpl := template.Must(template.New("").Parse(tmplText))
 	var to = &struct {
 		SendClientInfo bool
 		Upstreams      []Upstream
+		CacheDisabled  bool
 	}{
 		SendClientInfo: sendClientInfo,
 		Upstreams:      upstreams,
+		CacheDisabled:  cacheDisabled,
 	}
 	var sb strings.Builder
 	if err := tmpl.Execute(&sb, to); err != nil {
