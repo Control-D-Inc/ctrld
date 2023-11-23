@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
 	"syscall"
@@ -57,6 +58,23 @@ func (m *mdns) List() []string {
 		return true
 	})
 	return ips
+}
+
+func (m *mdns) lookupIPByHostname(name string, v6 bool) string {
+	if m == nil {
+		return ""
+	}
+	var ip string
+	m.name.Range(func(key, value any) bool {
+		if value == name {
+			if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
+				ip = addr.String()
+				return false
+			}
+		}
+		return true
+	})
+	return ip
 }
 
 func (m *mdns) init(quitCh chan struct{}) error {

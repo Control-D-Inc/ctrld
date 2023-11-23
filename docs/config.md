@@ -193,22 +193,6 @@ Perform LAN client discovery using PTR queries.
 - Required: no
 - Default: true
 
-### discover_ptr_endpoints
-List of DNS nameservers used for PTR discovery.
-
-Each entry can be either "ip" (default port 53) or "ip:port" pair. Invalid entry will be ignored.
-
-- Type: array of string
-- Required: no
-- Default: []
-
-Example:
-
-```toml
-[service]
-discover_ptr_endpoints = ["192.168.1.1", "192.168.2.1:5354"]
-```
-
 ### discover_hosts
 Perform LAN client discovery using hosts file.
 
@@ -334,6 +318,24 @@ If `ip_stack` is empty, or undefined:
 
  - Default value is `both` for non-Control D resolvers.
  - Default value is `split` for Control D resolvers.
+
+### send_client_info
+Specifying whether to include client info when sending query to upstream.
+
+- Type: boolean
+- Required: no
+- Default:
+  - `true` for ControlD upstreams.
+  - `false` for other upstreams.
+
+### discoverable
+Specifying whether the upstream can be used for PTR discovery.
+
+- Type: boolean
+- Required: no
+- Default:
+    - `true` for loopback/RFC1918/CGNAT IP address.
+    - `false` for public IP address.
 
 ## Network
 The `[network]` section defines networks from which DNS queries can originate from. These are used in policies. You can define multiple networks, and each one can have multiple cidrs.

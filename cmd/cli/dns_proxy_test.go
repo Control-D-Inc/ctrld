@@ -153,8 +153,8 @@ func TestCache(t *testing.T) {
 	answer2.SetRcode(msg, dns.RcodeRefused)
 	prog.cache.Add(dnscache.NewKey(msg, "upstream.0"), dnscache.NewValue(answer2, time.Now().Add(time.Minute)))
 
-	got1 := prog.proxy(context.Background(), []string{"upstream.1"}, nil, msg, nil)
-	got2 := prog.proxy(context.Background(), []string{"upstream.0"}, nil, msg, nil)
+	got1 := prog.proxy(context.Background(), []string{"upstream.1"}, nil, msg, nil, false)
+	got2 := prog.proxy(context.Background(), []string{"upstream.0"}, nil, msg, nil, false)
 	assert.NotSame(t, got1, got2)
 	assert.Equal(t, answer1.Rcode, got1.Rcode)
 	assert.Equal(t, answer2.Rcode, got2.Rcode)

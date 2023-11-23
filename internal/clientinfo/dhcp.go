@@ -134,6 +134,23 @@ func (d *dhcp) List() []string {
 	return ips
 }
 
+func (d *dhcp) lookupIPByHostname(name string, v6 bool) string {
+	if d == nil {
+		return ""
+	}
+	var ip string
+	d.ip2name.Range(func(key, value any) bool {
+		if value == name {
+			if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
+				ip = addr.String()
+				return false
+			}
+		}
+		return true
+	})
+	return ip
+}
+
 // AddLeaseFile adds given lease file for reading/watching clients info.
 func (d *dhcp) addLeaseFile(name string, format ctrld.LeaseFileFormat) error {
 	if d.watcher == nil {

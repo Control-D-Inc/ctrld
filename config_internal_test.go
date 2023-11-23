@@ -279,6 +279,61 @@ func TestUpstreamConfig_UpstreamSendClientInfo(t *testing.T) {
 	}
 }
 
+func TestUpstreamConfig_IsDiscoverable(t *testing.T) {
+	tests := []struct {
+		name         string
+		uc           *UpstreamConfig
+		discoverable bool
+	}{
+		{
+			"loopback",
+			&UpstreamConfig{Endpoint: "127.0.0.1", Type: ResolverTypeLegacy},
+			true,
+		},
+		{
+			"rfc1918",
+			&UpstreamConfig{Endpoint: "192.168.1.1", Type: ResolverTypeLegacy},
+			true,
+		},
+		{
+			"CGNAT",
+			&UpstreamConfig{Endpoint: "100.66.67.68", Type: ResolverTypeLegacy},
+			true,
+		},
+		{
+			"Public IP",
+			&UpstreamConfig{Endpoint: "8.8.8.8", Type: ResolverTypeLegacy},
+			false,
+		},
+		{
+			"override discoverable",
+			&UpstreamConfig{Endpoint: "127.0.0.1", Type: ResolverTypeLegacy, Discoverable: ptrBool(false)},
+			false,
+		},
+		{
+			"override non-public",
+			&UpstreamConfig{Endpoint: "1.1.1.1", Type: ResolverTypeLegacy, Discoverable: ptrBool(true)},
+			true,
+		},
+		{
+			"non-legacy upstream",
+			&UpstreamConfig{Endpoint: "https://192.168.1.1/custom-doh", Type: ResolverTypeDOH},
+			false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.uc.Init()
+			if got := tc.uc.IsDiscoverable(); got != tc.discoverable {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.discoverable, got)
+			}
+		})
+	}
+}
+
 func ptrBool(b bool) *bool {
 	return &b
 }

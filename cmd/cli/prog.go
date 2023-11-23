@@ -19,6 +19,7 @@ import (
 	"github.com/kardianos/service"
 	"github.com/spf13/viper"
 	"tailscale.com/net/interfaces"
+	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
@@ -32,6 +33,7 @@ const (
 	ctrldControlUnixSock = "ctrld_control.sock"
 	upstreamPrefix       = "upstream."
 	upstreamOS           = upstreamPrefix + "os"
+	upstreamPrivate      = upstreamPrefix + "private"
 )
 
 var logf = func(format string, args ...any) {
@@ -55,14 +57,15 @@ type prog struct {
 	logConn      net.Conn
 	cs           *controlServer
 
-	cfg         *ctrld.Config
-	appCallback *AppCallback
-	cache       dnscache.Cacher
-	sema        semaphore
-	ciTable     *clientinfo.Table
-	um          *upstreamMonitor
-	router      router.Router
-	ptrResolver ctrld.Resolver
+	cfg            *ctrld.Config
+	localUpstreams []string
+	ptrNameservers []string
+	appCallback    *AppCallback
+	cache          dnscache.Cacher
+	sema           semaphore
+	ciTable        *clientinfo.Table
+	um             *upstreamMonitor
+	router         router.Router
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -160,7 +163,7 @@ func (p *prog) runWait() {
 		// This needs to be done here, otherwise, the DNS handler may observe an invalid
 		// upstream config because its initialization function have not been called yet.
 		mainLog.Load().Debug().Msg("setup upstream with new config")
-		setupUpstream(newCfg)
+		p.setupUpstream(newCfg)
 
 		p.mu.Lock()
 		*p.cfg = *newCfg
@@ -187,7 +190,9 @@ func (p *prog) preRun() {
 	}
 }
 
-func setupUpstream(cfg *ctrld.Config) {
+func (p *prog) setupUpstream(cfg *ctrld.Config) {
+	localUpstreams := make([]string, 0, len(cfg.Upstream))
+	ptrNameservers := make([]string, 0, len(cfg.Upstream))
 	for n := range cfg.Upstream {
 		uc := cfg.Upstream[n]
 		uc.Init()
@@ -199,7 +204,16 @@ func setupUpstream(cfg *ctrld.Config) {
 		}
 		uc.SetCertPool(rootCertPool)
 		go uc.Ping()
+
+		if canBeLocalUpstream(uc.Domain) {
+			localUpstreams = append(localUpstreams, upstreamPrefix+n)
+		}
+		if uc.IsDiscoverable() {
+			ptrNameservers = append(ptrNameservers, uc.Endpoint)
+		}
 	}
+	p.localUpstreams = localUpstreams
+	p.ptrNameservers = ptrNameservers
 }
 
 // run runs the ctrld main components.
@@ -230,9 +244,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			p.cache = cacher
 		}
 	}
-	if r := p.cfg.Service.PtrResolver(); r != nil {
-		p.ptrResolver = r
-	}
 
 	var wg sync.WaitGroup
 	wg.Add(len(p.cfg.Listener))
@@ -260,8 +271,8 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				p.sema = &chanSemaphore{ready: make(chan struct{}, n)}
 			}
 		}
-		setupUpstream(p.cfg)
-		p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP(), cdUID)
+		p.setupUpstream(p.cfg)
+		p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP(), cdUID, p.ptrNameservers)
 		if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
 			mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
 			format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
@@ -612,4 +623,12 @@ func defaultRouteIP() string {
 	ip := addrs[0].String()
 	mainLog.Load().Debug().Str("ip", ip).Msg("found LAN interface IP")
 	return ip
+}
+
+// canBeLocalUpstream reports whether the IP address can be used as a local upstream.
+func canBeLocalUpstream(addr string) bool {
+	if ip, err := netip.ParseAddr(addr); err == nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || tsaddr.CGNATRange().Contains(ip)
+	}
+	return false
 }

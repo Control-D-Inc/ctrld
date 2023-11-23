@@ -1,6 +1,7 @@
 package clientinfo
 
 import (
+	"net/netip"
 	"os"
 	"sync"
 
@@ -107,6 +108,24 @@ func (hf *hostsFile) LookupHostnameByMac(mac string) string {
 // String returns human-readable format of hostsFile.
 func (hf *hostsFile) String() string {
 	return "hosts"
+}
+
+func (hf *hostsFile) lookupIPByHostname(name string, v6 bool) string {
+	if hf == nil {
+		return ""
+	}
+	hf.mu.Lock()
+	defer hf.mu.Unlock()
+	for addr, names := range hf.m {
+		if ip, err := netip.ParseAddr(addr); err == nil && !ip.IsLoopback() {
+			for _, n := range names {
+				if n == name && ip.Is6() == v6 {
+					return ip.String()
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // isLocalhostName reports whether the given hostname represents localhost.

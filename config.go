@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"runtime"
@@ -26,6 +27,7 @@ import (
 	"github.com/spf13/viper"
 	"golang.org/x/sync/singleflight"
 	"tailscale.com/logtail/backoff"
+	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
@@ -177,46 +179,22 @@ func (c *Config) FirstUpstream() *UpstreamConfig {
 
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
-	LogLevel              string   `mapstructure:"log_level" toml:"log_level,omitempty"`
-	LogPath               string   `mapstructure:"log_path" toml:"log_path,omitempty"`
-	CacheEnable           bool     `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
-	CacheSize             int      `mapstructure:"cache_size" toml:"cache_size,omitempty"`
-	CacheTTLOverride      int      `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
-	CacheServeStale       bool     `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
-	MaxConcurrentRequests *int     `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
-	DHCPLeaseFile         string   `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
-	DHCPLeaseFileFormat   string   `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
-	DiscoverMDNS          *bool    `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
-	DiscoverARP           *bool    `mapstructure:"discover_arp" toml:"discover_dhcp,omitempty"`
-	DiscoverDHCP          *bool    `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
-	DiscoverPtr           *bool    `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
-	DiscoverPtrEndpoints  []string `mapstructure:"discover_ptr_endpoints" toml:"discover_ptr_endpoints,omitempty"`
-	DiscoverHosts         *bool    `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
-	Daemon                bool     `mapstructure:"-" toml:"-"`
-	AllocateIP            bool     `mapstructure:"-" toml:"-"`
-}
-
-// PtrResolver returns a Resolver used for PTR lookup, based on ServiceConfig.DiscoverPtrEndpoints value.
-func (s ServiceConfig) PtrResolver() Resolver {
-	if len(s.DiscoverPtrEndpoints) > 0 {
-		nss := make([]string, 0, len(s.DiscoverPtrEndpoints))
-		for _, ns := range s.DiscoverPtrEndpoints {
-			host, port := ns, "53"
-			if h, p, err := net.SplitHostPort(ns); err == nil {
-				host, port = h, p
-			}
-			// Only use valid ip:port pair.
-			if _, portErr := strconv.Atoi(port); portErr == nil && port != "0" && net.ParseIP(host) != nil {
-				nss = append(nss, net.JoinHostPort(host, port))
-			} else {
-				ProxyLogger.Load().Warn().Msgf("ignoring invalid nameserver for PTR resolver: %q", ns)
-			}
-		}
-		if len(nss) > 0 {
-			return NewResolverWithNameserver(nss)
-		}
-	}
-	return nil
+	LogLevel              string `mapstructure:"log_level" toml:"log_level,omitempty"`
+	LogPath               string `mapstructure:"log_path" toml:"log_path,omitempty"`
+	CacheEnable           bool   `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
+	CacheSize             int    `mapstructure:"cache_size" toml:"cache_size,omitempty"`
+	CacheTTLOverride      int    `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
+	CacheServeStale       bool   `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
+	MaxConcurrentRequests *int   `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
+	DHCPLeaseFile         string `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
+	DHCPLeaseFileFormat   string `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
+	DiscoverMDNS          *bool  `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
+	DiscoverARP           *bool  `mapstructure:"discover_arp" toml:"discover_dhcp,omitempty"`
+	DiscoverDHCP          *bool  `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
+	DiscoverPtr           *bool  `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
+	DiscoverHosts         *bool  `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
+	Daemon                bool   `mapstructure:"-" toml:"-"`
+	AllocateIP            bool   `mapstructure:"-" toml:"-"`
 }
 
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.
@@ -238,6 +216,9 @@ type UpstreamConfig struct {
 	// The caller should not access this field directly.
 	// Use UpstreamSendClientInfo instead.
 	SendClientInfo *bool `mapstructure:"send_client_info" toml:"send_client_info,omitempty"`
+	// The caller should not access this field directly.
+	// Use IsDiscoverable instead.
+	Discoverable *bool `mapstructure:"discoverable" toml:"discoverable"`
 
 	g                  singleflight.Group
 	rebootstrap        atomic.Bool
@@ -359,6 +340,21 @@ func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
 	case ResolverTypeDOH, ResolverTypeDOH3:
 		if uc.isControlD() || uc.isNextDNS() {
 			return true
+		}
+	}
+	return false
+}
+
+// IsDiscoverable reports whether the upstream can be used for PTR discovery.
+// The caller must ensure uc.Init() was called before calling this.
+func (uc *UpstreamConfig) IsDiscoverable() bool {
+	if uc.Discoverable != nil {
+		return *uc.Discoverable
+	}
+	switch uc.Type {
+	case ResolverTypeOS, ResolverTypeLegacy, ResolverTypePrivate:
+		if ip, err := netip.ParseAddr(uc.Domain); err == nil {
+			return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || tsaddr.CGNATRange().Contains(ip)
 		}
 	}
 	return false

@@ -2,6 +2,7 @@ package clientinfo
 
 import (
 	"context"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -92,6 +93,23 @@ func (p *ptrDiscover) lookupHostname(ip string) string {
 		}
 	}
 	return ""
+}
+
+func (p *ptrDiscover) lookupIPByHostname(name string, v6 bool) string {
+	if p == nil {
+		return ""
+	}
+	var ip string
+	p.hostname.Range(func(key, value any) bool {
+		if value == name {
+			if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
+				ip = addr.String()
+				return false
+			}
+		}
+		return true
+	})
+	return ip
 }
 
 // checkServer monitors if the resolver can reach its nameserver. When the nameserver

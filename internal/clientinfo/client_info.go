@@ -3,7 +3,9 @@ package clientinfo
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,25 +71,27 @@ type Table struct {
 	refreshers        []refresher
 	initOnce          sync.Once
 
-	dhcp   *dhcp
-	merlin *merlinDiscover
-	arp    *arpDiscover
-	ptr    *ptrDiscover
-	mdns   *mdns
-	hf     *hostsFile
-	vni    *virtualNetworkIface
-	svcCfg ctrld.ServiceConfig
-	quitCh chan struct{}
-	selfIP string
-	cdUID  string
+	dhcp           *dhcp
+	merlin         *merlinDiscover
+	arp            *arpDiscover
+	ptr            *ptrDiscover
+	mdns           *mdns
+	hf             *hostsFile
+	vni            *virtualNetworkIface
+	svcCfg         ctrld.ServiceConfig
+	quitCh         chan struct{}
+	selfIP         string
+	cdUID          string
+	ptrNameservers []string
 }
 
-func NewTable(cfg *ctrld.Config, selfIP, cdUID string) *Table {
+func NewTable(cfg *ctrld.Config, selfIP, cdUID string, ns []string) *Table {
 	return &Table{
-		svcCfg: cfg.Service,
-		quitCh: make(chan struct{}),
-		selfIP: selfIP,
-		cdUID:  cdUID,
+		svcCfg:         cfg.Service,
+		quitCh:         make(chan struct{}),
+		selfIP:         selfIP,
+		cdUID:          cdUID,
+		ptrNameservers: ns,
 	}
 }
 
@@ -183,9 +187,25 @@ func (t *Table) init() {
 	// PTR lookup.
 	if t.discoverPTR() {
 		t.ptr = &ptrDiscover{resolver: ctrld.NewPrivateResolver()}
-		if r := t.svcCfg.PtrResolver(); r != nil {
-			ctrld.ProxyLogger.Load().Debug().Msgf("using nameservers %v for PTR discover", t.svcCfg.DiscoverPtrEndpoints)
-			t.ptr.resolver = r
+		if len(t.ptrNameservers) > 0 {
+			nss := make([]string, 0, len(t.ptrNameservers))
+			for _, ns := range t.ptrNameservers {
+				host, port := ns, "53"
+				if h, p, err := net.SplitHostPort(ns); err == nil {
+					host, port = h, p
+				}
+				// Only use valid ip:port pair.
+				if _, portErr := strconv.Atoi(port); portErr == nil && port != "0" && net.ParseIP(host) != nil {
+					nss = append(nss, net.JoinHostPort(host, port))
+				} else {
+					ctrld.ProxyLogger.Load().Warn().Msgf("ignoring invalid nameserver for ptr discover: %q", ns)
+				}
+			}
+			if len(nss) > 0 {
+				t.ptr.resolver = ctrld.NewResolverWithNameserver(nss)
+				ctrld.ProxyLogger.Load().Debug().Msgf("using nameservers %v for ptr discovery", nss)
+			}
+
 		}
 		ctrld.ProxyLogger.Load().Debug().Msg("start ptr discovery")
 		if err := t.ptr.refresh(); err != nil {
@@ -356,6 +376,27 @@ func (t *Table) StoreVPNClient(ci *ctrld.ClientInfo) {
 	}
 	t.vni.mac.Store(ci.IP, ci.Mac)
 	t.vni.ip2name.Store(ci.IP, ci.Hostname)
+}
+
+// ipFinder is the interface for retrieving IP address from hostname.
+type ipFinder interface {
+	lookupIPByHostname(name string, v6 bool) string
+}
+
+// LookupIPByHostname returns the ip address of given hostname.
+// If v6 is true, return IPv6 instead of default IPv4.
+func (t *Table) LookupIPByHostname(hostname string, v6 bool) *netip.Addr {
+	if t == nil {
+		return nil
+	}
+	for _, finder := range []ipFinder{t.hf, t.ptr, t.mdns, t.dhcp} {
+		if addr := finder.lookupIPByHostname(hostname, v6); addr != "" {
+			if ip, err := netip.ParseAddr(addr); err == nil {
+				return &ip
+			}
+		}
+	}
+	return nil
 }
 
 func (t *Table) discoverDHCP() bool {
