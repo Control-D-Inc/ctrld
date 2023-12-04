@@ -114,7 +114,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		// addresses of the machine. So ctrld could receive queries from LAN clients.
 		if needRFC1918Listeners(listenerConfig) {
 			g.Go(func() error {
-				for _, addr := range rfc1918Addresses() {
+				for _, addr := range ctrld.Rfc1918Addresses() {
 					func() {
 						listenAddr := net.JoinHostPort(addr, strconv.Itoa(listenerConfig.Port))
 						s, errCh := runDNSServer(listenAddr, proto, handler)
@@ -735,21 +735,6 @@ func queryFromSelf(ip string) bool {
 
 func needRFC1918Listeners(lc *ctrld.ListenerConfig) bool {
 	return lc.IP == "127.0.0.1" && lc.Port == 53
-}
-
-func rfc1918Addresses() []string {
-	var res []string
-	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
-		addrs, _ := i.Addrs()
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok || !ipNet.IP.IsPrivate() {
-				continue
-			}
-			res = append(res, ipNet.IP.String())
-		}
-	})
-	return res
 }
 
 // ipFromARPA parses a FQDN arpa domain and return the IP address if valid.

@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/miekg/dns"
+	"tailscale.com/net/interfaces"
 )
 
 const (
@@ -245,12 +247,16 @@ func NewBootstrapResolver(servers ...string) Resolver {
 }
 
 // NewPrivateResolver returns an OS resolver, which includes only private DNS servers,
-// excluding nameservers from /etc/resolv.conf file.
+// excluding:
+//
+// - Nameservers from /etc/resolv.conf file.
+// - Nameservers which is local RFC1918 addresses.
 //
 // This is useful for doing PTR lookup in LAN network.
 func NewPrivateResolver() Resolver {
 	nss := nameservers()
 	resolveConfNss := nameserversFromResolvconf()
+	localRfc1918Addrs := Rfc1918Addresses()
 	n := 0
 	for _, ns := range nss {
 		host, _, _ := net.SplitHostPort(ns)
@@ -261,6 +267,10 @@ func NewPrivateResolver() Resolver {
 		//
 		// causing the query always succeed.
 		if sliceContains(resolveConfNss, host) {
+			continue
+		}
+		// Ignoring local RFC 1918 addresses.
+		if sliceContains(localRfc1918Addrs, host) {
 			continue
 		}
 		ip := net.ParseIP(host)
@@ -283,6 +293,22 @@ func NewResolverWithNameserver(nameservers []string) Resolver {
 		return &dummyResolver{}
 	}
 	return &osResolver{nameservers: nameservers}
+}
+
+// Rfc1918Addresses returns the list of local interfaces private IP addresses
+func Rfc1918Addresses() []string {
+	var res []string
+	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+		addrs, _ := i.Addrs()
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok || !ipNet.IP.IsPrivate() {
+				continue
+			}
+			res = append(res, ipNet.IP.String())
+		}
+	})
+	return res
 }
 
 func newDialer(dnsAddress string) *net.Dialer {

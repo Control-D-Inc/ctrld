@@ -438,7 +438,7 @@ func (p *prog) setDNS() {
 
 	nameservers := []string{ns}
 	if needRFC1918Listeners(lc) {
-		nameservers = append(nameservers, rfc1918Addresses()...)
+		nameservers = append(nameservers, ctrld.Rfc1918Addresses()...)
 	}
 	if err := setDNS(netIface, nameservers); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
