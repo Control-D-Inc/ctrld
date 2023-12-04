@@ -274,6 +274,7 @@ func newDnsMsgWithClientIP(ip string) *dns.Msg {
 	m.Extra = append(m.Extra, o)
 	return m
 }
+
 func Test_stripClientSubnet(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -303,6 +304,72 @@ func Test_stripClientSubnet(t *testing.T) {
 			}
 			if tc.wantSubnet != hasSubnet {
 				t.Errorf("unexpected result, want: %v, got: %v", tc.wantSubnet, hasSubnet)
+			}
+		})
+	}
+}
+
+func newDnsMsgWithHostname(hostname string, typ uint16) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetQuestion(hostname, typ)
+	return m
+}
+
+func Test_isLanHostnameQuery(t *testing.T) {
+	tests := []struct {
+		name               string
+		msg                *dns.Msg
+		isLanHostnameQuery bool
+	}{
+		{"A", newDnsMsgWithHostname("foo", dns.TypeA), true},
+		{"AAAA", newDnsMsgWithHostname("foo", dns.TypeAAAA), true},
+		{"A not LAN", newDnsMsgWithHostname("example.com", dns.TypeA), false},
+		{"AAAA not LAN", newDnsMsgWithHostname("example.com", dns.TypeAAAA), false},
+		{"Not A or AAAA", newDnsMsgWithHostname("foo", dns.TypeTXT), false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isLanHostnameQuery(tc.msg); tc.isLanHostnameQuery != got {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.isLanHostnameQuery, got)
+			}
+		})
+	}
+}
+
+func newDnsMsgPtr(ip string, t *testing.T) *dns.Msg {
+	t.Helper()
+	m := new(dns.Msg)
+	ptr, err := dns.ReverseAddr(ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetQuestion(ptr, dns.TypePTR)
+	return m
+}
+
+func Test_isPrivatePtrLookup(t *testing.T) {
+	tests := []struct {
+		name               string
+		msg                *dns.Msg
+		isPrivatePtrLookup bool
+	}{
+		// RFC 1918 allocates 10.0.0.0/8, 172.16.0.0/12, and 192.168.0.0/16 as
+		{"10.0.0.0/8", newDnsMsgPtr("10.0.0.123", t), true},
+		{"172.16.0.0/12", newDnsMsgPtr("172.16.0.123", t), true},
+		{"192.168.0.0/16", newDnsMsgPtr("192.168.1.123", t), true},
+		{"CGNAT", newDnsMsgPtr("100.66.27.28", t), true},
+		{"Loopback", newDnsMsgPtr("127.0.0.1", t), true},
+		{"Link Local Unicast", newDnsMsgPtr("fe80::69f6:e16e:8bdb:433f", t), true},
+		{"Public IP", newDnsMsgPtr("8.8.8.8", t), false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isPrivatePtrLookup(tc.msg); tc.isPrivatePtrLookup != got {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.isPrivatePtrLookup, got)
 			}
 		})
 	}

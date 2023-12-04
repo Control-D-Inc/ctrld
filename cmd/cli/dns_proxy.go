@@ -806,6 +806,7 @@ func isPrivatePtrLookup(m *dns.Msg) bool {
 	return false
 }
 
+// isLanHostnameQuery reports whether DNS message is an A/AAAA query with LAN hostname.
 func isLanHostnameQuery(m *dns.Msg) bool {
 	if m == nil || len(m.Question) == 0 {
 		return false
@@ -816,7 +817,8 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	default:
 		return false
 	}
-	return !strings.Contains(q.Name, ".") ||
-		strings.HasSuffix(q.Name, ".domain") ||
-		strings.HasSuffix(q.Name, ".lan")
+	name := strings.TrimSuffix(q.Name, ".")
+	return !strings.Contains(name, ".") ||
+		strings.HasSuffix(name, ".domain") ||
+		strings.HasSuffix(name, ".lan")
 }

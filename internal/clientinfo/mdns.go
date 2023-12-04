@@ -69,6 +69,9 @@ func (m *mdns) lookupIPByHostname(name string, v6 bool) string {
 		if value == name {
 			if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
 				ip = addr.String()
+				if addr.IsLoopback() { // Continue searching if this is loopback address.
+					return true
+				}
 				return false
 			}
 		}
