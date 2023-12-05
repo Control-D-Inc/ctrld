@@ -216,11 +216,11 @@ DHCP leases file format.
 - Default: ""
 
 ### client_id_preference
-Decide how client ID has is generated.
+Decide how the client ID is generated
 
-If `host` -> client id will be a `hash(hostname)`.
-If `mac` -> client id will be `hash(mac)`.
-
+If `host` -> client id will only use the hostname i.e.`hash(hostname)`.
+If `mac` -> client id will only use the MAC address `hash(mac)`.
+Else -> client ID will use both Mac and Hostname i.e. `hash(mac + host)
 - Type: string
 - Required: no
 - Valid values: `mac`, `host`
