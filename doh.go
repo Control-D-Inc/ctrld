@@ -18,11 +18,12 @@ import (
 )
 
 const (
-	dohMacHeader         = "x-cd-mac"
-	dohIPHeader          = "x-cd-ip"
-	dohHostHeader        = "x-cd-host"
-	dohOsHeader          = "x-cd-os"
-	headerApplicationDNS = "application/dns-message"
+	dohMacHeader          = "x-cd-mac"
+	dohIPHeader           = "x-cd-ip"
+	dohHostHeader         = "x-cd-host"
+	dohOsHeader           = "x-cd-os"
+	dohClientIDPrefHeader = "x-cd-cpref"
+	headerApplicationDNS  = "application/dns-message"
 )
 
 // EncodeOsNameMap provides mapping from OS name to a shorter string, used for encoding x-cd-os value.
@@ -180,6 +181,12 @@ func addControlDHeaders(req *http.Request, ci *ClientInfo) {
 	}
 	if ci.Self {
 		req.Header.Set(dohOsHeader, dohOsHeaderValue())
+	}
+	switch ci.ClientIDPref {
+	case "mac":
+		req.Header.Set(dohClientIDPrefHeader, "1")
+	case "host":
+		req.Header.Set(dohClientIDPrefHeader, "2")
 	}
 }
 

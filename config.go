@@ -193,6 +193,7 @@ type ServiceConfig struct {
 	DiscoverDHCP          *bool  `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
 	DiscoverPtr           *bool  `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
 	DiscoverHosts         *bool  `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
+	ClientIDPref          string `mapstructure:"client_id_preference" toml:"client_id_preference,omitempty" validate:"omitempty,oneof=host mac"`
 	Daemon                bool   `mapstructure:"-" toml:"-"`
 	AllocateIP            bool   `mapstructure:"-" toml:"-"`
 }

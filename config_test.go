@@ -101,6 +101,7 @@ func TestConfigValidation(t *testing.T) {
 		{"lease file format required if lease file exist", configWithExistedLeaseFile(t), true},
 		{"invalid lease file format", configWithInvalidLeaseFileFormat(t), true},
 		{"invalid doh/doh3 endpoint", configWithInvalidDoHEndpoint(t), true},
+		{"invalid client id pref", configWithInvalidClientIDPref(t), true},
 	}
 
 	for _, tc := range tests {
@@ -236,5 +237,11 @@ func configWithInvalidDoHEndpoint(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Upstream["0"].Endpoint = "1.1.1.1"
 	cfg.Upstream["0"].Type = ctrld.ResolverTypeDOH
+	return cfg
+}
+
+func configWithInvalidClientIDPref(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Service.ClientIDPref = "foo"
 	return cfg
 }

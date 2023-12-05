@@ -67,6 +67,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		reqId := requestID()
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 		ci := p.getClientInfo(remoteIP, m)
+		ci.ClientIDPref = p.cfg.Service.ClientIDPref
 		stripClientSubnet(m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())

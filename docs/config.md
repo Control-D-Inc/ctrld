@@ -215,6 +215,17 @@ DHCP leases file format.
 - Valid values: `dnsmasq`, `isc-dhcp`
 - Default: ""
 
+### client_id_preference
+Decide how client ID has is generated.
+
+If `host` -> client id will be a `hash(hostname)`.
+If `mac` -> client id will be `hash(mac)`.
+
+- Type: string
+- Required: no
+- Valid values: `mac`, `host`
+- Default: ""
+
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.
 
