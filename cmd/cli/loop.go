@@ -60,6 +60,11 @@ func (p *prog) checkDnsLoop() {
 		if p.um.isDown("upstream." + n) {
 			continue
 		}
+		// Do not send test query to external upstream.
+		if !canBeLocalUpstream(uc.Domain) {
+			mainLog.Load().Debug().Msgf("skipping external: upstream.%s", n)
+			continue
+		}
 		uid := uc.UID()
 		p.loop[uid] = false
 		upstream[uid] = uc
