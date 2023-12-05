@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -14,6 +15,36 @@ const (
 	loopTestDomain = ".test"
 	loopTestQtype  = dns.TypeTXT
 )
+
+// newLoopGuard returns new loopGuard.
+func newLoopGuard() *loopGuard {
+	return &loopGuard{inflight: make(map[string]struct{})}
+}
+
+// loopGuard guards against DNS loop, ensuring only one query
+// for a given domain is processed at a time.
+type loopGuard struct {
+	mu       sync.Mutex
+	inflight map[string]struct{}
+}
+
+// TryLock marks the domain as being processed.
+func (lg *loopGuard) TryLock(domain string) bool {
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	if _, inflight := lg.inflight[domain]; !inflight {
+		lg.inflight[domain] = struct{}{}
+		return true
+	}
+	return false
+}
+
+// Unlock marks the domain as being done.
+func (lg *loopGuard) Unlock(domain string) {
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	delete(lg.inflight, domain)
+}
 
 // isLoop reports whether the given upstream config is detected as having DNS loop.
 func (p *prog) isLoop(uc *ctrld.UpstreamConfig) bool {

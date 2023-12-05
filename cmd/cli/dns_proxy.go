@@ -275,7 +275,13 @@ macRules:
 }
 
 func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg {
-	ip := ipFromARPA(msg.Question[0].Name)
+	cDomainName := msg.Question[0].Name
+	locked := p.ptrLoopGuard.TryLock(cDomainName)
+	defer p.ptrLoopGuard.Unlock(cDomainName)
+	if !locked {
+		return nil
+	}
+	ip := ipFromARPA(cDomainName)
 	if name := p.ciTable.LookupHostname(ip.String(), ""); name != "" {
 		answer := new(dns.Msg)
 		answer.SetReply(msg)
@@ -302,6 +308,11 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
 func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg {
 	q := msg.Question[0]
 	hostname := strings.TrimSuffix(q.Name, ".")
+	locked := p.lanLoopGuard.TryLock(hostname)
+	defer p.lanLoopGuard.Unlock(hostname)
+	if !locked {
+		return nil
+	}
 	if ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA); ip != nil {
 		answer := new(dns.Msg)
 		answer.SetReply(msg)

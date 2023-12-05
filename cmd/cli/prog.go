@@ -66,6 +66,8 @@ type prog struct {
 	ciTable        *clientinfo.Table
 	um             *upstreamMonitor
 	router         router.Router
+	ptrLoopGuard   *loopGuard
+	lanLoopGuard   *loopGuard
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -236,6 +238,8 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	}
 	p.onStartedDone = make(chan struct{})
 	p.loop = make(map[string]bool)
+	p.lanLoopGuard = newLoopGuard()
+	p.ptrLoopGuard = newLoopGuard()
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {

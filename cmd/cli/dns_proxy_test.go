@@ -69,6 +69,8 @@ func Test_prog_upstreamFor(t *testing.T) {
 	cfg := testhelper.SampleConfig(t)
 	p := &prog{cfg: cfg}
 	p.um = newUpstreamMonitor(p.cfg)
+	p.lanLoopGuard = newLoopGuard()
+	p.ptrLoopGuard = newLoopGuard()
 	for _, nc := range p.cfg.Network {
 		for _, cidr := range nc.Cidrs {
 			_, ipNet, err := net.ParseCIDR(cidr)
