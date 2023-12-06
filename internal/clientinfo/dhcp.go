@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -138,20 +139,33 @@ func (d *dhcp) lookupIPByHostname(name string, v6 bool) string {
 	if d == nil {
 		return ""
 	}
-	var ip string
+	var (
+		rfc1918Addrs []netip.Addr
+		others       []netip.Addr
+	)
 	d.ip2name.Range(func(key, value any) bool {
-		if value == name {
-			if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
-				ip = addr.String()
-				if addr.IsLoopback() { // Continue searching if this is loopback address.
-					return true
-				}
-				return false
+		if value != name {
+			return true
+		}
+		if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
+			if addr.IsPrivate() {
+				rfc1918Addrs = append(rfc1918Addrs, addr)
+			} else {
+				others = append(others, addr)
 			}
 		}
 		return true
 	})
-	return ip
+	result := [][]netip.Addr{rfc1918Addrs, others}
+	for _, addrs := range result {
+		if len(addrs) > 0 {
+			sort.Slice(addrs, func(i, j int) bool {
+				return addrs[i].Less(addrs[j])
+			})
+			return addrs[0].String()
+		}
+	}
+	return ""
 }
 
 // AddLeaseFile adds given lease file for reading/watching clients info.

@@ -86,3 +86,15 @@ lease 192.168.1.2 {
 		})
 	}
 }
+
+func Test_dhcp_lookupIPByHostname(t *testing.T) {
+	d := &dhcp{}
+	want := "192.168.1.123"
+	d.ip2name.Store(want, "foo")
+	d.ip2name.Store("127.0.0.1", "foo")
+	d.ip2name.Store("169.254.123.123", "foo")
+
+	if got := d.lookupIPByHostname("foo", false); got != want {
+		t.Fatalf("unexpected result, want: %s, got: %s", want, got)
+	}
+}
