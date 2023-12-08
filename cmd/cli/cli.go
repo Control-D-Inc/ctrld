@@ -144,8 +144,6 @@ func initCLI() {
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	_ = runCmd.Flags().MarkHidden("iface")
-	runCmd.Flags().BoolVarP(&setupRouter, "router", "", false, "Do setup router")
-	_ = runCmd.Flags().MarkHidden("router")
 	runCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 
 	rootCmd.AddCommand(runCmd)
@@ -255,7 +253,7 @@ func initCLI() {
 				return
 			}
 
-			if router.Name() != "" && setupRouter {
+			if router.Name() != "" && iface != "" {
 				mainLog.Load().Debug().Msg("cleaning up router before installing")
 				_ = p.router.Cleanup()
 			}
@@ -312,8 +310,6 @@ func initCLI() {
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmd.Flags().StringVarP(&nextdns, nextdnsFlagName, "", "", "NextDNS resolver id")
 	startCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
-	startCmd.Flags().BoolVarP(&setupRouter, "router", "", false, "Do router setup")
-	_ = startCmd.Flags().MarkHidden("router")
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
@@ -598,16 +594,11 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if !cmd.Flags().Changed("iface") {
 				os.Args = append(os.Args, "--iface="+ifaceStartStop)
 			}
-			if !cmd.Flags().Changed("router") {
-				os.Args = append(os.Args, fmt.Sprintf("--router=%v", setupRouterStartStop))
-			}
 			iface = ifaceStartStop
-			setupRouter = setupRouterStartStop
 			startCmd.Run(cmd, args)
 		},
 	}
 	startCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Update DNS setting for iface, "auto" means the default interface gateway`)
-	startCmdAlias.Flags().BoolVarP(&setupRouterStartStop, "router", "", true, "Do router setup")
 	startCmdAlias.Flags().AddFlagSet(startCmd.Flags())
 	rootCmd.AddCommand(startCmdAlias)
 	stopCmdAlias := &cobra.Command{
@@ -621,16 +612,11 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if !cmd.Flags().Changed("iface") {
 				os.Args = append(os.Args, "--iface="+ifaceStartStop)
 			}
-			if !cmd.Flags().Changed("router") {
-				os.Args = append(os.Args, fmt.Sprintf("--router=%v", setupRouterStartStop))
-			}
 			iface = ifaceStartStop
-			setupRouter = setupRouterStartStop
 			stopCmd.Run(cmd, args)
 		},
 	}
 	stopCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
-	stopCmdAlias.Flags().BoolVarP(&setupRouterStartStop, "router", "", true, "Do router setup")
 	stopCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
 	rootCmd.AddCommand(stopCmdAlias)
 
@@ -991,7 +977,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		if cp := router.CertPool(); cp != nil {
 			rootCertPool = cp
 		}
-		if setupRouter {
+		if iface != "" {
 			p.onStarted = append(p.onStarted, func() {
 				mainLog.Load().Debug().Msg("router setup on start")
 				if err := p.router.Setup(); err != nil {
