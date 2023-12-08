@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -437,6 +438,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 				if p.um.isDown(upstreams[n]) {
 					go p.um.checkUpstream(upstreams[n], upstreamConfig)
 				}
+			}
+			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
+			var e net.Error
+			if errors.As(err, &e) && e.Timeout() {
+				upstreamConfig.ReBootstrap()
 			}
 			return nil
 		}

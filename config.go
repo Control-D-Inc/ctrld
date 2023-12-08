@@ -426,8 +426,9 @@ func (uc *UpstreamConfig) ReBootstrap() {
 		return
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
-		ProxyLogger.Load().Debug().Msg("re-bootstrapping upstream ip")
-		uc.rebootstrap.Store(true)
+		if uc.rebootstrap.CompareAndSwap(false, true) {
+			ProxyLogger.Load().Debug().Msg("re-bootstrapping upstream ip")
+		}
 		return true, nil
 	})
 }
