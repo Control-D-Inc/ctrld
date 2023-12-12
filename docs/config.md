@@ -405,7 +405,14 @@ Port number that the listener will listen on for incoming requests. If `port` is
 - Default: 0 or 53 or 5354 (depending on platform)
 
 ### restricted
-If set to `true` makes the listener `REFUSE` DNS queries from all source IP addresses that are not explicitly defined in the policy using a `network`. 
+If set to `true`, makes the listener `REFUSED` DNS queries from all source IP addresses that are not explicitly defined in the policy using a `network`. 
+
+- Type: bool
+- Required: no
+- Default: false
+
+### allow_wan_clients
+The listener `REFUSED` DNS queries from WAN clients by default. If set to `true`, makes the listener replies to them.
 
 - Type: bool
 - Required: no

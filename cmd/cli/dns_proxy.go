@@ -77,12 +77,21 @@ func (p *prog) serveDNS(listenerNum string) error {
 		if len(m.Question) == 0 {
 			answer := new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeFormatError)
+			_ = w.WriteMsg(answer)
+			return
+		}
+		reqId := requestID()
+		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
+		if !listenerConfig.AllowWanClients && isWanClient(w.RemoteAddr()) {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "query refused, listener does not allow WAN clients: %s", w.RemoteAddr().String())
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeRefused)
+			_ = w.WriteMsg(answer)
 			return
 		}
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
-		reqId := requestID()
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 		ci := p.getClientInfo(remoteIP, m)
 		ci.ClientIDPref = p.cfg.Service.ClientIDPref
@@ -90,7 +99,6 @@ func (p *prog) serveDNS(listenerNum string) error {
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
 		t := time.Now()
-		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s received query: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
 		res := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, ci.Mac, domain)
 		var answer *dns.Msg
@@ -113,7 +121,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
 		}
 		if err := w.WriteMsg(answer); err != nil {
-			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "serveUDP: failed to send DNS response to client")
+			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "serveDNS: failed to send DNS response to client")
 		}
 	})
 
@@ -864,4 +872,17 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
 		strings.HasSuffix(name, ".lan")
+}
+
+// isWanClient reports whether the input is a WAN address.
+func isWanClient(na net.Addr) bool {
+	var ip netip.Addr
+	if ap, err := netip.ParseAddrPort(na.String()); err == nil {
+		ip = ap.Addr()
+	}
+	return !ip.IsLoopback() &&
+		!ip.IsPrivate() &&
+		!ip.IsLinkLocalUnicast() &&
+		!ip.IsLinkLocalMulticast() &&
+		!tsaddr.CGNATRange().Contains(ip)
 }

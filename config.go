@@ -240,10 +240,11 @@ type UpstreamConfig struct {
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
 type ListenerConfig struct {
-	IP         string                `mapstructure:"ip" toml:"ip,omitempty" validate:"iporempty"`
-	Port       int                   `mapstructure:"port" toml:"port,omitempty" validate:"gte=0"`
-	Restricted bool                  `mapstructure:"restricted" toml:"restricted,omitempty"`
-	Policy     *ListenerPolicyConfig `mapstructure:"policy" toml:"policy,omitempty"`
+	IP              string                `mapstructure:"ip" toml:"ip,omitempty" validate:"iporempty"`
+	Port            int                   `mapstructure:"port" toml:"port,omitempty" validate:"gte=0"`
+	Restricted      bool                  `mapstructure:"restricted" toml:"restricted,omitempty"`
+	AllowWanClients bool                  `mapstructure:"allow_wan_clients" toml:"allow_wan_clients,omitempty"`
+	Policy          *ListenerPolicyConfig `mapstructure:"policy" toml:"policy,omitempty"`
 }
 
 // IsDirectDnsListener reports whether ctrld can be a direct listener on port 53.

@@ -405,3 +405,29 @@ func Test_isPrivatePtrLookup(t *testing.T) {
 		})
 	}
 }
+
+func Test_isWanClient(t *testing.T) {
+	tests := []struct {
+		name        string
+		addr        net.Addr
+		isWanClient bool
+	}{
+		// RFC 1918 allocates 10.0.0.0/8, 172.16.0.0/12, and 192.168.0.0/16 as
+		{"10.0.0.0/8", &net.UDPAddr{IP: net.ParseIP("10.0.0.123")}, false},
+		{"172.16.0.0/12", &net.UDPAddr{IP: net.ParseIP("172.16.0.123")}, false},
+		{"192.168.0.0/16", &net.UDPAddr{IP: net.ParseIP("192.168.1.123")}, false},
+		{"CGNAT", &net.UDPAddr{IP: net.ParseIP("100.66.27.28")}, false},
+		{"Loopback", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")}, false},
+		{"Link Local Unicast", &net.UDPAddr{IP: net.ParseIP("fe80::69f6:e16e:8bdb:433f")}, false},
+		{"Public", &net.UDPAddr{IP: net.ParseIP("8.8.8.8")}, true},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isWanClient(tc.addr); tc.isWanClient != got {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.isWanClient, got)
+			}
+		})
+	}
+}
