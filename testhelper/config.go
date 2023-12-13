@@ -82,4 +82,8 @@ rules = [
     {"*.ru"         = ["upstream.1"]},
     {"*.local.host" = ["upstream.2", "upstream.0"]},
 ]
+macs = [
+    {"14:45:A0:67:83:0A" = ["upstream.2"]},
+    {"14:54:4a:8e:08:2d" = ["upstream.2"]},
+]
 `

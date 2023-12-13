@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
 	"syscall"
@@ -57,6 +58,27 @@ func (m *mdns) List() []string {
 		return true
 	})
 	return ips
+}
+
+func (m *mdns) lookupIPByHostname(name string, v6 bool) string {
+	if m == nil {
+		return ""
+	}
+	var ip string
+	m.name.Range(func(key, value any) bool {
+		if value == name {
+			if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
+				ip = addr.String()
+				//lint:ignore S1008 This is used for readable.
+				if addr.IsLoopback() { // Continue searching if this is loopback address.
+					return true
+				}
+				return false
+			}
+		}
+		return true
+	})
+	return ip
 }
 
 func (m *mdns) init(quitCh chan struct{}) error {
@@ -122,6 +144,10 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 		if err != nil {
 			if err, ok := err.(*net.OpError); ok && (err.Timeout() || err.Temporary()) {
 				continue
+			}
+			// Do not complain about use of closed network connection.
+			if errors.Is(err, net.ErrClosed) {
+				return
 			}
 			ctrld.ProxyLogger.Load().Debug().Err(err).Msg("mdns readLoop error")
 			return

@@ -6,14 +6,18 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"time"
+
+	"github.com/Control-D-Inc/ctrld"
 )
 
 const (
 	contentTypeJson = "application/json"
 	listClientsPath = "/clients"
 	startedPath     = "/started"
+	reloadPath      = "/reload"
 )
 
 type controlServer struct {
@@ -74,6 +78,52 @@ func (p *prog) registerControlServerHandler() {
 		case <-time.After(10 * time.Second):
 			w.WriteHeader(http.StatusRequestTimeout)
 		}
+	}))
+	p.cs.register(reloadPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		listeners := make(map[string]*ctrld.ListenerConfig)
+		p.mu.Lock()
+		for k, v := range p.cfg.Listener {
+			listeners[k] = &ctrld.ListenerConfig{
+				IP:   v.IP,
+				Port: v.Port,
+			}
+		}
+		oldSvc := p.cfg.Service
+		p.mu.Unlock()
+		if err := p.sendReloadSignal(); err != nil {
+			mainLog.Load().Err(err).Msg("could not send reload signal")
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		select {
+		case <-p.reloadDoneCh:
+		case <-time.After(5 * time.Second):
+			http.Error(w, "timeout waiting for ctrld reload", http.StatusInternalServerError)
+			return
+		}
+
+		p.mu.Lock()
+		defer p.mu.Unlock()
+
+		// Checking for cases that we could not do a reload.
+
+		// 1. Listener config ip or port changes.
+		for k, v := range p.cfg.Listener {
+			l := listeners[k]
+			if l == nil || l.IP != v.IP || l.Port != v.Port {
+				w.WriteHeader(http.StatusCreated)
+				return
+			}
+		}
+
+		// 2. Service config changes.
+		if !reflect.DeepEqual(oldSvc, p.cfg.Service) {
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+
+		// Otherwise, reload is done.
+		w.WriteHeader(http.StatusOK)
 	}))
 }
 

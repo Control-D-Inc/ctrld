@@ -5,10 +5,11 @@ type ClientInfoCtxKey struct{}
 
 // ClientInfo represents ctrld's clients information.
 type ClientInfo struct {
-	Mac      string
-	IP       string
-	Hostname string
-	Self     bool
+	Mac          string
+	IP           string
+	Hostname     string
+	Self         bool
+	ClientIDPref string
 }
 
 // LeaseFileFormat specifies the format of DHCP lease file.

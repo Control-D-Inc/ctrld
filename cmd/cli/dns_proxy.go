@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/net/interfaces"
 	"tailscale.com/net/netaddr"
+	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
@@ -25,6 +27,7 @@ import (
 
 const (
 	staleTTL = 60 * time.Second
+	localTTL = 3600 * time.Second
 	// EDNS0_OPTION_MAC is dnsmasq EDNS0 code for adding mac option.
 	// https://thekelleys.org.uk/gitweb/?p=dnsmasq.git;a=blob;f=src/dns-protocol.h;h=76ac66a8c28317e9c121a74ab5fd0e20f6237dc8;hb=HEAD#l81
 	// This is also dns.EDNS0LOCALSTART, but define our own constant here for clarification.
@@ -37,6 +40,29 @@ var osUpstreamConfig = &ctrld.UpstreamConfig{
 	Timeout: 2000,
 }
 
+var privateUpstreamConfig = &ctrld.UpstreamConfig{
+	Name:    "Private resolver",
+	Type:    ctrld.ResolverTypePrivate,
+	Timeout: 2000,
+}
+
+// proxyRequest contains data for proxying a DNS query to upstream.
+type proxyRequest struct {
+	msg            *dns.Msg
+	ci             *ctrld.ClientInfo
+	failoverRcodes []int
+	ufr            *upstreamForResult
+}
+
+// upstreamForResult represents the result of processing rules for a request.
+type upstreamForResult struct {
+	upstreams      []string
+	matchedPolicy  string
+	matchedNetwork string
+	matchedRule    string
+	matched        bool
+}
+
 func (p *prog) serveDNS(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
 	// make sure ip is allocated
@@ -44,36 +70,58 @@ func (p *prog) serveDNS(listenerNum string) error {
 		mainLog.Load().Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: failed to allocate listen ip")
 		return allocErr
 	}
-	var failoverRcodes []int
-	if listenerConfig.Policy != nil {
-		failoverRcodes = listenerConfig.Policy.FailoverRcodeNumbers
-	}
+
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
 		p.sema.acquire()
 		defer p.sema.release()
+		if len(m.Question) == 0 {
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeFormatError)
+			_ = w.WriteMsg(answer)
+			return
+		}
+		reqId := requestID()
+		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
+		if !listenerConfig.AllowWanClients && isWanClient(w.RemoteAddr()) {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "query refused, listener does not allow WAN clients: %s", w.RemoteAddr().String())
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeRefused)
+			_ = w.WriteMsg(answer)
+			return
+		}
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
-		reqId := requestID()
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 		ci := p.getClientInfo(remoteIP, m)
+		ci.ClientIDPref = p.cfg.Service.ClientIDPref
+		stripClientSubnet(m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
 		t := time.Now()
-		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s received query: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
-		upstreams, matched := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, domain)
+		res := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, ci.Mac, domain)
 		var answer *dns.Msg
-		if !matched && listenerConfig.Restricted {
+		if !res.matched && listenerConfig.Restricted {
+			ctrld.Log(ctx, mainLog.Load().Info(), "query refused, %s does not match any network policy", remoteAddr.String())
 			answer = new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeRefused)
 		} else {
-			answer = p.proxy(ctx, upstreams, failoverRcodes, m, ci)
+			var failoverRcode []int
+			if listenerConfig.Policy != nil {
+				failoverRcode = listenerConfig.Policy.FailoverRcodeNumbers
+			}
+			answer = p.proxy(ctx, &proxyRequest{
+				msg:            m,
+				ci:             ci,
+				failoverRcodes: failoverRcode,
+				ufr:            res,
+			})
 			rtt := time.Since(t)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
 		}
 		if err := w.WriteMsg(answer); err != nil {
-			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "serveUDP: failed to send DNS response to client")
+			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "serveDNS: failed to send DNS response to client")
 		}
 	})
 
@@ -99,7 +147,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		// addresses of the machine. So ctrld could receive queries from LAN clients.
 		if needRFC1918Listeners(listenerConfig) {
 			g.Go(func() error {
-				for _, addr := range rfc1918Addresses() {
+				for _, addr := range ctrld.Rfc1918Addresses() {
 					func() {
 						listenAddr := net.JoinHostPort(addr, strconv.Itoa(listenerConfig.Port))
 						s, errCh := runDNSServer(listenAddr, proto, handler)
@@ -146,27 +194,24 @@ func (p *prog) serveDNS(listenerNum string) error {
 // Though domain policy has higher priority than network policy, it is still
 // processed later, because policy logging want to know whether a network rule
 // is disregarded in favor of the domain level rule.
-func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, domain string) ([]string, bool) {
+func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, srcMac, domain string) (res *upstreamForResult) {
 	upstreams := []string{upstreamPrefix + defaultUpstreamNum}
 	matchedPolicy := "no policy"
 	matchedNetwork := "no network"
 	matchedRule := "no rule"
 	matched := false
+	res = &upstreamForResult{}
 
 	defer func() {
-		if !matched && lc.Restricted {
-			ctrld.Log(ctx, mainLog.Load().Info(), "query refused, %s does not match any network policy", addr.String())
-			return
-		}
-		if matched {
-			ctrld.Log(ctx, mainLog.Load().Info(), "%s, %s, %s -> %v", matchedPolicy, matchedNetwork, matchedRule, upstreams)
-		} else {
-			ctrld.Log(ctx, mainLog.Load().Info(), "no explicit policy matched, using default routing -> %v", upstreams)
-		}
+		res.upstreams = upstreams
+		res.matched = matched
+		res.matchedPolicy = matchedPolicy
+		res.matchedNetwork = matchedNetwork
+		res.matchedRule = matchedRule
 	}()
 
 	if lc.Policy == nil {
-		return upstreams, false
+		return
 	}
 
 	do := func(policyUpstreams []string) {
@@ -202,6 +247,19 @@ networkRules:
 		}
 	}
 
+macRules:
+	for _, rule := range lc.Policy.Macs {
+		for source, targets := range rule {
+			if source != "" && strings.EqualFold(source, srcMac) {
+				matchedPolicy = lc.Policy.Name
+				matchedNetwork = source
+				networkTargets = targets
+				matched = true
+				break macRules
+			}
+		}
+	}
+
 	for _, rule := range lc.Policy.Rules {
 		// There's only one entry per rule, config validation ensures this.
 		for source, targets := range rule {
@@ -213,7 +271,7 @@ networkRules:
 				matchedRule = source
 				do(targets)
 				matched = true
-				return upstreams, matched
+				return
 			}
 		}
 	}
@@ -222,26 +280,134 @@ networkRules:
 		do(networkTargets)
 	}
 
-	return upstreams, matched
+	return
 }
 
-func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []int, msg *dns.Msg, ci *ctrld.ClientInfo) *dns.Msg {
+func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg {
+	cDomainName := msg.Question[0].Name
+	locked := p.ptrLoopGuard.TryLock(cDomainName)
+	defer p.ptrLoopGuard.Unlock(cDomainName)
+	if !locked {
+		return nil
+	}
+	ip := ipFromARPA(cDomainName)
+	if name := p.ciTable.LookupHostname(ip.String(), ""); name != "" {
+		answer := new(dns.Msg)
+		answer.SetReply(msg)
+		answer.Compress = true
+		answer.Answer = []dns.RR{&dns.PTR{
+			Hdr: dns.RR_Header{
+				Name:   msg.Question[0].Name,
+				Rrtype: dns.TypePTR,
+				Class:  dns.ClassINET,
+			},
+			Ptr: dns.Fqdn(name),
+		}}
+		ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup, using client info table")
+		ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
+			Mac:      p.ciTable.LookupMac(ip.String()),
+			IP:       ip.String(),
+			Hostname: name,
+		})
+		return answer
+	}
+	return nil
+}
+
+func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg {
+	q := msg.Question[0]
+	hostname := strings.TrimSuffix(q.Name, ".")
+	locked := p.lanLoopGuard.TryLock(hostname)
+	defer p.lanLoopGuard.Unlock(hostname)
+	if !locked {
+		return nil
+	}
+	if ip := p.ciTable.LookupIPByHostname(hostname, q.Qtype == dns.TypeAAAA); ip != nil {
+		answer := new(dns.Msg)
+		answer.SetReply(msg)
+		answer.Compress = true
+		switch {
+		case ip.Is4():
+			answer.Answer = []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{
+					Name:   msg.Question[0].Name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    uint32(localTTL.Seconds()),
+				},
+				A: ip.AsSlice(),
+			}}
+		case ip.Is6():
+			answer.Answer = []dns.RR{&dns.AAAA{
+				Hdr: dns.RR_Header{
+					Name:   msg.Question[0].Name,
+					Rrtype: dns.TypeAAAA,
+					Class:  dns.ClassINET,
+					Ttl:    uint32(localTTL.Seconds()),
+				},
+				AAAA: ip.AsSlice(),
+			}}
+		}
+		ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using client info table")
+		ctrld.Log(ctx, mainLog.Load().Debug(), "client info: %v", ctrld.ClientInfo{
+			Mac:      p.ciTable.LookupMac(ip.String()),
+			IP:       ip.String(),
+			Hostname: hostname,
+		})
+		return answer
+	}
+	return nil
+}
+
+func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 	var staleAnswer *dns.Msg
+	upstreams := req.ufr.upstreams
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 		upstreams = []string{upstreamOS}
 	}
+
+	// LAN/PTR lookup flow:
+	//
+	// 1. If there's matching rule, follow it.
+	// 2. Try from client info table.
+	// 3. Try private resolver.
+	// 4. Try remote upstream.
+	isLanOrPtrQuery := false
+	if req.ufr.matched {
+		ctrld.Log(ctx, mainLog.Load().Info(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+	} else {
+		switch {
+		case isPrivatePtrLookup(req.msg):
+			isLanOrPtrQuery = true
+			if answer := p.proxyPrivatePtrLookup(ctx, req.msg); answer != nil {
+				return answer
+			}
+			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup, using upstreams: %v", upstreams)
+		case isLanHostnameQuery(req.msg):
+			isLanOrPtrQuery = true
+			if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
+				return answer
+			}
+			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using upstreams: %v", upstreams)
+		default:
+			ctrld.Log(ctx, mainLog.Load().Info(), "no explicit policy matched, using default routing -> %v", upstreams)
+		}
+	}
+
 	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
-	if p.cache != nil && msg.Question[0].Qtype != dns.TypePTR {
+	if p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR {
 		for _, upstream := range upstreams {
-			cachedValue := p.cache.Get(dnscache.NewKey(msg, upstream))
+			cachedValue := p.cache.Get(dnscache.NewKey(req.msg, upstream))
 			if cachedValue == nil {
 				continue
 			}
 			answer := cachedValue.Msg.Copy()
-			answer.SetRcode(msg, answer.Rcode)
+			answer.SetRcode(req.msg, answer.Rcode)
 			now := time.Now()
 			if cachedValue.Expire.After(now) {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "hit cached response")
@@ -268,9 +434,9 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		return dnsResolver.Resolve(resolveCtx, msg)
 	}
 	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
-		if upstreamConfig.UpstreamSendClientInfo() && ci != nil {
+		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "including client info with the request")
-			ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, ci)
+			ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, req.ci)
 		}
 		answer, err := resolve1(n, upstreamConfig, msg)
 		if err != nil {
@@ -280,6 +446,11 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 				if p.um.isDown(upstreams[n]) {
 					go p.um.checkUpstream(upstreams[n], upstreamConfig)
 				}
+			}
+			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
+			var e net.Error
+			if errors.As(err, &e) && e.Timeout() {
+				upstreamConfig.ReBootstrap()
 			}
 			return nil
 		}
@@ -297,7 +468,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			ctrld.Log(ctx, mainLog.Load().Warn(), "%s is down", upstreams[n])
 			continue
 		}
-		answer := resolve(n, upstreamConfig, msg)
+		answer := resolve(n, upstreamConfig, req.msg)
 		if answer == nil {
 			if serveStaleCache && staleAnswer != nil {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
@@ -307,7 +478,13 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 			}
 			continue
 		}
-		if answer.Rcode != dns.RcodeSuccess && len(upstreamConfigs) > 1 && containRcode(failoverRcodes, answer.Rcode) {
+		// We are doing LAN/PTR lookup using private resolver, so always process next one.
+		// Except for the last, we want to send response instead of saying all upstream failed.
+		if answer.Rcode != dns.RcodeSuccess && isLanOrPtrQuery && n != len(upstreamConfigs)-1 {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "no response from %s, process to next upstream", upstreams[n])
+			continue
+		}
+		if answer.Rcode != dns.RcodeSuccess && len(upstreamConfigs) > 1 && containRcode(req.failoverRcodes, answer.Rcode) {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "failover rcode matched, process to next upstream")
 			continue
 		}
@@ -315,7 +492,7 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 		// set compression, as it is not set by default when unpacking
 		answer.Compress = true
 
-		if p.cache != nil {
+		if p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR {
 			ttl := ttlFromMsg(answer)
 			now := time.Now()
 			expired := now.Add(time.Duration(ttl) * time.Second)
@@ -323,15 +500,25 @@ func (p *prog) proxy(ctx context.Context, upstreams []string, failoverRcodes []i
 				expired = now.Add(time.Duration(cachedTTL) * time.Second)
 			}
 			setCachedAnswerTTL(answer, now, expired)
-			p.cache.Add(dnscache.NewKey(msg, upstreams[n]), dnscache.NewValue(answer, expired))
+			p.cache.Add(dnscache.NewKey(req.msg, upstreams[n]), dnscache.NewValue(answer, expired))
 			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
 		}
 		return answer
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
 	answer := new(dns.Msg)
-	answer.SetRcode(msg, dns.RcodeServerFailure)
+	answer.SetRcode(req.msg, dns.RcodeServerFailure)
 	return answer
+}
+
+func (p *prog) upstreamsAndUpstreamConfigForLanAndPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
+	if len(p.localUpstreams) > 0 {
+		tmp := make([]string, 0, len(p.localUpstreams)+len(upstreams))
+		tmp = append(tmp, p.localUpstreams...)
+		tmp = append(tmp, upstreams...)
+		return tmp, p.upstreamConfigsFromUpstreamNumbers(tmp)
+	}
+	return append([]string{upstreamOS}, upstreams...), append([]*ctrld.UpstreamConfig{privateUpstreamConfig}, upstreamConfigs...)
 }
 
 func (p *prog) upstreamConfigsFromUpstreamNumbers(upstreams []string) []*ctrld.UpstreamConfig {
@@ -454,6 +641,23 @@ func ipAndMacFromMsg(msg *dns.Msg) (string, string) {
 	return ip, mac
 }
 
+// stripClientSubnet removes EDNS0_SUBNET from DNS message if the IP is RFC1918 or loopback address,
+// passing them to upstream is pointless, these cannot be used by anything on the WAN.
+func stripClientSubnet(msg *dns.Msg) {
+	if opt := msg.IsEdns0(); opt != nil {
+		opts := make([]dns.EDNS0, 0, len(opt.Option))
+		for _, s := range opt.Option {
+			if e, ok := s.(*dns.EDNS0_SUBNET); ok && (e.Address.IsPrivate() || e.Address.IsLoopback()) {
+				continue
+			}
+			opts = append(opts, s)
+		}
+		if len(opts) != len(opt.Option) {
+			opt.Option = opts
+		}
+	}
+}
+
 func spoofRemoteAddr(addr net.Addr, ci *ctrld.ClientInfo) net.Addr {
 	if ci != nil && ci.IP != "" {
 		switch addr := addr.(type) {
@@ -531,21 +735,42 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	}
 
 	// If MAC is still empty here, that mean the requests are made from virtual interface,
-	// like VPN/Wireguard clients, so we use whatever MAC address associated with remoteIP
-	// (most likely 127.0.0.1), and ci.IP as hostname, so we can distinguish those clients.
+	// like VPN/Wireguard clients, so we use ci.IP as hostname to distinguish those clients.
 	if ci.Mac == "" {
-		ci.Mac = p.ciTable.LookupMac(remoteIP)
 		if hostname := p.ciTable.LookupHostname(ci.IP, ""); hostname != "" {
 			ci.Hostname = hostname
 		} else {
-			ci.Hostname = ci.IP
-			p.ciTable.StoreVPNClient(ci)
+			// Only use IP as hostname for IPv4 clients.
+			// For Android devices, when it joins the network, it uses ctrld to resolve
+			// its private DNS once and never reaches ctrld again. For each time, it uses
+			// a different IPv6 address, which causes hundreds/thousands different client
+			// IDs created for the same device, which is pointless.
+			//
+			// TODO(cuonglm): investigate whether this can be a false positive for other clients?
+			if !ctrldnet.IsIPv6(ci.IP) {
+				ci.Hostname = ci.IP
+				p.ciTable.StoreVPNClient(ci)
+			}
 		}
 	} else {
 		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	}
 	ci.Self = queryFromSelf(ci.IP)
+	p.spoofLoopbackIpInClientInfo(ci)
 	return ci
+}
+
+// spoofLoopbackIpInClientInfo replaces loopback IPs in client info.
+//
+// - Preference IPv4.
+// - Preference RFC1918.
+func (p *prog) spoofLoopbackIpInClientInfo(ci *ctrld.ClientInfo) {
+	if ip := net.ParseIP(ci.IP); ip == nil || !ip.IsLoopback() {
+		return
+	}
+	if ip := p.ciTable.LookupRFC1918IPv4(ci.Mac); ip != "" {
+		ci.IP = ip
+	}
 }
 
 // queryFromSelf reports whether the input IP is from device running ctrld.
@@ -578,17 +803,86 @@ func needRFC1918Listeners(lc *ctrld.ListenerConfig) bool {
 	return lc.IP == "127.0.0.1" && lc.Port == 53
 }
 
-func rfc1918Addresses() []string {
-	var res []string
-	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
-		addrs, _ := i.Addrs()
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok || !ipNet.IP.IsPrivate() {
-				continue
-			}
-			res = append(res, ipNet.IP.String())
+// ipFromARPA parses a FQDN arpa domain and return the IP address if valid.
+func ipFromARPA(arpa string) net.IP {
+	if arpa, ok := strings.CutSuffix(arpa, ".in-addr.arpa."); ok {
+		if ptrIP := net.ParseIP(arpa); ptrIP != nil {
+			return net.IP{ptrIP[15], ptrIP[14], ptrIP[13], ptrIP[12]}
 		}
-	})
-	return res
+	}
+	if arpa, ok := strings.CutSuffix(arpa, ".ip6.arpa."); ok {
+		l := net.IPv6len * 2
+		base := 16
+		ip := make(net.IP, net.IPv6len)
+		for i := 0; i < l && arpa != ""; i++ {
+			idx := strings.LastIndexByte(arpa, '.')
+			off := idx + 1
+			if idx == -1 {
+				idx = 0
+				off = 0
+			} else if idx == len(arpa)-1 {
+				return nil
+			}
+			n, err := strconv.ParseUint(arpa[off:], base, 8)
+			if err != nil {
+				return nil
+			}
+			b := byte(n)
+			ii := i / 2
+			if i&1 == 1 {
+				b |= ip[ii] << 4
+			}
+			ip[ii] = b
+			arpa = arpa[:idx]
+		}
+		return ip
+	}
+	return nil
+}
+
+// isPrivatePtrLookup reports whether DNS message is an PTR query for LAN/CGNAT network.
+func isPrivatePtrLookup(m *dns.Msg) bool {
+	if m == nil || len(m.Question) == 0 {
+		return false
+	}
+	q := m.Question[0]
+	if ip := ipFromARPA(q.Name); ip != nil {
+		if addr, ok := netip.AddrFromSlice(ip); ok {
+			return addr.IsPrivate() ||
+				addr.IsLoopback() ||
+				addr.IsLinkLocalUnicast() ||
+				tsaddr.CGNATRange().Contains(addr)
+		}
+	}
+	return false
+}
+
+// isLanHostnameQuery reports whether DNS message is an A/AAAA query with LAN hostname.
+func isLanHostnameQuery(m *dns.Msg) bool {
+	if m == nil || len(m.Question) == 0 {
+		return false
+	}
+	q := m.Question[0]
+	switch q.Qtype {
+	case dns.TypeA, dns.TypeAAAA:
+	default:
+		return false
+	}
+	name := strings.TrimSuffix(q.Name, ".")
+	return !strings.Contains(name, ".") ||
+		strings.HasSuffix(name, ".domain") ||
+		strings.HasSuffix(name, ".lan")
+}
+
+// isWanClient reports whether the input is a WAN address.
+func isWanClient(na net.Addr) bool {
+	var ip netip.Addr
+	if ap, err := netip.ParseAddrPort(na.String()); err == nil {
+		ip = ap.Addr()
+	}
+	return !ip.IsLoopback() &&
+		!ip.IsPrivate() &&
+		!ip.IsLinkLocalUnicast() &&
+		!ip.IsLinkLocalMulticast() &&
+		!tsaddr.CGNATRange().Contains(ip)
 }

@@ -2,6 +2,7 @@ package clientinfo
 
 import (
 	"context"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -72,15 +73,16 @@ func (p *ptrDiscover) lookupHostname(ip string) string {
 	msg := new(dns.Msg)
 	addr, err := dns.ReverseAddr(ip)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Warn().Str("discovery", "ptr").Err(err).Msg("invalid ip address")
+		ctrld.ProxyLogger.Load().Info().Str("discovery", "ptr").Err(err).Msg("invalid ip address")
 		return ""
 	}
 	msg.SetQuestion(addr, dns.TypePTR)
 	ans, err := p.resolver.Resolve(ctx, msg)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Warn().Str("discovery", "ptr").Err(err).Msg("could not perform PTR lookup")
-		p.serverDown.Store(true)
-		go p.checkServer()
+		if p.serverDown.CompareAndSwap(false, true) {
+			ctrld.ProxyLogger.Load().Info().Str("discovery", "ptr").Err(err).Msg("could not perform PTR lookup")
+			go p.checkServer()
+		}
 		return ""
 	}
 	for _, rr := range ans.Answer {
@@ -91,6 +93,27 @@ func (p *ptrDiscover) lookupHostname(ip string) string {
 		}
 	}
 	return ""
+}
+
+func (p *ptrDiscover) lookupIPByHostname(name string, v6 bool) string {
+	if p == nil {
+		return ""
+	}
+	var ip string
+	p.hostname.Range(func(key, value any) bool {
+		if value == name {
+			if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
+				ip = addr.String()
+				//lint:ignore S1008 This is used for readable.
+				if addr.IsLoopback() { // Continue searching if this is loopback address.
+					return true
+				}
+				return false
+			}
+		}
+		return true
+	})
+	return ip
 }
 
 // checkServer monitors if the resolver can reach its nameserver. When the nameserver

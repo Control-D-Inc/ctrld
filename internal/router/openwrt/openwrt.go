@@ -8,11 +8,10 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
-
 	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
 
 const (
@@ -20,10 +19,9 @@ const (
 	openwrtDNSMasqConfigPath = "/tmp/dnsmasq.d/ctrld.conf"
 )
 
-var errUCIEntryNotFound = errors.New("uci: Entry not found")
-
 type Openwrt struct {
-	cfg *ctrld.Config
+	cfg              *ctrld.Config
+	dnsmasqCacheSize string
 }
 
 // New returns a router.Router for configuring/setup/run ctrld on Openwrt routers.
@@ -52,15 +50,24 @@ func (o *Openwrt) Setup() error {
 	if o.cfg.FirstListener().IsDirectDnsListener() {
 		return nil
 	}
+
+	// Save current dnsmasq config cache size if present.
+	if cs, err := uci("get", "dhcp.@dnsmasq[0].cachesize"); err == nil {
+		o.dnsmasqCacheSize = cs
+		if _, err := uci("delete", "dhcp.@dnsmasq[0].cachesize"); err != nil {
+			return err
+		}
+		// Commit.
+		if _, err := uci("commit", "dhcp"); err != nil {
+			return err
+		}
+	}
+
 	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, o.cfg)
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(openwrtDNSMasqConfigPath, []byte(data), 0600); err != nil {
-		return err
-	}
-	// Commit.
-	if _, err := uci("commit"); err != nil {
 		return err
 	}
 	// Restart dnsmasq service.
@@ -78,6 +85,18 @@ func (o *Openwrt) Cleanup() error {
 	if err := os.Remove(openwrtDNSMasqConfigPath); err != nil {
 		return err
 	}
+
+	// Restore original value if present.
+	if o.dnsmasqCacheSize != "" {
+		if _, err := uci("set", fmt.Sprintf("dhcp.@dnsmasq[0].cachesize=%s", o.dnsmasqCacheSize)); err != nil {
+			return err
+		}
+		// Commit.
+		if _, err := uci("commit", "dhcp"); err != nil {
+			return err
+		}
+	}
+
 	// Restart dnsmasq service.
 	if err := restartDNSMasq(); err != nil {
 		return err
@@ -91,6 +110,8 @@ func restartDNSMasq() error {
 	}
 	return nil
 }
+
+var errUCIEntryNotFound = errors.New("uci: Entry not found")
 
 func uci(args ...string) (string, error) {
 	cmd := exec.Command("uci", args...)

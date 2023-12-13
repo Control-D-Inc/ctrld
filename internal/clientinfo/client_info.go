@@ -1,8 +1,11 @@
 package clientinfo
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,25 +71,27 @@ type Table struct {
 	refreshers        []refresher
 	initOnce          sync.Once
 
-	dhcp   *dhcp
-	merlin *merlinDiscover
-	arp    *arpDiscover
-	ptr    *ptrDiscover
-	mdns   *mdns
-	hf     *hostsFile
-	vni    *virtualNetworkIface
-	cfg    *ctrld.Config
-	quitCh chan struct{}
-	selfIP string
-	cdUID  string
+	dhcp           *dhcp
+	merlin         *merlinDiscover
+	arp            *arpDiscover
+	ptr            *ptrDiscover
+	mdns           *mdns
+	hf             *hostsFile
+	vni            *virtualNetworkIface
+	svcCfg         ctrld.ServiceConfig
+	quitCh         chan struct{}
+	selfIP         string
+	cdUID          string
+	ptrNameservers []string
 }
 
-func NewTable(cfg *ctrld.Config, selfIP, cdUID string) *Table {
+func NewTable(cfg *ctrld.Config, selfIP, cdUID string, ns []string) *Table {
 	return &Table{
-		cfg:    cfg,
-		quitCh: make(chan struct{}),
-		selfIP: selfIP,
-		cdUID:  cdUID,
+		svcCfg:         cfg.Service,
+		quitCh:         make(chan struct{}),
+		selfIP:         selfIP,
+		cdUID:          cdUID,
+		ptrNameservers: ns,
 	}
 }
 
@@ -97,7 +102,7 @@ func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
 	clientInfoFiles[name] = format
 }
 
-func (t *Table) RefreshLoop(stopCh chan struct{}) {
+func (t *Table) RefreshLoop(ctx context.Context) {
 	timer := time.NewTicker(time.Minute * 5)
 	defer timer.Stop()
 	for {
@@ -106,7 +111,7 @@ func (t *Table) RefreshLoop(stopCh chan struct{}) {
 			for _, r := range t.refreshers {
 				_ = r.refresh()
 			}
-		case <-stopCh:
+		case <-ctx.Done():
 			close(t.quitCh)
 			return
 		}
@@ -182,6 +187,26 @@ func (t *Table) init() {
 	// PTR lookup.
 	if t.discoverPTR() {
 		t.ptr = &ptrDiscover{resolver: ctrld.NewPrivateResolver()}
+		if len(t.ptrNameservers) > 0 {
+			nss := make([]string, 0, len(t.ptrNameservers))
+			for _, ns := range t.ptrNameservers {
+				host, port := ns, "53"
+				if h, p, err := net.SplitHostPort(ns); err == nil {
+					host, port = h, p
+				}
+				// Only use valid ip:port pair.
+				if _, portErr := strconv.Atoi(port); portErr == nil && port != "0" && net.ParseIP(host) != nil {
+					nss = append(nss, net.JoinHostPort(host, port))
+				} else {
+					ctrld.ProxyLogger.Load().Warn().Msgf("ignoring invalid nameserver for ptr discover: %q", ns)
+				}
+			}
+			if len(nss) > 0 {
+				t.ptr.resolver = ctrld.NewResolverWithNameserver(nss)
+				ctrld.ProxyLogger.Load().Debug().Msgf("using nameservers %v for ptr discovery", nss)
+			}
+
+		}
 		ctrld.ProxyLogger.Load().Debug().Msg("start ptr discovery")
 		if err := t.ptr.refresh(); err != nil {
 			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init PTR discover")
@@ -235,6 +260,21 @@ func (t *Table) LookupHostname(ip, mac string) string {
 		}
 		if name := r.LookupHostnameByMac(mac); name != "" {
 			return name
+		}
+	}
+	return ""
+}
+
+// LookupRFC1918IPv4 returns the RFC1918 IPv4 address for the given MAC address, if any.
+func (t *Table) LookupRFC1918IPv4(mac string) string {
+	t.initOnce.Do(t.init)
+	for _, r := range t.ipResolvers {
+		ip, err := netip.ParseAddr(r.LookupIP(mac))
+		if err != nil || ip.Is6() {
+			continue
+		}
+		if ip.IsPrivate() {
+			return ip.String()
 		}
 	}
 	return ""
@@ -338,39 +378,60 @@ func (t *Table) StoreVPNClient(ci *ctrld.ClientInfo) {
 	t.vni.ip2name.Store(ci.IP, ci.Hostname)
 }
 
+// ipFinder is the interface for retrieving IP address from hostname.
+type ipFinder interface {
+	lookupIPByHostname(name string, v6 bool) string
+}
+
+// LookupIPByHostname returns the ip address of given hostname.
+// If v6 is true, return IPv6 instead of default IPv4.
+func (t *Table) LookupIPByHostname(hostname string, v6 bool) *netip.Addr {
+	if t == nil {
+		return nil
+	}
+	for _, finder := range []ipFinder{t.hf, t.ptr, t.mdns, t.dhcp} {
+		if addr := finder.lookupIPByHostname(hostname, v6); addr != "" {
+			if ip, err := netip.ParseAddr(addr); err == nil {
+				return &ip
+			}
+		}
+	}
+	return nil
+}
+
 func (t *Table) discoverDHCP() bool {
-	if t.cfg.Service.DiscoverDHCP == nil {
+	if t.svcCfg.DiscoverDHCP == nil {
 		return true
 	}
-	return *t.cfg.Service.DiscoverDHCP
+	return *t.svcCfg.DiscoverDHCP
 }
 
 func (t *Table) discoverARP() bool {
-	if t.cfg.Service.DiscoverARP == nil {
+	if t.svcCfg.DiscoverARP == nil {
 		return true
 	}
-	return *t.cfg.Service.DiscoverARP
+	return *t.svcCfg.DiscoverARP
 }
 
 func (t *Table) discoverMDNS() bool {
-	if t.cfg.Service.DiscoverMDNS == nil {
+	if t.svcCfg.DiscoverMDNS == nil {
 		return true
 	}
-	return *t.cfg.Service.DiscoverMDNS
+	return *t.svcCfg.DiscoverMDNS
 }
 
 func (t *Table) discoverPTR() bool {
-	if t.cfg.Service.DiscoverPtr == nil {
+	if t.svcCfg.DiscoverPtr == nil {
 		return true
 	}
-	return *t.cfg.Service.DiscoverPtr
+	return *t.svcCfg.DiscoverPtr
 }
 
 func (t *Table) discoverHosts() bool {
-	if t.cfg.Service.DiscoverHosts == nil {
+	if t.svcCfg.DiscoverHosts == nil {
 		return true
 	}
-	return *t.cfg.Service.DiscoverHosts
+	return *t.svcCfg.DiscoverHosts
 }
 
 // normalizeIP normalizes the ip parsed from dnsmasq/dhcpd lease file.

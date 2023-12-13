@@ -144,6 +144,7 @@ func initCLI() {
 	_ = runCmd.Flags().MarkHidden("homedir")
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	_ = runCmd.Flags().MarkHidden("iface")
+	runCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 
 	rootCmd.AddCommand(runCmd)
 
@@ -158,6 +159,7 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, args []string) {
 			checkStrFlagEmpty(cmd, cdUidFlagName)
 			checkStrFlagEmpty(cmd, cdOrgFlagName)
+			validateCdAndNextDNSFlags()
 			sc := &service.Config{}
 			*sc = *svcConfig
 			osArgs := os.Args[2:]
@@ -175,6 +177,9 @@ func initCLI() {
 				removeProvTokenFromArgs(sc)
 				// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
 				sc.Arguments = append(sc.Arguments, "--cd="+cdUID)
+			}
+			if cdUID != "" {
+				validateCdUpstreamProtocol()
 			}
 
 			p := &prog{
@@ -223,13 +228,17 @@ func initCLI() {
 				}()
 			}
 
-			tryReadingConfig(writeDefaultConfig)
+			tryReadingConfigWithNotice(writeDefaultConfig, true)
 
 			if err := v.Unmarshal(&cfg); err != nil {
 				mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 			}
 
 			initLogging()
+
+			if nextdns != "" {
+				removeNextDNSFromArgs(sc)
+			}
 
 			// Explicitly passing config, so on system where home directory could not be obtained,
 			// or sub-process env is different with the parent, we still behave correctly and use
@@ -244,16 +253,20 @@ func initCLI() {
 				return
 			}
 
-			if router.Name() != "" {
+			if router.Name() != "" && iface != "" {
 				mainLog.Load().Debug().Msg("cleaning up router before installing")
 				_ = p.router.Cleanup()
 			}
 
 			tasks := []task{
 				{s.Stop, false},
+				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
 				{s.Uninstall, false},
 				{s.Install, false},
 				{s.Start, true},
+				// Note that startCmd do not actually write ControlD config, but the config file was
+				// generated after s.Start, so we notice users here for consistent with nextdns mode.
+				{noticeWritingControlDConfig, false},
 			}
 			mainLog.Load().Notice().Msg("Starting service")
 			if doTasks(tasks) {
@@ -281,7 +294,7 @@ func initCLI() {
 			}
 		},
 	}
-	// Keep these flags in sync with runCmd above, except for "-d".
+	// Keep these flags in sync with runCmd above, except for "-d"/"--nextdns".
 	startCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
 	startCmd.Flags().StringVarP(&configBase64, "base64_config", "", "", "Base64 encoded config")
 	startCmd.Flags().StringVarP(&listenAddress, "listen", "", "", "Listener address and port, in format: address:port")
@@ -295,6 +308,8 @@ func initCLI() {
 	startCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
+	startCmd.Flags().StringVarP(&nextdns, nextdnsFlagName, "", "", "NextDNS resolver id")
+	startCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
@@ -367,6 +382,10 @@ func initCLI() {
 				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
+			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
+				mainLog.Load().Warn().Msg("service not installed")
+				return
+			}
 			initLogging()
 
 			tasks := []task{
@@ -388,6 +407,50 @@ func initCLI() {
 		},
 	}
 
+	reloadCmd := &cobra.Command{
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Use:   "reload",
+		Short: "Reload the ctrld service",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			dir, err := userHomeDir()
+			if err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
+			}
+			cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+			resp, err := cc.post(reloadPath, nil)
+			if err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to send reload signal to ctrld")
+			}
+			defer resp.Body.Close()
+			switch resp.StatusCode {
+			case http.StatusOK:
+				mainLog.Load().Notice().Msg("Service reloaded")
+			case http.StatusCreated:
+				s, err := newService(&prog{}, svcConfig)
+				if err != nil {
+					mainLog.Load().Error().Msg(err.Error())
+					return
+				}
+				mainLog.Load().Warn().Msg("Service was reloaded, but new config requires service restart.")
+				mainLog.Load().Warn().Msg("Restarting service")
+				if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
+					mainLog.Load().Warn().Msg("Service not installed")
+					return
+				}
+				restartCmd.Run(cmd, args)
+			default:
+				buf, err := io.ReadAll(resp.Body)
+				if err != nil {
+					mainLog.Load().Fatal().Err(err).Msg("could not read response from control server")
+				}
+				mainLog.Load().Error().Err(err).Msgf("failed to reload ctrld: %s", string(buf))
+			}
+		},
+	}
 	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show status of the ctrld service",
@@ -503,9 +566,10 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Short: "Manage ctrld service",
 		Args:  cobra.OnlyValidArgs,
 		ValidArgs: []string{
-			statusCmd.Use,
+			startCmd.Use,
 			stopCmd.Use,
 			restartCmd.Use,
+			reloadCmd.Use,
 			statusCmd.Use,
 			uninstallCmd.Use,
 			interfacesCmd.Use,
@@ -514,6 +578,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	serviceCmd.AddCommand(startCmd)
 	serviceCmd.AddCommand(stopCmd)
 	serviceCmd.AddCommand(restartCmd)
+	serviceCmd.AddCommand(reloadCmd)
 	serviceCmd.AddCommand(statusCmd)
 	serviceCmd.AddCommand(uninstallCmd)
 	serviceCmd.AddCommand(interfacesCmd)
@@ -567,6 +632,19 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		},
 	}
 	rootCmd.AddCommand(restartCmdAlias)
+
+	reloadCmdAlias := &cobra.Command{
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Use:   "reload",
+		Short: "Reload the ctrld service",
+		Run: func(cmd *cobra.Command, args []string) {
+			reloadCmd.Run(cmd, args)
+		},
+	}
+	rootCmd.AddCommand(reloadCmdAlias)
 
 	statusCmdAlias := &cobra.Command{
 		Use:   "status",
@@ -688,6 +766,7 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 	homedir = appConfig.HomeDir
 	verbose = appConfig.Verbose
 	cdUID = appConfig.CdUID
+	cdUpstreamProto = ctrld.ResolverTypeDOH
 	logPath = appConfig.LogPath
 	run(appCallback, stopCh)
 }
@@ -699,10 +778,12 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 	waitCh := make(chan struct{})
 	p := &prog{
-		waitCh:      waitCh,
-		stopCh:      stopCh,
-		cfg:         &cfg,
-		appCallback: appCallback,
+		waitCh:       waitCh,
+		stopCh:       stopCh,
+		reloadCh:     make(chan struct{}),
+		reloadDoneCh: make(chan struct{}),
+		cfg:          &cfg,
+		appCallback:  appCallback,
 	}
 	if homedir == "" {
 		if dir, err := userHomeDir(); err == nil {
@@ -740,9 +821,11 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	readBase64Config(configBase64)
 	processNoConfigFlags(noConfigStart)
+	p.mu.Lock()
 	if err := v.Unmarshal(&cfg); err != nil {
 		mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 	}
+	p.mu.Unlock()
 
 	processLogAndCacheFlags()
 
@@ -777,14 +860,47 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		cdUID = uid
 	}
 	if cdUID != "" {
-		err := processCDFlags()
-		if err != nil {
-			appCallback.Exit(err.Error())
-			return
+		validateCdUpstreamProtocol()
+		if err := processCDFlags(&cfg); err != nil {
+			if isMobile() {
+				appCallback.Exit(err.Error())
+				return
+			}
+
+			uninstallIfInvalidCdUID := func() {
+				cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
+				if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
+					s, err := newService(&prog{}, svcConfig)
+					if err != nil {
+						cdLogger.Warn().Err(err).Msg("failed to create new service")
+						return
+					}
+					if netIface, _ := netInterface(iface); netIface != nil {
+						if err := restoreNetworkManager(); err != nil {
+							cdLogger.Error().Err(err).Msg("could not restore NetworkManager")
+							return
+						}
+						cdLogger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS for interface")
+						if err := resetDNS(netIface); err != nil {
+							cdLogger.Warn().Err(err).Msg("something went wrong while restoring DNS")
+						} else {
+							cdLogger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS successfully")
+						}
+					}
+
+					tasks := []task{{s.Uninstall, true}}
+					if doTasks(tasks) {
+						cdLogger.Info().Msg("uninstalled service")
+					}
+					cdLogger.Fatal().Err(uer).Msg("failed to fetch resolver config")
+					return
+				}
+			}
+			uninstallIfInvalidCdUID()
 		}
 	}
 
-	updated := updateListenerConfig()
+	updated := updateListenerConfig(&cfg)
 
 	if cdUID != "" {
 		processLogAndCacheFlags()
@@ -812,7 +928,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		initLoggingWithBackup(false)
 	}
 
-	validateConfig(&cfg)
+	if err := validateConfig(&cfg); err != nil {
+		os.Exit(1)
+	}
 	initCache()
 
 	if daemon {
@@ -859,19 +977,21 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		if cp := router.CertPool(); cp != nil {
 			rootCertPool = cp
 		}
-		p.onStarted = append(p.onStarted, func() {
-			mainLog.Load().Debug().Msg("router setup on start")
-			if err := p.router.Setup(); err != nil {
-				mainLog.Load().Error().Err(err).Msg("could not configure router")
-			}
-		})
-		p.onStopped = append(p.onStopped, func() {
-			mainLog.Load().Debug().Msg("router cleanup on stop")
-			if err := p.router.Cleanup(); err != nil {
-				mainLog.Load().Error().Err(err).Msg("could not cleanup router")
-			}
-			p.resetDNS()
-		})
+		if iface != "" {
+			p.onStarted = append(p.onStarted, func() {
+				mainLog.Load().Debug().Msg("router setup on start")
+				if err := p.router.Setup(); err != nil {
+					mainLog.Load().Error().Err(err).Msg("could not configure router")
+				}
+			})
+			p.onStopped = append(p.onStopped, func() {
+				mainLog.Load().Debug().Msg("router cleanup on stop")
+				if err := p.router.Cleanup(); err != nil {
+					mainLog.Load().Error().Err(err).Msg("could not cleanup router")
+				}
+				p.resetDNS()
+			})
+		}
 	}
 
 	close(waitCh)
@@ -907,10 +1027,17 @@ func writeConfigFile() error {
 	return nil
 }
 
-func readConfigFile(writeDefaultConfig bool) bool {
+// readConfigFile reads in config file.
+//
+// - It writes default config file if config file not found if writeDefaultConfig is true.
+// - It emits notice message to user if notice is true.
+func readConfigFile(writeDefaultConfig, notice bool) bool {
 	// If err == nil, there's a config supplied via `--config`, no default config written.
 	err := v.ReadInConfig()
 	if err == nil {
+		if notice {
+			mainLog.Load().Notice().Msg("Reading config: " + v.ConfigFileUsed())
+		}
 		mainLog.Load().Info().Msg("loading config file from: " + v.ConfigFileUsed())
 		defaultConfigFile = v.ConfigFileUsed()
 		return true
@@ -925,13 +1052,17 @@ func readConfigFile(writeDefaultConfig bool) bool {
 		if err := v.Unmarshal(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to unmarshal default config: %v", err)
 		}
-		_ = updateListenerConfig()
+		nop := zerolog.Nop()
+		_, _ = tryUpdateListenerConfig(&cfg, &nop, true)
 		if err := writeConfigFile(); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
 		} else {
 			fp, err := filepath.Abs(defaultConfigFile)
 			if err != nil {
 				mainLog.Load().Fatal().Msgf("failed to get default config file path: %v", err)
+			}
+			if cdUID == "" && nextdns == "" {
+				mainLog.Load().Notice().Msg("Generating controld default config: " + fp)
 			}
 			mainLog.Load().Info().Msg("writing default config file to: " + fp)
 		}
@@ -1015,7 +1146,7 @@ func processNoConfigFlags(noConfigStart bool) {
 	v.Set("upstream", upstream)
 }
 
-func processCDFlags() error {
+func processCDFlags(cfg *ctrld.Config) error {
 	logger := mainLog.Load().With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
@@ -1031,44 +1162,17 @@ func processCDFlags() error {
 		}
 		break
 	}
-	if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
-		s, err := newService(&prog{}, svcConfig)
-		if err != nil {
-			logger.Warn().Err(err).Msg("failed to create new service")
-			return nil
-		}
-		if netIface, _ := netInterface(iface); netIface != nil {
-			if err := restoreNetworkManager(); err != nil {
-				logger.Error().Err(err).Msg("could not restore NetworkManager")
-				return nil
-			}
-			logger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS for interface")
-			if err := resetDNS(netIface); err != nil {
-				logger.Warn().Err(err).Msg("something went wrong while restoring DNS")
-			} else {
-				logger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS successfully")
-			}
-		}
-
-		tasks := []task{{s.Uninstall, true}}
-		if doTasks(tasks) {
-			logger.Info().Msg("uninstalled service")
-		}
-		event := logger.Fatal()
-		if isMobile() {
-			event = logger.Warn()
-		}
-		event.Err(uer).Msg("failed to fetch resolver config")
-		return uer
-	}
 	if err != nil {
+		if isMobile() {
+			return err
+		}
 		logger.Warn().Err(err).Msg("could not fetch resolver config")
-		return nil
+		return err
 	}
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
-	cfg = ctrld.Config{}
 
+	*cfg = ctrld.Config{}
 	// Fetch config, unmarshal to cfg.
 	if resolverConfig.Ctrld.CustomConfig != "" {
 		logger.Info().Msg("using defined custom config of Control-D resolver")
@@ -1085,7 +1189,7 @@ func processCDFlags() error {
 		cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
 		cfg.Upstream["0"] = &ctrld.UpstreamConfig{
 			Endpoint: resolverConfig.DOH,
-			Type:     ctrld.ResolverTypeDOH,
+			Type:     cdUpstreamProto,
 			Timeout:  5000,
 		}
 		rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
@@ -1213,6 +1317,11 @@ func selfCheckStatus(s service.Service) service.Status {
 		return service.StatusUnknown
 	}
 
+	// Not a ctrld upstream, return status as-is.
+	if cfg.FirstUpstream().VerifyDomain() == "" {
+		return status
+	}
+
 	mainLog.Load().Debug().Msg("ctrld listener is ready")
 	mainLog.Load().Debug().Msg("performing self-check")
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
@@ -1338,21 +1447,35 @@ func userHomeDir() (string, error) {
 	return dir, nil
 }
 
+// tryReadingConfig is like tryReadingConfigWithNotice, with notice set to false.
 func tryReadingConfig(writeDefaultConfig bool) {
+	tryReadingConfigWithNotice(writeDefaultConfig, false)
+}
+
+// tryReadingConfigWithNotice tries reading in config files, either specified by user or from default
+// locations. If notice is true, emitting a notice message to user which config file was read.
+func tryReadingConfigWithNotice(writeDefaultConfig, notice bool) {
 	// --config is specified.
 	if configPath != "" {
 		v.SetConfigFile(configPath)
-		readConfigFile(false)
+		readConfigFile(false, notice)
 		return
 	}
 	// no config start or base64 config mode.
 	if !writeDefaultConfig {
 		return
 	}
-	readConfig(writeDefaultConfig)
+	readConfigWithNotice(writeDefaultConfig, notice)
 }
 
+// readConfig calls readConfigWithNotice with notice set to false.
 func readConfig(writeDefaultConfig bool) {
+	readConfigWithNotice(writeDefaultConfig, false)
+}
+
+// readConfigWithNotice calls readConfigFile with config file set to ctrld.toml
+// or config.toml for compatible with earlier versions of ctrld.
+func readConfigWithNotice(writeDefaultConfig, notice bool) {
 	configs := []struct {
 		name    string
 		written bool
@@ -1369,7 +1492,7 @@ func readConfig(writeDefaultConfig bool) {
 	for _, config := range configs {
 		ctrld.SetConfigNameWithPath(v, config.name, dir)
 		v.SetConfigFile(configPath)
-		if readConfigFile(config.written) {
+		if readConfigFile(config.written, notice) {
 			break
 		}
 	}
@@ -1401,18 +1524,17 @@ func uninstall(p *prog, s service.Service) {
 	}
 }
 
-func validateConfig(cfg *ctrld.Config) {
-	err := ctrld.ValidateConfig(validator.New(), cfg)
-	if err == nil {
-		return
-	}
-	var ve validator.ValidationErrors
-	if errors.As(err, &ve) {
-		for _, fe := range ve {
-			mainLog.Load().Error().Msgf("invalid config: %s: %s", fe.Namespace(), fieldErrorMsg(fe))
+func validateConfig(cfg *ctrld.Config) error {
+	if err := ctrld.ValidateConfig(validator.New(), cfg); err != nil {
+		var ve validator.ValidationErrors
+		if errors.As(err, &ve) {
+			for _, fe := range ve {
+				mainLog.Load().Error().Msgf("invalid config: %s: %s", fe.Namespace(), fieldErrorMsg(fe))
+			}
 		}
+		return err
 	}
-	os.Exit(1)
+	return nil
 }
 
 // NOTE: Add more case here once new validation tag is used in ctrld.Config struct.
@@ -1483,9 +1605,19 @@ func mobileListenerPort() int {
 // updateListenerConfig updates the config for listeners if not defined,
 // or defined but invalid to be used, e.g: using loopback address other
 // than 127.0.0.1 with systemd-resolved.
-func updateListenerConfig() (updated bool) {
+func updateListenerConfig(cfg *ctrld.Config) bool {
+	updated, _ := tryUpdateListenerConfig(cfg, nil, true)
+	return updated
+}
+
+// tryUpdateListenerConfig tries updating listener config with a working one.
+// If fatal is true, and there's listen address conflicted, the function do
+// fatal error.
+func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fatal bool) (updated, ok bool) {
+	ok = true
 	lcc := make(map[string]*listenerConfigCheck)
 	cdMode := cdUID != ""
+	nextdnsMode := nextdns != ""
 	for n, listener := range cfg.Listener {
 		lcc[n] = &listenerConfigCheck{}
 		if listener.IP == "" {
@@ -1497,11 +1629,16 @@ func updateListenerConfig() (updated bool) {
 			lcc[n].Port = true
 		}
 		// In cd mode, we always try to pick an ip:port pair to work.
-		if cdMode {
+		// Same if nextdns resolver is used.
+		if cdMode || nextdnsMode {
 			lcc[n].IP = true
 			lcc[n].Port = true
 		}
 		updated = updated || lcc[n].IP || lcc[n].Port
+	}
+	il := mainLog.Load()
+	if infoLogger != nil {
+		il = infoLogger
 	}
 	if isMobile() {
 		// On Mobile, only use first listener, ignore others.
@@ -1594,7 +1731,11 @@ func updateListenerConfig() (updated bool) {
 				break
 			}
 			if !check.IP && !check.Port {
-				logMsg(mainLog.Load().Fatal(), n, "failed to listen: %v", err)
+				if fatal {
+					logMsg(mainLog.Load().Fatal(), n, "failed to listen: %v", err)
+				}
+				ok = false
+				break
 			}
 			if tryAllPort53 {
 				tryAllPort53 = false
@@ -1605,7 +1746,7 @@ func updateListenerConfig() (updated bool) {
 					listener.Port = 53
 				}
 				if check.IP {
-					logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+					logMsg(il.Info(), n, "could not listen on address: %s, trying: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 				}
 				continue
 			}
@@ -1618,7 +1759,7 @@ func updateListenerConfig() (updated bool) {
 					listener.Port = 53
 				}
 				if check.IP {
-					logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
+					logMsg(il.Info(), n, "could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 				}
 				continue
 			}
@@ -1630,7 +1771,7 @@ func updateListenerConfig() (updated bool) {
 				if check.Port {
 					listener.Port = 5354
 				}
-				logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying current ip with port 5354", addr)
+				logMsg(il.Info(), n, "could not listen on address: %s, trying current ip with port 5354", addr)
 				continue
 			}
 			if tryPort5354 {
@@ -1641,7 +1782,7 @@ func updateListenerConfig() (updated bool) {
 				if check.Port {
 					listener.Port = 5354
 				}
-				logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, trying 0.0.0.0:5354", addr)
+				logMsg(il.Info(), n, "could not listen on address: %s, trying 0.0.0.0:5354", addr)
 				continue
 			}
 			if check.IP && !isZeroIP { // for "0.0.0.0" or "::", we only need to try new port.
@@ -1655,11 +1796,18 @@ func updateListenerConfig() (updated bool) {
 				listener.Port = oldPort
 			}
 			if listener.IP == oldIP && listener.Port == oldPort {
-				logMsg(mainLog.Load().Fatal(), n, "could not listener on %s: %v", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)), err)
+				if fatal {
+					logMsg(mainLog.Load().Fatal(), n, "could not listener on %s: %v", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)), err)
+				}
+				ok = false
+				break
 			}
-			logMsg(mainLog.Load().Warn(), n, "could not listen on address: %s, pick a random ip+port", addr)
+			logMsg(il.Info(), n, "could not listen on address: %s, pick a random ip+port", addr)
 			attempts++
 		}
+	}
+	if !ok {
+		return
 	}
 
 	// Specific case for systemd-resolved.
@@ -1670,7 +1818,7 @@ func updateListenerConfig() (updated bool) {
 			// ip address, other than "127.0.0.1", so trying to listen on default route interface
 			// address instead.
 			if ip := net.ParseIP(listener.IP); ip != nil && ip.IsLoopback() && ip.String() != "127.0.0.1" {
-				logMsg(mainLog.Load().Warn(), n, "using loopback interface do not work with systemd-resolved")
+				logMsg(il.Info(), n, "using loopback interface do not work with systemd-resolved")
 				found := false
 				if netIface, _ := net.InterfaceByName(defaultIfaceName()); netIface != nil {
 					addrs, _ := netIface.Addrs()
@@ -1680,7 +1828,7 @@ func updateListenerConfig() (updated bool) {
 							if err := tryListen(addr); err == nil {
 								found = true
 								listener.IP = netIP.IP.String()
-								logMsg(mainLog.Load().Warn(), n, "use %s as listener address", listener.IP)
+								logMsg(il.Info(), n, "use %s as listener address", listener.IP)
 								break
 							}
 						}
@@ -1742,12 +1890,12 @@ func removeProvTokenFromArgs(sc *service.Config) {
 			continue
 		}
 		// For "--cd-org XXX", skip it and mark next arg skipped.
-		if x == cdOrgFlagName {
+		if x == "--"+cdOrgFlagName {
 			skip = true
 			continue
 		}
 		// For "--cd-org=XXX", just skip it.
-		if strings.HasPrefix(x, cdOrgFlagName+"=") {
+		if strings.HasPrefix(x, "--"+cdOrgFlagName+"=") {
 			continue
 		}
 		a = append(a, x)
@@ -1795,6 +1943,64 @@ func checkStrFlagEmpty(cmd *cobra.Command, flagName string) {
 		return
 	}
 	if fl.Value.String() == "" {
-		mainLog.Load().Fatal().Msgf(`flag "--%s"" value must be non-empty`, fl.Name)
+		mainLog.Load().Fatal().Msgf(`flag "--%s" value must be non-empty`, fl.Name)
 	}
+}
+
+func validateCdUpstreamProtocol() {
+	if cdUID == "" {
+		return
+	}
+	switch cdUpstreamProto {
+	case ctrld.ResolverTypeDOH, ctrld.ResolverTypeDOH3:
+	default:
+		mainLog.Load().Fatal().Msg(`flag "--protocol" must be "doh" or "doh3"`)
+	}
+}
+
+func validateCdAndNextDNSFlags() {
+	if (cdUID != "" || cdOrg != "") && nextdns != "" {
+		mainLog.Load().Fatal().Msgf("--%s/--%s could not be used with --%s", cdUidFlagName, cdOrgFlagName, nextdnsFlagName)
+	}
+}
+
+// removeNextDNSFromArgs removes the --nextdns from command line arguments.
+func removeNextDNSFromArgs(sc *service.Config) {
+	a := sc.Arguments[:0]
+	skip := false
+	for _, x := range sc.Arguments {
+		if skip {
+			skip = false
+			continue
+		}
+		// For "--nextdns XXX", skip it and mark next arg skipped.
+		if x == "--"+nextdnsFlagName {
+			skip = true
+			continue
+		}
+		// For "--nextdns=XXX", just skip it.
+		if strings.HasPrefix(x, "--"+nextdnsFlagName+"=") {
+			continue
+		}
+		a = append(a, x)
+	}
+	sc.Arguments = a
+}
+
+// doGenerateNextDNSConfig generates a working config with nextdns resolver.
+func doGenerateNextDNSConfig(uid string) error {
+	if uid == "" {
+		return nil
+	}
+	mainLog.Load().Notice().Msgf("Generating nextdns config: %s", defaultConfigFile)
+	generateNextDNSConfig(uid)
+	updateListenerConfig(&cfg)
+	return writeConfigFile()
+}
+
+func noticeWritingControlDConfig() error {
+	if cdUID != "" {
+		mainLog.Load().Notice().Msgf("Generating controld config: %s", defaultConfigFile)
+	}
+	return nil
 }

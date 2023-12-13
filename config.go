@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"runtime"
@@ -26,6 +27,7 @@ import (
 	"github.com/spf13/viper"
 	"golang.org/x/sync/singleflight"
 	"tailscale.com/logtail/backoff"
+	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld/internal/dnsrcode"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
@@ -82,6 +84,16 @@ func InitConfig(v *viper.Viper, name string) {
 		"0": {
 			IP:   "",
 			Port: 0,
+			Policy: &ListenerPolicyConfig{
+				Name: "Main Policy",
+				Networks: []Rule{
+					{"network.0": []string{"upstream.0"}},
+				},
+				Rules: []Rule{
+					{"example.com": []string{"upstream.0"}},
+					{"*.ads.com": []string{"upstream.1"}},
+				},
+			},
 		},
 	})
 	v.SetDefault("network", map[string]*NetworkConfig{
@@ -181,6 +193,7 @@ type ServiceConfig struct {
 	DiscoverDHCP          *bool  `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
 	DiscoverPtr           *bool  `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
 	DiscoverHosts         *bool  `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
+	ClientIDPref          string `mapstructure:"client_id_preference" toml:"client_id_preference,omitempty" validate:"omitempty,oneof=host mac"`
 	Daemon                bool   `mapstructure:"-" toml:"-"`
 	AllocateIP            bool   `mapstructure:"-" toml:"-"`
 }
@@ -204,6 +217,9 @@ type UpstreamConfig struct {
 	// The caller should not access this field directly.
 	// Use UpstreamSendClientInfo instead.
 	SendClientInfo *bool `mapstructure:"send_client_info" toml:"send_client_info,omitempty"`
+	// The caller should not access this field directly.
+	// Use IsDiscoverable instead.
+	Discoverable *bool `mapstructure:"discoverable" toml:"discoverable"`
 
 	g                  singleflight.Group
 	rebootstrap        atomic.Bool
@@ -224,10 +240,11 @@ type UpstreamConfig struct {
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
 type ListenerConfig struct {
-	IP         string                `mapstructure:"ip" toml:"ip,omitempty" validate:"iporempty"`
-	Port       int                   `mapstructure:"port" toml:"port,omitempty" validate:"gte=0"`
-	Restricted bool                  `mapstructure:"restricted" toml:"restricted,omitempty"`
-	Policy     *ListenerPolicyConfig `mapstructure:"policy" toml:"policy,omitempty"`
+	IP              string                `mapstructure:"ip" toml:"ip,omitempty" validate:"iporempty"`
+	Port            int                   `mapstructure:"port" toml:"port,omitempty" validate:"gte=0"`
+	Restricted      bool                  `mapstructure:"restricted" toml:"restricted,omitempty"`
+	AllowWanClients bool                  `mapstructure:"allow_wan_clients" toml:"allow_wan_clients,omitempty"`
+	Policy          *ListenerPolicyConfig `mapstructure:"policy" toml:"policy,omitempty"`
 }
 
 // IsDirectDnsListener reports whether ctrld can be a direct listener on port 53.
@@ -253,6 +270,7 @@ type ListenerPolicyConfig struct {
 	Name                 string   `mapstructure:"name" toml:"name,omitempty"`
 	Networks             []Rule   `mapstructure:"networks" toml:"networks,omitempty,inline,multiline" validate:"dive,len=1"`
 	Rules                []Rule   `mapstructure:"rules" toml:"rules,omitempty,inline,multiline" validate:"dive,len=1"`
+	Macs                 []Rule   `mapstructure:"macs" toml:"macs,omitempty,inline,multiline" validate:"dive,len=1"`
 	FailoverRcodes       []string `mapstructure:"failover_rcodes" toml:"failover_rcodes,omitempty" validate:"dive,dnsrcode"`
 	FailoverRcodeNumbers []int    `mapstructure:"-" toml:"-"`
 }
@@ -322,8 +340,23 @@ func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
 	}
 	switch uc.Type {
 	case ResolverTypeDOH, ResolverTypeDOH3:
-		if uc.isControlD() {
+		if uc.isControlD() || uc.isNextDNS() {
 			return true
+		}
+	}
+	return false
+}
+
+// IsDiscoverable reports whether the upstream can be used for PTR discovery.
+// The caller must ensure uc.Init() was called before calling this.
+func (uc *UpstreamConfig) IsDiscoverable() bool {
+	if uc.Discoverable != nil {
+		return *uc.Discoverable
+	}
+	switch uc.Type {
+	case ResolverTypeOS, ResolverTypeLegacy, ResolverTypePrivate:
+		if ip, err := netip.ParseAddr(uc.Domain); err == nil {
+			return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || tsaddr.CGNATRange().Contains(ip)
 		}
 	}
 	return false
@@ -394,8 +427,9 @@ func (uc *UpstreamConfig) ReBootstrap() {
 		return
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
-		ProxyLogger.Load().Debug().Msg("re-bootstrapping upstream ip")
-		uc.rebootstrap.Store(true)
+		if uc.rebootstrap.CompareAndSwap(false, true) {
+			ProxyLogger.Load().Debug().Msg("re-bootstrapping upstream ip")
+		}
 		return true, nil
 	})
 }
@@ -517,6 +551,16 @@ func (uc *UpstreamConfig) isControlD() bool {
 		}
 	}
 	return false
+}
+
+func (uc *UpstreamConfig) isNextDNS() bool {
+	domain := uc.Domain
+	if domain == "" {
+		if u, err := url.Parse(uc.Endpoint); err == nil {
+			domain = u.Hostname()
+		}
+	}
+	return domain == "dns.nextdns.io"
 }
 
 func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {

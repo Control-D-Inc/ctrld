@@ -18,11 +18,12 @@ import (
 )
 
 const (
-	dohMacHeader         = "x-cd-mac"
-	dohIPHeader          = "x-cd-ip"
-	dohHostHeader        = "x-cd-host"
-	dohOsHeader          = "x-cd-os"
-	headerApplicationDNS = "application/dns-message"
+	dohMacHeader          = "x-cd-mac"
+	dohIPHeader           = "x-cd-ip"
+	dohHostHeader         = "x-cd-host"
+	dohOsHeader           = "x-cd-os"
+	dohClientIDPrefHeader = "x-cd-cpref"
+	headerApplicationDNS  = "application/dns-message"
 )
 
 // EncodeOsNameMap provides mapping from OS name to a shorter string, used for encoding x-cd-os value.
@@ -76,7 +77,6 @@ func newDohResolver(uc *UpstreamConfig) *dohResolver {
 		endpoint:          uc.u,
 		isDoH3:            uc.Type == ResolverTypeDOH3,
 		http3RoundTripper: uc.http3RoundTripper,
-		sendClientInfo:    uc.UpstreamSendClientInfo(),
 		uc:                uc,
 	}
 	return r
@@ -87,9 +87,9 @@ type dohResolver struct {
 	endpoint          *url.URL
 	isDoH3            bool
 	http3RoundTripper http.RoundTripper
-	sendClientInfo    bool
 }
 
+// Resolve performs DNS query with given DNS message using DOH protocol.
 func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	data, err := msg.Pack()
 	if err != nil {
@@ -106,7 +106,7 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	if err != nil {
 		return nil, fmt.Errorf("could not create request: %w", err)
 	}
-	addHeader(ctx, req, r.sendClientInfo)
+	addHeader(ctx, req, r.uc)
 	dnsTyp := uint16(0)
 	if len(msg.Question) > 0 {
 		dnsTyp = msg.Question[0].Qtype
@@ -146,30 +146,61 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	return answer, nil
 }
 
-func addHeader(ctx context.Context, req *http.Request, sendClientInfo bool) {
+func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 	req.Header.Set("Content-Type", headerApplicationDNS)
 	req.Header.Set("Accept", headerApplicationDNS)
-	req.Header.Set(dohOsHeader, dohOsHeaderValue())
 
 	printed := false
-	if sendClientInfo {
+	if uc.UpstreamSendClientInfo() {
 		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
 			printed = ci.Mac != "" || ci.IP != "" || ci.Hostname != ""
-			if ci.Mac != "" {
-				req.Header.Set(dohMacHeader, ci.Mac)
-			}
-			if ci.IP != "" {
-				req.Header.Set(dohIPHeader, ci.IP)
-			}
-			if ci.Hostname != "" {
-				req.Header.Set(dohHostHeader, ci.Hostname)
-			}
-			if ci.Self {
-				req.Header.Set(dohOsHeader, dohOsHeaderValue())
+			switch {
+			case uc.isControlD():
+				addControlDHeaders(req, ci)
+			case uc.isNextDNS():
+				addNextDNSHeaders(req, ci)
 			}
 		}
 	}
 	if printed {
 		Log(ctx, ProxyLogger.Load().Debug().Interface("header", req.Header), "sending request header")
+	}
+}
+
+// addControlDHeaders set DoH/Doh3 HTTP request headers for ControlD upstream.
+func addControlDHeaders(req *http.Request, ci *ClientInfo) {
+	req.Header.Set(dohOsHeader, dohOsHeaderValue())
+	if ci.Mac != "" {
+		req.Header.Set(dohMacHeader, ci.Mac)
+	}
+	if ci.IP != "" {
+		req.Header.Set(dohIPHeader, ci.IP)
+	}
+	if ci.Hostname != "" {
+		req.Header.Set(dohHostHeader, ci.Hostname)
+	}
+	if ci.Self {
+		req.Header.Set(dohOsHeader, dohOsHeaderValue())
+	}
+	switch ci.ClientIDPref {
+	case "mac":
+		req.Header.Set(dohClientIDPrefHeader, "1")
+	case "host":
+		req.Header.Set(dohClientIDPrefHeader, "2")
+	}
+}
+
+// addNextDNSHeaders set DoH/Doh3 HTTP request headers for nextdns upstream.
+// https://github.com/nextdns/nextdns/blob/v1.41.0/resolver/doh.go#L100
+func addNextDNSHeaders(req *http.Request, ci *ClientInfo) {
+	if ci.Mac != "" {
+		// https: //github.com/nextdns/nextdns/blob/v1.41.0/run.go#L543
+		req.Header.Set("X-Device-Model", "mac:"+ci.Mac[:8])
+	}
+	if ci.IP != "" {
+		req.Header.Set("X-Device-Ip", ci.IP)
+	}
+	if ci.Hostname != "" {
+		req.Header.Set("X-Device-Name", ci.Hostname)
 	}
 }

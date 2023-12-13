@@ -8,10 +8,10 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
+	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld"
-	"github.com/kardianos/service"
+	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
 
 const (
@@ -95,7 +95,7 @@ func (e *EdgeOS) setupUSG() error {
 		return fmt.Errorf("setupUSG: backup current config: %w", err)
 	}
 
-	// Removing all configured upstreams.
+	// Removing all configured upstreams and cache config.
 	var sb strings.Builder
 	scanner := bufio.NewScanner(bytes.NewReader(buf))
 	for scanner.Scan() {
@@ -109,7 +109,7 @@ func (e *EdgeOS) setupUSG() error {
 		sb.WriteString(line)
 	}
 
-	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, e.cfg)
+	data, err := dnsmasq.ConfTmplWitchCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func (e *EdgeOS) setupUSG() error {
 }
 
 func (e *EdgeOS) setupUDM() error {
-	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, e.cfg)
+	data, err := dnsmasq.ConfTmplWitchCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
 	if err != nil {
 		return err
 	}

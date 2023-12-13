@@ -25,9 +25,9 @@ require (
 	github.com/spf13/viper v1.16.0
 	github.com/stretchr/testify v1.8.3
 	github.com/vishvananda/netlink v1.2.1-beta.2
-	golang.org/x/net v0.10.0
+	golang.org/x/net v0.17.0
 	golang.org/x/sync v0.2.0
-	golang.org/x/sys v0.8.1-0.20230609144347-5059a07aa46a
+	golang.org/x/sys v0.13.0
 	golang.zx2c4.com/wireguard/windows v0.5.3
 	tailscale.com v1.44.0
 )
@@ -70,11 +70,10 @@ require (
 	github.com/u-root/uio v0.0.0-20230305220412-3e8cd9d6bf63 // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13 // indirect
-	golang.org/x/crypto v0.9.0 // indirect
+	golang.org/x/crypto v0.14.0 // indirect
 	golang.org/x/exp v0.0.0-20230425010034-47ecfdc1ba53 // indirect
-	golang.org/x/mobile v0.0.0-20230531173138-3c911d8e3eda // indirect
 	golang.org/x/mod v0.10.0 // indirect
-	golang.org/x/text v0.9.0 // indirect
+	golang.org/x/text v0.13.0 // indirect
 	golang.org/x/tools v0.9.1 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

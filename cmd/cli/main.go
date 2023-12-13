@@ -32,6 +32,8 @@ var (
 	cdDev             bool
 	iface             string
 	ifaceStartStop    string
+	nextdns           string
+	cdUpstreamProto   string
 
 	mainLog       atomic.Pointer[zerolog.Logger]
 	consoleWriter zerolog.ConsoleWriter
@@ -39,8 +41,9 @@ var (
 )
 
 const (
-	cdUidFlagName = "cd"
-	cdOrgFlagName = "cd-org"
+	cdUidFlagName   = "cd"
+	cdOrgFlagName   = "cd-org"
+	nextdnsFlagName = "nextdns"
 )
 
 func init() {
@@ -93,6 +96,7 @@ func initConsoleLogging() {
 
 // initLogging initializes global logging setup.
 func initLogging() {
+	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
 	initLoggingWithBackup(true)
 }
 
@@ -131,7 +135,7 @@ func initLoggingWithBackup(doBackup bool) {
 	}
 	writers = append(writers, consoleWriter)
 	multi := zerolog.MultiLevelWriter(writers...)
-	l := mainLog.Load().Output(multi).With().Timestamp().Logger()
+	l := mainLog.Load().Output(multi).With().Logger()
 	mainLog.Store(&l)
 	// TODO: find a better way.
 	ctrld.ProxyLogger.Store(&l)

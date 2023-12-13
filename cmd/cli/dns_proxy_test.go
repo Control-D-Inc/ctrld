@@ -67,8 +67,11 @@ func Test_canonicalName(t *testing.T) {
 
 func Test_prog_upstreamFor(t *testing.T) {
 	cfg := testhelper.SampleConfig(t)
-	prog := &prog{cfg: cfg}
-	for _, nc := range prog.cfg.Network {
+	p := &prog{cfg: cfg}
+	p.um = newUpstreamMonitor(p.cfg)
+	p.lanLoopGuard = newLoopGuard()
+	p.ptrLoopGuard = newLoopGuard()
+	for _, nc := range p.cfg.Network {
 		for _, cidr := range nc.Cidrs {
 			_, ipNet, err := net.ParseCIDR(cidr)
 			if err != nil {
@@ -81,6 +84,7 @@ func Test_prog_upstreamFor(t *testing.T) {
 	tests := []struct {
 		name               string
 		ip                 string
+		mac                string
 		defaultUpstreamNum string
 		lc                 *ctrld.ListenerConfig
 		domain             string
@@ -88,11 +92,14 @@ func Test_prog_upstreamFor(t *testing.T) {
 		matched            bool
 		testLogMsg         string
 	}{
-		{"Policy map matches", "192.168.0.1:0", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.1", "upstream.0"}, true, ""},
-		{"Policy split matches", "192.168.0.1:0", "0", prog.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true, ""},
-		{"Policy map for other network matches", "192.168.1.2:0", "0", prog.cfg.Listener["0"], "abc.xyz", []string{"upstream.0"}, true, ""},
-		{"No policy map for listener", "192.168.1.2:0", "1", prog.cfg.Listener["1"], "abc.ru", []string{"upstream.1"}, false, ""},
-		{"unenforced loging", "192.168.1.2:0", "0", prog.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true, "My Policy, network.1 (unenforced), *.ru -> [upstream.1]"},
+		{"Policy map matches", "192.168.0.1:0", "", "0", p.cfg.Listener["0"], "abc.xyz", []string{"upstream.1", "upstream.0"}, true, ""},
+		{"Policy split matches", "192.168.0.1:0", "", "0", p.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true, ""},
+		{"Policy map for other network matches", "192.168.1.2:0", "", "0", p.cfg.Listener["0"], "abc.xyz", []string{"upstream.0"}, true, ""},
+		{"No policy map for listener", "192.168.1.2:0", "", "1", p.cfg.Listener["1"], "abc.ru", []string{"upstream.1"}, false, ""},
+		{"unenforced loging", "192.168.1.2:0", "", "0", p.cfg.Listener["0"], "abc.ru", []string{"upstream.1"}, true, "My Policy, network.1 (unenforced), *.ru -> [upstream.1]"},
+		{"Policy Macs matches upper", "192.168.0.1:0", "14:45:A0:67:83:0A", "0", p.cfg.Listener["0"], "abc.xyz", []string{"upstream.2"}, true, "14:45:a0:67:83:0a"},
+		{"Policy Macs matches lower", "192.168.0.1:0", "14:54:4a:8e:08:2d", "0", p.cfg.Listener["0"], "abc.xyz", []string{"upstream.2"}, true, "14:54:4a:8e:08:2d"},
+		{"Policy Macs matches case-insensitive", "192.168.0.1:0", "14:54:4A:8E:08:2D", "0", p.cfg.Listener["0"], "abc.xyz", []string{"upstream.2"}, true, "14:54:4a:8e:08:2d"},
 	}
 
 	for _, tc := range tests {
@@ -111,9 +118,13 @@ func Test_prog_upstreamFor(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, addr)
 				ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, requestID())
-				upstreams, matched := prog.upstreamFor(ctx, tc.defaultUpstreamNum, tc.lc, addr, tc.domain)
-				assert.Equal(t, tc.matched, matched)
-				assert.Equal(t, tc.upstreams, upstreams)
+				ufr := p.upstreamFor(ctx, tc.defaultUpstreamNum, tc.lc, addr, tc.mac, tc.domain)
+				p.proxy(ctx, &proxyRequest{
+					msg: newDnsMsgWithHostname("foo", dns.TypeA),
+					ufr: ufr,
+				})
+				assert.Equal(t, tc.matched, ufr.matched)
+				assert.Equal(t, tc.upstreams, ufr.upstreams)
 				if tc.testLogMsg != "" {
 					assert.Contains(t, logOutput.String(), tc.testLogMsg)
 				}
@@ -149,8 +160,32 @@ func TestCache(t *testing.T) {
 	answer2.SetRcode(msg, dns.RcodeRefused)
 	prog.cache.Add(dnscache.NewKey(msg, "upstream.0"), dnscache.NewValue(answer2, time.Now().Add(time.Minute)))
 
-	got1 := prog.proxy(context.Background(), []string{"upstream.1"}, nil, msg, nil)
-	got2 := prog.proxy(context.Background(), []string{"upstream.0"}, nil, msg, nil)
+	req1 := &proxyRequest{
+		msg:            msg,
+		ci:             nil,
+		failoverRcodes: nil,
+		ufr: &upstreamForResult{
+			upstreams:      []string{"upstream.1"},
+			matchedPolicy:  "",
+			matchedNetwork: "",
+			matchedRule:    "",
+			matched:        false,
+		},
+	}
+	req2 := &proxyRequest{
+		msg:            msg,
+		ci:             nil,
+		failoverRcodes: nil,
+		ufr: &upstreamForResult{
+			upstreams:      []string{"upstream.0"},
+			matchedPolicy:  "",
+			matchedNetwork: "",
+			matchedRule:    "",
+			matched:        false,
+		},
+	}
+	got1 := prog.proxy(context.Background(), req1)
+	got2 := prog.proxy(context.Background(), req2)
 	assert.NotSame(t, got1, got2)
 	assert.Equal(t, answer1.Rcode, got1.Rcode)
 	assert.Equal(t, answer2.Rcode, got2.Rcode)
@@ -230,6 +265,168 @@ func Test_remoteAddrFromMsg(t *testing.T) {
 			addr := spoofRemoteAddr(tc.addr, tc.ci)
 			if addr.String() != tc.want {
 				t.Errorf("unexpected result, want: %q, got: %q", tc.want, addr.String())
+			}
+		})
+	}
+}
+
+func Test_ipFromARPA(t *testing.T) {
+	tests := []struct {
+		IP   string
+		ARPA string
+	}{
+		{"1.2.3.4", "4.3.2.1.in-addr.arpa."},
+		{"245.110.36.114", "114.36.110.245.in-addr.arpa."},
+		{"::ffff:12.34.56.78", "78.56.34.12.in-addr.arpa."},
+		{"::1", "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa."},
+		{"1::", "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1.0.0.0.ip6.arpa."},
+		{"1234:567::89a:bcde", "e.d.c.b.a.9.8.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.7.6.5.0.4.3.2.1.ip6.arpa."},
+		{"1234:567:fefe:bcbc:adad:9e4a:89a:bcde", "e.d.c.b.a.9.8.0.a.4.e.9.d.a.d.a.c.b.c.b.e.f.e.f.7.6.5.0.4.3.2.1.ip6.arpa."},
+		{"", "asd.in-addr.arpa."},
+		{"", "asd.ip6.arpa."},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.IP, func(t *testing.T) {
+			t.Parallel()
+			if got := ipFromARPA(tc.ARPA); !got.Equal(net.ParseIP(tc.IP)) {
+				t.Errorf("unexpected ip, want: %s, got: %s", tc.IP, got)
+			}
+		})
+	}
+}
+
+func newDnsMsgWithClientIP(ip string) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	o := &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+	o.Option = append(o.Option, &dns.EDNS0_SUBNET{Address: net.ParseIP(ip)})
+	m.Extra = append(m.Extra, o)
+	return m
+}
+
+func Test_stripClientSubnet(t *testing.T) {
+	tests := []struct {
+		name       string
+		msg        *dns.Msg
+		wantSubnet bool
+	}{
+		{"no edns0", new(dns.Msg), false},
+		{"loopback IP v4", newDnsMsgWithClientIP("127.0.0.1"), false},
+		{"loopback IP v6", newDnsMsgWithClientIP("::1"), false},
+		{"private IP v4", newDnsMsgWithClientIP("192.168.1.123"), false},
+		{"private IP v6", newDnsMsgWithClientIP("fd12:3456:789a:1::1"), false},
+		{"public IP", newDnsMsgWithClientIP("1.1.1.1"), true},
+		{"invalid IP", newDnsMsgWithClientIP(""), true},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stripClientSubnet(tc.msg)
+			hasSubnet := false
+			if opt := tc.msg.IsEdns0(); opt != nil {
+				for _, s := range opt.Option {
+					if _, ok := s.(*dns.EDNS0_SUBNET); ok {
+						hasSubnet = true
+					}
+				}
+			}
+			if tc.wantSubnet != hasSubnet {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.wantSubnet, hasSubnet)
+			}
+		})
+	}
+}
+
+func newDnsMsgWithHostname(hostname string, typ uint16) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetQuestion(hostname, typ)
+	return m
+}
+
+func Test_isLanHostnameQuery(t *testing.T) {
+	tests := []struct {
+		name               string
+		msg                *dns.Msg
+		isLanHostnameQuery bool
+	}{
+		{"A", newDnsMsgWithHostname("foo", dns.TypeA), true},
+		{"AAAA", newDnsMsgWithHostname("foo", dns.TypeAAAA), true},
+		{"A not LAN", newDnsMsgWithHostname("example.com", dns.TypeA), false},
+		{"AAAA not LAN", newDnsMsgWithHostname("example.com", dns.TypeAAAA), false},
+		{"Not A or AAAA", newDnsMsgWithHostname("foo", dns.TypeTXT), false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isLanHostnameQuery(tc.msg); tc.isLanHostnameQuery != got {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.isLanHostnameQuery, got)
+			}
+		})
+	}
+}
+
+func newDnsMsgPtr(ip string, t *testing.T) *dns.Msg {
+	t.Helper()
+	m := new(dns.Msg)
+	ptr, err := dns.ReverseAddr(ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetQuestion(ptr, dns.TypePTR)
+	return m
+}
+
+func Test_isPrivatePtrLookup(t *testing.T) {
+	tests := []struct {
+		name               string
+		msg                *dns.Msg
+		isPrivatePtrLookup bool
+	}{
+		// RFC 1918 allocates 10.0.0.0/8, 172.16.0.0/12, and 192.168.0.0/16 as
+		{"10.0.0.0/8", newDnsMsgPtr("10.0.0.123", t), true},
+		{"172.16.0.0/12", newDnsMsgPtr("172.16.0.123", t), true},
+		{"192.168.0.0/16", newDnsMsgPtr("192.168.1.123", t), true},
+		{"CGNAT", newDnsMsgPtr("100.66.27.28", t), true},
+		{"Loopback", newDnsMsgPtr("127.0.0.1", t), true},
+		{"Link Local Unicast", newDnsMsgPtr("fe80::69f6:e16e:8bdb:433f", t), true},
+		{"Public IP", newDnsMsgPtr("8.8.8.8", t), false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isPrivatePtrLookup(tc.msg); tc.isPrivatePtrLookup != got {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.isPrivatePtrLookup, got)
+			}
+		})
+	}
+}
+
+func Test_isWanClient(t *testing.T) {
+	tests := []struct {
+		name        string
+		addr        net.Addr
+		isWanClient bool
+	}{
+		// RFC 1918 allocates 10.0.0.0/8, 172.16.0.0/12, and 192.168.0.0/16 as
+		{"10.0.0.0/8", &net.UDPAddr{IP: net.ParseIP("10.0.0.123")}, false},
+		{"172.16.0.0/12", &net.UDPAddr{IP: net.ParseIP("172.16.0.123")}, false},
+		{"192.168.0.0/16", &net.UDPAddr{IP: net.ParseIP("192.168.1.123")}, false},
+		{"CGNAT", &net.UDPAddr{IP: net.ParseIP("100.66.27.28")}, false},
+		{"Loopback", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")}, false},
+		{"Link Local Unicast", &net.UDPAddr{IP: net.ParseIP("fe80::69f6:e16e:8bdb:433f")}, false},
+		{"Public", &net.UDPAddr{IP: net.ParseIP("8.8.8.8")}, true},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isWanClient(tc.addr); tc.isWanClient != got {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.isWanClient, got)
 			}
 		})
 	}

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"tailscale.com/logtail/backoff"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -15,8 +14,8 @@ import (
 const (
 	// maxFailureRequest is the maximum failed queries allowed before an upstream is marked as down.
 	maxFailureRequest = 100
-	// checkUpstreamMaxBackoff is the max backoff time when checking upstream status.
-	checkUpstreamMaxBackoff = 2 * time.Minute
+	// checkUpstreamBackoffSleep is the time interval between each upstream checks.
+	checkUpstreamBackoffSleep = 2 * time.Second
 )
 
 // upstreamMonitor performs monitoring upstreams health.
@@ -76,7 +75,6 @@ func (um *upstreamMonitor) checkUpstream(upstream string, uc *ctrld.UpstreamConf
 	um.checking[upstream] = true
 	um.mu.Unlock()
 
-	bo := backoff.NewBackoff("checkUpstream", logf, checkUpstreamMaxBackoff)
 	resolver, err := ctrld.NewResolver(uc)
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not check upstream")
@@ -84,15 +82,20 @@ func (um *upstreamMonitor) checkUpstream(upstream string, uc *ctrld.UpstreamConf
 	}
 	msg := new(dns.Msg)
 	msg.SetQuestion(".", dns.TypeNS)
-	ctx := context.Background()
 
-	for {
+	check := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		uc.ReBootstrap()
 		_, err := resolver.Resolve(ctx, msg)
-		if err == nil {
+		return err
+	}
+	for {
+		if err := check(); err == nil {
 			mainLog.Load().Debug().Msgf("upstream %q is online", uc.Endpoint)
 			um.reset(upstream)
 			return
 		}
-		bo.BackOff(ctx, err)
+		time.Sleep(checkUpstreamBackoffSleep)
 	}
 }

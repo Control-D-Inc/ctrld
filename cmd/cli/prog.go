@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -16,7 +17,9 @@ import (
 	"syscall"
 
 	"github.com/kardianos/service"
+	"github.com/spf13/viper"
 	"tailscale.com/net/interfaces"
+	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
@@ -30,6 +33,7 @@ const (
 	ctrldControlUnixSock = "ctrld_control.sock"
 	upstreamPrefix       = "upstream."
 	upstreamOS           = upstreamPrefix + "os"
+	upstreamPrivate      = upstreamPrefix + "private"
 )
 
 var logf = func(format string, args ...any) {
@@ -45,19 +49,25 @@ var svcConfig = &service.Config{
 var useSystemdResolved = false
 
 type prog struct {
-	mu      sync.Mutex
-	waitCh  chan struct{}
-	stopCh  chan struct{}
-	logConn net.Conn
-	cs      *controlServer
+	mu           sync.Mutex
+	waitCh       chan struct{}
+	stopCh       chan struct{}
+	reloadCh     chan struct{} // For Windows.
+	reloadDoneCh chan struct{}
+	logConn      net.Conn
+	cs           *controlServer
 
-	cfg         *ctrld.Config
-	appCallback *AppCallback
-	cache       dnscache.Cacher
-	sema        semaphore
-	ciTable     *clientinfo.Table
-	um          *upstreamMonitor
-	router      router.Router
+	cfg            *ctrld.Config
+	localUpstreams []string
+	ptrNameservers []string
+	appCallback    *AppCallback
+	cache          dnscache.Cacher
+	sema           semaphore
+	ciTable        *clientinfo.Table
+	um             *upstreamMonitor
+	router         router.Router
+	ptrLoopGuard   *loopGuard
+	lanLoopGuard   *loopGuard
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -69,9 +79,104 @@ type prog struct {
 }
 
 func (p *prog) Start(s service.Service) error {
-	p.cfg = &cfg
-	go p.run()
+	go p.runWait()
 	return nil
+}
+
+// runWait runs ctrld components, waiting for signal to reload.
+func (p *prog) runWait() {
+	p.mu.Lock()
+	p.cfg = &cfg
+	p.mu.Unlock()
+	reloadSigCh := make(chan os.Signal, 1)
+	notifyReloadSigCh(reloadSigCh)
+
+	reload := false
+	logger := mainLog.Load()
+	for {
+		reloadCh := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			p.run(reload, reloadCh)
+			reload = true
+		}()
+		select {
+		case sig := <-reloadSigCh:
+			logger.Notice().Msgf("got signal: %s, reloading...", sig.String())
+		case <-p.reloadCh:
+			logger.Notice().Msg("reloading...")
+		case <-p.stopCh:
+			close(reloadCh)
+			return
+		}
+
+		waitOldRunDone := func() {
+			close(reloadCh)
+			<-done
+		}
+		newCfg := &ctrld.Config{}
+		v := viper.NewWithOptions(viper.KeyDelimiter("::"))
+		ctrld.InitConfig(v, "ctrld")
+		if configPath != "" {
+			v.SetConfigFile(configPath)
+		}
+		if err := v.ReadInConfig(); err != nil {
+			logger.Err(err).Msg("could not read new config")
+			waitOldRunDone()
+			continue
+		}
+		if err := v.Unmarshal(&newCfg); err != nil {
+			logger.Err(err).Msg("could not unmarshal new config")
+			waitOldRunDone()
+			continue
+		}
+		if cdUID != "" {
+			if err := processCDFlags(newCfg); err != nil {
+				logger.Err(err).Msg("could not fetch ControlD config")
+				waitOldRunDone()
+				continue
+			}
+		}
+
+		waitOldRunDone()
+
+		p.mu.Lock()
+		curListener := p.cfg.Listener
+		p.mu.Unlock()
+
+		for n, lc := range newCfg.Listener {
+			curLc := curListener[n]
+			if curLc == nil {
+				continue
+			}
+			if lc.IP == "" {
+				lc.IP = curLc.IP
+			}
+			if lc.Port == 0 {
+				lc.Port = curLc.Port
+			}
+		}
+		if err := validateConfig(newCfg); err != nil {
+			logger.Err(err).Msg("invalid config")
+			continue
+		}
+
+		// This needs to be done here, otherwise, the DNS handler may observe an invalid
+		// upstream config because its initialization function have not been called yet.
+		mainLog.Load().Debug().Msg("setup upstream with new config")
+		p.setupUpstream(newCfg)
+
+		p.mu.Lock()
+		*p.cfg = *newCfg
+		p.mu.Unlock()
+
+		logger.Notice().Msg("reloading config successfully")
+		select {
+		case p.reloadDoneCh <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (p *prog) preRun() {
@@ -87,14 +192,54 @@ func (p *prog) preRun() {
 	}
 }
 
-func (p *prog) run() {
+func (p *prog) setupUpstream(cfg *ctrld.Config) {
+	localUpstreams := make([]string, 0, len(cfg.Upstream))
+	ptrNameservers := make([]string, 0, len(cfg.Upstream))
+	for n := range cfg.Upstream {
+		uc := cfg.Upstream[n]
+		uc.Init()
+		if uc.BootstrapIP == "" {
+			uc.SetupBootstrapIP()
+			mainLog.Load().Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
+		} else {
+			mainLog.Load().Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("using bootstrap IP for upstream.%s", n)
+		}
+		uc.SetCertPool(rootCertPool)
+		go uc.Ping()
+
+		if canBeLocalUpstream(uc.Domain) {
+			localUpstreams = append(localUpstreams, upstreamPrefix+n)
+		}
+		if uc.IsDiscoverable() {
+			ptrNameservers = append(ptrNameservers, uc.Endpoint)
+		}
+	}
+	p.localUpstreams = localUpstreams
+	p.ptrNameservers = ptrNameservers
+}
+
+// run runs the ctrld main components.
+//
+// The reload boolean indicates that the function is run when ctrld first start
+// or when ctrld receive reloading signal. Platform specifics setup is only done
+// on started, mean reload is "false".
+//
+// The reloadCh is used to signal ctrld listeners that ctrld is going to be reloaded,
+// so all listeners could be terminated and re-spawned again.
+func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	// Wait the caller to signal that we can do our logic.
 	<-p.waitCh
-	p.preRun()
+	if !reload {
+		p.preRun()
+	}
 	numListeners := len(p.cfg.Listener)
-	p.started = make(chan struct{}, numListeners)
+	if !reload {
+		p.started = make(chan struct{}, numListeners)
+	}
 	p.onStartedDone = make(chan struct{})
 	p.loop = make(map[string]bool)
+	p.lanLoopGuard = newLoopGuard()
+	p.ptrLoopGuard = newLoopGuard()
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -103,15 +248,7 @@ func (p *prog) run() {
 			p.cache = cacher
 		}
 	}
-	p.sema = &chanSemaphore{ready: make(chan struct{}, defaultSemaphoreCap)}
-	if mcr := p.cfg.Service.MaxConcurrentRequests; mcr != nil {
-		n := *mcr
-		if n == 0 {
-			p.sema = &noopSemaphore{}
-		} else {
-			p.sema = &chanSemaphore{ready: make(chan struct{}, n)}
-		}
-	}
+
 	var wg sync.WaitGroup
 	wg.Add(len(p.cfg.Listener))
 
@@ -127,74 +264,102 @@ func (p *prog) run() {
 	}
 
 	p.um = newUpstreamMonitor(p.cfg)
-	for n := range p.cfg.Upstream {
-		uc := p.cfg.Upstream[n]
-		uc.Init()
-		if uc.BootstrapIP == "" {
-			uc.SetupBootstrapIP()
-			mainLog.Load().Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
-		} else {
-			mainLog.Load().Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("using bootstrap IP for upstream.%s", n)
+
+	if !reload {
+		p.sema = &chanSemaphore{ready: make(chan struct{}, defaultSemaphoreCap)}
+		if mcr := p.cfg.Service.MaxConcurrentRequests; mcr != nil {
+			n := *mcr
+			if n == 0 {
+				p.sema = &noopSemaphore{}
+			} else {
+				p.sema = &chanSemaphore{ready: make(chan struct{}, n)}
+			}
 		}
-		uc.SetCertPool(rootCertPool)
-		go uc.Ping()
+		p.setupUpstream(p.cfg)
+		p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP(), cdUID, p.ptrNameservers)
+		if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
+			mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
+			format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
+			p.ciTable.AddLeaseFile(leaseFile, format)
+		}
 	}
 
-	p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP(), cdUID)
-	if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
-		mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
-		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
-		p.ciTable.AddLeaseFile(leaseFile, format)
-	}
+	// context for managing spawn goroutines.
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
 	// Newer versions of android and iOS denies permission which breaks connectivity.
-	if !isMobile() {
+	if !isMobile() && !reload {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			p.ciTable.Init()
-			p.ciTable.RefreshLoop(p.stopCh)
+			p.ciTable.RefreshLoop(ctx)
 		}()
-		go p.watchLinkState()
+		go p.watchLinkState(ctx)
 	}
 
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()
-		go func(listenerNum string) {
-			defer wg.Done()
-			listenerConfig := p.cfg.Listener[listenerNum]
-			upstreamConfig := p.cfg.Upstream[listenerNum]
-			if upstreamConfig == nil {
-				mainLog.Load().Warn().Msgf("no default upstream for: [listener.%s]", listenerNum)
+		if !reload {
+			go func(listenerNum string) {
+				listenerConfig := p.cfg.Listener[listenerNum]
+				upstreamConfig := p.cfg.Upstream[listenerNum]
+				if upstreamConfig == nil {
+					mainLog.Load().Warn().Msgf("no default upstream for: [listener.%s]", listenerNum)
+				}
+				addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
+				mainLog.Load().Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
+				if err := p.serveDNS(listenerNum); err != nil {
+					mainLog.Load().Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
+				}
+			}(listenerNum)
+		}
+		go func() {
+			defer func() {
+				cancelFunc()
+				wg.Done()
+			}()
+			select {
+			case <-p.stopCh:
+			case <-ctx.Done():
+			case <-reloadCh:
 			}
-			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
-			mainLog.Load().Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
-			if err := p.serveDNS(listenerNum); err != nil {
-				mainLog.Load().Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
-			}
-		}(listenerNum)
+		}()
 	}
 
-	for i := 0; i < numListeners; i++ {
-		<-p.started
+	if !reload {
+		for i := 0; i < numListeners; i++ {
+			<-p.started
+		}
+		for _, f := range p.onStarted {
+			f()
+		}
 	}
-	for _, f := range p.onStarted {
-		f()
-	}
-	// Check for possible DNS loop.
-	p.checkDnsLoop()
+
 	close(p.onStartedDone)
 
-	// Start check DNS loop ticker.
-	go p.checkDnsLoopTicker()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Check for possible DNS loop.
+		p.checkDnsLoop()
+		// Start check DNS loop ticker.
+		p.checkDnsLoopTicker(ctx)
+	}()
 
-	// Stop writing log to unix socket.
-	consoleWriter.Out = os.Stdout
-	initLoggingWithBackup(false)
-	if p.logConn != nil {
-		_ = p.logConn.Close()
-	}
-	if p.cs != nil {
-		p.registerControlServerHandler()
-		if err := p.cs.start(); err != nil {
-			mainLog.Load().Warn().Err(err).Msg("could not start control server")
+	if !reload {
+		// Stop writing log to unix socket.
+		consoleWriter.Out = os.Stdout
+		initLoggingWithBackup(false)
+		if p.logConn != nil {
+			_ = p.logConn.Close()
+		}
+		if p.cs != nil {
+			p.registerControlServerHandler()
+			if err := p.cs.start(); err != nil {
+				mainLog.Load().Warn().Err(err).Msg("could not start control server")
+			}
 		}
 	}
 	wg.Wait()
@@ -276,7 +441,7 @@ func (p *prog) setDNS() {
 
 	nameservers := []string{ns}
 	if needRFC1918Listeners(lc) {
-		nameservers = append(nameservers, rfc1918Addresses()...)
+		nameservers = append(nameservers, ctrld.Rfc1918Addresses()...)
 	}
 	if err := setDNS(netIface, nameservers); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
@@ -461,4 +626,12 @@ func defaultRouteIP() string {
 	ip := addrs[0].String()
 	mainLog.Load().Debug().Str("ip", ip).Msg("found LAN interface IP")
 	return ip
+}
+
+// canBeLocalUpstream reports whether the IP address can be used as a local upstream.
+func canBeLocalUpstream(addr string) bool {
+	if ip, err := netip.ParseAddr(addr); err == nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || tsaddr.CGNATRange().Contains(ip)
+	}
+	return false
 }
