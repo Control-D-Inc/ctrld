@@ -206,7 +206,11 @@ func initCLI() {
 					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
 				}
 				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
-				sockPath := filepath.Join(dir, ctrldLogUnixSock)
+				sockDir := dir
+				if d, err := socketDir(); err == nil {
+					sockDir = d
+				}
+				sockPath := filepath.Join(sockDir, ctrldLogUnixSock)
 				_ = os.Remove(sockPath)
 				go func() {
 					defer func() {
@@ -393,7 +397,7 @@ func initCLI() {
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
-				dir, err := userHomeDir()
+				dir, err := socketDir()
 				if err != nil {
 					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
 					return
@@ -416,7 +420,7 @@ func initCLI() {
 		Short: "Reload the ctrld service",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			dir, err := userHomeDir()
+			dir, err := socketDir()
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
 			}
@@ -688,7 +692,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			dir, err := userHomeDir()
+			dir, err := socketDir()
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
 			}
@@ -790,7 +794,11 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			homedir = dir
 		}
 	}
-	sockPath := filepath.Join(homedir, ctrldLogUnixSock)
+	sockDir := homedir
+	if d, err := socketDir(); err == nil {
+		sockDir = d
+	}
+	sockPath := filepath.Join(sockDir, ctrldLogUnixSock)
 	if addr, err := net.ResolveUnixAddr("unix", sockPath); err == nil {
 		if conn, err := net.Dial(addr.Network(), addr.String()); err == nil {
 			lc := &logConn{conn: conn}
@@ -842,7 +850,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	p.router = router.New(&cfg, cdUID != "")
-	cs, err := newControlServer(filepath.Join(homedir, ctrldControlUnixSock))
+	cs, err := newControlServer(filepath.Join(sockDir, ctrldControlUnixSock))
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not create control server")
 	}
@@ -1295,7 +1303,7 @@ func selfCheckStatus(s service.Service) service.Status {
 	if status != service.StatusRunning {
 		return status
 	}
-	dir, err := userHomeDir()
+	dir, err := socketDir()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
 		return service.StatusUnknown
@@ -1443,6 +1451,19 @@ func userHomeDir() (string, error) {
 	}
 	if ok, _ := dirWritable(dir); !ok {
 		return os.UserHomeDir()
+	}
+	return dir, nil
+}
+
+// socketDir returns directory that ctrld will create socket file for running controlServer.
+func socketDir() (string, error) {
+	switch {
+	case runtime.GOOS == "windows", isMobile():
+		return userHomeDir()
+	}
+	dir := "/var/run"
+	if ok, _ := dirWritable(dir); !ok {
+		return userHomeDir()
 	}
 	return dir, nil
 }
