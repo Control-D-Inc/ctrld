@@ -146,6 +146,7 @@ func initCLI() {
 	_ = runCmd.Flags().MarkHidden("iface")
 	runCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 
+	runCmd.FParseErrWhitelist = cobra.FParseErrWhitelist{UnknownFlags: true}
 	rootCmd.AddCommand(runCmd)
 
 	startCmd := &cobra.Command{
