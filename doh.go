@@ -146,61 +146,67 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	return answer, nil
 }
 
+// addHeader adds necessary HTTP header to request based on upstream config.
 func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
-	req.Header.Set("Content-Type", headerApplicationDNS)
-	req.Header.Set("Accept", headerApplicationDNS)
-
 	printed := false
+	dohHeader := make(http.Header)
 	if uc.UpstreamSendClientInfo() {
 		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
 			printed = ci.Mac != "" || ci.IP != "" || ci.Hostname != ""
 			switch {
 			case uc.isControlD():
-				addControlDHeaders(req, ci)
+				dohHeader = newControlDHeaders(ci)
 			case uc.isNextDNS():
-				addNextDNSHeaders(req, ci)
+				dohHeader = newNextDNSHeaders(ci)
 			}
 		}
 	}
 	if printed {
-		Log(ctx, ProxyLogger.Load().Debug().Interface("header", req.Header), "sending request header")
+		Log(ctx, ProxyLogger.Load().Debug(), "sending request header: %v", dohHeader)
 	}
+	dohHeader.Set("Content-Type", headerApplicationDNS)
+	dohHeader.Set("Accept", headerApplicationDNS)
+	req.Header = dohHeader
 }
 
-// addControlDHeaders set DoH/Doh3 HTTP request headers for ControlD upstream.
-func addControlDHeaders(req *http.Request, ci *ClientInfo) {
-	req.Header.Set(dohOsHeader, dohOsHeaderValue())
+// newControlDHeaders returns DoH/Doh3 HTTP request headers for ControlD upstream.
+func newControlDHeaders(ci *ClientInfo) http.Header {
+	header := make(http.Header)
+	header.Set(dohOsHeader, dohOsHeaderValue())
 	if ci.Mac != "" {
-		req.Header.Set(dohMacHeader, ci.Mac)
+		header.Set(dohMacHeader, ci.Mac)
 	}
 	if ci.IP != "" {
-		req.Header.Set(dohIPHeader, ci.IP)
+		header.Set(dohIPHeader, ci.IP)
 	}
 	if ci.Hostname != "" {
-		req.Header.Set(dohHostHeader, ci.Hostname)
+		header.Set(dohHostHeader, ci.Hostname)
 	}
 	if ci.Self {
-		req.Header.Set(dohOsHeader, dohOsHeaderValue())
+		header.Set(dohOsHeader, dohOsHeaderValue())
 	}
 	switch ci.ClientIDPref {
 	case "mac":
-		req.Header.Set(dohClientIDPrefHeader, "1")
+		header.Set(dohClientIDPrefHeader, "1")
 	case "host":
-		req.Header.Set(dohClientIDPrefHeader, "2")
+		header.Set(dohClientIDPrefHeader, "2")
 	}
+	return header
 }
 
-// addNextDNSHeaders set DoH/Doh3 HTTP request headers for nextdns upstream.
+// newNextDNSHeaders returns DoH/Doh3 HTTP request headers for nextdns upstream.
 // https://github.com/nextdns/nextdns/blob/v1.41.0/resolver/doh.go#L100
-func addNextDNSHeaders(req *http.Request, ci *ClientInfo) {
+func newNextDNSHeaders(ci *ClientInfo) http.Header {
+	header := make(http.Header)
 	if ci.Mac != "" {
 		// https: //github.com/nextdns/nextdns/blob/v1.41.0/run.go#L543
-		req.Header.Set("X-Device-Model", "mac:"+ci.Mac[:8])
+		header.Set("X-Device-Model", "mac:"+ci.Mac[:8])
 	}
 	if ci.IP != "" {
-		req.Header.Set("X-Device-Ip", ci.IP)
+		header.Set("X-Device-Ip", ci.IP)
 	}
 	if ci.Hostname != "" {
-		req.Header.Set("X-Device-Name", ci.Hostname)
+		header.Set("X-Device-Name", ci.Hostname)
 	}
+	return header
 }
