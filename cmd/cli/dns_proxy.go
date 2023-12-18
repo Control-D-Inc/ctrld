@@ -504,7 +504,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 			p.cache.Add(dnscache.NewKey(req.msg, upstreams[n]), dnscache.NewValue(answer, expired))
 			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
 		}
-		ctrld.Log(ctx, mainLog.Load().Info(), "REPLY: %s -> %s (%s): %s", upstreams[n], req.ufr.srcAddr, req.ci.Hostname, dns.RcodeToString[answer.Rcode])
+		hostname := ""
+		if req.ci != nil {
+			hostname = req.ci.Hostname
+		}
+		ctrld.Log(ctx, mainLog.Load().Info(), "REPLY: %s -> %s (%s): %s", upstreams[n], req.ufr.srcAddr, hostname, dns.RcodeToString[answer.Rcode])
 		return answer
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
