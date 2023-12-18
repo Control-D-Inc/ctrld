@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -47,12 +46,6 @@ var privateUpstreamConfig = &ctrld.UpstreamConfig{
 	Timeout: 2000,
 }
 
-var hostName string
-
-func init() {
-	hostName, _ = os.Hostname()
-}
-
 // proxyRequest contains data for proxying a DNS query to upstream.
 type proxyRequest struct {
 	msg            *dns.Msg
@@ -68,6 +61,7 @@ type upstreamForResult struct {
 	matchedNetwork string
 	matchedRule    string
 	matched        bool
+	srcAddr        string
 }
 
 func (p *prog) serveDNS(listenerNum string) error {
@@ -104,9 +98,9 @@ func (p *prog) serveDNS(listenerNum string) error {
 		ci.ClientIDPref = p.cfg.Service.ClientIDPref
 		stripClientSubnet(m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
-		fmtSrcToDest := fmtRemoteToLocal(listenerNum, ci.Hostname, remoteAddr.String(), w.LocalAddr().String())
+		fmtSrcToDest := fmtRemoteToLocal(listenerNum, ci.Hostname, remoteAddr.String())
 		t := time.Now()
-		ctrld.Log(ctx, mainLog.Load().Info(), "%s received query: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
+		ctrld.Log(ctx, mainLog.Load().Info(), "QUERY: %s: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
 		res := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, ci.Mac, domain)
 		var answer *dns.Msg
 		if !res.matched && listenerConfig.Restricted {
@@ -207,7 +201,7 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 	matchedNetwork := "no network"
 	matchedRule := "no rule"
 	matched := false
-	res = &upstreamForResult{}
+	res = &upstreamForResult{srcAddr: addr.String()}
 
 	defer func() {
 		res.upstreams = upstreams
@@ -510,7 +504,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 			p.cache.Add(dnscache.NewKey(req.msg, upstreams[n]), dnscache.NewValue(answer, expired))
 			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
 		}
-		ctrld.Log(ctx, mainLog.Load().Info(), "%s -> %s replied: %s", upstreams[n], hostName, dns.RcodeToString[answer.Rcode])
+		ctrld.Log(ctx, mainLog.Load().Info(), "REPLY: %s -> %s (%s): %s", upstreams[n], req.ufr.srcAddr, req.ci.Hostname, dns.RcodeToString[answer.Rcode])
 		return answer
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
@@ -572,8 +566,8 @@ func wildcardMatches(wildcard, domain string) bool {
 	return false
 }
 
-func fmtRemoteToLocal(listenerNum, hostname, remote, local string) string {
-	return fmt.Sprintf("%s (%s) -> listener.%s: %s:", remote, hostname, listenerNum, local)
+func fmtRemoteToLocal(listenerNum, hostname, remote string) string {
+	return fmt.Sprintf("%s (%s) -> listener.%s", remote, hostname, listenerNum)
 }
 
 func requestID() string {
