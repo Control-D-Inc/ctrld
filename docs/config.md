@@ -331,7 +331,7 @@ If `ip_stack` is empty, or undefined:
  - Default value is `split` for Control D resolvers.
 
 ### send_client_info
-Specifying whether to include client info when sending query to upstream.
+Specifying whether to include client info when sending query to upstream. **This will only work with `doh` or `doh3` type upstreams.** 
 
 - Type: boolean
 - Required: no
