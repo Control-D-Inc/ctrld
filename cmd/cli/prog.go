@@ -525,6 +525,7 @@ var (
 	windowsENETUNREACH  = syscall.Errno(10051)
 	windowsEINVAL       = syscall.Errno(10022)
 	windowsEADDRINUSE   = syscall.Errno(10048)
+	windowsEHOSTUNREACH = syscall.Errno(10065)
 )
 
 func errUrlNetworkError(err error) bool {
@@ -547,7 +548,8 @@ func errNetworkError(err error) bool {
 			errors.Is(opErr.Err, syscall.ENETUNREACH),
 			errors.Is(opErr.Err, windowsENETUNREACH),
 			errors.Is(opErr.Err, windowsEINVAL),
-			errors.Is(opErr.Err, windowsECONNREFUSED):
+			errors.Is(opErr.Err, windowsECONNREFUSED),
+			errors.Is(opErr.Err, windowsEHOSTUNREACH):
 			return true
 		}
 	}

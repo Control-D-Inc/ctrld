@@ -61,6 +61,7 @@ type upstreamForResult struct {
 	matchedNetwork string
 	matchedRule    string
 	matched        bool
+	srcAddr        string
 }
 
 func (p *prog) serveDNS(listenerNum string) error {
@@ -97,9 +98,9 @@ func (p *prog) serveDNS(listenerNum string) error {
 		ci.ClientIDPref = p.cfg.Service.ClientIDPref
 		stripClientSubnet(m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
-		fmtSrcToDest := fmtRemoteToLocal(listenerNum, remoteAddr.String(), w.LocalAddr().String())
+		fmtSrcToDest := fmtRemoteToLocal(listenerNum, ci.Hostname, remoteAddr.String())
 		t := time.Now()
-		ctrld.Log(ctx, mainLog.Load().Debug(), "%s received query: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
+		ctrld.Log(ctx, mainLog.Load().Info(), "QUERY: %s: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
 		res := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, ci.Mac, domain)
 		var answer *dns.Msg
 		if !res.matched && listenerConfig.Restricted {
@@ -200,7 +201,7 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 	matchedNetwork := "no network"
 	matchedRule := "no rule"
 	matched := false
-	res = &upstreamForResult{}
+	res = &upstreamForResult{srcAddr: addr.String()}
 
 	defer func() {
 		res.upstreams = upstreams
@@ -377,7 +378,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 	// 4. Try remote upstream.
 	isLanOrPtrQuery := false
 	if req.ufr.matched {
-		ctrld.Log(ctx, mainLog.Load().Info(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
 	} else {
 		switch {
 		case isPrivatePtrLookup(req.msg):
@@ -386,16 +387,16 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 				return answer
 			}
 			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
-			ctrld.Log(ctx, mainLog.Load().Info(), "private PTR lookup, using upstreams: %v", upstreams)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
 		case isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
 			if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
 				return answer
 			}
 			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
-			ctrld.Log(ctx, mainLog.Load().Info(), "lan hostname lookup, using upstreams: %v", upstreams)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "lan hostname lookup, using upstreams: %v", upstreams)
 		default:
-			ctrld.Log(ctx, mainLog.Load().Info(), "no explicit policy matched, using default routing -> %v", upstreams)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "no explicit policy matched, using default routing -> %v", upstreams)
 		}
 	}
 
@@ -503,6 +504,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 			p.cache.Add(dnscache.NewKey(req.msg, upstreams[n]), dnscache.NewValue(answer, expired))
 			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
 		}
+		hostname := ""
+		if req.ci != nil {
+			hostname = req.ci.Hostname
+		}
+		ctrld.Log(ctx, mainLog.Load().Info(), "REPLY: %s -> %s (%s): %s", upstreams[n], req.ufr.srcAddr, hostname, dns.RcodeToString[answer.Rcode])
 		return answer
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
@@ -564,8 +570,8 @@ func wildcardMatches(wildcard, domain string) bool {
 	return false
 }
 
-func fmtRemoteToLocal(listenerNum, remote, local string) string {
-	return fmt.Sprintf("%s -> listener.%s: %s:", remote, listenerNum, local)
+func fmtRemoteToLocal(listenerNum, hostname, remote string) string {
+	return fmt.Sprintf("%s (%s) -> listener.%s", remote, hostname, listenerNum)
 }
 
 func requestID() string {

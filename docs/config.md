@@ -412,7 +412,7 @@ If set to `true`, makes the listener `REFUSED` DNS queries from all source IP ad
 - Default: false
 
 ### allow_wan_clients
-The listener `REFUSED` DNS queries from WAN clients by default. If set to `true`, makes the listener replies to them.
+The listener will refuse DNS queries from WAN IPs using `REFUSED` RCODE by default. Set to `true` to disable this behavior, but this is not recommended. 
 
 - Type: bool
 - Required: no
