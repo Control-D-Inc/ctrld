@@ -189,7 +189,7 @@ type ServiceConfig struct {
 	DHCPLeaseFile         string `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
 	DHCPLeaseFileFormat   string `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
 	DiscoverMDNS          *bool  `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
-	DiscoverARP           *bool  `mapstructure:"discover_arp" toml:"discover_dhcp,omitempty"`
+	DiscoverARP           *bool  `mapstructure:"discover_arp" toml:"discover_arp,omitempty"`
 	DiscoverDHCP          *bool  `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
 	DiscoverPtr           *bool  `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
 	DiscoverHosts         *bool  `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
