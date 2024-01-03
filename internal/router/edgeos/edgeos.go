@@ -109,7 +109,7 @@ func (e *EdgeOS) setupUSG() error {
 		sb.WriteString(line)
 	}
 
-	data, err := dnsmasq.ConfTmplWitchCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
+	data, err := dnsmasq.ConfTmplWithCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func (e *EdgeOS) setupUSG() error {
 }
 
 func (e *EdgeOS) setupUDM() error {
-	data, err := dnsmasq.ConfTmplWitchCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
+	data, err := dnsmasq.ConfTmplWithCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
 	if err != nil {
 		return err
 	}

@@ -65,11 +65,6 @@ func (f *Firewalla) Setup() error {
 		return fmt.Errorf("writing ctrld config: %w", err)
 	}
 
-	// Disable dnsmasq cache.
-	if err := dnsmasq.FirewallaDisableCache(); err != nil {
-		return err
-	}
-
 	// Restart dnsmasq service.
 	if err := restartDNSMasq(); err != nil {
 		return fmt.Errorf("restartDNSMasq: %w", err)
@@ -85,11 +80,6 @@ func (f *Firewalla) Cleanup() error {
 	// Removing current config.
 	if err := os.Remove(firewallaDNSMasqConfigPath); err != nil {
 		return fmt.Errorf("removing ctrld config: %w", err)
-	}
-
-	// Enable dnsmasq cache.
-	if err := dnsmasq.FirewallaEnableCache(); err != nil {
-		return err
 	}
 
 	// Restart dnsmasq service.
