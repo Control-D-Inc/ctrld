@@ -73,6 +73,7 @@ type Table struct {
 
 	dhcp           *dhcp
 	merlin         *merlinDiscover
+	ubios          *ubiosDiscover
 	arp            *arpDiscover
 	ndp            *ndpDiscover
 	ptr            *ptrDiscover
@@ -138,14 +139,26 @@ func (t *Table) init() {
 	// Otherwise, process all possible sources in order, that means
 	// the first result of IP/MAC/Hostname lookup will be used.
 	//
-	// Merlin custom clients.
+	// Routers custom clients:
+	//  - Merlin
+	//  - Ubios
 	if t.discoverDHCP() || t.discoverARP() {
 		t.merlin = &merlinDiscover{}
-		if err := t.merlin.refresh(); err != nil {
-			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init Merlin discover")
-		} else {
-			t.hostnameResolvers = append(t.hostnameResolvers, t.merlin)
-			t.refreshers = append(t.refreshers, t.merlin)
+		t.ubios = &ubiosDiscover{}
+		discovers := map[string]interface {
+			refresher
+			HostnameResolver
+		}{
+			"Merlin": t.merlin,
+			"Ubios":  t.ubios,
+		}
+		for platform, discover := range discovers {
+			if err := discover.refresh(); err != nil {
+				ctrld.ProxyLogger.Load().Error().Err(err).Msgf("could not init %s discover", platform)
+			} else {
+				t.hostnameResolvers = append(t.hostnameResolvers, discover)
+				t.refreshers = append(t.refreshers, discover)
+			}
 		}
 	}
 	// Hosts file mapping.
