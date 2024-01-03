@@ -74,6 +74,7 @@ type Table struct {
 	dhcp           *dhcp
 	merlin         *merlinDiscover
 	arp            *arpDiscover
+	ndp            *ndpDiscover
 	ptr            *ptrDiscover
 	mdns           *mdns
 	hf             *hostsFile
@@ -172,16 +173,28 @@ func (t *Table) init() {
 		}
 		go t.dhcp.watchChanges()
 	}
-	// ARP table.
+	// ARP/NDP table.
 	if t.discoverARP() {
 		t.arp = &arpDiscover{}
+		t.ndp = &ndpDiscover{}
 		ctrld.ProxyLogger.Load().Debug().Msg("start arp discovery")
-		if err := t.arp.refresh(); err != nil {
-			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init ARP discover")
-		} else {
-			t.ipResolvers = append(t.ipResolvers, t.arp)
-			t.macResolvers = append(t.macResolvers, t.arp)
-			t.refreshers = append(t.refreshers, t.arp)
+		discovers := map[string]interface {
+			refresher
+			IpResolver
+			MacResolver
+		}{
+			"ARP": t.arp,
+			"NDP": t.ndp,
+		}
+
+		for protocol, discover := range discovers {
+			if err := discover.refresh(); err != nil {
+				ctrld.ProxyLogger.Load().Error().Err(err).Msgf("could not init %s discover", protocol)
+			} else {
+				t.ipResolvers = append(t.ipResolvers, discover)
+				t.macResolvers = append(t.macResolvers, discover)
+				t.refreshers = append(t.refreshers, discover)
+			}
 		}
 	}
 	// PTR lookup.
@@ -328,7 +341,7 @@ func (t *Table) ListClients() []*Client {
 		_ = r.refresh()
 	}
 	ipMap := make(map[string]*Client)
-	il := []ipLister{t.dhcp, t.arp, t.ptr, t.mdns, t.vni}
+	il := []ipLister{t.dhcp, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
 	for _, ir := range il {
 		for _, ip := range ir.List() {
 			c, ok := ipMap[ip]
