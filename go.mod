@@ -15,6 +15,7 @@ require (
 	github.com/jaytaylor/go-hostsfile v0.0.0-20220426042432-61485ac1fa6c
 	github.com/josharian/native v1.1.1-0.20230202152459-5c7d0dd6ab86
 	github.com/kardianos/service v1.2.1
+	github.com/mdlayher/ndp v1.0.1
 	github.com/miekg/dns v1.1.55
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/pelletier/go-toml/v2 v2.0.8

@@ -209,6 +209,12 @@ func (t *Table) init() {
 				t.refreshers = append(t.refreshers, discover)
 			}
 		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-t.quitCh
+			cancel()
+		}()
+		go t.ndp.listen(ctx)
 	}
 	// PTR lookup.
 	if t.discoverPTR() {

@@ -2,10 +2,19 @@ package clientinfo
 
 import (
 	"bufio"
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/mdlayher/ndp"
+
+	"github.com/Control-D-Inc/ctrld"
 )
 
 // ndpDiscover provides client discovery functionality using NDP protocol.
@@ -58,6 +67,55 @@ func (nd *ndpDiscover) List() []string {
 		return true
 	})
 	return ips
+}
+
+// listen listens on ipv6 link local for Neighbor Solicitation message
+// to update new neighbors information to ndp table.
+func (nd *ndpDiscover) listen(ctx context.Context) {
+	ifi, err := firstInterfaceWithV6LinkLocal()
+	if err != nil {
+		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("failed to find valid ipv6")
+		return
+	}
+	c, ip, err := ndp.Listen(ifi, ndp.LinkLocal)
+	if err != nil {
+		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("ndp listen failed")
+		return
+	}
+	defer c.Close()
+	ctrld.ProxyLogger.Load().Debug().Msgf("listening ndp on: %s", ip.String())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		_ = c.SetReadDeadline(time.Now().Add(30 * time.Second))
+		msg, _, from, readErr := c.ReadFrom()
+		if readErr != nil {
+			var opErr *net.OpError
+			if errors.As(readErr, &opErr) && (opErr.Timeout() || opErr.Temporary()) {
+				continue
+			}
+			ctrld.ProxyLogger.Load().Debug().Err(readErr).Msg("ndp read loop error")
+			return
+		}
+
+		// Only looks for neighbor solicitation message, since new clients
+		// which join network will broadcast this message to us.
+		am, ok := msg.(*ndp.NeighborSolicitation)
+		if !ok {
+			continue
+		}
+		fromIP := from.String()
+		for _, opt := range am.Options {
+			if lla, ok := opt.(*ndp.LinkLayerAddress); ok {
+				mac := lla.Addr.String()
+				nd.mac.Store(fromIP, mac)
+				nd.ip.Store(mac, fromIP)
+			}
+		}
+	}
 }
 
 // scanWindows populates NDP table using information from "netsh" command.
@@ -123,4 +181,39 @@ func normalizeMac(mac string) string {
 func parseMAC(mac string) string {
 	hw, _ := net.ParseMAC(normalizeMac(mac))
 	return hw.String()
+}
+
+// firstInterfaceWithV6LinkLocal returns the first interface which is capable of using NDP.
+func firstInterfaceWithV6LinkLocal() (*net.Interface, error) {
+	ifis, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, ifi := range ifis {
+		// Skip if iface is down/loopback/non-multicast.
+		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagLoopback != 0 || ifi.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+
+		addrs, err := ifi.Addrs()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip, ok := netip.AddrFromSlice(ipNet.IP)
+			if !ok {
+				return nil, fmt.Errorf("invalid ip address: %s", ipNet.String())
+			}
+			if ip.Is6() && !ip.Is4In6() {
+				return &ifi, nil
+			}
+		}
+	}
+	return nil, errors.New("no interface can be used")
 }
