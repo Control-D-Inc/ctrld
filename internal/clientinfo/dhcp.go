@@ -3,6 +3,7 @@ package clientinfo
 import (
 	"bufio"
 	"bytes"
+	"encoding/csv"
 	"fmt"
 	"io"
 	"net"
@@ -202,7 +203,8 @@ func (d *dhcp) dnsmasqReadClientInfoFile(name string) error {
 
 }
 
-// dnsmasqReadClientInfoReader likes ctrld.Dnsmasq, but reading from an io.Reader instead of file.
+// dnsmasqReadClientInfoReader performs the same task as dnsmasqReadClientInfoFile,
+// but by reading from an io.Reader instead of file.
 func (d *dhcp) dnsmasqReadClientInfoReader(reader io.Reader) error {
 	return lineread.Reader(reader, func(line []byte) error {
 		fields := bytes.Fields(line)
@@ -244,7 +246,8 @@ func (d *dhcp) iscDHCPReadClientInfoFile(name string) error {
 	return d.iscDHCPReadClientInfoReader(f)
 }
 
-// iscDHCPReadClientInfoReader likes ctrld.IscDhcpd, but reading from an io.Reader instead of file.
+// iscDHCPReadClientInfoReader performs the same task as iscDHCPReadClientInfoFile,
+// but by reading from an io.Reader instead of file.
 func (d *dhcp) iscDHCPReadClientInfoReader(reader io.Reader) error {
 	s := bufio.NewScanner(reader)
 	var ip, mac, hostname string
@@ -283,6 +286,58 @@ func (d *dhcp) iscDHCPReadClientInfoReader(reader io.Reader) error {
 		case "client-hostname":
 			hostname = strings.Trim(fields[1], `";`)
 		}
+	}
+	return nil
+}
+
+// keaDhcp4ReadClientInfoFile populates dhcp table with client info reading from kea dhcp4 lease file.
+func (d *dhcp) keaDhcp4ReadClientInfoFile(name string) error {
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return d.keaDhcp4ReadClientInfoReader(bufio.NewReader(f))
+
+}
+
+// keaDhcp4ReadClientInfoReader performs the same task as keaDhcp4ReadClientInfoFile,
+// but by reading from an io.Reader instead of file.
+func (d *dhcp) keaDhcp4ReadClientInfoReader(r io.Reader) error {
+	cr := csv.NewReader(r)
+	for {
+		record, err := cr.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if len(record) < 9 {
+			continue // hostname is at 9th field, so skipping record with not enough fields.
+		}
+		if record[0] == "address" {
+			continue // skip header.
+		}
+		mac := record[1]
+		if _, err := net.ParseMAC(mac); err != nil { // skip invalid MAC
+			continue
+		}
+		ip := normalizeIP(record[0])
+		if net.ParseIP(ip) == nil {
+			ctrld.ProxyLogger.Load().Warn().Msgf("invalid ip address entry: %q", ip)
+			ip = ""
+		}
+
+		d.mac.Store(ip, mac)
+		d.ip.Store(mac, ip)
+		hostname := record[8]
+		if hostname == "*" {
+			continue
+		}
+		name := normalizeHostname(hostname)
+		d.mac2name.Store(mac, name)
+		d.ip2name.Store(ip, name)
 	}
 	return nil
 }

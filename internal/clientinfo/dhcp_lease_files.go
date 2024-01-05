@@ -15,4 +15,5 @@ var clientInfoFiles = map[string]ctrld.LeaseFileFormat{
 	"/run/dhcpd.leases":                        ctrld.IscDhcpd, // EdgeOS
 	"/var/dhcpd/var/db/dhcpd.leases":           ctrld.IscDhcpd, // Pfsense
 	"/home/pi/.router/run/dhcp/dnsmasq.leases": ctrld.Dnsmasq,  // Firewalla
+	"/var/lib/kea/dhcp4.leases":                ctrld.KeaDHCP4, // Pfsense
 }

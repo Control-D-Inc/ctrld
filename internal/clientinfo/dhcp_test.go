@@ -67,6 +67,41 @@ lease 192.168.1.2 {
 			"00:00:00:00:00:04",
 			"example",
 		},
+		{
+			"kea-dhcp4 good",
+			`address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id
+192.168.0.123,00:00:00:00:00:05,00:00:00:00:00:05,7200,1703290639,1,0,0,foo,0,,0
+`,
+			d.keaDhcp4ReadClientInfoReader,
+			"00:00:00:00:00:05",
+			"foo",
+		},
+		{
+			"kea-dhcp4 no-header",
+			`192.168.0.123,00:00:00:00:00:05,00:00:00:00:00:05,7200,1703290639,1,0,0,foo,0,,0`,
+			d.keaDhcp4ReadClientInfoReader,
+			"00:00:00:00:00:05",
+			"foo",
+		},
+		{
+			"kea-dhcp4 hostname *",
+			`address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id
+192.168.0.123,00:00:00:00:00:05,00:00:00:00:00:05,7200,1703290639,1,0,0,*,0,,0
+`,
+			d.keaDhcp4ReadClientInfoReader,
+			"00:00:00:00:00:05",
+			"*",
+		},
+		{
+			"kea-dhcp4 bad",
+			`address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id
+192.168.0.123,00:00:00:00:00:05,00:00:00:00:00:05,7200,1703290639,1,0,0,foo,0,,0
+192.168.0.124,invalid_MAC,00:00:00:00:00:05,7200,1703290639,1,0,0,foo,0,,0
+`,
+			d.keaDhcp4ReadClientInfoReader,
+			"00:00:00:00:00:05",
+			"foo",
+		},
 	}
 
 	for _, tc := range tests {
@@ -76,6 +111,12 @@ lease 192.168.1.2 {
 				t.Errorf("readClientInfoReader() error = %v", err)
 			}
 			val, existed := d.mac2name.Load(tc.mac)
+			if tc.hostname == "*" {
+				if existed {
+					t.Errorf("* hostname must be skipped")
+				}
+				return
+			}
 			if !existed {
 				t.Error("client info missing")
 			}
