@@ -1,8 +1,12 @@
 package clientinfo
 
 import (
+	"bufio"
+	"bytes"
+	"io"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
@@ -12,9 +16,10 @@ import (
 )
 
 const (
-	ipv4LocalhostName = "localhost"
-	ipv6LocalhostName = "ip6-localhost"
-	ipv6LoopbackName  = "ip6-loopback"
+	ipv4LocalhostName   = "localhost"
+	ipv6LocalhostName   = "ip6-localhost"
+	ipv6LoopbackName    = "ip6-loopback"
+	hostEntriesConfPath = "/var/unbound/host_entries.conf"
 )
 
 // hostsFile provides client discovery functionality using system hosts file.
@@ -34,14 +39,9 @@ func (hf *hostsFile) init() error {
 	if err := hf.watcher.Add(hostsfile.HostsPath); err != nil {
 		return err
 	}
-	m, err := hostsfile.ParseHosts(hostsfile.ReadHostsFile())
-	if err != nil {
-		return err
-	}
-	hf.mu.Lock()
-	hf.m = m
-	hf.mu.Unlock()
-	return nil
+	// Conservatively adding hostEntriesConfPath, since it is not available everywhere.
+	_ = hf.watcher.Add(hostEntriesConfPath)
+	return hf.refresh()
 }
 
 // refresh reloads hosts file entries.
@@ -52,6 +52,14 @@ func (hf *hostsFile) refresh() error {
 	}
 	hf.mu.Lock()
 	hf.m = m
+	// override hosts file with host_entries.conf content if present.
+	hem, err := parseHostEntriesConf(hostEntriesConfPath)
+	if err != nil && !os.IsNotExist(err) {
+		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("could not read host_entries.conf file")
+	}
+	for k, v := range hem {
+		hf.m[k] = v
+	}
 	hf.mu.Unlock()
 	return nil
 }
@@ -136,4 +144,47 @@ func isLocalhostName(hostname string) bool {
 	default:
 		return false
 	}
+}
+
+// parseHostEntriesConf parses host_entries.conf file and returns parsed result.
+func parseHostEntriesConf(path string) (map[string][]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseHostEntriesConfFromReader(bytes.NewReader(b)), nil
+}
+
+// parseHostEntriesConfFromReader is like parseHostEntriesConf, but read from an io.Reader instead of file.
+func parseHostEntriesConfFromReader(r io.Reader) map[string][]string {
+	hostsMap := map[string][]string{}
+	scanner := bufio.NewScanner(r)
+
+	localZone := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if after, found := strings.CutPrefix(line, "local-zone:"); found {
+			after = strings.TrimSpace(after)
+			fields := strings.Fields(after)
+			if len(fields) > 1 {
+				localZone = strings.Trim(fields[0], `""`)
+			}
+			continue
+		}
+		// Only read "local-data-ptr: ..." line, it has all necessary information.
+		after, found := strings.CutPrefix(line, "local-data-ptr:")
+		if !found {
+			continue
+		}
+		after = strings.TrimSpace(after)
+		after = strings.Trim(after, `"`)
+		fields := strings.Fields(after)
+		if len(fields) != 2 {
+			continue
+		}
+		ip := fields[0]
+		name := strings.TrimSuffix(fields[1], "."+localZone)
+		hostsMap[ip] = append(hostsMap[ip], name)
+	}
+	return hostsMap
 }
