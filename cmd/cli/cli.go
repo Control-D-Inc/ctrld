@@ -753,6 +753,11 @@ func isMobile() bool {
 	return runtime.GOOS == "android" || runtime.GOOS == "ios"
 }
 
+// isAndroid reports whether the current OS is Android.
+func isAndroid() bool {
+	return runtime.GOOS == "android"
+}
+
 // RunCobraCommand runs ctrld cli.
 func RunCobraCommand(cmd *cobra.Command) {
 	noConfigStart = isNoConfigStart(cmd)
@@ -771,7 +776,7 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 	homedir = appConfig.HomeDir
 	verbose = appConfig.Verbose
 	cdUID = appConfig.CdUID
-	cdUpstreamProto = ctrld.ResolverTypeDOH
+	cdUpstreamProto = appConfig.UpstreamProto
 	logPath = appConfig.LogPath
 	run(appCallback, stopCh)
 }
@@ -1618,10 +1623,18 @@ type listenerConfigCheck struct {
 
 // mobileListenerPort returns hardcoded port for mobile platforms.
 func mobileListenerPort() int {
-	if runtime.GOOS == "ios" {
-		return 53
+	if isAndroid() {
+		return 5354
 	}
-	return 5354
+	return 53
+}
+
+// mobileListenerIp returns hardcoded listener ip for mobile platforms
+func mobileListenerIp() string {
+	if isAndroid() {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
 }
 
 // updateListenerConfig updates the config for listeners if not defined,
@@ -1670,9 +1683,8 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 				delete(cfg.Listener, k)
 			}
 		}
-		// In cd mode, always use 127.0.0.1:5354.
 		if cdMode {
-			firstLn.IP = "127.0.0.1" // Mobile platforms allows running listener only on loop back address.
+			firstLn.IP = mobileListenerIp()
 			firstLn.Port = mobileListenerPort()
 			// TODO: use clear(lcc) once upgrading to go 1.21
 			for k := range lcc {
