@@ -54,6 +54,14 @@ type proxyRequest struct {
 	ufr            *upstreamForResult
 }
 
+// proxyResponse contains data for proxying a DNS response from upstream.
+type proxyResponse struct {
+	answer     *dns.Msg
+	cached     bool
+	clientInfo bool
+	upstream   string
+}
+
 // upstreamForResult represents the result of processing rules for a request.
 type upstreamForResult struct {
 	upstreams      []string
@@ -101,26 +109,49 @@ func (p *prog) serveDNS(listenerNum string) error {
 		fmtSrcToDest := fmtRemoteToLocal(listenerNum, ci.Hostname, remoteAddr.String())
 		t := time.Now()
 		ctrld.Log(ctx, mainLog.Load().Info(), "QUERY: %s: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
-		res := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, ci.Mac, domain)
+		ur := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, ci.Mac, domain)
+
+		labelValues := make([]string, 0, len(statsQueriesCountLabels))
+		labelValues = append(labelValues, net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port)))
+		labelValues = append(labelValues, ci.IP)
+		labelValues = append(labelValues, ci.Mac)
+		labelValues = append(labelValues, ci.Hostname)
+
 		var answer *dns.Msg
-		if !res.matched && listenerConfig.Restricted {
+		if !ur.matched && listenerConfig.Restricted {
 			ctrld.Log(ctx, mainLog.Load().Info(), "query refused, %s does not match any network policy", remoteAddr.String())
 			answer = new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeRefused)
+			labelValues = append(labelValues, "") // no upstream
 		} else {
 			var failoverRcode []int
 			if listenerConfig.Policy != nil {
 				failoverRcode = listenerConfig.Policy.FailoverRcodeNumbers
 			}
-			answer = p.proxy(ctx, &proxyRequest{
+			pr := p.proxy(ctx, &proxyRequest{
 				msg:            m,
 				ci:             ci,
 				failoverRcodes: failoverRcode,
-				ufr:            res,
+				ufr:            ur,
 			})
+			answer = pr.answer
 			rtt := time.Since(t)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
+			upstream := pr.upstream
+			switch {
+			case pr.cached:
+				upstream = "cache"
+			case pr.clientInfo:
+				upstream = "client_info_table"
+			}
+			labelValues = append(labelValues, upstream)
 		}
+		labelValues = append(labelValues, dns.TypeToString[q.Qtype])
+		labelValues = append(labelValues, dns.RcodeToString[answer.Rcode])
+		go func() {
+			p.WithLabelValuesInc(statsQueriesCount, labelValues...)
+			p.WithLabelValuesInc(statsClientQueriesCount, []string{ci.IP, ci.Mac, ci.Hostname}...)
+		}()
 		if err := w.WriteMsg(answer); err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "serveDNS: failed to send DNS response to client")
 		}
@@ -360,7 +391,7 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 	return nil
 }
 
-func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
+func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	var staleAnswer *dns.Msg
 	upstreams := req.ufr.upstreams
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
@@ -369,6 +400,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 		upstreams = []string{upstreamOS}
 	}
+
+	res := &proxyResponse{}
 
 	// LAN/PTR lookup flow:
 	//
@@ -384,14 +417,18 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 		case isPrivatePtrLookup(req.msg):
 			isLanOrPtrQuery = true
 			if answer := p.proxyPrivatePtrLookup(ctx, req.msg); answer != nil {
-				return answer
+				res.answer = answer
+				res.clientInfo = true
+				return res
 			}
 			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
 		case isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
 			if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
-				return answer
+				res.answer = answer
+				res.clientInfo = true
+				return res
 			}
 			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "lan hostname lookup, using upstreams: %v", upstreams)
@@ -413,7 +450,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 			if cachedValue.Expire.After(now) {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "hit cached response")
 				setCachedAnswerTTL(answer, now, cachedValue.Expire)
-				return answer
+				res.answer = answer
+				res.cached = true
+				return res
 			}
 			staleAnswer = answer
 		}
@@ -475,7 +514,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
 				now := time.Now()
 				setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
-				return staleAnswer
+				res.answer = staleAnswer
+				res.cached = true
+				return res
 			}
 			continue
 		}
@@ -509,12 +550,15 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *dns.Msg {
 			hostname = req.ci.Hostname
 		}
 		ctrld.Log(ctx, mainLog.Load().Info(), "REPLY: %s -> %s (%s): %s", upstreams[n], req.ufr.srcAddr, hostname, dns.RcodeToString[answer.Rcode])
-		return answer
+		res.answer = answer
+		res.upstream = upstreamConfig.Endpoint
+		return res
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
 	answer := new(dns.Msg)
 	answer.SetRcode(req.msg, dns.RcodeServerFailure)
-	return answer
+	res.answer = answer
+	return res
 }
 
 func (p *prog) upstreamsAndUpstreamConfigForLanAndPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {

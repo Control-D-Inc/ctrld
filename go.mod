@@ -19,6 +19,8 @@ require (
 	github.com/miekg/dns v1.1.55
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/pelletier/go-toml/v2 v2.0.8
+	github.com/prometheus/client_golang v1.15.1
+	github.com/prometheus/prom2json v1.3.3
 	github.com/quic-go/quic-go v0.38.0
 	github.com/rs/zerolog v1.28.0
 	github.com/spf13/cobra v1.7.0
@@ -35,11 +37,14 @@ require (
 
 require (
 	github.com/alexbrainman/sspi v0.0.0-20210105120005-909beea2cc74 // indirect
+	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-playground/locales v0.14.0 // indirect
 	github.com/go-playground/universal-translator v0.18.0 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
 	github.com/golang/mock v1.6.0 // indirect
+	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/google/pprof v0.0.0-20210407192527-94a9f03dee38 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
@@ -52,6 +57,7 @@ require (
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.18 // indirect
 	github.com/mattn/go-runewidth v0.0.14 // indirect
+	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
 	github.com/mdlayher/ethernet v0.0.0-20190606142754-0394541c37b7 // indirect
 	github.com/mdlayher/netlink v1.7.2 // indirect
 	github.com/mdlayher/raw v0.0.0-20191009151244-50f2db8cc065 // indirect
@@ -60,6 +66,9 @@ require (
 	github.com/onsi/ginkgo/v2 v2.9.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.17 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/prometheus/client_model v0.4.0 // indirect
+	github.com/prometheus/common v0.44.0 // indirect
+	github.com/prometheus/procfs v0.9.0 // indirect
 	github.com/quic-go/qpack v0.4.0 // indirect
 	github.com/quic-go/qtls-go1-20 v0.3.2 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
@@ -76,6 +85,7 @@ require (
 	golang.org/x/mod v0.10.0 // indirect
 	golang.org/x/text v0.13.0 // indirect
 	golang.org/x/tools v0.9.1 // indirect
+	google.golang.org/protobuf v1.30.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

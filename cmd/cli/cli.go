@@ -719,6 +719,10 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				sort.Strings(s)
 				return s
 			}
+			// If metrics is enabled, server set this for all clients, so we can check only the first one.
+			// Ideally, we may have a field in response to indicate that query count should be shown, but
+			// it would break earlier version of ctrld, which only look list of clients in response.
+			withQueryCount := len(clients) > 0 && clients[0].IncludeQueryCount
 			data := make([][]string, len(clients))
 			for i, c := range clients {
 				row := []string{
@@ -727,10 +731,17 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					c.Mac,
 					strings.Join(map2Slice(c.Source), ","),
 				}
+				if withQueryCount {
+					row = append(row, strconv.FormatInt(c.QueryCount, 10))
+				}
 				data[i] = row
 			}
 			table := tablewriter.NewWriter(os.Stdout)
-			table.SetHeader([]string{"IP", "Hostname", "Mac", "Discovered"})
+			headers := []string{"IP", "Hostname", "Mac", "Discovered"}
+			if withQueryCount {
+				headers = append(headers, "Queries")
+			}
+			table.SetHeader(headers)
 			table.SetAutoFormatHeaders(false)
 			table.AppendBulk(data)
 			table.Render()

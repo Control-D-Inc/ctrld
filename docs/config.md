@@ -234,6 +234,20 @@ Else -> client ID will use both Mac and Hostname i.e. `hash(mac + host)
 - Valid values: `mac`, `host`
 - Default: ""
 
+### metrics_query_stats
+If set to `true`, collect and export the query counters, and show them in `clients list` command.
+
+- Type: boolean
+- Required: no
+- Default: false
+
+### metrics_listener
+Specifying the `ip` and `port` of the metrics server.
+
+- Type: string
+- Required: no
+- Default: ""
+
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.
 

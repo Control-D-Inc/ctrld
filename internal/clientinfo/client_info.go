@@ -58,10 +58,12 @@ type ipLister interface {
 }
 
 type Client struct {
-	IP       netip.Addr
-	Mac      string
-	Hostname string
-	Source   map[string]struct{}
+	IP                netip.Addr
+	Mac               string
+	Hostname          string
+	Source            map[string]struct{}
+	QueryCount        int64
+	IncludeQueryCount bool
 }
 
 type Table struct {

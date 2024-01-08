@@ -195,6 +195,8 @@ type ServiceConfig struct {
 	DiscoverHosts           *bool  `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
 	DiscoverRefreshInterval int    `mapstructure:"discover_refresh_interval" toml:"discover_refresh_interval,omitempty"`
 	ClientIDPref            string `mapstructure:"client_id_preference" toml:"client_id_preference,omitempty" validate:"omitempty,oneof=host mac"`
+	MetricsQueryStats       bool   `mapstructure:"metrics_query_stats" toml:"metrics_query_stats,omitempty"`
+	MetricsListener         string `mapstructure:"metrics_listener" toml:"metrics_listener,omitempty"`
 	Daemon                  bool   `mapstructure:"-" toml:"-"`
 	AllocateIP              bool   `mapstructure:"-" toml:"-"`
 }

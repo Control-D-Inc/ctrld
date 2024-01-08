@@ -187,8 +187,8 @@ func TestCache(t *testing.T) {
 	got1 := prog.proxy(context.Background(), req1)
 	got2 := prog.proxy(context.Background(), req2)
 	assert.NotSame(t, got1, got2)
-	assert.Equal(t, answer1.Rcode, got1.Rcode)
-	assert.Equal(t, answer2.Rcode, got2.Rcode)
+	assert.Equal(t, answer1.Rcode, got1.answer.Rcode)
+	assert.Equal(t, answer2.Rcode, got2.answer.Rcode)
 }
 
 func Test_ipAndMacFromMsg(t *testing.T) {
