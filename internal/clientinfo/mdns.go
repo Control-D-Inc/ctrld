@@ -1,11 +1,16 @@
 package clientinfo
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -107,6 +112,7 @@ func (m *mdns) init(quitCh chan struct{}) error {
 
 	go m.probeLoop(v4ConnList, mdnsV4Addr, quitCh)
 	go m.probeLoop(v6ConnList, mdnsV6Addr, quitCh)
+	go m.getDataFromAvahiDaemonCache()
 
 	return nil
 }
@@ -210,6 +216,44 @@ func (m *mdns) probe(conns []*net.UDPConn, remoteAddr net.Addr) error {
 		}
 	}
 	return err
+}
+
+// getDataFromAvahiDaemonCache reads entries from avahi-daemon cache to update mdns data.
+func (m *mdns) getDataFromAvahiDaemonCache() {
+	if _, err := exec.LookPath("avahi-browse"); err != nil {
+		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("could not find avahi-browse binary, skipping.")
+		return
+	}
+	// Run avahi-browse to discover services from cache:
+	//  - "-a" -> all services.
+	//  - "-r" -> resolve found services.
+	//  - "-p" -> parseable format.
+	//  - "-c" -> read from cache.
+	out, err := exec.Command("avahi-browse", "-a", "-r", "-p", "-c").Output()
+	if err != nil {
+		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("could not browse services from avahi cache")
+		return
+	}
+	m.storeDataFromAvahiBrowseOutput(bytes.NewReader(out))
+}
+
+// storeDataFromAvahiBrowseOutput parses avahi-browse output from reader, then updating found data to mdns table.
+func (m *mdns) storeDataFromAvahiBrowseOutput(r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		fields := strings.FieldsFunc(scanner.Text(), func(r rune) bool {
+			return r == ';'
+		})
+		if len(fields) < 8 || fields[0] != "=" {
+			continue
+		}
+		ip := fields[7]
+		name := normalizeHostname(fields[6])
+		// Only using cache value if we don't have existed one.
+		if _, loaded := m.name.LoadOrStore(ip, name); !loaded {
+			ctrld.ProxyLogger.Load().Debug().Msgf("found hostname: %q, ip: %q via avahi cache", name, ip)
+		}
+	}
 }
 
 func multicastInterfaces() ([]net.Interface, error) {
