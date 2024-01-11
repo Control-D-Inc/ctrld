@@ -70,6 +70,7 @@ type Table struct {
 	hostnameResolvers []HostnameResolver
 	refreshers        []refresher
 	initOnce          sync.Once
+	refreshInterval   int
 
 	dhcp           *dhcp
 	merlin         *merlinDiscover
@@ -88,12 +89,17 @@ type Table struct {
 }
 
 func NewTable(cfg *ctrld.Config, selfIP, cdUID string, ns []string) *Table {
+	refreshInterval := cfg.Service.DiscoverRefreshInterval
+	if refreshInterval <= 0 {
+		refreshInterval = 2 * 60 // 2 minutes
+	}
 	return &Table{
-		svcCfg:         cfg.Service,
-		quitCh:         make(chan struct{}),
-		selfIP:         selfIP,
-		cdUID:          cdUID,
-		ptrNameservers: ns,
+		svcCfg:          cfg.Service,
+		quitCh:          make(chan struct{}),
+		selfIP:          selfIP,
+		cdUID:           cdUID,
+		ptrNameservers:  ns,
+		refreshInterval: refreshInterval,
 	}
 }
 
@@ -104,8 +110,9 @@ func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
 	clientInfoFiles[name] = format
 }
 
+// RefreshLoop runs all the refresher to update new client info data.
 func (t *Table) RefreshLoop(ctx context.Context) {
-	timer := time.NewTicker(time.Minute * 5)
+	timer := time.NewTicker(time.Second * time.Duration(t.refreshInterval))
 	defer timer.Stop()
 	for {
 		select {

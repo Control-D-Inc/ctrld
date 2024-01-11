@@ -200,6 +200,14 @@ Perform LAN client discovery using hosts file.
 - Required: no
 - Default: true
 
+### discover_refresh_interval
+Time in seconds between each discovery refresh loop to update new client information data. 
+The default value is 120 seconds, lower this value to make the discovery process run more aggressively.
+
+- Type: integer
+- Required: no
+- Default: 120
+
 ### dhcp_lease_file_path
 Relative or absolute path to a custom DHCP leases file location. 
 
