@@ -137,19 +137,8 @@ rcvar="${name}_enable"
 pidfile="/var/run/${name}.pid"
 child_pidfile="/var/run/${name}_child.pid"
 command="/usr/sbin/daemon"
-daemon_args="-P ${pidfile} -p ${child_pidfile} -t \"${name}: daemon\"{{if .WorkingDirectory}} -c {{.WorkingDirectory}}{{end}}"
+daemon_args="-r -P ${pidfile} -p ${child_pidfile} -t \"${name}: daemon\"{{if .WorkingDirectory}} -c {{.WorkingDirectory}}{{end}}"
 command_args="${daemon_args} {{.Path}}{{range .Arguments}} {{.}}{{end}}"
-
-stop_cmd="ctrld_stop"
-
-ctrld_stop() {
-  pid=$(cat ${pidfile})
-  child_pid=$(cat ${child_pidfile})
-  if [ -e "${child_pidfile}" ]; then
-    kill -s TERM "${child_pid}"
-    wait_for_pids "${child_pid}" "${pidfile}"
-  fi
-}
 
 load_rc_config "${name}"
 run_rc_command "$1"
