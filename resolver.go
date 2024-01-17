@@ -30,7 +30,7 @@ const (
 	ResolverTypePrivate = "private"
 )
 
-var bootstrapDNS = "76.76.2.0"
+const bootstrapDNS = "76.76.2.22"
 
 // or is the Resolver used for ResolverTypeOS.
 var or = &osResolver{nameservers: defaultNameservers()}
