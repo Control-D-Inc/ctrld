@@ -36,6 +36,10 @@ func (u *Ubios) Install(config *service.Config) error {
 	if edgeos.ContentFilteringEnabled() {
 		return edgeos.ErrContentFilteringEnabled
 	}
+	// See comment in (*edgeos.EdgeOS).Install method.
+	if edgeos.DnsShieldEnabled() {
+		return edgeos.ErrDnsShieldEnabled
+	}
 	return nil
 }
 
