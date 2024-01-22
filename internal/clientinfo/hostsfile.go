@@ -167,7 +167,7 @@ func parseHostEntriesConfFromReader(r io.Reader) map[string][]string {
 			after = strings.TrimSpace(after)
 			fields := strings.Fields(after)
 			if len(fields) > 1 {
-				localZone = strings.Trim(fields[0], `""`)
+				localZone = strings.Trim(fields[0], `"`)
 			}
 			continue
 		}

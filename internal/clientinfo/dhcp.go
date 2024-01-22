@@ -188,6 +188,8 @@ func (d *dhcp) readLeaseFile(name string, format ctrld.LeaseFileFormat) error {
 		return d.dnsmasqReadClientInfoFile(name)
 	case ctrld.IscDhcpd:
 		return d.iscDHCPReadClientInfoFile(name)
+	case ctrld.KeaDHCP4:
+		return d.keaDhcp4ReadClientInfoFile(name)
 	}
 	return fmt.Errorf("unsupported format: %s, file: %s", format, name)
 }
