@@ -15,10 +15,8 @@ no-resolv
 {{- range .Upstreams}}
 server={{ .IP }}#{{ .Port }}
 {{- end}}
-{{- if .SendClientInfo}}
 add-mac
 add-subnet=32,128
-{{- end}}
 {{- if .CacheDisabled}}
 cache-size=0
 {{- else}}
@@ -44,12 +42,10 @@ if [ -n "$pid" ] && [ -f "/proc/${pid}/cmdline" ]; then
   {{- range .Upstreams}}
   pc_append "server={{ .IP }}#{{ .Port }}" "$config_file"
   {{- end}}
-  {{- if .SendClientInfo}}
   pc_delete "add-mac" "$config_file"
   pc_delete "add-subnet" "$config_file"
   pc_append "add-mac" "$config_file"                # add client mac
   pc_append "add-subnet=32,128" "$config_file"      # add client ip
-  {{- end}}
   pc_delete "dnssec" "$config_file"                 # disable DNSSEC
   pc_delete "trust-anchor=" "$config_file"          # disable DNSSEC
   pc_delete "cache-size=" "$config_file"
@@ -92,29 +88,27 @@ func ConfTmplWithCacheDisabled(tmplText string, cfg *ctrld.Config, cacheDisabled
 		ip = "127.0.0.1"
 	}
 	upstreams := []Upstream{{IP: ip, Port: listener.Port}}
-	return confTmpl(tmplText, upstreams, cfg.HasUpstreamSendClientInfo(), cacheDisabled)
+	return confTmpl(tmplText, upstreams, cacheDisabled)
 }
 
 // FirewallaConfTmpl generates dnsmasq config for Firewalla routers.
 func FirewallaConfTmpl(tmplText string, cfg *ctrld.Config) (string, error) {
 	// If ctrld listen on all interfaces, generating config for all of them.
 	if lc := cfg.FirstListener(); lc != nil && (lc.IP == "0.0.0.0" || lc.IP == "") {
-		return confTmpl(tmplText, firewallaUpstreams(lc.Port), cfg.HasUpstreamSendClientInfo(), false)
+		return confTmpl(tmplText, firewallaUpstreams(lc.Port), false)
 	}
 	// Otherwise, generating config for the specific listener from ctrld's config.
 	return ConfTmplWithCacheDisabled(tmplText, cfg, false)
 }
 
-func confTmpl(tmplText string, upstreams []Upstream, sendClientInfo, cacheDisabled bool) (string, error) {
+func confTmpl(tmplText string, upstreams []Upstream, cacheDisabled bool) (string, error) {
 	tmpl := template.Must(template.New("").Parse(tmplText))
 	var to = &struct {
-		SendClientInfo bool
-		Upstreams      []Upstream
-		CacheDisabled  bool
+		Upstreams     []Upstream
+		CacheDisabled bool
 	}{
-		SendClientInfo: sendClientInfo,
-		Upstreams:      upstreams,
-		CacheDisabled:  cacheDisabled,
+		Upstreams:     upstreams,
+		CacheDisabled: cacheDisabled,
 	}
 	var sb strings.Builder
 	if err := tmpl.Execute(&sb, to); err != nil {
