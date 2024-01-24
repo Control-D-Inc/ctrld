@@ -61,7 +61,7 @@ $ docker pull controldns/ctrld
 Alternatively, if you know what you're doing you can download pre-compiled binaries from the [Releases](https://github.com/Control-D-Inc/ctrld/releases) section for the appropriate platform. 
 
 ## Build
-Lastly, you can build `ctrld` from source which requires `go1.19+`:
+Lastly, you can build `ctrld` from source which requires `go1.20+`:
 
 ```shell
 $ go build ./cmd/ctrld
