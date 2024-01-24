@@ -10,6 +10,8 @@ import (
 	"sort"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/Control-D-Inc/ctrld"
 )
 
@@ -66,6 +68,25 @@ func (p *prog) registerControlServerHandler() {
 		sort.Slice(clients, func(i, j int) bool {
 			return clients[i].IP.Less(clients[j].IP)
 		})
+		if p.cfg.Service.MetricsQueryStats {
+			for _, client := range clients {
+				client.IncludeQueryCount = true
+				dm := &dto.Metric{}
+				m, err := statsClientQueriesCount.MetricVec.GetMetricWithLabelValues(
+					client.IP.String(),
+					client.Mac,
+					client.Hostname,
+				)
+				if err != nil {
+					mainLog.Load().Debug().Err(err).Msgf("could not get metrics for client: %v", client)
+					continue
+				}
+				if err := m.Write(dm); err == nil {
+					client.QueryCount = int64(dm.Counter.GetValue())
+				}
+			}
+		}
+
 		if err := json.NewEncoder(w).Encode(&clients); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

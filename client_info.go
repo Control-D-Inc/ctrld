@@ -18,4 +18,5 @@ type LeaseFileFormat string
 const (
 	Dnsmasq  LeaseFileFormat = "dnsmasq"
 	IscDhcpd LeaseFileFormat = "isc-dhcpd"
+	KeaDHCP4 LeaseFileFormat = "kea-dhcp4"
 )

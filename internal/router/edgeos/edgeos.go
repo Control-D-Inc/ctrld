@@ -20,10 +20,14 @@ const (
 	usgDNSMasqConfigPath       = "/etc/dnsmasq.conf"
 	usgDNSMasqBackupConfigPath = "/etc/dnsmasq.conf.bak"
 	toggleContentFilteringLink = "https://community.ui.com/questions/UDM-Pro-disable-enable-DNS-filtering/e2cc4060-e56a-4139-b200-62d7f773ff8f"
+	toggleDnsShieldLink        = "https://community.ui.com/questions/UniFi-OS-3-2-7-DNS-Shield-Missing/d3a85905-4ce0-4fe4-8bf0-6cb04f21371d"
 )
 
 var ErrContentFilteringEnabled = fmt.Errorf(`the "Content Filtering" feature" is enabled, which is conflicted with ctrld.\n
 To disable it, folowing instruction here: %s`, toggleContentFilteringLink)
+
+var ErrDnsShieldEnabled = fmt.Errorf(`the "DNS Shield" feature" is enabled, which is conflicted with ctrld.\n
+To disable it, folowing screenshot here: %s`, toggleDnsShieldLink)
 
 type EdgeOS struct {
 	cfg   *ctrld.Config
@@ -49,6 +53,11 @@ func (e *EdgeOS) Install(_ *service.Config) error {
 	// error and guiding users to disable the feature using UniFi OS web UI.
 	if ContentFilteringEnabled() {
 		return ErrContentFilteringEnabled
+	}
+	// If "DNS Shield" is enabled, UniFi OS will spawn dnscrypt-proxy process, and route all DNS queries to it. So
+	// reporting an error and guiding users to disable the feature using UniFi OS web UI.
+	if DnsShieldEnabled() {
+		return ErrDnsShieldEnabled
 	}
 	return nil
 }
@@ -109,7 +118,7 @@ func (e *EdgeOS) setupUSG() error {
 		sb.WriteString(line)
 	}
 
-	data, err := dnsmasq.ConfTmplWitchCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
+	data, err := dnsmasq.ConfTmplWithCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
 	if err != nil {
 		return err
 	}
@@ -127,7 +136,7 @@ func (e *EdgeOS) setupUSG() error {
 }
 
 func (e *EdgeOS) setupUDM() error {
-	data, err := dnsmasq.ConfTmplWitchCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
+	data, err := dnsmasq.ConfTmplWithCacheDisabled(dnsmasq.ConfigContentTmpl, e.cfg, false)
 	if err != nil {
 		return err
 	}
@@ -167,6 +176,16 @@ func (e *EdgeOS) cleanupUDM() error {
 func ContentFilteringEnabled() bool {
 	st, err := os.Stat("/run/dnsfilter/dnsfilter")
 	return err == nil && !st.IsDir()
+}
+
+// DnsShieldEnabled reports whether DNS Shield is enabled.
+// See: https://community.ui.com/releases/UniFi-OS-Dream-Machines-3-2-7/251dfc1e-f4dd-4264-a080-3be9d8b9e02b
+func DnsShieldEnabled() bool {
+	buf, err := os.ReadFile("/var/run/dnsmasq.conf.d/dns.conf")
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(buf, []byte("server=127.0.0.1#5053"))
 }
 
 func LeaseFileDir() string {

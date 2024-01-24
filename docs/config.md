@@ -200,6 +200,14 @@ Perform LAN client discovery using hosts file.
 - Required: no
 - Default: true
 
+### discover_refresh_interval
+Time in seconds between each discovery refresh loop to update new client information data. 
+The default value is 120 seconds, lower this value to make the discovery process run more aggressively.
+
+- Type: integer
+- Required: no
+- Default: 120
+
 ### dhcp_lease_file_path
 Relative or absolute path to a custom DHCP leases file location. 
 
@@ -224,6 +232,20 @@ Else -> client ID will use both Mac and Hostname i.e. `hash(mac + host)
 - Type: string
 - Required: no
 - Valid values: `mac`, `host`
+- Default: ""
+
+### metrics_query_stats
+If set to `true`, collect and export the query counters, and show them in `clients list` command.
+
+- Type: boolean
+- Required: no
+- Default: false
+
+### metrics_listener
+Specifying the `ip` and `port` of the metrics server.
+
+- Type: string
+- Required: no
 - Default: ""
 
 ## Upstream

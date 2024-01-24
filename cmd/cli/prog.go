@@ -348,6 +348,13 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		p.checkDnsLoopTicker(ctx)
 	}()
 
+	wg.Add(1)
+	// Prometheus exporter goroutine.
+	go func() {
+		defer wg.Done()
+		p.runMetricsServer(ctx, reloadCh)
+	}()
+
 	if !reload {
 		// Stop writing log to unix socket.
 		consoleWriter.Out = os.Stdout
@@ -363,6 +370,11 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		}
 	}
 	wg.Wait()
+}
+
+// metricsEnabled reports whether prometheus exporter is enabled/disabled.
+func (p *prog) metricsEnabled() bool {
+	return p.cfg.Service.MetricsQueryStats || p.cfg.Service.MetricsListener != ""
 }
 
 func (p *prog) Stop(s service.Service) error {

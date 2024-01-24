@@ -36,6 +36,10 @@ func (u *Ubios) Install(config *service.Config) error {
 	if edgeos.ContentFilteringEnabled() {
 		return edgeos.ErrContentFilteringEnabled
 	}
+	// See comment in (*edgeos.EdgeOS).Install method.
+	if edgeos.DnsShieldEnabled() {
+		return edgeos.ErrDnsShieldEnabled
+	}
 	return nil
 }
 
@@ -51,15 +55,11 @@ func (u *Ubios) Setup() error {
 	if u.cfg.FirstListener().IsDirectDnsListener() {
 		return nil
 	}
-	data, err := dnsmasq.ConfTmpl(dnsmasq.ConfigContentTmpl, u.cfg)
+	data, err := dnsmasq.ConfTmplWithCacheDisabled(dnsmasq.ConfigContentTmpl, u.cfg, false)
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(ubiosDNSMasqConfigPath, []byte(data), 0600); err != nil {
-		return err
-	}
-	// Disable dnsmasq cache.
-	if err := dnsmasq.DisableCache(ubiosDNSMasqDnsConfigPath); err != nil {
 		return err
 	}
 	// Restart dnsmasq service.
@@ -75,10 +75,6 @@ func (u *Ubios) Cleanup() error {
 	}
 	// Remove the custom dnsmasq config
 	if err := os.Remove(ubiosDNSMasqConfigPath); err != nil {
-		return err
-	}
-	// Enable dnsmasq cache.
-	if err := dnsmasq.EnableCache(ubiosDNSMasqDnsConfigPath); err != nil {
 		return err
 	}
 	// Restart dnsmasq service.

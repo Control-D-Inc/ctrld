@@ -58,10 +58,12 @@ type ipLister interface {
 }
 
 type Client struct {
-	IP       netip.Addr
-	Mac      string
-	Hostname string
-	Source   map[string]struct{}
+	IP                netip.Addr
+	Mac               string
+	Hostname          string
+	Source            map[string]struct{}
+	QueryCount        int64
+	IncludeQueryCount bool
 }
 
 type Table struct {
@@ -70,10 +72,13 @@ type Table struct {
 	hostnameResolvers []HostnameResolver
 	refreshers        []refresher
 	initOnce          sync.Once
+	refreshInterval   int
 
 	dhcp           *dhcp
 	merlin         *merlinDiscover
+	ubios          *ubiosDiscover
 	arp            *arpDiscover
+	ndp            *ndpDiscover
 	ptr            *ptrDiscover
 	mdns           *mdns
 	hf             *hostsFile
@@ -86,12 +91,17 @@ type Table struct {
 }
 
 func NewTable(cfg *ctrld.Config, selfIP, cdUID string, ns []string) *Table {
+	refreshInterval := cfg.Service.DiscoverRefreshInterval
+	if refreshInterval <= 0 {
+		refreshInterval = 2 * 60 // 2 minutes
+	}
 	return &Table{
-		svcCfg:         cfg.Service,
-		quitCh:         make(chan struct{}),
-		selfIP:         selfIP,
-		cdUID:          cdUID,
-		ptrNameservers: ns,
+		svcCfg:          cfg.Service,
+		quitCh:          make(chan struct{}),
+		selfIP:          selfIP,
+		cdUID:           cdUID,
+		ptrNameservers:  ns,
+		refreshInterval: refreshInterval,
 	}
 }
 
@@ -102,8 +112,9 @@ func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
 	clientInfoFiles[name] = format
 }
 
+// RefreshLoop runs all the refresher to update new client info data.
 func (t *Table) RefreshLoop(ctx context.Context) {
-	timer := time.NewTicker(time.Minute * 5)
+	timer := time.NewTicker(time.Second * time.Duration(t.refreshInterval))
 	defer timer.Stop()
 	for {
 		select {
@@ -137,14 +148,26 @@ func (t *Table) init() {
 	// Otherwise, process all possible sources in order, that means
 	// the first result of IP/MAC/Hostname lookup will be used.
 	//
-	// Merlin custom clients.
+	// Routers custom clients:
+	//  - Merlin
+	//  - Ubios
 	if t.discoverDHCP() || t.discoverARP() {
 		t.merlin = &merlinDiscover{}
-		if err := t.merlin.refresh(); err != nil {
-			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init Merlin discover")
-		} else {
-			t.hostnameResolvers = append(t.hostnameResolvers, t.merlin)
-			t.refreshers = append(t.refreshers, t.merlin)
+		t.ubios = &ubiosDiscover{}
+		discovers := map[string]interface {
+			refresher
+			HostnameResolver
+		}{
+			"Merlin": t.merlin,
+			"Ubios":  t.ubios,
+		}
+		for platform, discover := range discovers {
+			if err := discover.refresh(); err != nil {
+				ctrld.ProxyLogger.Load().Error().Err(err).Msgf("could not init %s discover", platform)
+			} else {
+				t.hostnameResolvers = append(t.hostnameResolvers, discover)
+				t.refreshers = append(t.refreshers, discover)
+			}
 		}
 	}
 	// Hosts file mapping.
@@ -172,17 +195,35 @@ func (t *Table) init() {
 		}
 		go t.dhcp.watchChanges()
 	}
-	// ARP table.
+	// ARP/NDP table.
 	if t.discoverARP() {
 		t.arp = &arpDiscover{}
+		t.ndp = &ndpDiscover{}
 		ctrld.ProxyLogger.Load().Debug().Msg("start arp discovery")
-		if err := t.arp.refresh(); err != nil {
-			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init ARP discover")
-		} else {
-			t.ipResolvers = append(t.ipResolvers, t.arp)
-			t.macResolvers = append(t.macResolvers, t.arp)
-			t.refreshers = append(t.refreshers, t.arp)
+		discovers := map[string]interface {
+			refresher
+			IpResolver
+			MacResolver
+		}{
+			"ARP": t.arp,
+			"NDP": t.ndp,
 		}
+
+		for protocol, discover := range discovers {
+			if err := discover.refresh(); err != nil {
+				ctrld.ProxyLogger.Load().Error().Err(err).Msgf("could not init %s discover", protocol)
+			} else {
+				t.ipResolvers = append(t.ipResolvers, discover)
+				t.macResolvers = append(t.macResolvers, discover)
+				t.refreshers = append(t.refreshers, discover)
+			}
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-t.quitCh
+			cancel()
+		}()
+		go t.ndp.listen(ctx)
 	}
 	// PTR lookup.
 	if t.discoverPTR() {
@@ -328,7 +369,7 @@ func (t *Table) ListClients() []*Client {
 		_ = r.refresh()
 	}
 	ipMap := make(map[string]*Client)
-	il := []ipLister{t.dhcp, t.arp, t.ptr, t.mdns, t.vni}
+	il := []ipLister{t.dhcp, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
 	for _, ir := range il {
 		for _, ip := range ir.List() {
 			c, ok := ipMap[ip]

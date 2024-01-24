@@ -719,6 +719,10 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				sort.Strings(s)
 				return s
 			}
+			// If metrics is enabled, server set this for all clients, so we can check only the first one.
+			// Ideally, we may have a field in response to indicate that query count should be shown, but
+			// it would break earlier version of ctrld, which only look list of clients in response.
+			withQueryCount := len(clients) > 0 && clients[0].IncludeQueryCount
 			data := make([][]string, len(clients))
 			for i, c := range clients {
 				row := []string{
@@ -727,10 +731,17 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					c.Mac,
 					strings.Join(map2Slice(c.Source), ","),
 				}
+				if withQueryCount {
+					row = append(row, strconv.FormatInt(c.QueryCount, 10))
+				}
 				data[i] = row
 			}
 			table := tablewriter.NewWriter(os.Stdout)
-			table.SetHeader([]string{"IP", "Hostname", "Mac", "Discovered"})
+			headers := []string{"IP", "Hostname", "Mac", "Discovered"}
+			if withQueryCount {
+				headers = append(headers, "Queries")
+			}
+			table.SetHeader(headers)
 			table.SetAutoFormatHeaders(false)
 			table.AppendBulk(data)
 			table.Render()
@@ -753,6 +764,11 @@ func isMobile() bool {
 	return runtime.GOOS == "android" || runtime.GOOS == "ios"
 }
 
+// isAndroid reports whether the current OS is Android.
+func isAndroid() bool {
+	return runtime.GOOS == "android"
+}
+
 // RunCobraCommand runs ctrld cli.
 func RunCobraCommand(cmd *cobra.Command) {
 	noConfigStart = isNoConfigStart(cmd)
@@ -771,7 +787,7 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 	homedir = appConfig.HomeDir
 	verbose = appConfig.Verbose
 	cdUID = appConfig.CdUID
-	cdUpstreamProto = ctrld.ResolverTypeDOH
+	cdUpstreamProto = appConfig.UpstreamProto
 	logPath = appConfig.LogPath
 	run(appCallback, stopCh)
 }
@@ -1618,10 +1634,18 @@ type listenerConfigCheck struct {
 
 // mobileListenerPort returns hardcoded port for mobile platforms.
 func mobileListenerPort() int {
-	if runtime.GOOS == "ios" {
-		return 53
+	if isAndroid() {
+		return 5354
 	}
-	return 5354
+	return 53
+}
+
+// mobileListenerIp returns hardcoded listener ip for mobile platforms
+func mobileListenerIp() string {
+	if isAndroid() {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
 }
 
 // updateListenerConfig updates the config for listeners if not defined,
@@ -1670,9 +1694,8 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 				delete(cfg.Listener, k)
 			}
 		}
-		// In cd mode, always use 127.0.0.1:5354.
 		if cdMode {
-			firstLn.IP = "127.0.0.1" // Mobile platforms allows running listener only on loop back address.
+			firstLn.IP = mobileListenerIp()
 			firstLn.Port = mobileListenerPort()
 			// TODO: use clear(lcc) once upgrading to go 1.21
 			for k := range lcc {

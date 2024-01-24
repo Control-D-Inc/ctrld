@@ -121,6 +121,29 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+func TestConfigDiscoverOverride(t *testing.T) {
+	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
+	ctrld.InitConfig(v, "test_config_discover_override")
+	v.SetConfigType("toml")
+	configStr := `
+[service]
+discover_arp = false
+discover_dhcp = false
+discover_hosts = false
+discover_mdns = false
+discover_ptr = false
+`
+	require.NoError(t, v.ReadConfig(strings.NewReader(configStr)))
+	cfg := ctrld.Config{}
+	require.NoError(t, v.Unmarshal(&cfg))
+
+	require.False(t, *cfg.Service.DiscoverARP)
+	require.False(t, *cfg.Service.DiscoverDHCP)
+	require.False(t, *cfg.Service.DiscoverHosts)
+	require.False(t, *cfg.Service.DiscoverMDNS)
+	require.False(t, *cfg.Service.DiscoverPtr)
+}
+
 func defaultConfig(t *testing.T) *ctrld.Config {
 	v := viper.New()
 	ctrld.InitConfig(v, "test_load_default_config")
