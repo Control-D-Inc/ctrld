@@ -242,7 +242,7 @@ If set to `true`, collect and export the query counters, and show them in `clien
 - Default: false
 
 ### metrics_listener
-Specifying the `ip` and `port` of the metrics server.
+Specifying the `ip` and `port` of the Prometheus metrics server. The Prometheus metrics will be available on: `http://ip:port/metrics`. You can also append `/metrics/json` to get the same data in json format. 
 
 - Type: string
 - Required: no
