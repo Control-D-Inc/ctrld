@@ -384,6 +384,7 @@ func (t *Table) ListClients() []*Client {
 			}
 		}
 	}
+	clientsByMAC := make(map[string]*Client)
 	for ip := range ipMap {
 		c := ipMap[ip]
 		for _, e := range t.lookupMacAll(ip) {
@@ -397,6 +398,7 @@ func (t *Table) ListClients() []*Client {
 		for _, e := range t.lookupHostnameAll(ip, c.Mac) {
 			if c.Hostname == "" && e.name != "" {
 				c.Hostname = e.name
+				clientsByMAC[c.Mac] = c
 			}
 			if e.name != "" {
 				c.Source[e.src] = struct{}{}
@@ -405,6 +407,11 @@ func (t *Table) ListClients() []*Client {
 	}
 	clients := make([]*Client, 0, len(ipMap))
 	for _, c := range ipMap {
+		// If we found a client with empty hostname, use hostname from
+		// an existed client which has the same MAC address.
+		if cFromMac := clientsByMAC[c.Mac]; cFromMac != nil && c.Hostname == "" {
+			c.Hostname = cFromMac.Hostname
+		}
 		clients = append(clients, c)
 	}
 	return clients

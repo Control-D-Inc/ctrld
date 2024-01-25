@@ -44,3 +44,31 @@ func TestTable_LookupRFC1918IPv4(t *testing.T) {
 		t.Fatalf("unexpected result, want: %s, got: %s", rfc1918IPv4, got)
 	}
 }
+
+func TestTable_ListClients(t *testing.T) {
+	mac := "74:56:3c:44:eb:5e"
+	ipv6_1 := "2405:4803:a04b:4190:fbe9:cd14:d522:bbae"
+	ipv6_2 := "2405:4803:a04b:4190:fbe9:cd14:d522:bbab"
+	table := &Table{}
+
+	// NDP init.
+	table.ndp = &ndpDiscover{}
+	table.ndp.mac.Store(ipv6_1, mac)
+	table.ndp.mac.Store(ipv6_2, mac)
+	table.ndp.ip.Store(mac, ipv6_1)
+	table.ndp.ip.Store(mac, ipv6_2)
+	table.ipResolvers = append(table.ipResolvers, table.ndp)
+	table.macResolvers = append(table.macResolvers, table.ndp)
+
+	hostname := "foo"
+	// mdns init.
+	table.mdns = &mdns{}
+	table.mdns.name.Store(ipv6_2, hostname)
+	table.hostnameResolvers = append(table.hostnameResolvers, table.mdns)
+
+	for _, c := range table.ListClients() {
+		if c.Hostname != hostname {
+			t.Fatalf("missing hostname for client: %v", c)
+		}
+	}
+}
