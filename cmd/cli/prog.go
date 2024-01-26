@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -417,8 +418,14 @@ func (p *prog) setDNS() {
 	if iface == "" {
 		return
 	}
+	// allIfaces tracks whether we should set DNS for all physical interfaces.
+	allIfaces := false
 	if iface == "auto" {
 		iface = defaultIfaceName()
+		// If iface is "auto", it means user does not specify "--iface" flag.
+		// In this case, ctrld has to set DNS for all physical interfaces, so
+		// thing will still work when user switch from one to the other.
+		allIfaces = requiredMultiNICsConfig()
 	}
 	lc := cfg.FirstListener()
 	if lc == nil {
@@ -460,14 +467,22 @@ func (p *prog) setDNS() {
 		return
 	}
 	logger.Debug().Msg("setting DNS successfully")
+	if allIfaces {
+		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
+			return setDNS(i, nameservers)
+		})
+	}
 }
 
 func (p *prog) resetDNS() {
 	if iface == "" {
 		return
 	}
+	allIfaces := false
 	if iface == "auto" {
 		iface = defaultIfaceName()
+		// See corresponding comments in (*prog).setDNS function.
+		allIfaces = requiredMultiNICsConfig()
 	}
 	logger := mainLog.Load().With().Str("iface", iface).Logger()
 	netIface, err := netInterface(iface)
@@ -485,6 +500,9 @@ func (p *prog) resetDNS() {
 		return
 	}
 	logger.Debug().Msg("Restoring DNS successfully")
+	if allIfaces {
+		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDNS)
+	}
 }
 
 func randomLocalIP() string {
@@ -648,4 +666,52 @@ func canBeLocalUpstream(addr string) bool {
 		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || tsaddr.CGNATRange().Contains(ip)
 	}
 	return false
+}
+
+// withEachPhysicalInterfaces runs the function f with each physical interfaces, excluding
+// the interface that matches excludeIfaceName. The context is used to clarify the
+// log message when error happens.
+func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.Interface) error) {
+	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+		// Skip not-running/local/virtual interface.
+		if !i.IsUp() || i.IsLoopback() || len(i.HardwareAddr) == 0 {
+			return
+		}
+		// Skip non-configured interfaces.
+		if addrs, _ := i.Addrs(); len(addrs) == 0 {
+			return
+		}
+		// Skip invalid interface.
+		if !validInterface(i.Interface) {
+			return
+		}
+		netIface := i.Interface
+		if err := patchNetIfaceName(netIface); err != nil {
+			mainLog.Load().Debug().Err(err).Msg("failed to patch net interface name")
+			return
+		}
+		// Skip excluded interface.
+		if netIface.Name == excludeIfaceName {
+			return
+		}
+		// Skip Windows Hyper-V Default Switch.
+		if strings.Contains(netIface.Name, "vEthernet") {
+			return
+		}
+		if err := f(netIface); err != nil {
+			mainLog.Load().Warn().Err(err).Msgf("failed to %s for interface: %q", context, i.Name)
+		} else {
+			mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
+		}
+	})
+}
+
+// requiredMultiNicConfig reports whether ctrld needs to set/reset DNS for multiple NICs.
+func requiredMultiNICsConfig() bool {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return true
+	default:
+		return false
+	}
 }
