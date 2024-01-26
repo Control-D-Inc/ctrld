@@ -3,3 +3,12 @@ gon.hcl
 
 /Build
 .DS_Store
+
+# Release folder
+dist/
+
+# Binaries
+ctrld-*
+
+# generated file
+cmd/cli/rsrc_*.syso

@@ -1,0 +1,20 @@
+{
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.0.0.1"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "ControlD Inc",
+            "FileDescription": "Control D DNS daemon",
+            "ProductName": "ctrld",
+            "InternalName": "ctrld",
+            "LegalCopyright": "ControlD Inc 2024"
+          }
+        }
+      }
+    }
+  }
+}

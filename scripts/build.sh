@@ -72,6 +72,7 @@ build() {
       if [ "$CGO_ENABLED" = "0" ]; then
         binary=${binary}-nocgo
       fi
+      GOOS=${goos} GOARCH=${goarch} GOARM=${3} "$go" generate ./...
       GOOS=${goos} GOARCH=${goarch} GOARM=${3} "$go" build -ldflags="$ldflags" -o "$binary" ./cmd/ctrld
       compress "$binary"
       ;;
@@ -81,6 +82,7 @@ build() {
       if [ "$CGO_ENABLED" = "0" ]; then
         binary=${binary}-nocgo
       fi
+      GOOS=${goos} GOARCH=${goarch} GOMIPS=softfloat "$go" generate ./...
       GOOS=${goos} GOARCH=${goarch} GOMIPS=softfloat "$go" build -ldflags="$ldflags" -o "$binary" ./cmd/ctrld
       compress "$binary"
       ;;
