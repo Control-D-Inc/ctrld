@@ -364,6 +364,9 @@ func initCLI() {
 				return
 			}
 			initLogging()
+			if err := checkDeactivationPin(s); errors.Is(err, errInvalidDeactivationPin) {
+				os.Exit(deactivationPinInvalidExitCode)
+			}
 			if doTasks([]task{{s.Stop, true}}) {
 				p.router.Cleanup()
 				p.resetDNS()
@@ -372,6 +375,8 @@ func initCLI() {
 		},
 	}
 	stopCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, "auto" means the default interface gateway`)
+	stopCmd.Flags().Int64VarP(&deactivationPin, "pin", "", defaultDeactivationPin, `Pin code for stopping ctrld`)
+	_ = stopCmd.Flags().MarkHidden("pin")
 
 	restartCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
@@ -518,10 +523,15 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if iface == "" {
 				iface = "auto"
 			}
+			if err := checkDeactivationPin(s); errors.Is(err, errInvalidDeactivationPin) {
+				os.Exit(deactivationPinInvalidExitCode)
+			}
 			uninstall(p, s)
 		},
 	}
 	uninstallCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, use "auto" for the default gateway interface`)
+	uninstallCmd.Flags().Int64VarP(&deactivationPin, "pin", "", defaultDeactivationPin, `Pin code for uninstalling ctrld`)
+	_ = uninstallCmd.Flags().MarkHidden("pin")
 
 	listIfacesCmd := &cobra.Command{
 		Use:   "list",
@@ -1171,6 +1181,18 @@ func processNoConfigFlags(noConfigStart bool) {
 	v.Set("upstream", upstream)
 }
 
+// defaultDeactivationPin is the default value for cdDeactivationPin.
+// If cdDeactivationPin equals to this default, it means the pin code is not set from Control D API.
+const defaultDeactivationPin = -1
+
+// cdDeactivationPin is used in cd mode to decide whether stop and uninstall commands can be run.
+var cdDeactivationPin int64 = defaultDeactivationPin
+
+// deactivationPinNotSet reports whether cdDeactivationPin was not set by processCDFlags.
+func deactivationPinNotSet() bool {
+	return cdDeactivationPin == defaultDeactivationPin
+}
+
 func processCDFlags(cfg *ctrld.Config) error {
 	logger := mainLog.Load().With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
@@ -1193,6 +1215,11 @@ func processCDFlags(cfg *ctrld.Config) error {
 		}
 		logger.Warn().Err(err).Msg("could not fetch resolver config")
 		return err
+	}
+
+	if resolverConfig.DeactivationPin != nil {
+		logger.Debug().Msg("saving deactivation pin")
+		cdDeactivationPin = *resolverConfig.DeactivationPin
 	}
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
@@ -2048,4 +2075,30 @@ func noticeWritingControlDConfig() error {
 		mainLog.Load().Notice().Msgf("Generating controld config: %s", defaultConfigFile)
 	}
 	return nil
+}
+
+// deactivationPinInvalidExitCode indicates exit code due to invalid pin code.
+const deactivationPinInvalidExitCode = 126
+
+// errInvalidDeactivationPin indicates that the deactivation pin is invalid.
+var errInvalidDeactivationPin = errors.New("deactivation pin is invalid")
+
+// checkDeactivationPin validates if the deactivation pin matches one in ControlD config.
+func checkDeactivationPin(s service.Service) error {
+	dir, err := socketDir()
+	if err != nil {
+		mainLog.Load().Err(err).Msg("could not check deactivation pin")
+		return err
+	}
+	cc := newSocketControlClient(s, dir)
+	if cc == nil {
+		return nil // ctrld is not running.
+	}
+	data, _ := json.Marshal(&deactivationRequest{Pin: deactivationPin})
+	resp, _ := cc.post(deactivationPath, bytes.NewReader(data))
+	if resp != nil && resp.StatusCode == http.StatusOK {
+		return nil // valid pin
+	}
+	mainLog.Load().Error().Msg("deactivation pin is invalid")
+	return errInvalidDeactivationPin
 }

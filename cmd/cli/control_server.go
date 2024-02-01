@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	contentTypeJson = "application/json"
-	listClientsPath = "/clients"
-	startedPath     = "/started"
-	reloadPath      = "/reload"
+	contentTypeJson  = "application/json"
+	listClientsPath  = "/clients"
+	startedPath      = "/started"
+	reloadPath       = "/reload"
+	deactivationPath = "/deactivation"
 )
 
 type controlServer struct {
@@ -145,6 +146,25 @@ func (p *prog) registerControlServerHandler() {
 
 		// Otherwise, reload is done.
 		w.WriteHeader(http.StatusOK)
+	}))
+	p.cs.register(deactivationPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		// Non-cd mode or pin code not set, always allowing deactivation.
+		if cdUID == "" || deactivationPinNotSet() {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		var req deactivationRequest
+		if err := json.NewDecoder(request.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			mainLog.Load().Err(err).Msg("invalid deactivation request")
+			return
+		}
+		code := http.StatusBadRequest
+		if req.Pin == cdDeactivationPin {
+			code = http.StatusOK
+		}
+		w.WriteHeader(code)
 	}))
 }
 

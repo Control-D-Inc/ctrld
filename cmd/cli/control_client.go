@@ -27,3 +27,8 @@ func newControlClient(addr string) *controlClient {
 func (c *controlClient) post(path string, data io.Reader) (*http.Response, error) {
 	return c.c.Post("http://unix"+path, contentTypeJson, data)
 }
+
+// deactivationRequest represents request for validating deactivation pin.
+type deactivationRequest struct {
+	Pin int64 `json:"pin"`
+}
