@@ -266,7 +266,7 @@ func initCLI() {
 			tasks := []task{
 				{s.Stop, false},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
-				{s.Uninstall, false},
+				{func() error { return ensureUninstall(s) }, false},
 				{s.Install, false},
 				{s.Start, true},
 				// Note that startCmd do not actually write ControlD config, but the config file was
@@ -2101,4 +2101,18 @@ func checkDeactivationPin(s service.Service) error {
 	}
 	mainLog.Load().Error().Msg("deactivation pin is invalid")
 	return errInvalidDeactivationPin
+}
+
+// ensureUninstall ensures that s.Uninstall will remove ctrld service from system completely.
+func ensureUninstall(s service.Service) error {
+	maxAttempts := 10
+	var err error
+	for i := 0; i < maxAttempts; i++ {
+		err = s.Uninstall()
+		if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	return errors.Join(err, errors.New("uninstall failed"))
 }
