@@ -586,6 +586,15 @@ func errNetworkError(err error) bool {
 	return false
 }
 
+// errConnectionRefused reports whether err is connection refused.
+func errConnectionRefused(err error) bool {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		return false
+	}
+	return errors.Is(opErr.Err, syscall.ECONNREFUSED) || errors.Is(opErr.Err, windowsECONNREFUSED)
+}
+
 func ifaceFirstPrivateIP(iface *net.Interface) string {
 	if iface == nil {
 		return ""
