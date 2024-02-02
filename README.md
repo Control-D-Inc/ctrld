@@ -10,7 +10,8 @@ A highly configurable DNS forwarding proxy with support for:
 - Multiple network policy driven DNS query steering
 - Policy driven domain based "split horizon" DNS with wildcard support
 - Integrations with common router vendors and firmware
-- LAN client discovery via DHCP, mDNS, and ARP
+- LAN client discovery via DHCP, mDNS, ARP, NDP, hosts file parsing
+- Prometheus metrics exporter 
 
 ## TLDR
 Proxy legacy DNS traffic to secure DNS upstreams in highly configurable ways. 
@@ -232,7 +233,6 @@ See [Contribution Guideline](./docs/contributing.md)
 
 ## Roadmap
 The following functionality is on the roadmap and will be available in future releases. 
-- Prometheus metrics exporter 
 - DNS intercept mode
 - Direct listener mode
 - Support for more routers (let us know which ones)
