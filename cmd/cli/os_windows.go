@@ -2,19 +2,43 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
+	"strings"
+	"sync"
 
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
+const forwardersFilename = ".forwarders.txt"
+
+var (
+	setDNSOnce   sync.Once
+	resetDNSOnce sync.Once
+)
+
 func setDNS(iface *net.Interface, nameservers []string) error {
 	if len(nameservers) == 0 {
 		return errors.New("empty DNS nameservers")
 	}
+	setDNSOnce.Do(func() {
+		// If there's a Dns server running, that means we are on AD with Dns feature enabled.
+		// Configuring the Dns server to forward queries to ctrld instead.
+		if windowsHasLocalDnsServerRunning() {
+			file := absHomeDir(forwardersFilename)
+			if err := os.WriteFile(file, []byte(strings.Join(nameservers, ",")), 0600); err != nil {
+				mainLog.Load().Warn().Err(err).Msg("could not save forwarders settings")
+			}
+			if err := addDnsServerForwarders(nameservers); err != nil {
+				mainLog.Load().Warn().Err(err).Msg("could not set forwarders settings")
+			}
+		}
+	})
 	primaryDNS := nameservers[0]
 	if err := setPrimaryDNS(iface, primaryDNS); err != nil {
 		return err
@@ -28,6 +52,23 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 
 // TODO(cuonglm): should we use system API?
 func resetDNS(iface *net.Interface) error {
+	resetDNSOnce.Do(func() {
+		// See corresponding comment in setDNS.
+		if windowsHasLocalDnsServerRunning() {
+			file := absHomeDir(forwardersFilename)
+			content, err := os.ReadFile(file)
+			if err != nil {
+				mainLog.Load().Error().Err(err).Msg("could not read forwarders settings")
+				return
+			}
+			nameservers := strings.Split(string(content), ",")
+			if err := removeDnsServerForwarders(nameservers); err != nil {
+				mainLog.Load().Error().Err(err).Msg("could not remove forwarders settings")
+				return
+			}
+		}
+	})
+
 	if ctrldnet.SupportsIPv6ListenLocal() {
 		if output, err := netsh("interface", "ipv6", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp"); err != nil {
 			mainLog.Load().Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))
@@ -92,4 +133,26 @@ func currentDNS(iface *net.Interface) []string {
 		ns = append(ns, nameserver.String())
 	}
 	return ns
+}
+
+// addDnsServerForwarders adds given nameservers to DNS server forwarders list.
+func addDnsServerForwarders(nameservers []string) error {
+	for _, ns := range nameservers {
+		cmd := fmt.Sprintf("Add-DnsServerForwarder -IPAddress %s", ns)
+		if out, err := powershell(cmd); err != nil {
+			return fmt.Errorf("%w: %s", err, string(out))
+		}
+	}
+	return nil
+}
+
+// removeDnsServerForwarders removes given nameservers from DNS server forwarders list.
+func removeDnsServerForwarders(nameservers []string) error {
+	for _, ns := range nameservers {
+		cmd := fmt.Sprintf("Remove-DnsServerForwarder -IPAddress %s -Force", ns)
+		if out, err := powershell(cmd); err != nil {
+			return fmt.Errorf("%w: %s", err, string(out))
+		}
+	}
+	return nil
 }
