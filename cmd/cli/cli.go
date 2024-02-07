@@ -802,6 +802,15 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 	run(appCallback, stopCh)
 }
 
+// CheckDeactivationPin checks if deactivation pin is valid
+func CheckDeactivationPin(pin int64) int {
+	deactivationPin = pin
+	if err := checkDeactivationPin(nil); errors.Is(err, errInvalidDeactivationPin) {
+		return deactivationPinInvalidExitCode
+	}
+	return 0
+}
+
 // run runs ctrld cli with given app callback and stop channel.
 func run(appCallback *AppCallback, stopCh chan struct{}) {
 	if stopCh == nil {
@@ -2090,7 +2099,12 @@ func checkDeactivationPin(s service.Service) error {
 		mainLog.Load().Err(err).Msg("could not check deactivation pin")
 		return err
 	}
-	cc := newSocketControlClient(s, dir)
+	var cc *controlClient
+	if s == nil {
+		cc = newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+	} else {
+		cc = newSocketControlClient(s, dir)
+	}
 	if cc == nil {
 		return nil // ctrld is not running.
 	}
