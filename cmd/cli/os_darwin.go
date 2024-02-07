@@ -44,6 +44,11 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 
 // TODO(cuonglm): use system API
 func resetDNS(iface *net.Interface) error {
+	if ns := savedNameservers(iface); len(ns) > 0 {
+		if err := setDNS(iface, ns); err == nil {
+			return nil
+		}
+	}
 	cmd := "networksetup"
 	args := []string{"-setdnsservers", iface.Name, "empty"}
 

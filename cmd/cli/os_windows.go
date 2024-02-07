@@ -69,6 +69,11 @@ func resetDNS(iface *net.Interface) error {
 		}
 	})
 
+	if ns := savedNameservers(iface); len(ns) > 0 {
+		if err := setDNS(iface, ns); err == nil {
+			return nil
+		}
+	}
 	if ctrldnet.SupportsIPv6ListenLocal() {
 		if output, err := netsh("interface", "ipv6", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp"); err != nil {
 			mainLog.Load().Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))

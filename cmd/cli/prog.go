@@ -462,6 +462,7 @@ func (p *prog) setDNS() {
 	if needRFC1918Listeners(lc) {
 		nameservers = append(nameservers, ctrld.Rfc1918Addresses()...)
 	}
+	saveCurrentDNS(netIface)
 	if err := setDNS(netIface, nameservers); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return
@@ -469,6 +470,7 @@ func (p *prog) setDNS() {
 	logger.Debug().Msg("setting DNS successfully")
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
+			saveCurrentDNS(i)
 			return setDNS(i, nameservers)
 		})
 	}
@@ -723,4 +725,36 @@ func requiredMultiNICsConfig() bool {
 	default:
 		return false
 	}
+}
+
+// saveCurrentDNS saves the current DNS settings for restoring later.
+// Only works on Windows and Mac.
+func saveCurrentDNS(iface *net.Interface) {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+	default:
+		return
+	}
+	ns := currentDNS(iface)
+	if len(ns) == 0 {
+		return
+	}
+	file := savedDnsSettingsFilePath(iface)
+	if err := os.WriteFile(file, []byte(strings.Join(ns, ",")), 0600); err != nil {
+		mainLog.Load().Err(err).Msgf("could not save DNS settings for iface: %s", iface.Name)
+	}
+}
+
+// savedDnsSettingsFilePath returns the path to saved DNS settings of the given interface.
+func savedDnsSettingsFilePath(iface *net.Interface) string {
+	return absHomeDir(".dns_" + iface.Name)
+}
+
+// savedNameservers returns the static DNS nameservers of the given interface.
+func savedNameservers(iface *net.Interface) []string {
+	file := savedDnsSettingsFilePath(iface)
+	if data, err := os.ReadFile(file); err != nil && len(data) > 0 {
+		return strings.Split(string(data), ",")
+	}
+	return nil
 }
