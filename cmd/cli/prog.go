@@ -462,7 +462,6 @@ func (p *prog) setDNS() {
 	if needRFC1918Listeners(lc) {
 		nameservers = append(nameservers, ctrld.Rfc1918Addresses()...)
 	}
-	saveCurrentDNS(netIface)
 	if err := setDNS(netIface, nameservers); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return
@@ -470,7 +469,6 @@ func (p *prog) setDNS() {
 	logger.Debug().Msg("setting DNS successfully")
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
-			saveCurrentDNS(i)
 			return setDNS(i, nameservers)
 		})
 	}
@@ -753,7 +751,7 @@ func savedDnsSettingsFilePath(iface *net.Interface) string {
 // savedNameservers returns the static DNS nameservers of the given interface.
 func savedNameservers(iface *net.Interface) []string {
 	file := savedDnsSettingsFilePath(iface)
-	if data, err := os.ReadFile(file); err != nil && len(data) > 0 {
+	if data, _ := os.ReadFile(file); len(data) > 0 {
 		return strings.Split(string(data), ",")
 	}
 	return nil

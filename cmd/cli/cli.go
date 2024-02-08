@@ -268,6 +268,14 @@ func initCLI() {
 				{s.Stop, false},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
 				{func() error { return ensureUninstall(s) }, false},
+				{func() error {
+					// Save current DNS so we can restore later.
+					withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
+						saveCurrentDNS(i)
+						return nil
+					})
+					return nil
+				}, false},
 				{s.Install, false},
 				{s.Start, true},
 				// Note that startCmd do not actually write ControlD config, but the config file was
