@@ -31,6 +31,13 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		// Configuring the Dns server to forward queries to ctrld instead.
 		if windowsHasLocalDnsServerRunning() {
 			file := absHomeDir(forwardersFilename)
+			if data, _ := os.ReadFile(file); len(data) > 0 {
+				if err := removeDnsServerForwarders(strings.Split(string(data), ",")); err != nil {
+					mainLog.Load().Error().Err(err).Msg("could not remove current forwarders settings")
+				} else {
+					mainLog.Load().Debug().Msg("removed current forwarders settings.")
+				}
+			}
 			if err := os.WriteFile(file, []byte(strings.Join(nameservers, ",")), 0600); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("could not save forwarders settings")
 			}
