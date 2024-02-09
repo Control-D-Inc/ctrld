@@ -270,10 +270,7 @@ func initCLI() {
 				{func() error { return ensureUninstall(s) }, false},
 				{func() error {
 					// Save current DNS so we can restore later.
-					withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
-						saveCurrentDNS(i)
-						return nil
-					})
+					withEachPhysicalInterfaces("", "save DNS settings", saveCurrentStaticDNS)
 					return nil
 				}, false},
 				{s.Install, false},
@@ -2197,7 +2194,8 @@ func exchangeContextWithTimeout(c *dns.Client, timeout time.Duration, msg *dns.M
 
 // powershell runs the given powershell command.
 func powershell(cmd string) ([]byte, error) {
-	return exec.Command("powershell", "-Command", cmd).CombinedOutput()
+	out, err := exec.Command("powershell", "-Command", cmd).CombinedOutput()
+	return bytes.TrimSpace(out), err
 }
 
 // windowsHasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.

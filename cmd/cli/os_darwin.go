@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bufio"
+	"bytes"
 	"net"
 	"os/exec"
 
@@ -44,7 +46,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 
 // TODO(cuonglm): use system API
 func resetDNS(iface *net.Interface) error {
-	if ns := savedNameservers(iface); len(ns) > 0 {
+	if ns := savedStaticNameservers(iface); len(ns) > 0 {
 		if err := setDNS(iface, ns); err == nil {
 			return nil
 		}
@@ -61,4 +63,24 @@ func resetDNS(iface *net.Interface) error {
 
 func currentDNS(_ *net.Interface) []string {
 	return resolvconffile.NameServers("")
+}
+
+// currentStaticDNS returns the current static DNS settings of given interface.
+func currentStaticDNS(iface *net.Interface) []string {
+	cmd := "networksetup"
+	args := []string{"-getdnsservers", iface.Name}
+	out, err := exec.Command(cmd, args...).Output()
+	if err != nil {
+		mainLog.Load().Error().Err(err).Msg("could not get current static DNS")
+		return nil
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	var ns []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if ip := net.ParseIP(line); ip != nil {
+			ns = append(ns, ip.String())
+		}
+	}
+	return ns
 }

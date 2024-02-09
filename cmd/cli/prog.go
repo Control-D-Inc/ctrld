@@ -725,32 +725,40 @@ func requiredMultiNICsConfig() bool {
 	}
 }
 
-// saveCurrentDNS saves the current DNS settings for restoring later.
+// saveCurrentStaticDNS saves the current static DNS settings for restoring later.
 // Only works on Windows and Mac.
-func saveCurrentDNS(iface *net.Interface) {
+func saveCurrentStaticDNS(iface *net.Interface) error {
 	switch runtime.GOOS {
 	case "windows", "darwin":
 	default:
-		return
+		return nil
 	}
-	ns := currentDNS(iface)
+	file := savedStaticDnsSettingsFilePath(iface)
+	if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+		mainLog.Load().Warn().Err(err).Msg("could not remove old static DNS settings file")
+	}
+	ns := currentStaticDNS(iface)
 	if len(ns) == 0 {
-		return
+		return nil
 	}
-	file := savedDnsSettingsFilePath(iface)
+	mainLog.Load().Debug().Msgf("DNS settings for %s is static, saving ...", iface.Name)
 	if err := os.WriteFile(file, []byte(strings.Join(ns, ",")), 0600); err != nil {
 		mainLog.Load().Err(err).Msgf("could not save DNS settings for iface: %s", iface.Name)
+		return err
 	}
+	return nil
 }
 
-// savedDnsSettingsFilePath returns the path to saved DNS settings of the given interface.
-func savedDnsSettingsFilePath(iface *net.Interface) string {
+// savedStaticDnsSettingsFilePath returns the path to saved DNS settings of the given interface.
+func savedStaticDnsSettingsFilePath(iface *net.Interface) string {
 	return absHomeDir(".dns_" + iface.Name)
 }
 
-// savedNameservers returns the static DNS nameservers of the given interface.
-func savedNameservers(iface *net.Interface) []string {
-	file := savedDnsSettingsFilePath(iface)
+// savedStaticNameservers returns the static DNS nameservers of the given interface.
+//
+//lint:ignore U1000 use in os_windows.go and os_darwin.go
+func savedStaticNameservers(iface *net.Interface) []string {
+	file := savedStaticDnsSettingsFilePath(iface)
 	if data, _ := os.ReadFile(file); len(data) > 0 {
 		return strings.Split(string(data), ",")
 	}

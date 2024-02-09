@@ -15,7 +15,11 @@ import (
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
-const forwardersFilename = ".forwarders.txt"
+const (
+	forwardersFilename       = ".forwarders.txt"
+	v4InterfaceKeyPathFormat = `HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\`
+	v6InterfaceKeyPathFormat = `HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\`
+)
 
 var (
 	setDNSOnce   sync.Once
@@ -47,7 +51,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		}
 	})
 	primaryDNS := nameservers[0]
-	if err := setPrimaryDNS(iface, primaryDNS); err != nil {
+	if err := setPrimaryDNS(iface, primaryDNS, true); err != nil {
 		return err
 	}
 	if len(nameservers) > 1 {
@@ -76,25 +80,48 @@ func resetDNS(iface *net.Interface) error {
 		}
 	})
 
-	if ns := savedNameservers(iface); len(ns) > 0 {
-		if err := setDNS(iface, ns); err == nil {
-			return nil
-		}
-	}
+	// Restoring ipv6 first.
 	if ctrldnet.SupportsIPv6ListenLocal() {
 		if output, err := netsh("interface", "ipv6", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp"); err != nil {
 			mainLog.Load().Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))
 		}
 	}
+	// Restoring ipv4 DHCP.
 	output, err := netsh("interface", "ipv4", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp")
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msgf("failed to reset ipv4 DNS: %s", string(output))
 		return err
 	}
+	// If there's static DNS saved, restoring it.
+	if nss := savedStaticNameservers(iface); len(nss) > 0 {
+		v4ns := make([]string, 0, 2)
+		v6ns := make([]string, 0, 2)
+		for _, ns := range nss {
+			if ctrldnet.IsIPv6(ns) {
+				v6ns = append(v6ns, ns)
+			} else {
+				v4ns = append(v4ns, ns)
+			}
+		}
+
+		for _, ns := range [][]string{v4ns, v6ns} {
+			if len(ns) == 0 {
+				continue
+			}
+			primaryDNS := ns[0]
+			if err := setPrimaryDNS(iface, primaryDNS, false); err != nil {
+				return err
+			}
+			if len(ns) > 1 {
+				secondaryDNS := ns[1]
+				_ = addSecondaryDNS(iface, secondaryDNS)
+			}
+		}
+	}
 	return nil
 }
 
-func setPrimaryDNS(iface *net.Interface, dns string) error {
+func setPrimaryDNS(iface *net.Interface, dns string, disablev6 bool) error {
 	ipVer := "ipv4"
 	if ctrldnet.IsIPv6(dns) {
 		ipVer = "ipv6"
@@ -105,7 +132,7 @@ func setPrimaryDNS(iface *net.Interface, dns string) error {
 		mainLog.Load().Error().Err(err).Msgf("failed to set primary DNS: %s", string(output))
 		return err
 	}
-	if ipVer == "ipv4" && ctrldnet.SupportsIPv6ListenLocal() {
+	if disablev6 && ipVer == "ipv4" && ctrldnet.SupportsIPv6ListenLocal() {
 		// Disable IPv6 DNS, so the query will be fallback to IPv4.
 		_, _ = netsh("interface", "ipv6", "set", "dnsserver", idx, "static", "::1", "primary")
 	}
@@ -143,6 +170,37 @@ func currentDNS(iface *net.Interface) []string {
 	ns := make([]string, 0, len(nameservers))
 	for _, nameserver := range nameservers {
 		ns = append(ns, nameserver.String())
+	}
+	return ns
+}
+
+// currentStaticDNS returns the current static DNS settings of given interface.
+func currentStaticDNS(iface *net.Interface) []string {
+	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
+	if err != nil {
+		mainLog.Load().Error().Err(err).Msg("could not get interface LUID")
+		return nil
+	}
+	guid, err := luid.GUID()
+	if err != nil {
+		mainLog.Load().Error().Err(err).Msg("could not get interface GUID")
+		return nil
+	}
+	var ns []string
+	for _, path := range []string{v4InterfaceKeyPathFormat, v6InterfaceKeyPathFormat} {
+		interfaceKeyPath := path + guid.String()
+		found := false
+		for _, key := range []string{"NameServer", "ProfileNameServer"} {
+			if found {
+				continue
+			}
+			cmd := fmt.Sprintf(`Get-ItemPropertyValue -Path "%s" -Name "%s"`, interfaceKeyPath, key)
+			out, err := powershell(cmd)
+			if err == nil && len(out) > 0 {
+				found = true
+				ns = append(ns, strings.Split(string(out), ",")...)
+			}
+		}
 	}
 	return ns
 }

@@ -203,6 +203,11 @@ func currentDNS(iface *net.Interface) []string {
 	return nil
 }
 
+// currentStaticDNS returns the current static DNS settings of given interface.
+func currentStaticDNS(iface *net.Interface) []string {
+	return currentDNS(iface)
+}
+
 func getDNSByResolvectl(iface string) []string {
 	b, err := exec.Command("resolvectl", "dns", "-i", iface).Output()
 	if err != nil {

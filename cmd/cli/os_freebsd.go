@@ -66,3 +66,8 @@ func resetDNS(iface *net.Interface) error {
 func currentDNS(_ *net.Interface) []string {
 	return resolvconffile.NameServers("")
 }
+
+// currentStaticDNS returns the current static DNS settings of given interface.
+func currentStaticDNS(iface *net.Interface) []string {
+	return currentDNS(iface)
+}
