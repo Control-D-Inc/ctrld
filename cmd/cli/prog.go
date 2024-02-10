@@ -682,12 +682,8 @@ func canBeLocalUpstream(addr string) bool {
 // log message when error happens.
 func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.Interface) error) {
 	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
-		// Skip not-running/local/virtual interface.
-		if !i.IsUp() || i.IsLoopback() || len(i.HardwareAddr) == 0 {
-			return
-		}
-		// Skip non-configured interfaces.
-		if addrs, _ := i.Addrs(); len(addrs) == 0 {
+		// Skip loopback/virtual interface.
+		if i.IsLoopback() || len(i.HardwareAddr) == 0 {
 			return
 		}
 		// Skip invalid interface.
