@@ -264,7 +264,7 @@ func initCLI() {
 
 			// If pin code was set, do not allow running start command.
 			if status == service.StatusRunning {
-				if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
+				if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 					os.Exit(deactivationPinInvalidExitCode)
 				}
 			}
@@ -413,7 +413,7 @@ func initCLI() {
 				return
 			}
 			initLogging()
-			if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
+			if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)
 			}
 			if doTasks([]task{{s.Stop, true}}) {
@@ -572,7 +572,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if iface == "" {
 				iface = "auto"
 			}
-			if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
+			if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)
 			}
 			uninstall(p, s)
@@ -852,9 +852,9 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 }
 
 // CheckDeactivationPin checks if deactivation pin is valid
-func CheckDeactivationPin(pin int64) int {
+func CheckDeactivationPin(pin int64, stopCh chan struct{}) int {
 	deactivationPin = pin
-	if err := checkDeactivationPin(nil); isCheckDeactivationPinErr(err) {
+	if err := checkDeactivationPin(nil, stopCh); isCheckDeactivationPinErr(err) {
 		return deactivationPinInvalidExitCode
 	}
 	return 0
@@ -935,7 +935,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	p.router = router.New(&cfg, cdUID != "")
-	cs, err := newControlServer(filepath.Join(sockDir, ctrldControlUnixSock))
+	cs, err := newControlServer(filepath.Join(sockDir, ControlSocketName()))
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not create control server")
 	}
@@ -2097,6 +2097,26 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 	return cc
 }
 
+func newSocketControlClientMobile(dir string, stopCh chan struct{}) *controlClient {
+	bo := backoff.NewBackoff("self-check", logf, 3*time.Second)
+	bo.LogLongerThan = 3 * time.Second
+	ctx := context.Background()
+	cc := newControlClient(filepath.Join(dir, ControlSocketName()))
+	for {
+		select {
+		case <-stopCh:
+			return nil
+		default:
+			_, err := cc.post("/", nil)
+			if err == nil {
+				return cc
+			} else {
+				bo.BackOff(ctx, err)
+			}
+		}
+	}
+}
+
 // checkStrFlagEmpty validates if a string flag was set to an empty string.
 // If yes, emitting a fatal error message.
 func checkStrFlagEmpty(cmd *cobra.Command, flagName string) {
@@ -2177,7 +2197,7 @@ var errInvalidDeactivationPin = errors.New("deactivation pin is invalid")
 var errRequiredDeactivationPin = errors.New("deactivation pin is required to stop or uninstall the service")
 
 // checkDeactivationPin validates if the deactivation pin matches one in ControlD config.
-func checkDeactivationPin(s service.Service) error {
+func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	dir, err := socketDir()
 	if err != nil {
 		mainLog.Load().Err(err).Msg("could not check deactivation pin")
@@ -2185,7 +2205,7 @@ func checkDeactivationPin(s service.Service) error {
 	}
 	var cc *controlClient
 	if s == nil {
-		cc = newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+		cc = newSocketControlClientMobile(dir, stopCh)
 	} else {
 		cc = newSocketControlClient(s, dir)
 	}

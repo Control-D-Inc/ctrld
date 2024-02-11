@@ -33,10 +33,21 @@ const (
 	defaultSemaphoreCap  = 256
 	ctrldLogUnixSock     = "ctrld_start.sock"
 	ctrldControlUnixSock = "ctrld_control.sock"
-	upstreamPrefix       = "upstream."
-	upstreamOS           = upstreamPrefix + "os"
-	upstreamPrivate      = upstreamPrefix + "private"
+	// iOS unix socket name max length is 11.
+	ctrldControlUnixSockMobile = "cd.sock"
+	upstreamPrefix             = "upstream."
+	upstreamOS                 = upstreamPrefix + "os"
+	upstreamPrivate            = upstreamPrefix + "private"
 )
+
+// ControlSocketName returns name for control unix socket.
+func ControlSocketName() string {
+	if isMobile() {
+		return ctrldControlUnixSockMobile
+	} else {
+		return ctrldControlUnixSock
+	}
+}
 
 var logf = func(format string, args ...any) {
 	mainLog.Load().Debug().Msgf(format, args...)
