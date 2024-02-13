@@ -89,8 +89,7 @@ func resetDNS(iface *net.Interface) error {
 	// Restoring ipv4 DHCP.
 	output, err := netsh("interface", "ipv4", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp")
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msgf("failed to reset ipv4 DNS: %s", string(output))
-		return err
+		return fmt.Errorf("%s: %w", string(output), err)
 	}
 	// If there's static DNS saved, restoring it.
 	if nss := savedStaticNameservers(iface); len(nss) > 0 {
@@ -178,12 +177,16 @@ func currentDNS(iface *net.Interface) []string {
 func currentStaticDNS(iface *net.Interface) []string {
 	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("could not get interface LUID")
+		if ifaceUp(iface) {
+			mainLog.Load().Error().Err(err).Msg("could not get interface LUID")
+		}
 		return nil
 	}
 	guid, err := luid.GUID()
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("could not get interface GUID")
+		if ifaceUp(iface) {
+			mainLog.Load().Error().Err(err).Msg("could not get interface GUID")
+		}
 		return nil
 	}
 	var ns []string

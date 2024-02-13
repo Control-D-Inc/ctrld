@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"net"
 	"os/exec"
 
@@ -36,10 +37,8 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	cmd := "networksetup"
 	args := []string{"-setdnsservers", iface.Name}
 	args = append(args, nameservers...)
-
-	if err := exec.Command(cmd, args...).Run(); err != nil {
-		mainLog.Load().Error().Err(err).Msgf("setDNS failed, ips = %q", nameservers)
-		return err
+	if out, err := exec.Command(cmd, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %w", string(out), err)
 	}
 	return nil
 }
@@ -53,10 +52,8 @@ func resetDNS(iface *net.Interface) error {
 	}
 	cmd := "networksetup"
 	args := []string{"-setdnsservers", iface.Name, "empty"}
-
-	if err := exec.Command(cmd, args...).Run(); err != nil {
-		mainLog.Load().Error().Err(err).Msgf("resetDNS failed")
-		return err
+	if out, err := exec.Command(cmd, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%v: %w", string(out), err)
 	}
 	return nil
 }
@@ -71,7 +68,9 @@ func currentStaticDNS(iface *net.Interface) []string {
 	args := []string{"-getdnsservers", iface.Name}
 	out, err := exec.Command(cmd, args...).Output()
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("could not get current static DNS")
+		if ifaceUp(iface) {
+			mainLog.Load().Error().Err(err).Msg("could not get current static DNS")
+		}
 		return nil
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(out))

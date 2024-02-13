@@ -704,7 +704,9 @@ func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.
 			return
 		}
 		if err := f(netIface); err != nil {
-			mainLog.Load().Warn().Err(err).Msgf("failed to %s for interface: %q", context, i.Name)
+			if ifaceUp(netIface) {
+				mainLog.Load().Warn().Err(err).Msgf("failed to %s for interface: %q", context, i.Name)
+			}
 		} else {
 			mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
 		}
