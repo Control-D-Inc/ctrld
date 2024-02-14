@@ -63,15 +63,12 @@ func currentDNS(_ *net.Interface) []string {
 }
 
 // currentStaticDNS returns the current static DNS settings of given interface.
-func currentStaticDNS(iface *net.Interface) []string {
+func currentStaticDNS(iface *net.Interface) ([]string, error) {
 	cmd := "networksetup"
 	args := []string{"-getdnsservers", iface.Name}
 	out, err := exec.Command(cmd, args...).Output()
 	if err != nil {
-		if ifaceUp(iface) {
-			mainLog.Load().Error().Err(err).Msg("could not get current static DNS")
-		}
-		return nil
+		return nil, err
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	var ns []string
@@ -81,5 +78,5 @@ func currentStaticDNS(iface *net.Interface) []string {
 			ns = append(ns, ip.String())
 		}
 	}
-	return ns
+	return ns, nil
 }

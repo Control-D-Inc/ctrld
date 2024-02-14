@@ -174,20 +174,14 @@ func currentDNS(iface *net.Interface) []string {
 }
 
 // currentStaticDNS returns the current static DNS settings of given interface.
-func currentStaticDNS(iface *net.Interface) []string {
+func currentStaticDNS(iface *net.Interface) ([]string, error) {
 	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {
-		if ifaceUp(iface) {
-			mainLog.Load().Error().Err(err).Msg("could not get interface LUID")
-		}
-		return nil
+		return nil, err
 	}
 	guid, err := luid.GUID()
 	if err != nil {
-		if ifaceUp(iface) {
-			mainLog.Load().Error().Err(err).Msg("could not get interface GUID")
-		}
-		return nil
+		return nil, err
 	}
 	var ns []string
 	for _, path := range []string{v4InterfaceKeyPathFormat, v6InterfaceKeyPathFormat} {
@@ -205,7 +199,7 @@ func currentStaticDNS(iface *net.Interface) []string {
 			}
 		}
 	}
-	return ns
+	return ns, nil
 }
 
 // addDnsServerForwarders adds given nameservers to DNS server forwarders list.

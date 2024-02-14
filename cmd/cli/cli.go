@@ -2223,8 +2223,3 @@ func absHomeDir(filename string) string {
 	}
 	return filepath.Join(dir, filename)
 }
-
-// ifaceUp reports whether the net interface is up.
-func ifaceUp(iface *net.Interface) bool {
-	return iface != nil && iface.Flags&net.FlagUp != 0
-}

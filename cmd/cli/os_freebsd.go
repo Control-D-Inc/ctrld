@@ -68,6 +68,6 @@ func currentDNS(_ *net.Interface) []string {
 }
 
 // currentStaticDNS returns the current static DNS settings of given interface.
-func currentStaticDNS(iface *net.Interface) []string {
-	return currentDNS(iface)
+func currentStaticDNS(iface *net.Interface) ([]string, error) {
+	return currentDNS(iface), nil
 }

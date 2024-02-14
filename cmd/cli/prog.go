@@ -703,11 +703,8 @@ func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.
 		if strings.Contains(netIface.Name, "vEthernet") {
 			return
 		}
-		if err := f(netIface); err != nil {
-			if ifaceUp(netIface) {
-				mainLog.Load().Warn().Err(err).Msgf("failed to %s for interface: %q", context, i.Name)
-			}
-		} else {
+		// TODO: investigate whether we should report this error?
+		if err := f(netIface); err == nil {
 			mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
 		}
 	})
@@ -735,7 +732,7 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 	if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
 		mainLog.Load().Warn().Err(err).Msg("could not remove old static DNS settings file")
 	}
-	ns := currentStaticDNS(iface)
+	ns, _ := currentStaticDNS(iface)
 	if len(ns) == 0 {
 		return nil
 	}
