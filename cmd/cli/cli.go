@@ -259,6 +259,13 @@ func initCLI() {
 				return
 			}
 
+			// If pin code was set, do not allow running start command.
+			if status, _ := s.Status(); status == service.StatusRunning {
+				if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
+					os.Exit(deactivationPinInvalidExitCode)
+				}
+			}
+
 			if router.Name() != "" && iface != "" {
 				mainLog.Load().Debug().Msg("cleaning up router before installing")
 				_ = p.router.Cleanup()
@@ -393,7 +400,7 @@ func initCLI() {
 				return
 			}
 			initLogging()
-			if err := checkDeactivationPin(s); errors.Is(err, errInvalidDeactivationPin) {
+			if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)
 			}
 			if doTasks([]task{{s.Stop, true}}) {
@@ -552,7 +559,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if iface == "" {
 				iface = "auto"
 			}
-			if err := checkDeactivationPin(s); errors.Is(err, errInvalidDeactivationPin) {
+			if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)
 			}
 			uninstall(p, s)
@@ -834,7 +841,7 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 // CheckDeactivationPin checks if deactivation pin is valid
 func CheckDeactivationPin(pin int64) int {
 	deactivationPin = pin
-	if err := checkDeactivationPin(nil); errors.Is(err, errInvalidDeactivationPin) {
+	if err := checkDeactivationPin(nil); isCheckDeactivationPinErr(err) {
 		return deactivationPinInvalidExitCode
 	}
 	return 0
@@ -2146,6 +2153,9 @@ const deactivationPinInvalidExitCode = 126
 // errInvalidDeactivationPin indicates that the deactivation pin is invalid.
 var errInvalidDeactivationPin = errors.New("deactivation pin is invalid")
 
+// errRequiredDeactivationPin indicates that the deactivation pin is required but not provided by users.
+var errRequiredDeactivationPin = errors.New("deactivation pin is required to stop or uninstall the service")
+
 // checkDeactivationPin validates if the deactivation pin matches one in ControlD config.
 func checkDeactivationPin(s service.Service) error {
 	dir, err := socketDir()
@@ -2164,11 +2174,22 @@ func checkDeactivationPin(s service.Service) error {
 	}
 	data, _ := json.Marshal(&deactivationRequest{Pin: deactivationPin})
 	resp, _ := cc.post(deactivationPath, bytes.NewReader(data))
-	if resp != nil && resp.StatusCode == http.StatusOK {
-		return nil // valid pin
+	if resp != nil {
+		switch resp.StatusCode {
+		case http.StatusBadRequest:
+			mainLog.Load().Error().Msg(errRequiredDeactivationPin.Error())
+			return errRequiredDeactivationPin // pin is required
+		case http.StatusOK:
+			return nil // valid pin
+		}
 	}
-	mainLog.Load().Error().Msg("deactivation pin is invalid")
+	mainLog.Load().Error().Msg(errInvalidDeactivationPin.Error())
 	return errInvalidDeactivationPin
+}
+
+// isCheckDeactivationPinErr reports whether there is an error during check deactivation pin process.
+func isCheckDeactivationPinErr(err error) bool {
+	return errors.Is(err, errInvalidDeactivationPin) || errors.Is(err, errRequiredDeactivationPin)
 }
 
 // ensureUninstall ensures that s.Uninstall will remove ctrld service from system completely.

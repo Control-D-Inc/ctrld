@@ -160,9 +160,14 @@ func (p *prog) registerControlServerHandler() {
 			mainLog.Load().Err(err).Msg("invalid deactivation request")
 			return
 		}
-		code := http.StatusBadRequest
-		if req.Pin == cdDeactivationPin {
+
+		code := http.StatusForbidden
+		switch req.Pin {
+		case cdDeactivationPin:
 			code = http.StatusOK
+		case defaultDeactivationPin:
+			// If the pin code was set, but users do not provide --pin, return proper code to client.
+			code = http.StatusBadRequest
 		}
 		w.WriteHeader(code)
 	}))
