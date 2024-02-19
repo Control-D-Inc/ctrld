@@ -14,7 +14,7 @@ The config file allows for advanced configuration of the `ctrld` utility to cove
 
 
 ## Config Location
-`ctrld` uses [TOML](toml_link) format for its configuration file. Default configuration file is `ctrld.toml` found in following order:
+`ctrld` uses [TOML][toml_link] format for its configuration file. Default configuration file is `ctrld.toml` found in following order:
 
  - `/etc/controld` on *nix.
  - User's home directory on Windows.
@@ -551,7 +551,7 @@ networks = [
 
 If `upstream.0` returns a NXDOMAIN response, the request will be forwarded to `upstream.1` instead of returning immediately to the client.
 
-See all available DNS Rcodes value [here](rcode_link).
+See all available DNS Rcodes value [here][rcode_link].
 
 [toml_link]: https://toml.io/en
 [rcode_link]: https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml#dns-parameters-6
