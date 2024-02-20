@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand"
 	"net"
 	"net/netip"
@@ -729,12 +730,12 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 		return nil
 	}
 	file := savedStaticDnsSettingsFilePath(iface)
-	if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
-		mainLog.Load().Warn().Err(err).Msg("could not remove old static DNS settings file")
-	}
 	ns, _ := currentStaticDNS(iface)
 	if len(ns) == 0 {
 		return nil
+	}
+	if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		mainLog.Load().Warn().Err(err).Msg("could not remove old static DNS settings file")
 	}
 	mainLog.Load().Debug().Msgf("DNS settings for %s is static, saving ...", iface.Name)
 	if err := os.WriteFile(file, []byte(strings.Join(ns, ",")), 0600); err != nil {
