@@ -468,6 +468,13 @@ func (p *prog) setDNS() {
 		return
 	}
 	logger.Debug().Msg("setting DNS successfully")
+	if shouldWatchResolvconf() {
+		servers := make([]netip.Addr, len(nameservers))
+		for i := range nameservers {
+			servers[i] = netip.MustParseAddr(nameservers[i])
+		}
+		go watchResolvConf(netIface, servers, setResolvConf)
+	}
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
 			return setDNS(i, nameservers)
