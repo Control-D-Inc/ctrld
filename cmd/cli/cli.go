@@ -2194,6 +2194,8 @@ func checkDeactivationPin(s service.Service) error {
 			return errRequiredDeactivationPin // pin is required
 		case http.StatusOK:
 			return nil // valid pin
+		case http.StatusNotFound:
+			return nil // the server is running older version of ctrld
 		}
 	}
 	mainLog.Load().Error().Msg(errInvalidDeactivationPin.Error())
