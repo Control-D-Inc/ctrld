@@ -739,6 +739,7 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 	file := savedStaticDnsSettingsFilePath(iface)
 	ns, _ := currentStaticDNS(iface)
 	if len(ns) == 0 {
+		_ = os.Remove(file) // removing old static DNS settings
 		return nil
 	}
 	if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
