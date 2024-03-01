@@ -707,13 +707,11 @@ func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.
 		if netIface.Name == excludeIfaceName {
 			return
 		}
-		// Skip Windows Hyper-V Default Switch.
-		if strings.Contains(netIface.Name, "vEthernet") {
-			return
-		}
 		// TODO: investigate whether we should report this error?
 		if err := f(netIface); err == nil {
 			mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
+		} else if !errors.Is(err, errSaveCurrentStaticDNSNotSupported) {
+			mainLog.Load().Err(err).Msgf("%s for interface %q failed", context, i.Name)
 		}
 	})
 }
@@ -728,13 +726,15 @@ func requiredMultiNICsConfig() bool {
 	}
 }
 
+var errSaveCurrentStaticDNSNotSupported = errors.New("saving current DNS is not supported on this platform")
+
 // saveCurrentStaticDNS saves the current static DNS settings for restoring later.
 // Only works on Windows and Mac.
 func saveCurrentStaticDNS(iface *net.Interface) error {
 	switch runtime.GOOS {
 	case "windows", "darwin":
 	default:
-		return nil
+		return errSaveCurrentStaticDNSNotSupported
 	}
 	file := savedStaticDnsSettingsFilePath(iface)
 	ns, _ := currentStaticDNS(iface)
