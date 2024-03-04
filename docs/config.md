@@ -224,11 +224,8 @@ DHCP leases file format.
 - Default: ""
 
 ### client_id_preference
-Decide how the client ID is generated
+Decide how the client ID is generated. By default client ID will use both MAC address and Hostname i.e. `hash(mac + host)`. To override this behavior, select one of the 2 allowed values to scope client ID to just MAC address OR Hostname.  
 
-If `host` -> client id will only use the hostname i.e.`hash(hostname)`.
-If `mac` -> client id will only use the MAC address `hash(mac)`.
-Else -> client ID will use both Mac and Hostname i.e. `hash(mac + host)
 - Type: string
 - Required: no
 - Valid values: `mac`, `host`
@@ -242,7 +239,7 @@ If set to `true`, collect and export the query counters, and show them in `clien
 - Default: false
 
 ### metrics_listener
-Specifying the `ip` and `port` of the metrics server.
+Specifying the `ip` and `port` of the Prometheus metrics server. The Prometheus metrics will be available on: `http://ip:port/metrics`. You can also append `/metrics/json` to get the same data in json format. 
 
 - Type: string
 - Required: no

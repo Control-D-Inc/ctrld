@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand"
 	"net"
 	"net/netip"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -417,8 +419,14 @@ func (p *prog) setDNS() {
 	if iface == "" {
 		return
 	}
+	// allIfaces tracks whether we should set DNS for all physical interfaces.
+	allIfaces := false
 	if iface == "auto" {
 		iface = defaultIfaceName()
+		// If iface is "auto", it means user does not specify "--iface" flag.
+		// In this case, ctrld has to set DNS for all physical interfaces, so
+		// thing will still work when user switch from one to the other.
+		allIfaces = requiredMultiNICsConfig()
 	}
 	lc := cfg.FirstListener()
 	if lc == nil {
@@ -460,14 +468,29 @@ func (p *prog) setDNS() {
 		return
 	}
 	logger.Debug().Msg("setting DNS successfully")
+	if shouldWatchResolvconf() {
+		servers := make([]netip.Addr, len(nameservers))
+		for i := range nameservers {
+			servers[i] = netip.MustParseAddr(nameservers[i])
+		}
+		go watchResolvConf(netIface, servers, setResolvConf)
+	}
+	if allIfaces {
+		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
+			return setDNS(i, nameservers)
+		})
+	}
 }
 
 func (p *prog) resetDNS() {
 	if iface == "" {
 		return
 	}
+	allIfaces := false
 	if iface == "auto" {
 		iface = defaultIfaceName()
+		// See corresponding comments in (*prog).setDNS function.
+		allIfaces = requiredMultiNICsConfig()
 	}
 	logger := mainLog.Load().With().Str("iface", iface).Logger()
 	netIface, err := netInterface(iface)
@@ -485,6 +508,9 @@ func (p *prog) resetDNS() {
 		return
 	}
 	logger.Debug().Msg("Restoring DNS successfully")
+	if allIfaces {
+		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDNS)
+	}
 }
 
 func randomLocalIP() string {
@@ -568,6 +594,15 @@ func errNetworkError(err error) bool {
 	return false
 }
 
+// errConnectionRefused reports whether err is connection refused.
+func errConnectionRefused(err error) bool {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		return false
+	}
+	return errors.Is(opErr.Err, syscall.ECONNREFUSED) || errors.Is(opErr.Err, windowsECONNREFUSED)
+}
+
 func ifaceFirstPrivateIP(iface *net.Interface) string {
 	if iface == nil {
 		return ""
@@ -648,4 +683,88 @@ func canBeLocalUpstream(addr string) bool {
 		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || tsaddr.CGNATRange().Contains(ip)
 	}
 	return false
+}
+
+// withEachPhysicalInterfaces runs the function f with each physical interfaces, excluding
+// the interface that matches excludeIfaceName. The context is used to clarify the
+// log message when error happens.
+func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.Interface) error) {
+	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+		// Skip loopback/virtual interface.
+		if i.IsLoopback() || len(i.HardwareAddr) == 0 {
+			return
+		}
+		// Skip invalid interface.
+		if !validInterface(i.Interface) {
+			return
+		}
+		netIface := i.Interface
+		if err := patchNetIfaceName(netIface); err != nil {
+			mainLog.Load().Debug().Err(err).Msg("failed to patch net interface name")
+			return
+		}
+		// Skip excluded interface.
+		if netIface.Name == excludeIfaceName {
+			return
+		}
+		// TODO: investigate whether we should report this error?
+		if err := f(netIface); err == nil {
+			mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
+		} else if !errors.Is(err, errSaveCurrentStaticDNSNotSupported) {
+			mainLog.Load().Err(err).Msgf("%s for interface %q failed", context, i.Name)
+		}
+	})
+}
+
+// requiredMultiNicConfig reports whether ctrld needs to set/reset DNS for multiple NICs.
+func requiredMultiNICsConfig() bool {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return true
+	default:
+		return false
+	}
+}
+
+var errSaveCurrentStaticDNSNotSupported = errors.New("saving current DNS is not supported on this platform")
+
+// saveCurrentStaticDNS saves the current static DNS settings for restoring later.
+// Only works on Windows and Mac.
+func saveCurrentStaticDNS(iface *net.Interface) error {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+	default:
+		return errSaveCurrentStaticDNSNotSupported
+	}
+	file := savedStaticDnsSettingsFilePath(iface)
+	ns, _ := currentStaticDNS(iface)
+	if len(ns) == 0 {
+		_ = os.Remove(file) // removing old static DNS settings
+		return nil
+	}
+	if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		mainLog.Load().Warn().Err(err).Msg("could not remove old static DNS settings file")
+	}
+	mainLog.Load().Debug().Msgf("DNS settings for %s is static, saving ...", iface.Name)
+	if err := os.WriteFile(file, []byte(strings.Join(ns, ",")), 0600); err != nil {
+		mainLog.Load().Err(err).Msgf("could not save DNS settings for iface: %s", iface.Name)
+		return err
+	}
+	return nil
+}
+
+// savedStaticDnsSettingsFilePath returns the path to saved DNS settings of the given interface.
+func savedStaticDnsSettingsFilePath(iface *net.Interface) string {
+	return absHomeDir(".dns_" + iface.Name)
+}
+
+// savedStaticNameservers returns the static DNS nameservers of the given interface.
+//
+//lint:ignore U1000 use in os_windows.go and os_darwin.go
+func savedStaticNameservers(iface *net.Interface) []string {
+	file := savedStaticDnsSettingsFilePath(iface)
+	if data, _ := os.ReadFile(file); len(data) > 0 {
+		return strings.Split(string(data), ",")
+	}
+	return nil
 }

@@ -1,5 +1,3 @@
-//go:build !qf
-
 package ctrld
 
 import (

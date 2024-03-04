@@ -199,7 +199,7 @@ func distroName() string {
 		return merlin.Name
 	case haveFile("/etc/openwrt_version"):
 		return openwrt.Name
-	case haveDir("/data/unifi"):
+	case isUbios():
 		return ubios.Name
 	case bytes.HasPrefix(unameU(), []byte("synology")):
 		return synology.Name
@@ -233,4 +233,15 @@ func unameO() []byte {
 func unameU() []byte {
 	out, _ := exec.Command("uname", "-u").Output()
 	return out
+}
+
+// isUbios reports whether the current machine is running on Ubios.
+func isUbios() bool {
+	if haveDir("/data/unifi") {
+		return true
+	}
+	if err := exec.Command("ubnt-device-info", "firmware").Run(); err == nil {
+		return true
+	}
+	return false
 }

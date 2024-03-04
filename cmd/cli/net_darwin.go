@@ -42,3 +42,21 @@ func networkServiceName(ifaceName string, r io.Reader) string {
 	}
 	return ""
 }
+
+// validInterface reports whether the *net.Interface is a valid one, which includes:
+//
+// - en0: physical wireless
+// - en1: Thunderbolt 1
+// - en2: Thunderbolt 2
+// - en3: Thunderbolt 3
+// - en4: Thunderbolt 4
+//
+// For full list, see: https://unix.stackexchange.com/questions/603506/what-are-these-ifconfig-interfaces-on-macos
+func validInterface(iface *net.Interface) bool {
+	switch iface.Name {
+	case "en0", "en1", "en2", "en3", "en4":
+		return true
+	default:
+		return false
+	}
+}

@@ -61,13 +61,13 @@ func mapCallback(callback AppCallback) cli.AppCallback {
 	}
 }
 
-func (c *Controller) Stop() bool {
-	if c.stopCh != nil {
+func (c *Controller) Stop(Pin int64) int {
+	errorCode := cli.CheckDeactivationPin(Pin)
+	if errorCode == 0 && c.stopCh != nil {
 		close(c.stopCh)
 		c.stopCh = nil
-		return true
 	}
-	return false
+	return errorCode
 }
 
 func (c *Controller) IsRunning() bool {

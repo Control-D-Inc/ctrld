@@ -50,9 +50,10 @@ var (
 )
 
 var (
-	v                 = viper.NewWithOptions(viper.KeyDelimiter("::"))
-	defaultConfigFile = "ctrld.toml"
-	rootCertPool      *x509.CertPool
+	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
+	defaultConfigFile    = "ctrld.toml"
+	rootCertPool         *x509.CertPool
+	errSelfCheckNoAnswer = errors.New("no answer from ctrld listener")
 )
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains"}
@@ -258,6 +259,16 @@ func initCLI() {
 				return
 			}
 
+			status, err := s.Status()
+			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
+
+			// If pin code was set, do not allow running start command.
+			if status == service.StatusRunning {
+				if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
+					os.Exit(deactivationPinInvalidExitCode)
+				}
+			}
+
 			if router.Name() != "" && iface != "" {
 				mainLog.Load().Debug().Msg("cleaning up router before installing")
 				_ = p.router.Cleanup()
@@ -266,7 +277,22 @@ func initCLI() {
 			tasks := []task{
 				{s.Stop, false},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
-				{s.Uninstall, false},
+				{func() error { return ensureUninstall(s) }, false},
+				{func() error {
+					// If ctrld is installed, we should not save current DNS settings, because:
+					//
+					// - The DNS settings was being set by ctrld already.
+					// - We could not determine the state of DNS settings before installing ctrld.
+					if isCtrldInstalled {
+						return nil
+					}
+
+					// Save current DNS so we can restore later.
+					withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
+						return saveCurrentStaticDNS(i)
+					})
+					return nil
+				}, false},
 				{s.Install, false},
 				{s.Start, true},
 				// Note that startCmd do not actually write ControlD config, but the config file was
@@ -280,17 +306,40 @@ func initCLI() {
 					return
 				}
 
-				status := selfCheckStatus(s)
-				switch status {
-				case service.StatusRunning:
+				ok, status, err := selfCheckStatus(s)
+				switch {
+				case ok && status == service.StatusRunning:
 					mainLog.Load().Notice().Msg("Service started")
 				default:
 					marker := bytes.Repeat([]byte("="), 32)
-					mainLog.Load().Error().Msg("ctrld service may not have started due to an error or misconfiguration, service log:")
-					_, _ = mainLog.Load().Write(marker)
-					for msg := range runCmdLogCh {
-						_, _ = mainLog.Load().Write([]byte(msg))
+					// If ctrld service is not running, emitting log obtained from ctrld process.
+					if status != service.StatusRunning {
+						mainLog.Load().Error().Msg("ctrld service may not have started due to an error or misconfiguration, service log:")
+						_, _ = mainLog.Load().Write(marker)
+						haveLog := false
+						for msg := range runCmdLogCh {
+							_, _ = mainLog.Load().Write([]byte(msg))
+							haveLog = true
+						}
+						// If we're unable to get log from "ctrld run", notice users about it.
+						if !haveLog {
+							mainLog.Load().Write([]byte(`<no log output is obtained from ctrld process>"`))
+						}
 					}
+					// Report any error if occurred.
+					if err != nil {
+						_, _ = mainLog.Load().Write(marker)
+						msg := fmt.Sprintf("An error occurred while performing test query: %s", err)
+						mainLog.Load().Write([]byte(msg))
+					}
+					// If ctrld service is running but selfCheckStatus failed, it could be related
+					// to user's system firewall configuration, notice users about it.
+					if status == service.StatusRunning {
+						_, _ = mainLog.Load().Write(marker)
+						mainLog.Load().Write([]byte(`ctrld service was running, but a DNS query could not be sent to its listener`))
+						mainLog.Load().Write([]byte(`Please check your system firewall if it is configured to block/intercept/redirect DNS queries`))
+					}
+
 					_, _ = mainLog.Load().Write(marker)
 					uninstall(p, s)
 					os.Exit(1)
@@ -364,6 +413,9 @@ func initCLI() {
 				return
 			}
 			initLogging()
+			if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
+				os.Exit(deactivationPinInvalidExitCode)
+			}
 			if doTasks([]task{{s.Stop, true}}) {
 				p.router.Cleanup()
 				p.resetDNS()
@@ -372,6 +424,8 @@ func initCLI() {
 		},
 	}
 	stopCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, "auto" means the default interface gateway`)
+	stopCmd.Flags().Int64VarP(&deactivationPin, "pin", "", defaultDeactivationPin, `Pin code for stopping ctrld`)
+	_ = stopCmd.Flags().MarkHidden("pin")
 
 	restartCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
@@ -518,10 +572,15 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if iface == "" {
 				iface = "auto"
 			}
+			if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
+				os.Exit(deactivationPinInvalidExitCode)
+			}
 			uninstall(p, s)
 		},
 	}
 	uninstallCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, use "auto" for the default gateway interface`)
+	uninstallCmd.Flags().Int64VarP(&deactivationPin, "pin", "", defaultDeactivationPin, `Pin code for uninstalling ctrld`)
+	_ = uninstallCmd.Flags().MarkHidden("pin")
 
 	listIfacesCmd := &cobra.Command{
 		Use:   "list",
@@ -790,6 +849,15 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 	cdUpstreamProto = appConfig.UpstreamProto
 	logPath = appConfig.LogPath
 	run(appCallback, stopCh)
+}
+
+// CheckDeactivationPin checks if deactivation pin is valid
+func CheckDeactivationPin(pin int64) int {
+	deactivationPin = pin
+	if err := checkDeactivationPin(nil); isCheckDeactivationPinErr(err) {
+		return deactivationPinInvalidExitCode
+	}
+	return 0
 }
 
 // run runs ctrld cli with given app callback and stop channel.
@@ -1171,6 +1239,18 @@ func processNoConfigFlags(noConfigStart bool) {
 	v.Set("upstream", upstream)
 }
 
+// defaultDeactivationPin is the default value for cdDeactivationPin.
+// If cdDeactivationPin equals to this default, it means the pin code is not set from Control D API.
+const defaultDeactivationPin = -1
+
+// cdDeactivationPin is used in cd mode to decide whether stop and uninstall commands can be run.
+var cdDeactivationPin int64 = defaultDeactivationPin
+
+// deactivationPinNotSet reports whether cdDeactivationPin was not set by processCDFlags.
+func deactivationPinNotSet() bool {
+	return cdDeactivationPin == defaultDeactivationPin
+}
+
 func processCDFlags(cfg *ctrld.Config) error {
 	logger := mainLog.Load().With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
@@ -1193,6 +1273,11 @@ func processCDFlags(cfg *ctrld.Config) error {
 		}
 		logger.Warn().Err(err).Msg("could not fetch resolver config")
 		return err
+	}
+
+	if resolverConfig.DeactivationPin != nil {
+		logger.Debug().Msg("saving deactivation pin")
+		cdDeactivationPin = *resolverConfig.DeactivationPin
 	}
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
@@ -1310,41 +1395,44 @@ func defaultIfaceName() string {
 	return dri
 }
 
-func selfCheckStatus(s service.Service) service.Status {
+// selfCheckStatus performs the end-to-end DNS test by sending query to ctrld listener.
+// It returns a boolean to indicate whether the check is succeeded, the actual status
+// of ctrld service, and an additional error if any.
+func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 	status, err := s.Status()
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not get service status")
-		return status
+		return false, service.StatusUnknown, err
 	}
 	// If ctrld is not running, do nothing, just return the status as-is.
 	if status != service.StatusRunning {
-		return status
+		return false, status, nil
 	}
 	dir, err := socketDir()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
-		return service.StatusUnknown
+		return false, status, err
 	}
 	mainLog.Load().Debug().Msg("waiting for ctrld listener to be ready")
 	cc := newSocketControlClient(s, dir)
 	if cc == nil {
-		return service.StatusUnknown
+		return false, status, errors.New("could not connect to control server")
 	}
 
 	resp, err := cc.post(startedPath, nil)
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to connect to control server")
-		return service.StatusUnknown
+		return false, status, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		mainLog.Load().Error().Msg("ctrld listener is not ready")
-		return service.StatusUnknown
+		return false, status, errors.New("ctrld listener is not ready")
 	}
 
 	// Not a ctrld upstream, return status as-is.
 	if cfg.FirstUpstream().VerifyDomain() == "" {
-		return status
+		return true, status, nil
 	}
 
 	mainLog.Load().Debug().Msg("ctrld listener is ready")
@@ -1369,12 +1457,12 @@ func selfCheckStatus(s service.Service) service.Status {
 	domain := cfg.FirstUpstream().VerifyDomain()
 	if domain == "" {
 		// Nothing to do, return the status as-is.
-		return status
+		return true, status, nil
 	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("could not watch config change")
-		return service.StatusUnknown
+		return false, status, err
 	}
 	defer watcher.Close()
 
@@ -1413,14 +1501,18 @@ func selfCheckStatus(s service.Service) service.Status {
 		m := new(dns.Msg)
 		m.SetQuestion(domain+".", dns.TypeA)
 		m.RecursionDesired = true
-		r, _, err := c.ExchangeContext(ctx, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
+		r, _, exErr := exchangeContextWithTimeout(c, time.Second, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
 		if r != nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
 			mainLog.Load().Debug().Msgf("self-check against %q succeeded", domain)
-			return status
+			return true, status, nil
+		}
+		// Return early if this is a connection refused.
+		if errConnectionRefused(exErr) {
+			return false, status, exErr
 		}
 		lastAnswer = r
-		lastErr = err
-		bo.BackOff(ctx, fmt.Errorf("ExchangeContext: %w", err))
+		lastErr = exErr
+		bo.BackOff(ctx, fmt.Errorf("ExchangeContext: %w", exErr))
 	}
 	mainLog.Load().Debug().Msgf("self-check against %q failed", domain)
 	lc := cfg.FirstListener()
@@ -1435,9 +1527,9 @@ func selfCheckStatus(s service.Service) service.Status {
 		for _, s := range strings.Split(lastAnswer.String(), "\n") {
 			mainLog.Load().Debug().Msgf("%s", s)
 		}
-		mainLog.Load().Debug().Msg(marker)
+		return false, status, errSelfCheckNoAnswer
 	}
-	return service.StatusUnknown
+	return false, status, lastErr
 }
 
 func userHomeDir() (string, error) {
@@ -1664,10 +1756,17 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 	lcc := make(map[string]*listenerConfigCheck)
 	cdMode := cdUID != ""
 	nextdnsMode := nextdns != ""
+	// For Windows server with local Dns server running, we can only try on random local IP.
+	hasLocalDnsServer := windowsHasLocalDnsServerRunning()
 	for n, listener := range cfg.Listener {
 		lcc[n] = &listenerConfigCheck{}
 		if listener.IP == "" {
 			listener.IP = "0.0.0.0"
+			if hasLocalDnsServer {
+				// Windows Server lies to us that we could listen on 0.0.0.0:53
+				// even there's a process already done that, stick to local IP only.
+				listener.IP = "127.0.0.1"
+			}
 			lcc[n].IP = true
 		}
 		if listener.Port == 0 {
@@ -1676,9 +1775,15 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 		}
 		// In cd mode, we always try to pick an ip:port pair to work.
 		// Same if nextdns resolver is used.
+		//
+		// Except on Windows Server with local Dns running,
+		// we could only listen on random local IP port 53.
 		if cdMode || nextdnsMode {
 			lcc[n].IP = true
 			lcc[n].Port = true
+			if hasLocalDnsServer {
+				lcc[n].Port = false
+			}
 		}
 		updated = updated || lcc[n].IP || lcc[n].Port
 	}
@@ -1764,6 +1869,11 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 		tryAllPort53 := true
 		tryOldIPPort5354 := true
 		tryPort5354 := true
+		if hasLocalDnsServer {
+			tryAllPort53 = false
+			tryOldIPPort5354 = false
+			tryPort5354 = false
+		}
 		attempts := 0
 		maxAttempts := 10
 		for {
@@ -2048,4 +2158,104 @@ func noticeWritingControlDConfig() error {
 		mainLog.Load().Notice().Msgf("Generating controld config: %s", defaultConfigFile)
 	}
 	return nil
+}
+
+// deactivationPinInvalidExitCode indicates exit code due to invalid pin code.
+const deactivationPinInvalidExitCode = 126
+
+// errInvalidDeactivationPin indicates that the deactivation pin is invalid.
+var errInvalidDeactivationPin = errors.New("deactivation pin is invalid")
+
+// errRequiredDeactivationPin indicates that the deactivation pin is required but not provided by users.
+var errRequiredDeactivationPin = errors.New("deactivation pin is required to stop or uninstall the service")
+
+// checkDeactivationPin validates if the deactivation pin matches one in ControlD config.
+func checkDeactivationPin(s service.Service) error {
+	dir, err := socketDir()
+	if err != nil {
+		mainLog.Load().Err(err).Msg("could not check deactivation pin")
+		return err
+	}
+	var cc *controlClient
+	if s == nil {
+		cc = newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+	} else {
+		cc = newSocketControlClient(s, dir)
+	}
+	if cc == nil {
+		return nil // ctrld is not running.
+	}
+	data, _ := json.Marshal(&deactivationRequest{Pin: deactivationPin})
+	resp, _ := cc.post(deactivationPath, bytes.NewReader(data))
+	if resp != nil {
+		switch resp.StatusCode {
+		case http.StatusBadRequest:
+			mainLog.Load().Error().Msg(errRequiredDeactivationPin.Error())
+			return errRequiredDeactivationPin // pin is required
+		case http.StatusOK:
+			return nil // valid pin
+		case http.StatusNotFound:
+			return nil // the server is running older version of ctrld
+		}
+	}
+	mainLog.Load().Error().Msg(errInvalidDeactivationPin.Error())
+	return errInvalidDeactivationPin
+}
+
+// isCheckDeactivationPinErr reports whether there is an error during check deactivation pin process.
+func isCheckDeactivationPinErr(err error) bool {
+	return errors.Is(err, errInvalidDeactivationPin) || errors.Is(err, errRequiredDeactivationPin)
+}
+
+// ensureUninstall ensures that s.Uninstall will remove ctrld service from system completely.
+func ensureUninstall(s service.Service) error {
+	maxAttempts := 10
+	var err error
+	for i := 0; i < maxAttempts; i++ {
+		err = s.Uninstall()
+		if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	return errors.Join(err, errors.New("uninstall failed"))
+}
+
+// exchangeContextWithTimeout wraps c.ExchangeContext with the given timeout.
+func exchangeContextWithTimeout(c *dns.Client, timeout time.Duration, msg *dns.Msg, addr string) (*dns.Msg, time.Duration, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return c.ExchangeContext(ctx, msg, addr)
+}
+
+// powershell runs the given powershell command.
+func powershell(cmd string) ([]byte, error) {
+	out, err := exec.Command("powershell", "-Command", cmd).CombinedOutput()
+	return bytes.TrimSpace(out), err
+}
+
+// windowsHasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.
+func windowsHasLocalDnsServerRunning() bool {
+	if runtime.GOOS == "windows" {
+		out, _ := powershell("Get-WindowsFeature -Name DNS")
+		if !bytes.Contains(bytes.ToLower(out), []byte("installed")) {
+			return false
+		}
+
+		_, err := powershell("Get-Process -Name DNS")
+		return err == nil
+	}
+	return false
+}
+
+// absHomeDir returns the absolute path to given filename using home directory as root dir.
+func absHomeDir(filename string) string {
+	if homedir != "" {
+		return filepath.Join(homedir, filename)
+	}
+	dir, err := userHomeDir()
+	if err != nil {
+		return filename
+	}
+	return filepath.Join(dir, filename)
 }

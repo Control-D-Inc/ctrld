@@ -72,17 +72,9 @@ build() {
       if [ "$CGO_ENABLED" = "0" ]; then
         binary=${binary}-nocgo
       fi
+      GOOS=${goos} GOARCH=${goarch} GOARM=${3} "$go" generate ./...
       GOOS=${goos} GOARCH=${goarch} GOARM=${3} "$go" build -ldflags="$ldflags" -o "$binary" ./cmd/ctrld
       compress "$binary"
-
-      if [ -z "${CTRLD_NO_QF}" ]; then
-        binary_qf=${executable_name}-qf-${goos}-${goarch}v${3}
-        if [ "$CGO_ENABLED" = "0" ]; then
-          binary_qf=${binary_qf}-nocgo
-        fi
-        GOOS=${goos} GOARCH=${goarch} GOARM=${3} "$go" build -ldflags="$ldflags" -tags=qf -o "$binary_qf" ./cmd/ctrld
-        compress "$binary_qf"
-      fi
       ;;
     *)
       # GOMIPS is required for linux/mips: https://nileshgr.com/2020/02/16/golang-on-openwrt-mips/
@@ -90,17 +82,9 @@ build() {
       if [ "$CGO_ENABLED" = "0" ]; then
         binary=${binary}-nocgo
       fi
+      GOOS=${goos} GOARCH=${goarch} GOMIPS=softfloat "$go" generate ./...
       GOOS=${goos} GOARCH=${goarch} GOMIPS=softfloat "$go" build -ldflags="$ldflags" -o "$binary" ./cmd/ctrld
       compress "$binary"
-
-      if [ -z "${CTRLD_NO_QF}" ]; then
-        binary_qf=${executable_name}-qf-${goos}-${goarch}
-        if [ "$CGO_ENABLED" = "0" ]; then
-          binary_qf=${binary_qf}-nocgo
-        fi
-        GOOS=${goos} GOARCH=${goarch} GOMIPS=softfloat "$go" build -ldflags="$ldflags" -tags=qf -o "$binary_qf" ./cmd/ctrld
-        compress "$binary_qf"
-      fi
       ;;
   esac
 }

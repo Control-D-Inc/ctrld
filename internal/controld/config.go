@@ -35,8 +35,9 @@ type ResolverConfig struct {
 	Ctrld struct {
 		CustomConfig string `json:"custom_config"`
 	} `json:"ctrld"`
-	Exclude []string `json:"exclude"`
-	UID     string   `json:"uid"`
+	Exclude         []string `json:"exclude"`
+	UID             string   `json:"uid"`
+	DeactivationPin *int64   `json:"deactivation_pin,omitempty"`
 }
 
 type utilityResponse struct {
