@@ -2065,6 +2065,8 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 	ctx := context.Background()
 
 	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+	timeout := time.NewTimer(30 * time.Second)
+	defer timeout.Stop()
 
 	// The socket control server may not start yet, so attempt to ping
 	// it until we got a response. For each iteration, check ctrld status
@@ -2084,6 +2086,11 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 		}
 		// The socket control server is not ready yet, backoff for waiting it to be ready.
 		bo.BackOff(ctx, err)
+		select {
+		case <-timeout.C:
+			return nil
+		default:
+		}
 		continue
 	}
 
