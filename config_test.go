@@ -102,6 +102,7 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid lease file format", configWithInvalidLeaseFileFormat(t), true},
 		{"invalid doh/doh3 endpoint", configWithInvalidDoHEndpoint(t), true},
 		{"invalid client id pref", configWithInvalidClientIDPref(t), true},
+		{"doh endpoint without scheme", dohUpstreamEndpointWithoutScheme(t), false},
 	}
 
 	for _, tc := range tests {
@@ -164,6 +165,12 @@ func invalidNetworkConfig(t *testing.T) *ctrld.Config {
 func invalidUpstreamType(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Upstream["0"].Type = "DOH"
+	return cfg
+}
+
+func dohUpstreamEndpointWithoutScheme(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Upstream["0"].Endpoint = "freedns.controld.com/p1"
 	return cfg
 }
 
@@ -258,7 +265,7 @@ func configWithInvalidLeaseFileFormat(t *testing.T) *ctrld.Config {
 
 func configWithInvalidDoHEndpoint(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
-	cfg.Upstream["0"].Endpoint = "1.1.1.1"
+	cfg.Upstream["0"].Endpoint = "/1.1.1.1"
 	cfg.Upstream["0"].Type = ctrld.ResolverTypeDOH
 	return cfg
 }

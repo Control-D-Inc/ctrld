@@ -285,6 +285,7 @@ type Rule map[string][]string
 
 // Init initialized necessary values for an UpstreamConfig.
 func (uc *UpstreamConfig) Init() {
+	uc.initDoHScheme()
 	uc.uid = upstreamUID()
 	if u, err := url.Parse(uc.Endpoint); err == nil {
 		uc.Domain = u.Host
@@ -631,6 +632,18 @@ func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
 	return "tcp-tls", "udp"
 }
 
+// initDoHScheme initializes the endpoint scheme for DoH/DoH3 upstream if not present.
+func (uc *UpstreamConfig) initDoHScheme() {
+	switch uc.Type {
+	case ResolverTypeDOH, ResolverTypeDOH3:
+	default:
+		return
+	}
+	if !strings.HasPrefix(uc.Endpoint, "https://") {
+		uc.Endpoint = "https://" + uc.Endpoint
+	}
+}
+
 // Init initialized necessary values for an ListenerConfig.
 func (lc *ListenerConfig) Init() {
 	if lc.Policy != nil {
@@ -683,14 +696,11 @@ func upstreamConfigStructLevelValidation(sl validator.StructLevel) {
 		return
 	}
 
+	uc.initDoHScheme()
 	// DoH/DoH3 requires endpoint is an HTTP url.
 	if uc.Type == ResolverTypeDOH || uc.Type == ResolverTypeDOH3 {
 		u, err := url.Parse(uc.Endpoint)
 		if err != nil || u.Host == "" {
-			sl.ReportError(uc.Endpoint, "endpoint", "Endpoint", "http_url", "")
-			return
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
 			sl.ReportError(uc.Endpoint, "endpoint", "Endpoint", "http_url", "")
 			return
 		}
