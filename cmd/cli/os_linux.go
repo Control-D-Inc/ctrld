@@ -45,7 +45,11 @@ func deAllocateIP(ip string) error {
 
 const maxSetDNSAttempts = 5
 
-// set the dns server for the provided network interface
+// setDnsIgnoreUnusableInterface likes setDNS, but return a nil error if the interface is not usable.
+func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) error {
+	return setDNS(iface, nameservers)
+}
+
 func setDNS(iface *net.Interface, nameservers []string) error {
 	r, err := dns.NewOSConfigurator(logf, iface.Name)
 	if err != nil {

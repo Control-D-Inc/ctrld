@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strings"
 
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
@@ -25,6 +26,18 @@ func deAllocateIP(ip string) error {
 	cmd := exec.Command("ifconfig", "lo0", "-alias", ip)
 	if err := cmd.Run(); err != nil {
 		mainLog.Load().Error().Err(err).Msg("deAllocateIP failed")
+		return err
+	}
+	return nil
+}
+
+// setDnsIgnoreUnusableInterface likes setDNS, but return a nil error if the interface is not usable.
+func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) error {
+	if err := setDNS(iface, nameservers); err != nil {
+		// TODO: investiate whether we can detect this without relying on error message.
+		if strings.Contains(err.Error(), " is not a recognized network service") {
+			return nil
+		}
 		return err
 	}
 	return nil

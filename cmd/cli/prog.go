@@ -477,7 +477,7 @@ func (p *prog) setDNS() {
 	}
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
-			return setDNS(i, nameservers)
+			return setDnsIgnoreUnusableInterface(i, nameservers)
 		})
 	}
 }
