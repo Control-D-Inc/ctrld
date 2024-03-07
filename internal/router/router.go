@@ -145,7 +145,7 @@ func LocalResolverIP() string {
 // HomeDir returns the home directory of ctrld on current router.
 func HomeDir() (string, error) {
 	switch Name() {
-	case ddwrt.Name, merlin.Name, tomato.Name:
+	case ddwrt.Name, firewalla.Name, merlin.Name, tomato.Name:
 		exe, err := os.Executable()
 		if err != nil {
 			return "", err
