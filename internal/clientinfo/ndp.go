@@ -69,6 +69,21 @@ func (nd *ndpDiscover) List() []string {
 	return ips
 }
 
+// saveInfo saves ip and mac info to mapping table.
+// Last seen ip address will override the old one,
+func (nd *ndpDiscover) saveInfo(ip, mac string) {
+	// Store ip => map mapping,
+	nd.mac.Store(ip, mac)
+	// If there is old ip => mac mapping, delete it.
+	old, ok := nd.ip.Load(mac)
+	if ok {
+		oldIP := old.(string)
+		nd.mac.Delete(oldIP)
+	}
+	// Store mac => ip mapping.
+	nd.ip.Store(mac, ip)
+}
+
 // listen listens on ipv6 link local for Neighbor Solicitation message
 // to update new neighbors information to ndp table.
 func (nd *ndpDiscover) listen(ctx context.Context) {
@@ -111,8 +126,7 @@ func (nd *ndpDiscover) listen(ctx context.Context) {
 		for _, opt := range am.Options {
 			if lla, ok := opt.(*ndp.LinkLayerAddress); ok {
 				mac := lla.Addr.String()
-				nd.mac.Store(fromIP, mac)
-				nd.ip.Store(mac, fromIP)
+				nd.saveInfo(fromIP, mac)
 			}
 		}
 	}
@@ -127,8 +141,7 @@ func (nd *ndpDiscover) scanWindows(r io.Reader) {
 			continue
 		}
 		if mac := parseMAC(fields[1]); mac != "" {
-			nd.mac.Store(fields[0], mac)
-			nd.ip.Store(mac, fields[0])
+			nd.saveInfo(fields[0], mac)
 		}
 	}
 }
@@ -147,8 +160,7 @@ func (nd *ndpDiscover) scanUnix(r io.Reader) {
 			if idx := strings.IndexByte(ip, '%'); idx != -1 {
 				ip = ip[:idx]
 			}
-			nd.mac.Store(ip, mac)
-			nd.ip.Store(mac, ip)
+			nd.saveInfo(ip, mac)
 		}
 	}
 }

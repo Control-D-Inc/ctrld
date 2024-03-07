@@ -17,8 +17,7 @@ func (nd *ndpDiscover) scan() {
 	for _, n := range neighs {
 		ip := n.IP.String()
 		mac := n.HardwareAddr.String()
-		nd.mac.Store(ip, mac)
-		nd.ip.Store(mac, ip)
+		nd.saveInfo(ip, mac)
 	}
 
 }

@@ -45,12 +45,15 @@ ff02::c                                       33-33-00-00-00-0c  Permanent
 	nd.scanWindows(r)
 
 	count := 0
+	expectedCount := 5
 	nd.mac.Range(func(key, value any) bool {
 		count++
 		return true
 	})
-	if count != 6 {
-		t.Errorf("unexpected count, want 6, got: %d", count)
+	// There are 2 entries for 60-57-47-21-dd-00 in the table, but (*ndpDiscover).saveInfo
+	// only saves the last one, that's why the expected count number is 5.
+	if count != expectedCount {
+		t.Errorf("unexpected count, want %d, got: %d", expectedCount, count)
 	}
 
 	count = 0
@@ -58,7 +61,7 @@ ff02::c                                       33-33-00-00-00-0c  Permanent
 		count++
 		return true
 	})
-	if count != 5 {
-		t.Errorf("unexpected count, want 5, got: %d", count)
+	if count != expectedCount {
+		t.Errorf("unexpected count, want %d, got: %d", expectedCount, count)
 	}
 }
