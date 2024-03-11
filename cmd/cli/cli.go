@@ -23,11 +23,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Masterminds/semver"
 	"github.com/cuonglm/osinfo"
 	"github.com/fsnotify/fsnotify"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
+	"github.com/minio/selfupdate"
 	"github.com/olekukonko/tablewriter"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/rs/zerolog"
@@ -845,6 +847,89 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	}
 	clientsCmd.AddCommand(listClientsCmd)
 	rootCmd.AddCommand(clientsCmd)
+
+	upgradeCmd := &cobra.Command{
+		Use:   "upgrade",
+		Short: "Upgrading ctrld to latest version",
+		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Run: func(cmd *cobra.Command, args []string) {
+			s, err := newService(&prog{}, svcConfig)
+			if err != nil {
+				mainLog.Load().Error().Msg(err.Error())
+				return
+			}
+			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
+				mainLog.Load().Warn().Msg("service not installed")
+				return
+			}
+			bin, err := os.Executable()
+			if err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
+			}
+			oldBin := bin + "_previous"
+			urlString := "https://dl.controld.com"
+			if !isStableVersion(curVersion()) {
+				urlString = "https://dl.controld.dev"
+			}
+			dlUrl := fmt.Sprintf("%s/%s-%s/ctrld", urlString, runtime.GOOS, runtime.GOARCH)
+			if runtime.GOOS == "windows" {
+				dlUrl += ".exe"
+			}
+			mainLog.Load().Debug().Msgf("Downloading binary: %s", dlUrl)
+			resp, err := http.Get(dlUrl)
+			if err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to download binary")
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				mainLog.Load().Fatal().Msgf("could not download binary: %s", http.StatusText(resp.StatusCode))
+			}
+			mainLog.Load().Debug().Msg("Updating current binary")
+			if err := selfupdate.Apply(resp.Body, selfupdate.Options{OldSavePath: oldBin}); err != nil {
+				if rerr := selfupdate.RollbackError(err); rerr != nil {
+					mainLog.Load().Error().Err(rerr).Msg("could not rollback old binary")
+				}
+				mainLog.Load().Fatal().Err(err).Msg("failed to update current binary")
+			}
+
+			doRestart := func() bool {
+				tasks := []task{
+					{s.Stop, false},
+					{s.Start, false},
+				}
+				if doTasks(tasks) {
+					if dir, err := socketDir(); err == nil {
+						return newSocketControlClient(s, dir) != nil
+					}
+				}
+				return false
+			}
+			mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")
+			if doRestart() {
+				_ = os.Remove(oldBin)
+				_ = os.Chmod(bin, 0755)
+				mainLog.Load().Notice().Msg("Upgrade successful")
+				return
+			}
+
+			mainLog.Load().Warn().Msgf("Upgrade failed, restoring previous binary: %s", oldBin)
+			if err := os.Remove(bin); err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to remove new binary")
+			}
+			if err := os.Rename(oldBin, bin); err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to restore old binary")
+			}
+			if doRestart() {
+				mainLog.Load().Notice().Msg("Restored previous binary successfully")
+				return
+			}
+		},
+	}
+	rootCmd.AddCommand(upgradeCmd)
 }
 
 // isMobile reports whether the current OS is a mobile platform.
@@ -855,6 +940,15 @@ func isMobile() bool {
 // isAndroid reports whether the current OS is Android.
 func isAndroid() bool {
 	return runtime.GOOS == "android"
+}
+
+// isStableVersion reports whether vs is a stable semantic version.
+func isStableVersion(vs string) bool {
+	v, err := semver.NewVersion(vs)
+	if err != nil {
+		return false
+	}
+	return v.Prerelease() == ""
 }
 
 // RunCobraCommand runs ctrld cli.

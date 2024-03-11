@@ -3,6 +3,7 @@ module github.com/Control-D-Inc/ctrld
 go 1.21
 
 require (
+	github.com/Masterminds/semver v1.5.0
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/cuonglm/osinfo v0.0.0-20230921071424-e0e1b1e0bbbf
 	github.com/frankban/quicktest v1.14.5
@@ -17,6 +18,7 @@ require (
 	github.com/kardianos/service v1.2.1
 	github.com/mdlayher/ndp v1.0.1
 	github.com/miekg/dns v1.1.55
+	github.com/minio/selfupdate v0.6.0
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/pelletier/go-toml/v2 v2.0.8
 	github.com/prometheus/client_golang v1.15.1
@@ -37,6 +39,7 @@ require (
 )
 
 require (
+	aead.dev/minisign v0.2.0 // indirect
 	github.com/alexbrainman/sspi v0.0.0-20210105120005-909beea2cc74 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
