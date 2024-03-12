@@ -520,7 +520,7 @@ func (p *prog) resetDNS() {
 	}
 	logger.Debug().Msg("Restoring DNS successfully")
 	if allIfaces {
-		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDNS)
+		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDnsIgnoreUnusableInterface)
 	}
 }
 

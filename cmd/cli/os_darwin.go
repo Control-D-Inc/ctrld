@@ -56,6 +56,18 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	return nil
 }
 
+// resetDnsIgnoreUnusableInterface likes resetDNS, but return a nil error if the interface is not usable.
+func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
+	if err := resetDNS(iface); err != nil {
+		// TODO: investiate whether we can detect this without relying on error message.
+		if strings.Contains(err.Error(), " is not a recognized network service") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // TODO(cuonglm): use system API
 func resetDNS(iface *net.Interface) error {
 	if ns := savedStaticNameservers(iface); len(ns) > 0 {

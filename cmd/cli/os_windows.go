@@ -67,6 +67,11 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	return nil
 }
 
+// resetDnsIgnoreUnusableInterface likes resetDNS, but return a nil error if the interface is not usable.
+func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
+	return resetDNS(iface)
+}
+
 // TODO(cuonglm): should we use system API?
 func resetDNS(iface *net.Interface) error {
 	resetDNSOnce.Do(func() {
