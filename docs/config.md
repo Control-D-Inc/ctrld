@@ -220,7 +220,7 @@ DHCP leases file format.
 
 - Type: string
 - Required: no
-- Valid values: `dnsmasq`, `isc-dhcp`
+- Valid values: `dnsmasq`, `isc-dhcp`, `kea-dhcp4`
 - Default: ""
 
 ### client_id_preference
