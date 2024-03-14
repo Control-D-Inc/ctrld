@@ -101,6 +101,10 @@ func (p *prog) serveDNS(listenerNum string) error {
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
+		if _, ok := p.cacheFlushDomainsMap[domain]; ok && p.cache != nil {
+			p.cache.Purge()
+			ctrld.Log(ctx, mainLog.Load().Debug(), "received query %q, local cache is purged", domain)
+		}
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 		ci := p.getClientInfo(remoteIP, m)
 		ci.ClientIDPref = p.cfg.Service.ClientIDPref

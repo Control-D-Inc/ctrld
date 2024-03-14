@@ -1831,6 +1831,11 @@ func fieldErrorMsg(fe validator.FieldError) string {
 			return fmt.Sprintf("must define at least %s element", fe.Param())
 		}
 		return fmt.Sprintf("minimum value: %q", fe.Param())
+	case "max":
+		if fe.Kind() == reflect.Map || fe.Kind() == reflect.Slice {
+			return fmt.Sprintf("exceeded maximum number of elements: %s", fe.Param())
+		}
+		return fmt.Sprintf("maximum value: %q", fe.Param())
 	case "len":
 		if fe.Kind() == reflect.Slice {
 			return fmt.Sprintf("must have at least %s element", fe.Param())

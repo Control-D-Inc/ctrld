@@ -70,17 +70,18 @@ type prog struct {
 	logConn      net.Conn
 	cs           *controlServer
 
-	cfg            *ctrld.Config
-	localUpstreams []string
-	ptrNameservers []string
-	appCallback    *AppCallback
-	cache          dnscache.Cacher
-	sema           semaphore
-	ciTable        *clientinfo.Table
-	um             *upstreamMonitor
-	router         router.Router
-	ptrLoopGuard   *loopGuard
-	lanLoopGuard   *loopGuard
+	cfg                  *ctrld.Config
+	localUpstreams       []string
+	ptrNameservers       []string
+	appCallback          *AppCallback
+	cache                dnscache.Cacher
+	cacheFlushDomainsMap map[string]struct{}
+	sema                 semaphore
+	ciTable              *clientinfo.Table
+	um                   *upstreamMonitor
+	router               router.Router
+	ptrLoopGuard         *loopGuard
+	lanLoopGuard         *loopGuard
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -253,12 +254,17 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	p.loop = make(map[string]bool)
 	p.lanLoopGuard = newLoopGuard()
 	p.ptrLoopGuard = newLoopGuard()
+	p.cacheFlushDomainsMap = nil
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
 			mainLog.Load().Error().Err(err).Msg("failed to create cacher, caching is disabled")
 		} else {
 			p.cache = cacher
+			p.cacheFlushDomainsMap = make(map[string]struct{}, 256)
+			for _, domain := range p.cfg.Service.CacheFlushDomains {
+				p.cacheFlushDomainsMap[canonicalName(domain)] = struct{}{}
+			}
 		}
 	}
 

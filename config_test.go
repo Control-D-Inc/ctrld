@@ -1,6 +1,7 @@
 package ctrld_test
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -103,6 +104,7 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid doh/doh3 endpoint", configWithInvalidDoHEndpoint(t), true},
 		{"invalid client id pref", configWithInvalidClientIDPref(t), true},
 		{"doh endpoint without scheme", dohUpstreamEndpointWithoutScheme(t), false},
+		{"maximum number of flush cache domains", configWithInvalidFlushCacheDomain(t), true},
 	}
 
 	for _, tc := range tests {
@@ -273,5 +275,14 @@ func configWithInvalidDoHEndpoint(t *testing.T) *ctrld.Config {
 func configWithInvalidClientIDPref(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Service.ClientIDPref = "foo"
+	return cfg
+}
+
+func configWithInvalidFlushCacheDomain(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Service.CacheFlushDomains = make([]string, 257)
+	for i := range cfg.Service.CacheFlushDomains {
+		cfg.Service.CacheFlushDomains[i] = fmt.Sprintf("%d.com", i)
+	}
 	return cfg
 }
