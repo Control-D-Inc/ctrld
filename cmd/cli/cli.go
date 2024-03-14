@@ -437,7 +437,7 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, args []string) {
 			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg, cdUID != "")}
+			p := &prog{router: router.New(&cfg, runInCdMode())}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
@@ -594,7 +594,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg, cdUID != "")}
+			p := &prog{router: router.New(&cfg, runInCdMode())}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
@@ -2439,4 +2439,21 @@ func absHomeDir(filename string) string {
 		return filename
 	}
 	return filepath.Join(dir, filename)
+}
+
+// runInCdMode reports whether ctrld service is running in cd mode.
+func runInCdMode() bool {
+	if s, _ := newService(&prog{}, svcConfig); s != nil {
+		if dir, _ := socketDir(); dir != "" {
+			cc := newSocketControlClient(s, dir)
+			if cc != nil {
+				resp, _ := cc.post(cdPath, nil)
+				if resp != nil {
+					defer resp.Body.Close()
+					return resp.StatusCode == http.StatusOK
+				}
+			}
+		}
+	}
+	return false
 }
