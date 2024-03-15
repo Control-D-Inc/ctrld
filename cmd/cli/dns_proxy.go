@@ -282,7 +282,7 @@ networkRules:
 macRules:
 	for _, rule := range lc.Policy.Macs {
 		for source, targets := range rule {
-			if source != "" && strings.EqualFold(source, srcMac) {
+			if source != "" && (strings.EqualFold(source, srcMac) || wildcardMatches(strings.ToLower(source), strings.ToLower(srcMac))) {
 				matchedPolicy = lc.Policy.Name
 				matchedNetwork = source
 				networkTargets = targets
@@ -590,7 +590,8 @@ func canonicalName(fqdn string) string {
 	return q
 }
 
-func wildcardMatches(wildcard, domain string) bool {
+// wildcardMatches reports whether string str matches the wildcard pattern.
+func wildcardMatches(wildcard, str string) bool {
 	// Wildcard match.
 	wildCardParts := strings.Split(wildcard, "*")
 	if len(wildCardParts) != 2 {
@@ -600,15 +601,15 @@ func wildcardMatches(wildcard, domain string) bool {
 	switch {
 	case len(wildCardParts[0]) > 0 && len(wildCardParts[1]) > 0:
 		// Domain must match both prefix and suffix.
-		return strings.HasPrefix(domain, wildCardParts[0]) && strings.HasSuffix(domain, wildCardParts[1])
+		return strings.HasPrefix(str, wildCardParts[0]) && strings.HasSuffix(str, wildCardParts[1])
 
 	case len(wildCardParts[1]) > 0:
 		// Only suffix must match.
-		return strings.HasSuffix(domain, wildCardParts[1])
+		return strings.HasSuffix(str, wildCardParts[1])
 
 	case len(wildCardParts[0]) > 0:
 		// Only prefix must match.
-		return strings.HasPrefix(domain, wildCardParts[0])
+		return strings.HasPrefix(str, wildCardParts[0])
 	}
 
 	return false

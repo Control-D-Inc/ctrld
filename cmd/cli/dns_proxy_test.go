@@ -22,14 +22,21 @@ func Test_wildcardMatches(t *testing.T) {
 		domain   string
 		match    bool
 	}{
-		{"prefix parent should not match", "*.windscribe.com", "windscribe.com", false},
-		{"prefix", "*.windscribe.com", "anything.windscribe.com", true},
-		{"prefix not match other domain", "*.windscribe.com", "example.com", false},
-		{"prefix not match domain in name", "*.windscribe.com", "wwindscribe.com", false},
-		{"suffix", "suffix.*", "suffix.windscribe.com", true},
-		{"suffix not match other", "suffix.*", "suffix1.windscribe.com", false},
-		{"both", "suffix.*.windscribe.com", "suffix.anything.windscribe.com", true},
-		{"both not match", "suffix.*.windscribe.com", "suffix1.suffix.windscribe.com", false},
+		{"domain - prefix parent should not match", "*.windscribe.com", "windscribe.com", false},
+		{"domain - prefix", "*.windscribe.com", "anything.windscribe.com", true},
+		{"domain - prefix not match other s", "*.windscribe.com", "example.com", false},
+		{"domain - prefix not match s in name", "*.windscribe.com", "wwindscribe.com", false},
+		{"domain - suffix", "suffix.*", "suffix.windscribe.com", true},
+		{"domain - suffix not match other", "suffix.*", "suffix1.windscribe.com", false},
+		{"domain - both", "suffix.*.windscribe.com", "suffix.anything.windscribe.com", true},
+		{"domain - both not match", "suffix.*.windscribe.com", "suffix1.suffix.windscribe.com", false},
+		{"mac - prefix", "*:98:05:b4:2b", "d4:67:98:05:b4:2b", true},
+		{"mac - prefix not match other s", "*:98:05:b4:2b", "0d:ba:54:09:94:2c", false},
+		{"mac - prefix not match s in name", "*:98:05:b4:2b", "e4:67:97:05:b4:2b", false},
+		{"mac - suffix", "d4:67:98:*", "d4:67:98:05:b4:2b", true},
+		{"mac - suffix not match other", "d4:67:98:*", "d4:67:97:15:b4:2b", false},
+		{"mac - both", "d4:67:98:*:b4:2b", "d4:67:98:05:b4:2b", true},
+		{"mac - both not match", "d4:67:98:*:b4:2b", "d4:67:97:05:c4:2b", false},
 	}
 
 	for _, tc := range tests {
