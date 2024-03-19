@@ -1783,6 +1783,10 @@ func readConfigWithNotice(writeDefaultConfig, notice bool) {
 }
 
 func uninstall(p *prog, s service.Service) {
+	if _, err := s.Status(); err != nil && errors.Is(err, service.ErrNotInstalled) {
+		mainLog.Load().Error().Msg(err.Error())
+		return
+	}
 	tasks := []task{
 		{s.Stop, false},
 		{s.Uninstall, true},
@@ -2233,7 +2237,6 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 	for {
 		curStatus, err := s.Status()
 		if err != nil {
-			mainLog.Load().Warn().Err(err).Msg("could not get service status while doing self-check")
 			return nil
 		}
 		if curStatus != service.StatusRunning {

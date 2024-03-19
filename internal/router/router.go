@@ -18,6 +18,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
 	"github.com/Control-D-Inc/ctrld/internal/router/firewalla"
 	"github.com/Control-D-Inc/ctrld/internal/router/merlin"
+	netgear "github.com/Control-D-Inc/ctrld/internal/router/netgear_orbi_voxel"
 	"github.com/Control-D-Inc/ctrld/internal/router/openwrt"
 	"github.com/Control-D-Inc/ctrld/internal/router/synology"
 	"github.com/Control-D-Inc/ctrld/internal/router/tomato"
@@ -66,8 +67,15 @@ func New(cfg *ctrld.Config, cdMode bool) Router {
 		return tomato.New(cfg)
 	case firewalla.Name:
 		return firewalla.New(cfg)
+	case netgear.Name:
+		return netgear.New(cfg)
 	}
 	return newOsRouter(cfg, cdMode)
+}
+
+// IsNetGearOrbi reports whether the router is a Netgear Orbi router.
+func IsNetGearOrbi() bool {
+	return Name() == netgear.Name
 }
 
 // IsGLiNet reports whether the router is an GL.iNet router.
@@ -145,7 +153,7 @@ func LocalResolverIP() string {
 // HomeDir returns the home directory of ctrld on current router.
 func HomeDir() (string, error) {
 	switch Name() {
-	case ddwrt.Name, firewalla.Name, merlin.Name, tomato.Name:
+	case ddwrt.Name, firewalla.Name, merlin.Name, netgear.Name, tomato.Name:
 		exe, err := os.Executable()
 		if err != nil {
 			return "", err
@@ -198,6 +206,9 @@ func distroName() string {
 	case bytes.HasPrefix(unameO(), []byte("ASUSWRT-Merlin")):
 		return merlin.Name
 	case haveFile("/etc/openwrt_version"):
+		if haveFile("/bin/config") { // TODO: is there any more reliable way?
+			return netgear.Name
+		}
 		return openwrt.Name
 	case isUbios():
 		return ubios.Name
