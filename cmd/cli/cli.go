@@ -1965,10 +1965,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 		if cdMode {
 			firstLn.IP = mobileListenerIp()
 			firstLn.Port = mobileListenerPort()
-			// TODO: use clear(lcc) once upgrading to go 1.21
-			for k := range lcc {
-				delete(lcc, k)
-			}
+			clear(lcc)
 			updated = true
 		}
 	}
