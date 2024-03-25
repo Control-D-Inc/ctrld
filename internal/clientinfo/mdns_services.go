@@ -67,4 +67,16 @@ var services = [...]string{
 
 	// Merlin
 	"_alexa._tcp",
+
+	// Newer Android TV devices
+	"_androidtvremote2._tcp.local.",
+
+	// https://esphome.io/
+	"_esphomelib._tcp.local.",
+
+	// https://www.home-assistant.io/
+	"_home-assistant._tcp.local.",
+
+	// https://kno.wled.ge/
+	"_wled._tcp.local.",
 }
