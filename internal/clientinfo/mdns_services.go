@@ -79,6 +79,4 @@ var services = [...]string{
 
 	// https://kno.wled.ge/
 	"_wled._tcp.local.",
-
-
 }
