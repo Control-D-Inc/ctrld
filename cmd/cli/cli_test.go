@@ -21,3 +21,26 @@ func Test_writeConfigFile(t *testing.T) {
 	_, err = os.Stat(configPath)
 	require.NoError(t, err)
 }
+
+func Test_isStableVersion(t *testing.T) {
+	tests := []struct {
+		name     string
+		ver      string
+		isStable bool
+	}{
+		{"stable", "v1.3.5", true},
+		{"pre", "v1.3.5-next", false},
+		{"pre with commit hash", "v1.3.5-next-asdf", false},
+		{"dev", "dev", false},
+		{"empty", "dev", false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isStableVersion(tc.ver); got != tc.isStable {
+				t.Errorf("unexpected result for %s, want: %v, got: %v", tc.ver, tc.isStable, got)
+			}
+		})
+	}
+}

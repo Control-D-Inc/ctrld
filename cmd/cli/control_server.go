@@ -21,6 +21,7 @@ const (
 	startedPath      = "/started"
 	reloadPath       = "/reload"
 	deactivationPath = "/deactivation"
+	cdPath           = "/cd"
 )
 
 type controlServer struct {
@@ -170,6 +171,13 @@ func (p *prog) registerControlServerHandler() {
 			code = http.StatusBadRequest
 		}
 		w.WriteHeader(code)
+	}))
+	p.cs.register(cdPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if cdUID != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
 	}))
 }
 

@@ -62,7 +62,7 @@ func mapCallback(callback AppCallback) cli.AppCallback {
 }
 
 func (c *Controller) Stop(Pin int64) int {
-	errorCode := cli.CheckDeactivationPin(Pin)
+	errorCode := cli.CheckDeactivationPin(Pin, c.stopCh)
 	if errorCode == 0 && c.stopCh != nil {
 		close(c.stopCh)
 		c.stopCh = nil

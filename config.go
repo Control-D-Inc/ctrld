@@ -179,26 +179,27 @@ func (c *Config) FirstUpstream() *UpstreamConfig {
 
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
-	LogLevel                string `mapstructure:"log_level" toml:"log_level,omitempty"`
-	LogPath                 string `mapstructure:"log_path" toml:"log_path,omitempty"`
-	CacheEnable             bool   `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
-	CacheSize               int    `mapstructure:"cache_size" toml:"cache_size,omitempty"`
-	CacheTTLOverride        int    `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
-	CacheServeStale         bool   `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
-	MaxConcurrentRequests   *int   `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
-	DHCPLeaseFile           string `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
-	DHCPLeaseFileFormat     string `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
-	DiscoverMDNS            *bool  `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
-	DiscoverARP             *bool  `mapstructure:"discover_arp" toml:"discover_arp,omitempty"`
-	DiscoverDHCP            *bool  `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
-	DiscoverPtr             *bool  `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
-	DiscoverHosts           *bool  `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
-	DiscoverRefreshInterval int    `mapstructure:"discover_refresh_interval" toml:"discover_refresh_interval,omitempty"`
-	ClientIDPref            string `mapstructure:"client_id_preference" toml:"client_id_preference,omitempty" validate:"omitempty,oneof=host mac"`
-	MetricsQueryStats       bool   `mapstructure:"metrics_query_stats" toml:"metrics_query_stats,omitempty"`
-	MetricsListener         string `mapstructure:"metrics_listener" toml:"metrics_listener,omitempty"`
-	Daemon                  bool   `mapstructure:"-" toml:"-"`
-	AllocateIP              bool   `mapstructure:"-" toml:"-"`
+	LogLevel                string   `mapstructure:"log_level" toml:"log_level,omitempty"`
+	LogPath                 string   `mapstructure:"log_path" toml:"log_path,omitempty"`
+	CacheEnable             bool     `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
+	CacheSize               int      `mapstructure:"cache_size" toml:"cache_size,omitempty"`
+	CacheTTLOverride        int      `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
+	CacheServeStale         bool     `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
+	CacheFlushDomains       []string `mapstructure:"cache_flush_domains" toml:"cache_flush_domains" validate:"max=256"`
+	MaxConcurrentRequests   *int     `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
+	DHCPLeaseFile           string   `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
+	DHCPLeaseFileFormat     string   `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
+	DiscoverMDNS            *bool    `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
+	DiscoverARP             *bool    `mapstructure:"discover_arp" toml:"discover_arp,omitempty"`
+	DiscoverDHCP            *bool    `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
+	DiscoverPtr             *bool    `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
+	DiscoverHosts           *bool    `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
+	DiscoverRefreshInterval int      `mapstructure:"discover_refresh_interval" toml:"discover_refresh_interval,omitempty"`
+	ClientIDPref            string   `mapstructure:"client_id_preference" toml:"client_id_preference,omitempty" validate:"omitempty,oneof=host mac"`
+	MetricsQueryStats       bool     `mapstructure:"metrics_query_stats" toml:"metrics_query_stats,omitempty"`
+	MetricsListener         string   `mapstructure:"metrics_listener" toml:"metrics_listener,omitempty"`
+	Daemon                  bool     `mapstructure:"-" toml:"-"`
+	AllocateIP              bool     `mapstructure:"-" toml:"-"`
 }
 
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.
@@ -285,6 +286,7 @@ type Rule map[string][]string
 
 // Init initialized necessary values for an UpstreamConfig.
 func (uc *UpstreamConfig) Init() {
+	uc.initDoHScheme()
 	uc.uid = upstreamUID()
 	if u, err := url.Parse(uc.Endpoint); err == nil {
 		uc.Domain = u.Host
@@ -631,6 +633,18 @@ func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
 	return "tcp-tls", "udp"
 }
 
+// initDoHScheme initializes the endpoint scheme for DoH/DoH3 upstream if not present.
+func (uc *UpstreamConfig) initDoHScheme() {
+	switch uc.Type {
+	case ResolverTypeDOH, ResolverTypeDOH3:
+	default:
+		return
+	}
+	if !strings.HasPrefix(uc.Endpoint, "https://") {
+		uc.Endpoint = "https://" + uc.Endpoint
+	}
+}
+
 // Init initialized necessary values for an ListenerConfig.
 func (lc *ListenerConfig) Init() {
 	if lc.Policy != nil {
@@ -683,14 +697,11 @@ func upstreamConfigStructLevelValidation(sl validator.StructLevel) {
 		return
 	}
 
+	uc.initDoHScheme()
 	// DoH/DoH3 requires endpoint is an HTTP url.
 	if uc.Type == ResolverTypeDOH || uc.Type == ResolverTypeDOH3 {
 		u, err := url.Parse(uc.Endpoint)
 		if err != nil || u.Host == "" {
-			sl.ReportError(uc.Endpoint, "endpoint", "Endpoint", "http_url", "")
-			return
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
 			sl.ReportError(uc.Endpoint, "endpoint", "Endpoint", "http_url", "")
 			return
 		}

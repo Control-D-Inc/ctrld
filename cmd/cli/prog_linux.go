@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+
 	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
@@ -9,6 +11,10 @@ import (
 func init() {
 	if r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, "lo"); err == nil {
 		useSystemdResolved = r.Mode() == "systemd-resolved"
+	}
+	// Disable quic-go's ECN support by default, see https://github.com/quic-go/quic-go/issues/3911
+	if os.Getenv("QUIC_GO_DISABLE_ECN") == "" {
+		os.Setenv("QUIC_GO_DISABLE_ECN", "true")
 	}
 }
 

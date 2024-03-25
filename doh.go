@@ -60,17 +60,10 @@ func init() {
 	}
 }
 
-// TODO: use sync.OnceValue when upgrading to go1.21
-var xCdOsValueOnce sync.Once
-var xCdOsValue string
-
-func dohOsHeaderValue() string {
-	xCdOsValueOnce.Do(func() {
-		oi := osinfo.New()
-		xCdOsValue = strings.Join([]string{EncodeOsNameMap[runtime.GOOS], EncodeArchNameMap[runtime.GOARCH], oi.Dist}, "-")
-	})
-	return xCdOsValue
-}
+var dohOsHeaderValue = sync.OnceValue(func() string {
+	oi := osinfo.New()
+	return strings.Join([]string{EncodeOsNameMap[runtime.GOOS], EncodeArchNameMap[runtime.GOARCH], oi.Dist}, "-")
+})()
 
 func newDohResolver(uc *UpstreamConfig) *dohResolver {
 	r := &dohResolver{
@@ -172,7 +165,7 @@ func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 // newControlDHeaders returns DoH/Doh3 HTTP request headers for ControlD upstream.
 func newControlDHeaders(ci *ClientInfo) http.Header {
 	header := make(http.Header)
-	header.Set(dohOsHeader, dohOsHeaderValue())
+	header.Set(dohOsHeader, dohOsHeaderValue)
 	if ci.Mac != "" {
 		header.Set(dohMacHeader, ci.Mac)
 	}
@@ -183,7 +176,7 @@ func newControlDHeaders(ci *ClientInfo) http.Header {
 		header.Set(dohHostHeader, ci.Hostname)
 	}
 	if ci.Self {
-		header.Set(dohOsHeader, dohOsHeaderValue())
+		header.Set(dohOsHeader, dohOsHeaderValue)
 	}
 	switch ci.ClientIDPref {
 	case "mac":

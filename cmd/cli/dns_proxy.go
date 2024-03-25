@@ -101,6 +101,10 @@ func (p *prog) serveDNS(listenerNum string) error {
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
+		if _, ok := p.cacheFlushDomainsMap[domain]; ok && p.cache != nil {
+			p.cache.Purge()
+			ctrld.Log(ctx, mainLog.Load().Debug(), "received query %q, local cache is purged", domain)
+		}
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 		ci := p.getClientInfo(remoteIP, m)
 		ci.ClientIDPref = p.cfg.Service.ClientIDPref
@@ -282,7 +286,7 @@ networkRules:
 macRules:
 	for _, rule := range lc.Policy.Macs {
 		for source, targets := range rule {
-			if source != "" && strings.EqualFold(source, srcMac) {
+			if source != "" && (strings.EqualFold(source, srcMac) || wildcardMatches(strings.ToLower(source), strings.ToLower(srcMac))) {
 				matchedPolicy = lc.Policy.Name
 				matchedNetwork = source
 				networkTargets = targets
@@ -590,7 +594,8 @@ func canonicalName(fqdn string) string {
 	return q
 }
 
-func wildcardMatches(wildcard, domain string) bool {
+// wildcardMatches reports whether string str matches the wildcard pattern.
+func wildcardMatches(wildcard, str string) bool {
 	// Wildcard match.
 	wildCardParts := strings.Split(wildcard, "*")
 	if len(wildCardParts) != 2 {
@@ -600,15 +605,15 @@ func wildcardMatches(wildcard, domain string) bool {
 	switch {
 	case len(wildCardParts[0]) > 0 && len(wildCardParts[1]) > 0:
 		// Domain must match both prefix and suffix.
-		return strings.HasPrefix(domain, wildCardParts[0]) && strings.HasSuffix(domain, wildCardParts[1])
+		return strings.HasPrefix(str, wildCardParts[0]) && strings.HasSuffix(str, wildCardParts[1])
 
 	case len(wildCardParts[1]) > 0:
 		// Only suffix must match.
-		return strings.HasSuffix(domain, wildCardParts[1])
+		return strings.HasSuffix(str, wildCardParts[1])
 
 	case len(wildCardParts[0]) > 0:
 		// Only prefix must match.
-		return strings.HasPrefix(domain, wildCardParts[0])
+		return strings.HasPrefix(str, wildCardParts[0])
 	}
 
 	return false
@@ -784,6 +789,7 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 		ci.Mac = p.ciTable.LookupMac(ci.IP)
 	}
 
+	isV6 := ctrldnet.IsIPv6(ci.IP)
 	// If MAC is still empty here, that mean the requests are made from virtual interface,
 	// like VPN/Wireguard clients, so we use ci.IP as hostname to distinguish those clients.
 	if ci.Mac == "" {
@@ -797,7 +803,7 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 			// IDs created for the same device, which is pointless.
 			//
 			// TODO(cuonglm): investigate whether this can be a false positive for other clients?
-			if !ctrldnet.IsIPv6(ci.IP) {
+			if !isV6 {
 				ci.Hostname = ci.IP
 				p.ciTable.StoreVPNClient(ci)
 			}
@@ -806,6 +812,17 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	}
 	ci.Self = queryFromSelf(ci.IP)
+	// If this is a query from self, but ci.IP is not loopback IP,
+	// try using hostname mapping for lookback IP if presents.
+	if ci.Self {
+		loopbackIP := "127.0.0.1"
+		if isV6 {
+			loopbackIP = "::1"
+		}
+		if name := p.ciTable.LookupHostname(loopbackIP, ""); name != "" {
+			ci.Hostname = name
+		}
+	}
 	p.spoofLoopbackIpInClientInfo(ci)
 	return ci
 }

@@ -26,6 +26,12 @@ var (
 	resetDNSOnce sync.Once
 )
 
+// setDnsIgnoreUnusableInterface likes setDNS, but return a nil error if the interface is not usable.
+func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) error {
+	return setDNS(iface, nameservers)
+}
+
+// setDNS sets the dns server for the provided network interface
 func setDNS(iface *net.Interface, nameservers []string) error {
 	if len(nameservers) == 0 {
 		return errors.New("empty DNS nameservers")
@@ -59,6 +65,11 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		_ = addSecondaryDNS(iface, secondaryDNS)
 	}
 	return nil
+}
+
+// resetDnsIgnoreUnusableInterface likes resetDNS, but return a nil error if the interface is not usable.
+func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
+	return resetDNS(iface)
 }
 
 // TODO(cuonglm): should we use system API?

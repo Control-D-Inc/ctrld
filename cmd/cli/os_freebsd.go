@@ -29,6 +29,11 @@ func deAllocateIP(ip string) error {
 	return nil
 }
 
+// setDnsIgnoreUnusableInterface likes setDNS, but return a nil error if the interface is not usable.
+func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) error {
+	return setDNS(iface, nameservers)
+}
+
 // set the dns server for the provided network interface
 func setDNS(iface *net.Interface, nameservers []string) error {
 	r, err := dns.NewOSConfigurator(logf, iface.Name)
@@ -47,6 +52,11 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		return err
 	}
 	return nil
+}
+
+// resetDnsIgnoreUnusableInterface likes resetDNS, but return a nil error if the interface is not usable.
+func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
+	return resetDNS(iface)
 }
 
 func resetDNS(iface *net.Interface) error {

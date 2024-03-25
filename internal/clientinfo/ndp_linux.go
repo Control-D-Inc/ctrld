@@ -15,10 +15,12 @@ func (nd *ndpDiscover) scan() {
 	}
 
 	for _, n := range neighs {
+		// Skipping non-reachable neighbors.
+		if n.State&netlink.NUD_REACHABLE == 0 {
+			continue
+		}
 		ip := n.IP.String()
 		mac := n.HardwareAddr.String()
-		nd.mac.Store(ip, mac)
-		nd.ip.Store(mac, ip)
+		nd.saveInfo(ip, mac)
 	}
-
 }

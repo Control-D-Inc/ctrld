@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strings"
 
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
@@ -30,6 +31,18 @@ func deAllocateIP(ip string) error {
 	return nil
 }
 
+// setDnsIgnoreUnusableInterface likes setDNS, but return a nil error if the interface is not usable.
+func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) error {
+	if err := setDNS(iface, nameservers); err != nil {
+		// TODO: investiate whether we can detect this without relying on error message.
+		if strings.Contains(err.Error(), " is not a recognized network service") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // set the dns server for the provided network interface
 // networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
 // TODO(cuonglm): use system API
@@ -39,6 +52,18 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	args = append(args, nameservers...)
 	if out, err := exec.Command(cmd, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("%v: %w", string(out), err)
+	}
+	return nil
+}
+
+// resetDnsIgnoreUnusableInterface likes resetDNS, but return a nil error if the interface is not usable.
+func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
+	if err := resetDNS(iface); err != nil {
+		// TODO: investiate whether we can detect this without relying on error message.
+		if strings.Contains(err.Error(), " is not a recognized network service") {
+			return nil
+		}
+		return err
 	}
 	return nil
 }
