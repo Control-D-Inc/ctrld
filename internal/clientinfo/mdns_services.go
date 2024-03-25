@@ -44,7 +44,7 @@ var services = [...]string{
 	"_nfs._tcp.local.",
 	"_nvstream._tcp.local.",
 	"_androidtvremote._tcp.local.",
-	"_androidtvremote2._tcp.local",
+	"_androidtvremote2._tcp.local.",
 	"_omnistate._tcp.local.",
 	"_photoshopserver._tcp.local.",
 	"_printer._tcp.local.",
