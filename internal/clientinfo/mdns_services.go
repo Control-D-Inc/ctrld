@@ -23,13 +23,11 @@ var services = [...]string{
 	"_eppc._tcp.local.",
 	"_esdevice._tcp.local.",
 	"_esfileshare._tcp.local.",
-	"_esphomelib._tcp.local.",
 	"_ftp._tcp.local.",
 	"_googlecast._tcp.local.",
 	"_googlezone._tcp.local.",
 	"_hap._tcp.local.",
 	"_homekit._tcp.local.",
-	"_home-assistant._tcp.local.",
 	"_home-sharing._tcp.local.",
 	"_http._tcp.local.",
 	"_hudson._tcp.local.",
@@ -44,7 +42,6 @@ var services = [...]string{
 	"_nfs._tcp.local.",
 	"_nvstream._tcp.local.",
 	"_androidtvremote._tcp.local.",
-	"_androidtvremote2._tcp.local.",
 	"_omnistate._tcp.local.",
 	"_photoshopserver._tcp.local.",
 	"_printer._tcp.local.",
@@ -65,10 +62,23 @@ var services = [...]string{
 	"_tunnel._tcp.local.",
 	"_webdav._tcp.local.",
 	"_webdav._tcp.local.",
-	"_wled._tcp.local.",
 	"_workstation._tcp.local.",
 	"_xserveraid._tcp.local.",
 
 	// Merlin
 	"_alexa._tcp",
+
+	// Newer Android TV devices
+	"_androidtvremote2._tcp.local.",
+
+	// https://esphome.io/
+	"_esphomelib._tcp.local.",
+
+	// https://www.home-assistant.io/
+	"_home-assistant._tcp.local.",
+
+	// https://kno.wled.ge/
+	"_wled._tcp.local.",
+
+
 }
