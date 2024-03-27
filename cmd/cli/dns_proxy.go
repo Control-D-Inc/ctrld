@@ -101,6 +101,11 @@ func (p *prog) serveDNS(listenerNum string) error {
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
+		if domain == selfCheckInternalTestDomain {
+			answer := resolveInternalDomainTestQuery(ctx, domain, m)
+			_ = w.WriteMsg(answer)
+			return
+		}
 		if _, ok := p.cacheFlushDomainsMap[domain]; ok && p.cache != nil {
 			p.cache.Purge()
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received query %q, local cache is purged", domain)
@@ -952,4 +957,21 @@ func isWanClient(na net.Addr) bool {
 		!ip.IsLinkLocalUnicast() &&
 		!ip.IsLinkLocalMulticast() &&
 		!tsaddr.CGNATRange().Contains(ip)
+}
+
+// resolveInternalDomainTestQuery resolves internal test domain query, returning the answer to the caller.
+func resolveInternalDomainTestQuery(ctx context.Context, domain string, m *dns.Msg) *dns.Msg {
+	ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain test query")
+	q := m.Question[0]
+	answer := new(dns.Msg)
+	rrStr := fmt.Sprintf("%s A %s", domain, net.IPv4zero)
+	if q.Qtype == dns.TypeAAAA {
+		rrStr = fmt.Sprintf("%s AAAA %s", domain, net.IPv6zero)
+	}
+	rr, err := dns.NewRR(rrStr)
+	if err == nil {
+		answer.Answer = append(answer.Answer, rr)
+	}
+	answer.SetReply(m)
+	return answer
 }

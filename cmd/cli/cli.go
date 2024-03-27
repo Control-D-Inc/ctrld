@@ -46,6 +46,9 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
+// selfCheckInternalTestDomain is used for testing ctrld self response to clients.
+const selfCheckInternalTestDomain = "ctrld" + loopTestDomain
+
 var (
 	version = "dev"
 	commit  = "none"
@@ -1552,6 +1555,13 @@ func defaultIfaceName() string {
 // selfCheckStatus performs the end-to-end DNS test by sending query to ctrld listener.
 // It returns a boolean to indicate whether the check is succeeded, the actual status
 // of ctrld service, and an additional error if any.
+//
+// We perform two tests:
+//
+// - Internal testing, ensuring query could be sent from client -> ctrld.
+// - External testing, ensuring query could be sent from ctrld -> upstream.
+//
+// Self-check is considered success only if both tests are ok.
 func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 	status, err := s.Status()
 	if err != nil {
@@ -1634,8 +1644,9 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 	})
 	v.WatchConfig()
 	var (
-		lastAnswer *dns.Msg
-		lastErr    error
+		lastAnswer     *dns.Msg
+		lastErr        error
+		internalTested bool
 	)
 	for i := 0; i < maxAttempts; i++ {
 		mu.Lock()
@@ -1648,6 +1659,9 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 		mu.Unlock()
 		lc := cfg.FirstListener()
 		domain = cfg.FirstUpstream().VerifyDomain()
+		if !internalTested {
+			domain = selfCheckInternalTestDomain
+		}
 		if domain == "" {
 			continue
 		}
@@ -1657,7 +1671,13 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 		m.RecursionDesired = true
 		r, _, exErr := exchangeContextWithTimeout(c, time.Second, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
 		if r != nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
-			mainLog.Load().Debug().Msgf("self-check against %q succeeded", domain)
+			internalTested = domain == selfCheckInternalTestDomain
+			if internalTested {
+				mainLog.Load().Debug().Msgf("internal self-check against %q succeeded", domain)
+				continue // internal domain test ok, continue with external test.
+			} else {
+				mainLog.Load().Debug().Msgf("external self-check against %q succeeded", domain)
+			}
 			return true, status, nil
 		}
 		// Return early if this is a connection refused.
