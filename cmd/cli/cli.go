@@ -369,7 +369,7 @@ func initCLI() {
 					}
 					// If ctrld service is running but selfCheckStatus failed, it could be related
 					// to user's system firewall configuration, notice users about it.
-					if status == service.StatusRunning {
+					if status == service.StatusRunning && err == nil {
 						_, _ = mainLog.Load().Write(marker)
 						mainLog.Load().Write([]byte(`ctrld service was running, but a DNS query could not be sent to its listener`))
 						mainLog.Load().Write([]byte(`Please check your system firewall if it is configured to block/intercept/redirect DNS queries`))
@@ -1705,6 +1705,12 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 		bo.BackOff(ctx, fmt.Errorf("ExchangeContext: %w", exErr))
 	}
 	mainLog.Load().Debug().Msgf("self-check against %q failed", domain)
+	// Ping all upstreams to provide better error message to users.
+	for name, uc := range cfg.Upstream {
+		if err := uc.ErrorPing(); err != nil {
+			mainLog.Load().Err(err).Msgf("failed to connect to upstream.%s, endpoint: %s", name, uc.Endpoint)
+		}
+	}
 	lc := cfg.FirstListener()
 	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
 	marker := strings.Repeat("=", 32)

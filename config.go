@@ -521,35 +521,55 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 
 // Ping warms up the connection to DoH/DoH3 upstream.
 func (uc *UpstreamConfig) Ping() {
+	_ = uc.ping()
+}
+
+// ErrorPing is like Ping, but return an error if any.
+func (uc *UpstreamConfig) ErrorPing() error {
+	return uc.ping()
+}
+
+func (uc *UpstreamConfig) ping() error {
 	switch uc.Type {
 	case ResolverTypeDOH, ResolverTypeDOH3:
 	default:
-		return
+		return nil
 	}
 
-	ping := func(t http.RoundTripper) {
+	ping := func(t http.RoundTripper) error {
 		if t == nil {
-			return
+			return nil
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		req, _ := http.NewRequestWithContext(ctx, "HEAD", uc.Endpoint, nil)
-		resp, _ := t.RoundTrip(req)
-		if resp == nil {
-			return
+		req, err := http.NewRequestWithContext(ctx, "HEAD", uc.Endpoint, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := t.RoundTrip(req)
+		if err != nil {
+			return err
 		}
 		defer resp.Body.Close()
 		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
 	}
 
 	for _, typ := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		switch uc.Type {
 		case ResolverTypeDOH:
-			ping(uc.dohTransport(typ))
+
+			if err := ping(uc.dohTransport(typ)); err != nil {
+				return err
+			}
 		case ResolverTypeDOH3:
-			ping(uc.doh3Transport(typ))
+			if err := ping(uc.doh3Transport(typ)); err != nil {
+				return err
+			}
 		}
 	}
+
+	return nil
 }
 
 func (uc *UpstreamConfig) isControlD() bool {

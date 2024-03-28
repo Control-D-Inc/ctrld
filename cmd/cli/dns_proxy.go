@@ -962,6 +962,7 @@ func isWanClient(na net.Addr) bool {
 // resolveInternalDomainTestQuery resolves internal test domain query, returning the answer to the caller.
 func resolveInternalDomainTestQuery(ctx context.Context, domain string, m *dns.Msg) *dns.Msg {
 	ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain test query")
+
 	q := m.Question[0]
 	answer := new(dns.Msg)
 	rrStr := fmt.Sprintf("%s A %s", domain, net.IPv4zero)
