@@ -46,6 +46,15 @@ const (
 	// depending on the record type of the DNS query.
 	IpStackSplit = "split"
 
+	// FreeDnsDomain is the domain name of free ControlD service.
+	FreeDnsDomain = "freedns.controld.com"
+	// FreeDNSBoostrapIP is the IP address of freedns.controld.com.
+	FreeDNSBoostrapIP = "76.76.2.11"
+	// PremiumDnsDomain is the domain name of premium ControlD service.
+	PremiumDnsDomain = "dns.controld.com"
+	// PremiumDNSBoostrapIP is the IP address of dns.controld.com.
+	PremiumDNSBoostrapIP = "76.76.2.22"
+
 	controlDComDomain = "controld.com"
 	controlDNetDomain = "controld.net"
 	controlDDevDomain = "controld.dev"
@@ -104,14 +113,14 @@ func InitConfig(v *viper.Viper, name string) {
 	})
 	v.SetDefault("upstream", map[string]*UpstreamConfig{
 		"0": {
-			BootstrapIP: "76.76.2.11",
+			BootstrapIP: FreeDNSBoostrapIP,
 			Name:        "Control D - Anti-Malware",
 			Type:        ResolverTypeDOH,
 			Endpoint:    "https://freedns.controld.com/p1",
 			Timeout:     5000,
 		},
 		"1": {
-			BootstrapIP: "76.76.2.11",
+			BootstrapIP: FreeDNSBoostrapIP,
 			Name:        "Control D - No Ads",
 			Type:        ResolverTypeDOQ,
 			Endpoint:    "p2.freedns.controld.com",

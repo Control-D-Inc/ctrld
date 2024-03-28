@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1431,6 +1432,20 @@ func processCDFlags(cfg *ctrld.Config) error {
 		mainLog.Load().Err(err).Msg("disregarding invalid custom config")
 	}
 
+	bootstrapIP := func(endpoint string) string {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			logger.Warn().Err(err).Msgf("no bootstrap IP for invalid endpoint: %s", endpoint)
+			return ""
+		}
+		switch {
+		case dns.IsSubDomain(ctrld.FreeDnsDomain, u.Host):
+			return ctrld.FreeDNSBoostrapIP
+		case dns.IsSubDomain(ctrld.PremiumDnsDomain, u.Host):
+			return ctrld.PremiumDNSBoostrapIP
+		}
+		return ""
+	}
 	cfg.Network = make(map[string]*ctrld.NetworkConfig)
 	cfg.Network["0"] = &ctrld.NetworkConfig{
 		Name:  "Network 0",
@@ -1438,9 +1453,10 @@ func processCDFlags(cfg *ctrld.Config) error {
 	}
 	cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
 	cfg.Upstream["0"] = &ctrld.UpstreamConfig{
-		Endpoint: resolverConfig.DOH,
-		Type:     cdUpstreamProto,
-		Timeout:  5000,
+		BootstrapIP: bootstrapIP(resolverConfig.DOH),
+		Endpoint:    resolverConfig.DOH,
+		Type:        cdUpstreamProto,
+		Timeout:     5000,
 	}
 	rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
 	for _, domain := range resolverConfig.Exclude {
