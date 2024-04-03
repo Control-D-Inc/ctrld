@@ -224,6 +224,7 @@ func (t *Table) init() {
 			cancel()
 		}()
 		go t.ndp.listen(ctx)
+		go t.ndp.subscribe(ctx)
 	}
 	// PTR lookup.
 	if t.discoverPTR() {
