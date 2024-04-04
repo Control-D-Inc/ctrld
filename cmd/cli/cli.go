@@ -916,7 +916,15 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if doRestart() {
 				_ = os.Remove(oldBin)
 				_ = os.Chmod(bin, 0755)
-				mainLog.Load().Notice().Msg("Upgrade successful")
+				ver := "unknown version"
+				out, err := exec.Command(bin, "--version").CombinedOutput()
+				if err != nil {
+					mainLog.Load().Warn().Err(err).Msg("Failed to get new binary version")
+				}
+				if after, found := strings.CutPrefix(string(out), "ctrld version "); found {
+					ver = after
+				}
+				mainLog.Load().Notice().Msgf("Upgrade successful - %s", ver)
 				return
 			}
 
