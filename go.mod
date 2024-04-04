@@ -31,9 +31,9 @@ require (
 	github.com/spf13/viper v1.16.0
 	github.com/stretchr/testify v1.8.3
 	github.com/vishvananda/netlink v1.2.1-beta.2
-	golang.org/x/net v0.17.0
+	golang.org/x/net v0.23.0
 	golang.org/x/sync v0.2.0
-	golang.org/x/sys v0.13.0
+	golang.org/x/sys v0.18.0
 	golang.zx2c4.com/wireguard/windows v0.5.3
 	tailscale.com v1.44.0
 )
@@ -82,10 +82,10 @@ require (
 	github.com/vishvananda/netns v0.0.4 // indirect
 	go.uber.org/mock v0.3.0 // indirect
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13 // indirect
-	golang.org/x/crypto v0.14.0 // indirect
+	golang.org/x/crypto v0.21.0 // indirect
 	golang.org/x/exp v0.0.0-20230425010034-47ecfdc1ba53 // indirect
 	golang.org/x/mod v0.11.0 // indirect
-	golang.org/x/text v0.13.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/tools v0.9.1 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
