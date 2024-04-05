@@ -165,7 +165,6 @@ func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 // newControlDHeaders returns DoH/Doh3 HTTP request headers for ControlD upstream.
 func newControlDHeaders(ci *ClientInfo) http.Header {
 	header := make(http.Header)
-	header.Set(dohOsHeader, dohOsHeaderValue)
 	if ci.Mac != "" {
 		header.Set(dohMacHeader, ci.Mac)
 	}
