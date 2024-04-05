@@ -24,7 +24,7 @@ func (nd *ndpDiscover) scan() {
 		}
 		ip := n.IP.String()
 		mac := n.HardwareAddr.String()
-		nd.saveInfo(ip, mac, false)
+		nd.saveInfo(ip, mac)
 	}
 }
 
@@ -54,7 +54,7 @@ func (nd *ndpDiscover) subscribe(ctx context.Context) {
 			mac := nu.HardwareAddr.String()
 			switch nu.State {
 			case netlink.NUD_REACHABLE:
-				nd.saveInfo(ip, mac, false)
+				nd.saveInfo(ip, mac)
 			case netlink.NUD_FAILED:
 				ctrld.ProxyLogger.Load().Debug().Msgf("removing NDP neighbor with failed state: %s", ip)
 				nd.mac.Delete(ip)

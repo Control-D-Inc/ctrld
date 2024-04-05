@@ -115,6 +115,15 @@ func IsIPv6(ip string) bool {
 	return parsedIP != nil && parsedIP.To4() == nil && parsedIP.To16() != nil
 }
 
+// IsLinkLocalUnicastIPv6 checks if the provided IP is a link local unicast v6 address.
+func IsLinkLocalUnicastIPv6(ip string) bool {
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil || parsedIP.To4() != nil || parsedIP.To16() == nil {
+		return false
+	}
+	return parsedIP.To16().IsLinkLocalUnicast()
+}
+
 type parallelDialerResult struct {
 	conn net.Conn
 	err  error

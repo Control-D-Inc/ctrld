@@ -15,6 +15,7 @@ import (
 	"github.com/mdlayher/ndp"
 
 	"github.com/Control-D-Inc/ctrld"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 // ndpDiscover provides client discovery functionality using NDP protocol.
@@ -70,20 +71,23 @@ func (nd *ndpDiscover) List() []string {
 }
 
 // saveInfo saves ip and mac info to mapping table.
-// If force is true, old ip will be removed before saving.
-func (nd *ndpDiscover) saveInfo(ip, mac string, force bool) {
+func (nd *ndpDiscover) saveInfo(ip, mac string) {
 	ip = normalizeIP(ip)
 	// Store ip => map mapping,
 	nd.mac.Store(ip, mac)
 
-	if force {
-		// If there is old ip => mac mapping, delete it.
-		if old, ok := nd.ip.Load(mac); ok {
-			oldIP := old.(string)
+	// Do not store mac => ip mapping if new ip is a link local unicast.
+	if ctrldnet.IsLinkLocalUnicastIPv6(ip) {
+		return
+	}
+
+	// If there is old ip => mac mapping, delete it.
+	if old, existed := nd.ip.Load(mac); existed {
+		oldIP := old.(string)
+		if oldIP != ip {
 			nd.mac.Delete(oldIP)
 		}
 	}
-
 	// Store mac => ip mapping.
 	nd.ip.Store(mac, ip)
 }
@@ -138,7 +142,7 @@ func (nd *ndpDiscover) listenOnInterface(ctx context.Context, ifi *net.Interface
 		for _, opt := range am.Options {
 			if lla, ok := opt.(*ndp.LinkLayerAddress); ok {
 				mac := lla.Addr.String()
-				nd.saveInfo(fromIP, mac, true)
+				nd.saveInfo(fromIP, mac)
 			}
 		}
 	}
@@ -153,7 +157,7 @@ func (nd *ndpDiscover) scanWindows(r io.Reader) {
 			continue
 		}
 		if mac := parseMAC(fields[1]); mac != "" {
-			nd.saveInfo(fields[0], mac, true)
+			nd.saveInfo(fields[0], mac)
 		}
 	}
 }
@@ -172,7 +176,7 @@ func (nd *ndpDiscover) scanUnix(r io.Reader) {
 			if idx := strings.IndexByte(ip, '%'); idx != -1 {
 				ip = ip[:idx]
 			}
-			nd.saveInfo(ip, mac, true)
+			nd.saveInfo(ip, mac)
 		}
 	}
 }
