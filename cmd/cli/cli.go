@@ -176,6 +176,27 @@ func initCLI() {
 			}
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
+
+			p := &prog{
+				router: router.New(&cfg, cdUID != ""),
+				cfg:    &cfg,
+			}
+			s, err := newService(p, sc)
+			if err != nil {
+				mainLog.Load().Error().Msg(err.Error())
+				return
+			}
+
+			status, err := s.Status()
+			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
+
+			// If pin code was set, do not allow running start command.
+			if status == service.StatusRunning {
+				if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
+					os.Exit(deactivationPinInvalidExitCode)
+				}
+			}
+
 			if cdUID != "" {
 				rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
 				if err != nil {
@@ -211,6 +232,7 @@ func initCLI() {
 				v = oldV
 			} else if uid := cdUIDFromProvToken(); uid != "" {
 				cdUID = uid
+				mainLog.Load().Debug().Msg("using uid from provision token")
 				removeProvTokenFromArgs(sc)
 				// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
 				sc.Arguments = append(sc.Arguments, "--cd="+cdUID)
@@ -219,10 +241,6 @@ func initCLI() {
 				validateCdUpstreamProtocol()
 			}
 
-			p := &prog{
-				router: router.New(&cfg, cdUID != ""),
-				cfg:    &cfg,
-			}
 			if err := p.router.ConfigureService(sc); err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to configure service on router")
 			}
@@ -286,22 +304,6 @@ func initCLI() {
 			// the expected config file.
 			if configPath == "" {
 				sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
-			}
-
-			s, err := newService(p, sc)
-			if err != nil {
-				mainLog.Load().Error().Msg(err.Error())
-				return
-			}
-
-			status, err := s.Status()
-			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
-
-			// If pin code was set, do not allow running start command.
-			if status == service.StatusRunning {
-				if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
-					os.Exit(deactivationPinInvalidExitCode)
-				}
 			}
 
 			if router.Name() != "" && iface != "" {
@@ -2237,6 +2239,7 @@ func cdUIDFromProvToken() string {
 	if cdOrg == "" {
 		return ""
 	}
+
 	// Process provision token if provided.
 	resolverConfig, err := controld.FetchResolverUID(cdOrg, rootCmd.Version, cdDev)
 	if err != nil {
