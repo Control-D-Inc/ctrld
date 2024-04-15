@@ -854,10 +854,24 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	clientsCmd.AddCommand(listClientsCmd)
 	rootCmd.AddCommand(clientsCmd)
 
+	const (
+		upgradeChannelDev     = "dev"
+		upgradeChannelProd    = "prod"
+		upgradeChannelDefault = "default"
+	)
+	upgradeChannel := map[string]string{
+		upgradeChannelDefault: "https://dl.controld.dev",
+		upgradeChannelDev:     "https://dl.controld.dev",
+		upgradeChannelProd:    "https://dl.controld.com",
+	}
+	if isStableVersion(curVersion()) {
+		upgradeChannel[upgradeChannelDefault] = upgradeChannel[upgradeChannelProd]
+	}
 	upgradeCmd := &cobra.Command{
-		Use:   "upgrade",
-		Short: "Upgrading ctrld to latest version",
-		Args:  cobra.NoArgs,
+		Use:       "upgrade",
+		Short:     "Upgrading ctrld to latest version",
+		ValidArgs: []string{upgradeChannelDev, upgradeChannelProd},
+		Args:      cobra.MaximumNArgs(1),
 		PreRun: func(cmd *cobra.Command, args []string) {
 			initConsoleLogging()
 			checkHasElevatedPrivilege()
@@ -877,9 +891,15 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
 			}
 			oldBin := bin + "_previous"
-			urlString := "https://dl.controld.com"
-			if !isStableVersion(curVersion()) {
-				urlString = "https://dl.controld.dev"
+			urlString := upgradeChannel[upgradeChannelDefault]
+			if len(args) > 0 {
+				channel := args[0]
+				switch channel {
+				case upgradeChannelProd, upgradeChannelDev: // ok
+				default:
+					mainLog.Load().Fatal().Msgf("uprade argument must be either %q or %q", upgradeChannelProd, upgradeChannelDev)
+				}
+				urlString = upgradeChannel[channel]
 			}
 			dlUrl := fmt.Sprintf("%s/%s-%s/ctrld", urlString, runtime.GOOS, runtime.GOARCH)
 			if runtime.GOOS == "windows" {
