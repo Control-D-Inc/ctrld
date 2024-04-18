@@ -14,6 +14,11 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
 
+const (
+	ipV4Loopback = "127.0.0.1"
+	ipv6Loopback = "::1"
+)
+
 // IpResolver is the interface for retrieving IP from Mac.
 type IpResolver interface {
 	fmt.Stringer
@@ -320,6 +325,14 @@ func (t *Table) LookupRFC1918IPv4(mac string) string {
 		}
 	}
 	return ""
+}
+
+// LocalHostname returns the localhost hostname associated with loopback IP.
+func (t *Table) LocalHostname(v6 bool) string {
+	if v6 {
+		return t.LookupHostname(ipv6Loopback, "")
+	}
+	return t.LookupHostname(ipV4Loopback, "")
 }
 
 type macEntry struct {

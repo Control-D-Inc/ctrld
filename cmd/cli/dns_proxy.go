@@ -820,11 +820,7 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	// If this is a query from self, but ci.IP is not loopback IP,
 	// try using hostname mapping for lookback IP if presents.
 	if ci.Self {
-		loopbackIP := "127.0.0.1"
-		if isV6 {
-			loopbackIP = "::1"
-		}
-		if name := p.ciTable.LookupHostname(loopbackIP, ""); name != "" {
+		if name := p.ciTable.LocalHostname(isV6); name != "" {
 			ci.Hostname = name
 		}
 	}

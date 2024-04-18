@@ -353,8 +353,8 @@ func (d *dhcp) addSelf() {
 		return
 	}
 	hostname = normalizeHostname(hostname)
-	d.ip2name.Store("127.0.0.1", hostname)
-	d.ip2name.Store("::1", hostname)
+	d.ip2name.Store(ipV4Loopback, hostname)
+	d.ip2name.Store(ipv6Loopback, hostname)
 	found := false
 	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
 		mac := i.HardwareAddr.String()
@@ -375,15 +375,17 @@ func (d *dhcp) addSelf() {
 			d.mac.Store(ip.String(), mac)
 			d.ip.Store(mac, ip.String())
 			if ip.To4() != nil {
-				d.mac.Store("127.0.0.1", mac)
+				d.mac.Store(ipV4Loopback, mac)
 			} else {
-				d.mac.Store("::1", mac)
+				d.mac.Store(ipv6Loopback, mac)
 			}
 			d.mac2name.Store(mac, hostname)
 			d.ip2name.Store(ip.String(), hostname)
 			// If we have self IP set, and this IP is it, use this IP only.
 			if ip.String() == d.selfIP {
 				found = true
+				d.mac.Store(ipV4Loopback, mac)
+				d.mac.Store(ipv6Loopback, mac)
 			}
 		}
 	})
