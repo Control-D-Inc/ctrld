@@ -328,11 +328,13 @@ func (t *Table) LookupRFC1918IPv4(mac string) string {
 }
 
 // LocalHostname returns the localhost hostname associated with loopback IP.
-func (t *Table) LocalHostname(v6 bool) string {
-	if v6 {
-		return t.LookupHostname(ipv6Loopback, "")
+func (t *Table) LocalHostname() string {
+	for _, ip := range []string{ipV4Loopback, ipv6Loopback} {
+		if name := t.LookupHostname(ip, ""); name != "" {
+			return name
+		}
 	}
-	return t.LookupHostname(ipV4Loopback, "")
+	return ""
 }
 
 type macEntry struct {

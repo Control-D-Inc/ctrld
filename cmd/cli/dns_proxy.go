@@ -794,7 +794,6 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 		ci.Mac = p.ciTable.LookupMac(ci.IP)
 	}
 
-	isV6 := ctrldnet.IsIPv6(ci.IP)
 	// If MAC is still empty here, that mean the requests are made from virtual interface,
 	// like VPN/Wireguard clients, so we use ci.IP as hostname to distinguish those clients.
 	if ci.Mac == "" {
@@ -808,7 +807,7 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 			// IDs created for the same device, which is pointless.
 			//
 			// TODO(cuonglm): investigate whether this can be a false positive for other clients?
-			if !isV6 {
+			if !ctrldnet.IsIPv6(ci.IP) {
 				ci.Hostname = ci.IP
 				p.ciTable.StoreVPNClient(ci)
 			}
@@ -820,7 +819,7 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	// If this is a query from self, but ci.IP is not loopback IP,
 	// try using hostname mapping for lookback IP if presents.
 	if ci.Self {
-		if name := p.ciTable.LocalHostname(isV6); name != "" {
+		if name := p.ciTable.LocalHostname(); name != "" {
 			ci.Hostname = name
 		}
 	}
