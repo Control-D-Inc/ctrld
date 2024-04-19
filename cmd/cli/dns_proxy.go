@@ -101,6 +101,15 @@ func (p *prog) serveDNS(listenerNum string) error {
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
+		if domain == selfCheckInternalTestDomain {
+			answer := resolveInternalDomainTestQuery(ctx, domain, m)
+			_ = w.WriteMsg(answer)
+			return
+		}
+		if _, ok := p.cacheFlushDomainsMap[domain]; ok && p.cache != nil {
+			p.cache.Purge()
+			ctrld.Log(ctx, mainLog.Load().Debug(), "received query %q, local cache is purged", domain)
+		}
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 		ci := p.getClientInfo(remoteIP, m)
 		ci.ClientIDPref = p.cfg.Service.ClientIDPref
@@ -282,7 +291,7 @@ networkRules:
 macRules:
 	for _, rule := range lc.Policy.Macs {
 		for source, targets := range rule {
-			if source != "" && strings.EqualFold(source, srcMac) {
+			if source != "" && (strings.EqualFold(source, srcMac) || wildcardMatches(strings.ToLower(source), strings.ToLower(srcMac))) {
 				matchedPolicy = lc.Policy.Name
 				matchedNetwork = source
 				networkTargets = targets
@@ -590,7 +599,8 @@ func canonicalName(fqdn string) string {
 	return q
 }
 
-func wildcardMatches(wildcard, domain string) bool {
+// wildcardMatches reports whether string str matches the wildcard pattern.
+func wildcardMatches(wildcard, str string) bool {
 	// Wildcard match.
 	wildCardParts := strings.Split(wildcard, "*")
 	if len(wildCardParts) != 2 {
@@ -600,15 +610,15 @@ func wildcardMatches(wildcard, domain string) bool {
 	switch {
 	case len(wildCardParts[0]) > 0 && len(wildCardParts[1]) > 0:
 		// Domain must match both prefix and suffix.
-		return strings.HasPrefix(domain, wildCardParts[0]) && strings.HasSuffix(domain, wildCardParts[1])
+		return strings.HasPrefix(str, wildCardParts[0]) && strings.HasSuffix(str, wildCardParts[1])
 
 	case len(wildCardParts[1]) > 0:
 		// Only suffix must match.
-		return strings.HasSuffix(domain, wildCardParts[1])
+		return strings.HasSuffix(str, wildCardParts[1])
 
 	case len(wildCardParts[0]) > 0:
 		// Only prefix must match.
-		return strings.HasPrefix(domain, wildCardParts[0])
+		return strings.HasPrefix(str, wildCardParts[0])
 	}
 
 	return false
@@ -806,6 +816,13 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	}
 	ci.Self = queryFromSelf(ci.IP)
+	// If this is a query from self, but ci.IP is not loopback IP,
+	// try using hostname mapping for lookback IP if presents.
+	if ci.Self {
+		if name := p.ciTable.LocalHostname(); name != "" {
+			ci.Hostname = name
+		}
+	}
 	p.spoofLoopbackIpInClientInfo(ci)
 	return ci
 }
@@ -935,4 +952,22 @@ func isWanClient(na net.Addr) bool {
 		!ip.IsLinkLocalUnicast() &&
 		!ip.IsLinkLocalMulticast() &&
 		!tsaddr.CGNATRange().Contains(ip)
+}
+
+// resolveInternalDomainTestQuery resolves internal test domain query, returning the answer to the caller.
+func resolveInternalDomainTestQuery(ctx context.Context, domain string, m *dns.Msg) *dns.Msg {
+	ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain test query")
+
+	q := m.Question[0]
+	answer := new(dns.Msg)
+	rrStr := fmt.Sprintf("%s A %s", domain, net.IPv4zero)
+	if q.Qtype == dns.TypeAAAA {
+		rrStr = fmt.Sprintf("%s AAAA %s", domain, net.IPv6zero)
+	}
+	rr, err := dns.NewRR(rrStr)
+	if err == nil {
+		answer.Answer = append(answer.Answer, rr)
+	}
+	answer.SetReply(m)
+	return answer
 }

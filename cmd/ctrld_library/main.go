@@ -61,8 +61,13 @@ func mapCallback(callback AppCallback) cli.AppCallback {
 	}
 }
 
-func (c *Controller) Stop(Pin int64) int {
-	errorCode := cli.CheckDeactivationPin(Pin)
+func (c *Controller) Stop(restart bool, pin int64) int {
+	var errorCode = 0
+	// Force disconnect without checking pin.
+	// In iOS restart is required if vpn detects no connectivity after network change.
+	if !restart {
+		errorCode = cli.CheckDeactivationPin(pin, c.stopCh)
+	}
 	if errorCode == 0 && c.stopCh != nil {
 		close(c.stopCh)
 		c.stopCh = nil

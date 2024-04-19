@@ -15,6 +15,7 @@ import (
 	"github.com/mdlayher/ndp"
 
 	"github.com/Control-D-Inc/ctrld"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 // ndpDiscover provides client discovery functionality using NDP protocol.
@@ -69,15 +70,45 @@ func (nd *ndpDiscover) List() []string {
 	return ips
 }
 
+// saveInfo saves ip and mac info to mapping table.
+func (nd *ndpDiscover) saveInfo(ip, mac string) {
+	ip = normalizeIP(ip)
+	// Store ip => map mapping,
+	nd.mac.Store(ip, mac)
+
+	// Do not store mac => ip mapping if new ip is a link local unicast.
+	if ctrldnet.IsLinkLocalUnicastIPv6(ip) {
+		return
+	}
+
+	// If there is old ip => mac mapping, delete it.
+	if old, existed := nd.ip.Load(mac); existed {
+		oldIP := old.(string)
+		if oldIP != ip {
+			nd.mac.Delete(oldIP)
+		}
+	}
+	// Store mac => ip mapping.
+	nd.ip.Store(mac, ip)
+}
+
 // listen listens on ipv6 link local for Neighbor Solicitation message
 // to update new neighbors information to ndp table.
 func (nd *ndpDiscover) listen(ctx context.Context) {
-	ifi, err := firstInterfaceWithV6LinkLocal()
+	ifis, err := allInterfacesWithV6LinkLocal()
 	if err != nil {
-		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("failed to find valid ipv6")
+		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("failed to find valid ipv6 interfaces")
 		return
 	}
-	c, ip, err := ndp.Listen(ifi, ndp.LinkLocal)
+	for _, ifi := range ifis {
+		go func(ifi *net.Interface) {
+			nd.listenOnInterface(ctx, ifi)
+		}(ifi)
+	}
+}
+
+func (nd *ndpDiscover) listenOnInterface(ctx context.Context, ifi *net.Interface) {
+	c, ip, err := ndp.Listen(ifi, ndp.Unspecified)
 	if err != nil {
 		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("ndp listen failed")
 		return
@@ -111,8 +142,7 @@ func (nd *ndpDiscover) listen(ctx context.Context) {
 		for _, opt := range am.Options {
 			if lla, ok := opt.(*ndp.LinkLayerAddress); ok {
 				mac := lla.Addr.String()
-				nd.mac.Store(fromIP, mac)
-				nd.ip.Store(mac, fromIP)
+				nd.saveInfo(fromIP, mac)
 			}
 		}
 	}
@@ -127,8 +157,7 @@ func (nd *ndpDiscover) scanWindows(r io.Reader) {
 			continue
 		}
 		if mac := parseMAC(fields[1]); mac != "" {
-			nd.mac.Store(fields[0], mac)
-			nd.ip.Store(mac, fields[0])
+			nd.saveInfo(fields[0], mac)
 		}
 	}
 }
@@ -147,8 +176,7 @@ func (nd *ndpDiscover) scanUnix(r io.Reader) {
 			if idx := strings.IndexByte(ip, '%'); idx != -1 {
 				ip = ip[:idx]
 			}
-			nd.mac.Store(ip, mac)
-			nd.ip.Store(mac, ip)
+			nd.saveInfo(ip, mac)
 		}
 	}
 }
@@ -183,14 +211,15 @@ func parseMAC(mac string) string {
 	return hw.String()
 }
 
-// firstInterfaceWithV6LinkLocal returns the first interface which is capable of using NDP.
-func firstInterfaceWithV6LinkLocal() (*net.Interface, error) {
+// allInterfacesWithV6LinkLocal returns all interfaces which is capable of using NDP.
+func allInterfacesWithV6LinkLocal() ([]*net.Interface, error) {
 	ifis, err := net.Interfaces()
 	if err != nil {
 		return nil, err
 	}
-
+	res := make([]*net.Interface, 0, len(ifis))
 	for _, ifi := range ifis {
+		ifi := ifi
 		// Skip if iface is down/loopback/non-multicast.
 		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagLoopback != 0 || ifi.Flags&net.FlagMulticast == 0 {
 			continue
@@ -211,9 +240,10 @@ func firstInterfaceWithV6LinkLocal() (*net.Interface, error) {
 				return nil, fmt.Errorf("invalid ip address: %s", ipNet.String())
 			}
 			if ip.Is6() && !ip.Is4In6() {
-				return &ifi, nil
+				res = append(res, &ifi)
+				break
 			}
 		}
 	}
-	return nil, errors.New("no interface can be used")
+	return res, nil
 }

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,11 +24,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Masterminds/semver"
 	"github.com/cuonglm/osinfo"
 	"github.com/fsnotify/fsnotify"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
+	"github.com/minio/selfupdate"
 	"github.com/olekukonko/tablewriter"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/rs/zerolog"
@@ -43,6 +46,9 @@ import (
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
+
+// selfCheckInternalTestDomain is used for testing ctrld self response to clients.
+const selfCheckInternalTestDomain = "ctrld" + loopTestDomain
 
 var (
 	version = "dev"
@@ -170,12 +176,63 @@ func initCLI() {
 			}
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
+
+			p := &prog{
+				router: router.New(&cfg, cdUID != ""),
+				cfg:    &cfg,
+			}
+			s, err := newService(p, sc)
+			if err != nil {
+				mainLog.Load().Error().Msg(err.Error())
+				return
+			}
+
+			status, err := s.Status()
+			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
+
+			// If pin code was set, do not allow running start command.
+			if status == service.StatusRunning {
+				if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
+					os.Exit(deactivationPinInvalidExitCode)
+				}
+			}
+
 			if cdUID != "" {
-				if _, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev); err != nil {
+				rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+				if err != nil {
 					mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid: %s", cdUID)
 				}
+				// validateCdRemoteConfig clobbers v, saving it here to restore later.
+				oldV := v
+				if err := validateCdRemoteConfig(rc, &ctrld.Config{}); err != nil {
+					if errors.As(err, &viper.ConfigParseError{}) {
+						if configStr, _ := base64.StdEncoding.DecodeString(rc.Ctrld.CustomConfig); len(configStr) > 0 {
+							tmpDir := os.TempDir()
+							tmpConfFile := filepath.Join(tmpDir, "ctrld.toml")
+							errorLogged := false
+							// Write remote config to a temporary file to get details error.
+							if we := os.WriteFile(tmpConfFile, configStr, 0600); we == nil {
+								if de := decoderErrorFromTomlFile(tmpConfFile); de != nil {
+									row, col := de.Position()
+									mainLog.Load().Error().Msgf("failed to parse custom config at line: %d, column: %d, error: %s", row, col, de.Error())
+									errorLogged = true
+								}
+								_ = os.Remove(tmpConfFile)
+							}
+							// If we could not log details error, emit what we have already got.
+							if !errorLogged {
+								mainLog.Load().Error().Msgf("failed to parse custom config: %v", err)
+							}
+						}
+					} else {
+						mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
+					}
+					mainLog.Load().Warn().Msg("disregarding invalid custom config")
+				}
+				v = oldV
 			} else if uid := cdUIDFromProvToken(); uid != "" {
 				cdUID = uid
+				mainLog.Load().Debug().Msg("using uid from provision token")
 				removeProvTokenFromArgs(sc)
 				// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
 				sc.Arguments = append(sc.Arguments, "--cd="+cdUID)
@@ -184,10 +241,6 @@ func initCLI() {
 				validateCdUpstreamProtocol()
 			}
 
-			p := &prog{
-				router: router.New(&cfg, cdUID != ""),
-				cfg:    &cfg,
-			}
 			if err := p.router.ConfigureService(sc); err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to configure service on router")
 			}
@@ -251,22 +304,6 @@ func initCLI() {
 			// the expected config file.
 			if configPath == "" {
 				sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
-			}
-
-			s, err := newService(p, sc)
-			if err != nil {
-				mainLog.Load().Error().Msg(err.Error())
-				return
-			}
-
-			status, err := s.Status()
-			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
-
-			// If pin code was set, do not allow running start command.
-			if status == service.StatusRunning {
-				if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
-					os.Exit(deactivationPinInvalidExitCode)
-				}
 			}
 
 			if router.Name() != "" && iface != "" {
@@ -334,7 +371,7 @@ func initCLI() {
 					}
 					// If ctrld service is running but selfCheckStatus failed, it could be related
 					// to user's system firewall configuration, notice users about it.
-					if status == service.StatusRunning {
+					if status == service.StatusRunning && err == nil {
 						_, _ = mainLog.Load().Write(marker)
 						mainLog.Load().Write([]byte(`ctrld service was running, but a DNS query could not be sent to its listener`))
 						mainLog.Load().Write([]byte(`Please check your system firewall if it is configured to block/intercept/redirect DNS queries`))
@@ -406,14 +443,14 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, args []string) {
 			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg, cdUID != "")}
+			p := &prog{router: router.New(&cfg, runInCdMode())}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
 			initLogging()
-			if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
+			if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)
 			}
 			if doTasks([]task{{s.Stop, true}}) {
@@ -563,7 +600,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg, cdUID != "")}
+			p := &prog{router: router.New(&cfg, runInCdMode())}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
@@ -572,7 +609,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if iface == "" {
 				iface = "auto"
 			}
-			if err := checkDeactivationPin(s); isCheckDeactivationPinErr(err) {
+			if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)
 			}
 			uninstall(p, s)
@@ -816,6 +853,117 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	}
 	clientsCmd.AddCommand(listClientsCmd)
 	rootCmd.AddCommand(clientsCmd)
+
+	const (
+		upgradeChannelDev     = "dev"
+		upgradeChannelProd    = "prod"
+		upgradeChannelDefault = "default"
+	)
+	upgradeChannel := map[string]string{
+		upgradeChannelDefault: "https://dl.controld.dev",
+		upgradeChannelDev:     "https://dl.controld.dev",
+		upgradeChannelProd:    "https://dl.controld.com",
+	}
+	if isStableVersion(curVersion()) {
+		upgradeChannel[upgradeChannelDefault] = upgradeChannel[upgradeChannelProd]
+	}
+	upgradeCmd := &cobra.Command{
+		Use:       "upgrade",
+		Short:     "Upgrading ctrld to latest version",
+		ValidArgs: []string{upgradeChannelDev, upgradeChannelProd},
+		Args:      cobra.MaximumNArgs(1),
+		PreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+			checkHasElevatedPrivilege()
+		},
+		Run: func(cmd *cobra.Command, args []string) {
+			s, err := newService(&prog{}, svcConfig)
+			if err != nil {
+				mainLog.Load().Error().Msg(err.Error())
+				return
+			}
+			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
+				mainLog.Load().Warn().Msg("service not installed")
+				return
+			}
+			bin, err := os.Executable()
+			if err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
+			}
+			oldBin := bin + "_previous"
+			urlString := upgradeChannel[upgradeChannelDefault]
+			if len(args) > 0 {
+				channel := args[0]
+				switch channel {
+				case upgradeChannelProd, upgradeChannelDev: // ok
+				default:
+					mainLog.Load().Fatal().Msgf("uprade argument must be either %q or %q", upgradeChannelProd, upgradeChannelDev)
+				}
+				urlString = upgradeChannel[channel]
+			}
+			dlUrl := fmt.Sprintf("%s/%s-%s/ctrld", urlString, runtime.GOOS, runtime.GOARCH)
+			if runtime.GOOS == "windows" {
+				dlUrl += ".exe"
+			}
+			mainLog.Load().Debug().Msgf("Downloading binary: %s", dlUrl)
+			resp, err := http.Get(dlUrl)
+			if err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to download binary")
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				mainLog.Load().Fatal().Msgf("could not download binary: %s", http.StatusText(resp.StatusCode))
+			}
+			mainLog.Load().Debug().Msg("Updating current binary")
+			if err := selfupdate.Apply(resp.Body, selfupdate.Options{OldSavePath: oldBin}); err != nil {
+				if rerr := selfupdate.RollbackError(err); rerr != nil {
+					mainLog.Load().Error().Err(rerr).Msg("could not rollback old binary")
+				}
+				mainLog.Load().Fatal().Err(err).Msg("failed to update current binary")
+			}
+
+			doRestart := func() bool {
+				tasks := []task{
+					{s.Stop, false},
+					{s.Start, false},
+				}
+				if doTasks(tasks) {
+					if dir, err := socketDir(); err == nil {
+						return newSocketControlClient(s, dir) != nil
+					}
+				}
+				return false
+			}
+			mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")
+			if doRestart() {
+				_ = os.Remove(oldBin)
+				_ = os.Chmod(bin, 0755)
+				ver := "unknown version"
+				out, err := exec.Command(bin, "--version").CombinedOutput()
+				if err != nil {
+					mainLog.Load().Warn().Err(err).Msg("Failed to get new binary version")
+				}
+				if after, found := strings.CutPrefix(string(out), "ctrld version "); found {
+					ver = after
+				}
+				mainLog.Load().Notice().Msgf("Upgrade successful - %s", ver)
+				return
+			}
+
+			mainLog.Load().Warn().Msgf("Upgrade failed, restoring previous binary: %s", oldBin)
+			if err := os.Remove(bin); err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to remove new binary")
+			}
+			if err := os.Rename(oldBin, bin); err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to restore old binary")
+			}
+			if doRestart() {
+				mainLog.Load().Notice().Msg("Restored previous binary successfully")
+				return
+			}
+		},
+	}
+	rootCmd.AddCommand(upgradeCmd)
 }
 
 // isMobile reports whether the current OS is a mobile platform.
@@ -826,6 +974,15 @@ func isMobile() bool {
 // isAndroid reports whether the current OS is Android.
 func isAndroid() bool {
 	return runtime.GOOS == "android"
+}
+
+// isStableVersion reports whether vs is a stable semantic version.
+func isStableVersion(vs string) bool {
+	v, err := semver.NewVersion(vs)
+	if err != nil {
+		return false
+	}
+	return v.Prerelease() == ""
 }
 
 // RunCobraCommand runs ctrld cli.
@@ -852,9 +1009,9 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 }
 
 // CheckDeactivationPin checks if deactivation pin is valid
-func CheckDeactivationPin(pin int64) int {
+func CheckDeactivationPin(pin int64, stopCh chan struct{}) int {
 	deactivationPin = pin
-	if err := checkDeactivationPin(nil); isCheckDeactivationPinErr(err) {
+	if err := checkDeactivationPin(nil, stopCh); isCheckDeactivationPinErr(err) {
 		return deactivationPinInvalidExitCode
 	}
 	return 0
@@ -912,7 +1069,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	writeDefaultConfig := !noConfigStart && configBase64 == ""
 	tryReadingConfig(writeDefaultConfig)
 
-	readBase64Config(configBase64)
+	if err := readBase64Config(configBase64); err != nil {
+		mainLog.Load().Fatal().Err(err).Msg("failed to read base64 config")
+	}
 	processNoConfigFlags(noConfigStart)
 	p.mu.Lock()
 	if err := v.Unmarshal(&cfg); err != nil {
@@ -935,7 +1094,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	p.router = router.New(&cfg, cdUID != "")
-	cs, err := newControlServer(filepath.Join(sockDir, ctrldControlUnixSock))
+	cs, err := newControlServer(filepath.Join(sockDir, ControlSocketName()))
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not create control server")
 	}
@@ -1141,7 +1300,7 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 	}
 
 	// If error is viper.ConfigFileNotFoundError, write default config.
-	if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+	if errors.As(err, &viper.ConfigFileNotFoundError{}) {
 		if err := v.Unmarshal(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to unmarshal default config: %v", err)
 		}
@@ -1162,13 +1321,11 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		return false
 	}
 
-	if _, ok := err.(viper.ConfigParseError); ok {
-		if f, _ := os.Open(v.ConfigFileUsed()); f != nil {
-			var i any
-			if err, ok := toml.NewDecoder(f).Decode(&i).(*toml.DecodeError); ok {
-				row, col := err.Position()
-				mainLog.Load().Fatal().Msgf("failed to decode config file at line: %d, column: %d, error: %v", row, col, err)
-			}
+	// If error is viper.ConfigParseError, emit details line and column number.
+	if errors.As(err, &viper.ConfigParseError{}) {
+		if de := decoderErrorFromTomlFile(v.ConfigFileUsed()); de != nil {
+			row, col := de.Position()
+			mainLog.Load().Fatal().Msgf("failed to decode config file at line: %d, column: %d, error: %v", row, col, err)
 		}
 	}
 
@@ -1177,13 +1334,27 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 	return false
 }
 
-func readBase64Config(configBase64 string) {
+// decoderErrorFromTomlFile parses the invalid toml file, returning the details decoder error.
+func decoderErrorFromTomlFile(cf string) *toml.DecodeError {
+	if f, _ := os.Open(cf); f != nil {
+		defer f.Close()
+		var i any
+		var de *toml.DecodeError
+		if err := toml.NewDecoder(f).Decode(&i); err != nil && errors.As(err, &de) {
+			return de
+		}
+	}
+	return nil
+}
+
+// readBase64Config reads ctrld config from the base64 input string.
+func readBase64Config(configBase64 string) error {
 	if configBase64 == "" {
-		return
+		return nil
 	}
 	configStr, err := base64.StdEncoding.DecodeString(configBase64)
 	if err != nil {
-		mainLog.Load().Fatal().Msgf("invalid base64 config: %v", err)
+		return fmt.Errorf("invalid base64 config: %w", err)
 	}
 
 	// readBase64Config is called when:
@@ -1194,9 +1365,7 @@ func readBase64Config(configBase64 string) {
 	// So we need to re-create viper instance to discard old one.
 	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	v.SetConfigType("toml")
-	if err := v.ReadConfig(bytes.NewReader(configStr)); err != nil {
-		mainLog.Load().Fatal().Msgf("failed to read base64 config: %v", err)
-	}
+	return v.ReadConfig(bytes.NewReader(configStr))
 }
 
 func processNoConfigFlags(noConfigStart bool) {
@@ -1286,42 +1455,76 @@ func processCDFlags(cfg *ctrld.Config) error {
 	// Fetch config, unmarshal to cfg.
 	if resolverConfig.Ctrld.CustomConfig != "" {
 		logger.Info().Msg("using defined custom config of Control-D resolver")
-		readBase64Config(resolverConfig.Ctrld.CustomConfig)
-		if err := v.Unmarshal(&cfg); err != nil {
-			mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
+		if err := validateCdRemoteConfig(resolverConfig, cfg); err == nil {
+			setListenerDefaultValue(cfg)
+			return nil
 		}
-	} else {
-		cfg.Network = make(map[string]*ctrld.NetworkConfig)
-		cfg.Network["0"] = &ctrld.NetworkConfig{
-			Name:  "Network 0",
-			Cidrs: []string{"0.0.0.0/0"},
-		}
-		cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
-		cfg.Upstream["0"] = &ctrld.UpstreamConfig{
-			Endpoint: resolverConfig.DOH,
-			Type:     cdUpstreamProto,
-			Timeout:  5000,
-		}
-		rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
-		for _, domain := range resolverConfig.Exclude {
-			rules = append(rules, ctrld.Rule{domain: []string{}})
-		}
-		cfg.Listener = make(map[string]*ctrld.ListenerConfig)
-		lc := &ctrld.ListenerConfig{
-			Policy: &ctrld.ListenerPolicyConfig{
-				Name:  "My Policy",
-				Rules: rules,
-			},
-		}
-		cfg.Listener["0"] = lc
+		mainLog.Load().Err(err).Msg("disregarding invalid custom config")
 	}
+
+	bootstrapIP := func(endpoint string) string {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			logger.Warn().Err(err).Msgf("no bootstrap IP for invalid endpoint: %s", endpoint)
+			return ""
+		}
+		switch {
+		case dns.IsSubDomain(ctrld.FreeDnsDomain, u.Host):
+			return ctrld.FreeDNSBoostrapIP
+		case dns.IsSubDomain(ctrld.PremiumDnsDomain, u.Host):
+			return ctrld.PremiumDNSBoostrapIP
+		}
+		return ""
+	}
+	cfg.Network = make(map[string]*ctrld.NetworkConfig)
+	cfg.Network["0"] = &ctrld.NetworkConfig{
+		Name:  "Network 0",
+		Cidrs: []string{"0.0.0.0/0"},
+	}
+	cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
+	cfg.Upstream["0"] = &ctrld.UpstreamConfig{
+		BootstrapIP: bootstrapIP(resolverConfig.DOH),
+		Endpoint:    resolverConfig.DOH,
+		Type:        cdUpstreamProto,
+		Timeout:     5000,
+	}
+	rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
+	for _, domain := range resolverConfig.Exclude {
+		rules = append(rules, ctrld.Rule{domain: []string{}})
+	}
+	cfg.Listener = make(map[string]*ctrld.ListenerConfig)
+	lc := &ctrld.ListenerConfig{
+		Policy: &ctrld.ListenerPolicyConfig{
+			Name:  "My Policy",
+			Rules: rules,
+		},
+	}
+	cfg.Listener["0"] = lc
+
 	// Set default value.
+	setListenerDefaultValue(cfg)
+
+	return nil
+}
+
+// setListenerDefaultValue sets the default value for cfg.Listener if none existed.
+func setListenerDefaultValue(cfg *ctrld.Config) {
 	if len(cfg.Listener) == 0 {
 		cfg.Listener = map[string]*ctrld.ListenerConfig{
 			"0": {IP: "", Port: 0},
 		}
 	}
-	return nil
+}
+
+// validateCdRemoteConfig validates the custom config from ControlD if defined.
+func validateCdRemoteConfig(rc *controld.ResolverConfig, cfg *ctrld.Config) error {
+	if rc.Ctrld.CustomConfig == "" {
+		return nil
+	}
+	if err := readBase64Config(rc.Ctrld.CustomConfig); err != nil {
+		return err
+	}
+	return v.Unmarshal(&cfg)
 }
 
 func processListenFlag() {
@@ -1398,6 +1601,13 @@ func defaultIfaceName() string {
 // selfCheckStatus performs the end-to-end DNS test by sending query to ctrld listener.
 // It returns a boolean to indicate whether the check is succeeded, the actual status
 // of ctrld service, and an additional error if any.
+//
+// We perform two tests:
+//
+// - Internal testing, ensuring query could be sent from client -> ctrld.
+// - External testing, ensuring query could be sent from ctrld -> upstream.
+//
+// Self-check is considered success only if both tests are ok.
 func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 	status, err := s.Status()
 	if err != nil {
@@ -1480,8 +1690,9 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 	})
 	v.WatchConfig()
 	var (
-		lastAnswer *dns.Msg
-		lastErr    error
+		lastAnswer     *dns.Msg
+		lastErr        error
+		internalTested bool
 	)
 	for i := 0; i < maxAttempts; i++ {
 		mu.Lock()
@@ -1494,6 +1705,9 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 		mu.Unlock()
 		lc := cfg.FirstListener()
 		domain = cfg.FirstUpstream().VerifyDomain()
+		if !internalTested {
+			domain = selfCheckInternalTestDomain
+		}
 		if domain == "" {
 			continue
 		}
@@ -1503,7 +1717,13 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 		m.RecursionDesired = true
 		r, _, exErr := exchangeContextWithTimeout(c, time.Second, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
 		if r != nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
-			mainLog.Load().Debug().Msgf("self-check against %q succeeded", domain)
+			internalTested = domain == selfCheckInternalTestDomain
+			if internalTested {
+				mainLog.Load().Debug().Msgf("internal self-check against %q succeeded", domain)
+				continue // internal domain test ok, continue with external test.
+			} else {
+				mainLog.Load().Debug().Msgf("external self-check against %q succeeded", domain)
+			}
 			return true, status, nil
 		}
 		// Return early if this is a connection refused.
@@ -1515,6 +1735,12 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 		bo.BackOff(ctx, fmt.Errorf("ExchangeContext: %w", exErr))
 	}
 	mainLog.Load().Debug().Msgf("self-check against %q failed", domain)
+	// Ping all upstreams to provide better error message to users.
+	for name, uc := range cfg.Upstream {
+		if err := uc.ErrorPing(); err != nil {
+			mainLog.Load().Err(err).Msgf("failed to connect to upstream.%s, endpoint: %s", name, uc.Endpoint)
+		}
+	}
 	lc := cfg.FirstListener()
 	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
 	marker := strings.Repeat("=", 32)
@@ -1629,6 +1855,10 @@ func readConfigWithNotice(writeDefaultConfig, notice bool) {
 }
 
 func uninstall(p *prog, s service.Service) {
+	if _, err := s.Status(); err != nil && errors.Is(err, service.ErrNotInstalled) {
+		mainLog.Load().Error().Msg(err.Error())
+		return
+	}
 	tasks := []task{
 		{s.Stop, false},
 		{s.Uninstall, true},
@@ -1677,6 +1907,11 @@ func fieldErrorMsg(fe validator.FieldError) string {
 			return fmt.Sprintf("must define at least %s element", fe.Param())
 		}
 		return fmt.Sprintf("minimum value: %q", fe.Param())
+	case "max":
+		if fe.Kind() == reflect.Map || fe.Kind() == reflect.Slice {
+			return fmt.Sprintf("exceeded maximum number of elements: %s", fe.Param())
+		}
+		return fmt.Sprintf("maximum value: %q", fe.Param())
 	case "len":
 		if fe.Kind() == reflect.Slice {
 			return fmt.Sprintf("must have at least %s element", fe.Param())
@@ -1802,10 +2037,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 		if cdMode {
 			firstLn.IP = mobileListenerIp()
 			firstLn.Port = mobileListenerPort()
-			// TODO: use clear(lcc) once upgrading to go 1.21
-			for k := range lcc {
-				delete(lcc, k)
-			}
+			clear(lcc)
 			updated = true
 		}
 	}
@@ -2027,6 +2259,7 @@ func cdUIDFromProvToken() string {
 	if cdOrg == "" {
 		return ""
 	}
+
 	// Process provision token if provided.
 	resolverConfig, err := controld.FetchResolverUID(cdOrg, rootCmd.Version, cdDev)
 	if err != nil {
@@ -2065,6 +2298,8 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 	ctx := context.Background()
 
 	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+	timeout := time.NewTimer(30 * time.Second)
+	defer timeout.Stop()
 
 	// The socket control server may not start yet, so attempt to ping
 	// it until we got a response. For each iteration, check ctrld status
@@ -2072,7 +2307,6 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 	for {
 		curStatus, err := s.Status()
 		if err != nil {
-			mainLog.Load().Warn().Err(err).Msg("could not get service status while doing self-check")
 			return nil
 		}
 		if curStatus != service.StatusRunning {
@@ -2084,10 +2318,35 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 		}
 		// The socket control server is not ready yet, backoff for waiting it to be ready.
 		bo.BackOff(ctx, err)
+		select {
+		case <-timeout.C:
+			return nil
+		default:
+		}
 		continue
 	}
 
 	return cc
+}
+
+func newSocketControlClientMobile(dir string, stopCh chan struct{}) *controlClient {
+	bo := backoff.NewBackoff("self-check", logf, 3*time.Second)
+	bo.LogLongerThan = 3 * time.Second
+	ctx := context.Background()
+	cc := newControlClient(filepath.Join(dir, ControlSocketName()))
+	for {
+		select {
+		case <-stopCh:
+			return nil
+		default:
+			_, err := cc.post("/", nil)
+			if err == nil {
+				return cc
+			} else {
+				bo.BackOff(ctx, err)
+			}
+		}
+	}
 }
 
 // checkStrFlagEmpty validates if a string flag was set to an empty string.
@@ -2170,7 +2429,7 @@ var errInvalidDeactivationPin = errors.New("deactivation pin is invalid")
 var errRequiredDeactivationPin = errors.New("deactivation pin is required to stop or uninstall the service")
 
 // checkDeactivationPin validates if the deactivation pin matches one in ControlD config.
-func checkDeactivationPin(s service.Service) error {
+func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	dir, err := socketDir()
 	if err != nil {
 		mainLog.Load().Err(err).Msg("could not check deactivation pin")
@@ -2178,7 +2437,7 @@ func checkDeactivationPin(s service.Service) error {
 	}
 	var cc *controlClient
 	if s == nil {
-		cc = newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+		cc = newSocketControlClientMobile(dir, stopCh)
 	} else {
 		cc = newSocketControlClient(s, dir)
 	}
@@ -2258,4 +2517,21 @@ func absHomeDir(filename string) string {
 		return filename
 	}
 	return filepath.Join(dir, filename)
+}
+
+// runInCdMode reports whether ctrld service is running in cd mode.
+func runInCdMode() bool {
+	if s, _ := newService(&prog{}, svcConfig); s != nil {
+		if dir, _ := socketDir(); dir != "" {
+			cc := newSocketControlClient(s, dir)
+			if cc != nil {
+				resp, _ := cc.post(cdPath, nil)
+				if resp != nil {
+					defer resp.Body.Close()
+					return resp.StatusCode == http.StatusOK
+				}
+			}
+		}
+	}
+	return false
 }

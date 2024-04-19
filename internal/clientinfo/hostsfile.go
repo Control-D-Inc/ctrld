@@ -95,7 +95,7 @@ func (hf *hostsFile) LookupHostnameByIP(ip string) string {
 	hf.mu.Lock()
 	defer hf.mu.Unlock()
 	if names := hf.m[ip]; len(names) > 0 {
-		isLoopback := ip == "127.0.0.1" || ip == "::1"
+		isLoopback := ip == ipV4Loopback || ip == ipv6Loopback
 		for _, hostname := range names {
 			name := normalizeHostname(hostname)
 			// Ignoring ipv4/ipv6 loopback entry.

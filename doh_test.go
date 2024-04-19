@@ -6,7 +6,7 @@ import (
 )
 
 func Test_dohOsHeaderValue(t *testing.T) {
-	val := dohOsHeaderValue()
+	val := dohOsHeaderValue
 	if val == "" {
 		t.Fatalf("empty %s", dohOsHeader)
 	}

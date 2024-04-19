@@ -1,6 +1,7 @@
 package ctrld_test
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -102,6 +103,8 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid lease file format", configWithInvalidLeaseFileFormat(t), true},
 		{"invalid doh/doh3 endpoint", configWithInvalidDoHEndpoint(t), true},
 		{"invalid client id pref", configWithInvalidClientIDPref(t), true},
+		{"doh endpoint without scheme", dohUpstreamEndpointWithoutScheme(t), false},
+		{"maximum number of flush cache domains", configWithInvalidFlushCacheDomain(t), true},
 	}
 
 	for _, tc := range tests {
@@ -164,6 +167,12 @@ func invalidNetworkConfig(t *testing.T) *ctrld.Config {
 func invalidUpstreamType(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Upstream["0"].Type = "DOH"
+	return cfg
+}
+
+func dohUpstreamEndpointWithoutScheme(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Upstream["0"].Endpoint = "freedns.controld.com/p1"
 	return cfg
 }
 
@@ -258,7 +267,7 @@ func configWithInvalidLeaseFileFormat(t *testing.T) *ctrld.Config {
 
 func configWithInvalidDoHEndpoint(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
-	cfg.Upstream["0"].Endpoint = "1.1.1.1"
+	cfg.Upstream["0"].Endpoint = "/1.1.1.1"
 	cfg.Upstream["0"].Type = ctrld.ResolverTypeDOH
 	return cfg
 }
@@ -266,5 +275,14 @@ func configWithInvalidDoHEndpoint(t *testing.T) *ctrld.Config {
 func configWithInvalidClientIDPref(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Service.ClientIDPref = "foo"
+	return cfg
+}
+
+func configWithInvalidFlushCacheDomain(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Service.CacheFlushDomains = make([]string, 257)
+	for i := range cfg.Service.CacheFlushDomains {
+		cfg.Service.CacheFlushDomains[i] = fmt.Sprintf("%d.com", i)
+	}
 	return cfg
 }

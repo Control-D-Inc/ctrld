@@ -33,10 +33,21 @@ const (
 	defaultSemaphoreCap  = 256
 	ctrldLogUnixSock     = "ctrld_start.sock"
 	ctrldControlUnixSock = "ctrld_control.sock"
-	upstreamPrefix       = "upstream."
-	upstreamOS           = upstreamPrefix + "os"
-	upstreamPrivate      = upstreamPrefix + "private"
+	// iOS unix socket name max length is 11.
+	ctrldControlUnixSockMobile = "cd.sock"
+	upstreamPrefix             = "upstream."
+	upstreamOS                 = upstreamPrefix + "os"
+	upstreamPrivate            = upstreamPrefix + "private"
 )
+
+// ControlSocketName returns name for control unix socket.
+func ControlSocketName() string {
+	if isMobile() {
+		return ctrldControlUnixSockMobile
+	} else {
+		return ctrldControlUnixSock
+	}
+}
 
 var logf = func(format string, args ...any) {
 	mainLog.Load().Debug().Msgf(format, args...)
@@ -59,17 +70,18 @@ type prog struct {
 	logConn      net.Conn
 	cs           *controlServer
 
-	cfg            *ctrld.Config
-	localUpstreams []string
-	ptrNameservers []string
-	appCallback    *AppCallback
-	cache          dnscache.Cacher
-	sema           semaphore
-	ciTable        *clientinfo.Table
-	um             *upstreamMonitor
-	router         router.Router
-	ptrLoopGuard   *loopGuard
-	lanLoopGuard   *loopGuard
+	cfg                  *ctrld.Config
+	localUpstreams       []string
+	ptrNameservers       []string
+	appCallback          *AppCallback
+	cache                dnscache.Cacher
+	cacheFlushDomainsMap map[string]struct{}
+	sema                 semaphore
+	ciTable              *clientinfo.Table
+	um                   *upstreamMonitor
+	router               router.Router
+	ptrLoopGuard         *loopGuard
+	lanLoopGuard         *loopGuard
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -242,12 +254,17 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	p.loop = make(map[string]bool)
 	p.lanLoopGuard = newLoopGuard()
 	p.ptrLoopGuard = newLoopGuard()
+	p.cacheFlushDomainsMap = nil
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
 			mainLog.Load().Error().Err(err).Msg("failed to create cacher, caching is disabled")
 		} else {
 			p.cache = cacher
+			p.cacheFlushDomainsMap = make(map[string]struct{}, 256)
+			for _, domain := range p.cfg.Service.CacheFlushDomains {
+				p.cacheFlushDomainsMap[canonicalName(domain)] = struct{}{}
+			}
 		}
 	}
 
@@ -477,7 +494,7 @@ func (p *prog) setDNS() {
 	}
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
-			return setDNS(i, nameservers)
+			return setDnsIgnoreUnusableInterface(i, nameservers)
 		})
 	}
 }
@@ -509,7 +526,7 @@ func (p *prog) resetDNS() {
 	}
 	logger.Debug().Msg("Restoring DNS successfully")
 	if allIfaces {
-		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDNS)
+		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDnsIgnoreUnusableInterface)
 	}
 }
 

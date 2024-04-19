@@ -157,6 +157,13 @@ stale cached records (regardless of their TTLs) until upstream comes online.
 - Required: no
 - Default: false
 
+### cache_flush_domains
+When `ctrld` receives query with domain name in `cache_flush_domains`, the local cache will be discarded
+before serving the query.
+
+- Type: array of strings
+- Required: no
+
 ### max_concurrent_requests
 The number of concurrent requests that will be handled, must be a non-negative integer. 
 Tweaking this value depends on the capacity of your system.
@@ -220,7 +227,7 @@ DHCP leases file format.
 
 - Type: string
 - Required: no
-- Valid values: `dnsmasq`, `isc-dhcp`
+- Valid values: `dnsmasq`, `isc-dhcp`, `kea-dhcp4`
 - Default: ""
 
 ### client_id_preference
@@ -531,7 +538,7 @@ And within each policy, the rules are processed from top to bottom.
 ### failover_rcodes
 For non success response, `failover_rcodes` allows the request to be forwarded to next upstream, if the response `RCODE` matches any value defined in `failover_rcodes`.
 
-- Type: array of string
+- Type: array of strings
 - Required: no
 - Default: []
 - 

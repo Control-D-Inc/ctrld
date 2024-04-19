@@ -12,6 +12,7 @@ import (
 type Cacher interface {
 	Get(Key) *Value
 	Add(Key, *Value)
+	Purge()
 }
 
 // Key is the caching key for DNS message.
@@ -34,13 +35,20 @@ type LRUCache struct {
 	cacher *lru.ARCCache[Key, *Value]
 }
 
+// Get looks up key's value from cache.
 func (l *LRUCache) Get(key Key) *Value {
 	v, _ := l.cacher.Get(key)
 	return v
 }
 
+// Add adds a value to cache.
 func (l *LRUCache) Add(key Key, value *Value) {
 	l.cacher.Add(key, value)
+}
+
+// Purge clears the cache.
+func (l *LRUCache) Purge() {
+	l.cacher.Purge()
 }
 
 // NewLRUCache creates a new LRUCache instance with given size.

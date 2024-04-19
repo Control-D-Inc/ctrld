@@ -111,8 +111,16 @@ func (or *osRouter) Setup() error {
 
 func (or *osRouter) Cleanup() error {
 	if or.cdMode {
-		_ = exec.Command(unboundRcPath, "onerestart").Run()
-		_ = exec.Command(dnsmasqRcPath, "onerestart").Run()
+		c, err := currentConfig()
+		if err != nil {
+			return err
+		}
+		if c.UnboundEnabled() {
+			_ = exec.Command(unboundRcPath, "onerestart").Run()
+		}
+		if c.DnsmasqEnabled() {
+			_ = exec.Command(dnsmasqRcPath, "onerestart").Run()
+		}
 	}
 	return nil
 }

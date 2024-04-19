@@ -20,7 +20,7 @@ func newService(i service.Interface, c *service.Config) (service.Service, error)
 		return nil, err
 	}
 	switch {
-	case router.IsOldOpenwrt():
+	case router.IsOldOpenwrt(), router.IsNetGearOrbi():
 		return &procd{&sysV{s}}, nil
 	case router.IsGLiNet():
 		return &sysV{s}, nil

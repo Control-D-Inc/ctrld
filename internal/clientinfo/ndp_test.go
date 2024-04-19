@@ -45,20 +45,22 @@ ff02::c                                       33-33-00-00-00-0c  Permanent
 	nd.scanWindows(r)
 
 	count := 0
+	expectedCount := 6
 	nd.mac.Range(func(key, value any) bool {
 		count++
 		return true
 	})
-	if count != 6 {
-		t.Errorf("unexpected count, want 6, got: %d", count)
+	if count != expectedCount {
+		t.Errorf("unexpected count, want %d, got: %d", expectedCount, count)
 	}
 
 	count = 0
+	expectedCount = 4
 	nd.ip.Range(func(key, value any) bool {
 		count++
 		return true
 	})
-	if count != 5 {
-		t.Errorf("unexpected count, want 5, got: %d", count)
+	if count != expectedCount {
+		t.Errorf("unexpected count, want %d, got: %d", expectedCount, count)
 	}
 }

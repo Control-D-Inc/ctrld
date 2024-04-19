@@ -14,6 +14,11 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
 
+const (
+	ipV4Loopback = "127.0.0.1"
+	ipv6Loopback = "::1"
+)
+
 // IpResolver is the interface for retrieving IP from Mac.
 type IpResolver interface {
 	fmt.Stringer
@@ -224,6 +229,7 @@ func (t *Table) init() {
 			cancel()
 		}()
 		go t.ndp.listen(ctx)
+		go t.ndp.subscribe(ctx)
 	}
 	// PTR lookup.
 	if t.discoverPTR() {
@@ -316,6 +322,16 @@ func (t *Table) LookupRFC1918IPv4(mac string) string {
 		}
 		if ip.IsPrivate() {
 			return ip.String()
+		}
+	}
+	return ""
+}
+
+// LocalHostname returns the localhost hostname associated with loopback IP.
+func (t *Table) LocalHostname() string {
+	for _, ip := range []string{ipV4Loopback, ipv6Loopback} {
+		if name := t.LookupHostname(ip, ""); name != "" {
+			return name
 		}
 	}
 	return ""
