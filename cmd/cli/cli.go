@@ -401,6 +401,7 @@ func initCLI() {
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmd.Flags().StringVarP(&nextdns, nextdnsFlagName, "", "", "NextDNS resolver id")
 	startCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
+	startCmd.Flags().BoolVarP(&skipSelfChecks, "skip_self_checks", "", false, `Skip self checks after installing ctrld service`)
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
@@ -1618,6 +1619,11 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 	if status != service.StatusRunning {
 		return false, status, nil
 	}
+	// Skip self checks if set.
+	if skipSelfChecks {
+		return true, status, nil
+	}
+
 	dir, err := socketDir()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
