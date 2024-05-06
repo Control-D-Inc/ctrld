@@ -752,20 +752,19 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 		Handler: handler,
 	}
 
-	waitLock := sync.Mutex{}
-	waitLock.Lock()
-	s.NotifyStartedFunc = waitLock.Unlock
+	startedCh := make(chan struct{})
+	s.NotifyStartedFunc = func() { sync.OnceFunc(func() { close(startedCh) })() }
 
 	errCh := make(chan error)
 	go func() {
 		defer close(errCh)
 		if err := s.ListenAndServe(); err != nil {
-			waitLock.Unlock()
+			s.NotifyStartedFunc()
 			mainLog.Load().Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
 			errCh <- err
 		}
 	}()
-	waitLock.Lock()
+	<-startedCh
 	return s, errCh
 }
 
