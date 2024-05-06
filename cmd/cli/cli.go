@@ -86,7 +86,7 @@ var rootCmd = &cobra.Command{
 	Use:     "ctrld",
 	Short:   strings.TrimLeft(rootShortDesc, "\n"),
 	Version: curVersion(),
-	PreRun: func(cmd *cobra.Command, args []string) {
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		initConsoleLogging()
 	},
 }
@@ -127,9 +127,6 @@ func initCLI() {
 		Use:   "run",
 		Short: "Run the DNS proxy server",
 		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
-		},
 		Run: func(cmd *cobra.Command, args []string) {
 			RunCobraCommand(cmd)
 		},
@@ -158,7 +155,6 @@ func initCLI() {
 
 	startCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "start",
@@ -405,9 +401,6 @@ func initCLI() {
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
-		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
-		},
 		Run: func(cmd *cobra.Command, _ []string) {
 			exe, err := os.Executable()
 			if err != nil {
@@ -435,7 +428,6 @@ func initCLI() {
 
 	stopCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "stop",
@@ -467,7 +459,6 @@ func initCLI() {
 
 	restartCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "restart",
@@ -506,7 +497,6 @@ func initCLI() {
 
 	reloadCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "reload",
@@ -552,9 +542,6 @@ func initCLI() {
 		Use:   "status",
 		Short: "Show status of the ctrld service",
 		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
-		},
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := newService(&prog{}, svcConfig)
 			if err != nil {
@@ -582,14 +569,12 @@ func initCLI() {
 	if runtime.GOOS == "darwin" {
 		// On darwin, running status command without privileges may return wrong information.
 		statusCmd.PreRun = func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		}
 	}
 
 	uninstallCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "uninstall",
@@ -624,9 +609,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Use:   "list",
 		Short: "List network interfaces of the host",
 		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
-		},
 		Run: func(cmd *cobra.Command, args []string) {
 			err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
 				fmt.Printf("Index : %d\n", i.Index)
@@ -687,7 +669,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	rootCmd.AddCommand(serviceCmd)
 	startCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "start",
@@ -705,7 +686,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	rootCmd.AddCommand(startCmdAlias)
 	stopCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "stop",
@@ -724,7 +704,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 
 	restartCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "restart",
@@ -737,7 +716,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 
 	reloadCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "reload",
@@ -752,16 +730,12 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Use:   "status",
 		Short: "Show status of the ctrld service",
 		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
-		},
-		Run: statusCmd.Run,
+		Run:   statusCmd.Run,
 	}
 	rootCmd.AddCommand(statusCmdAlias)
 
 	uninstallCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "uninstall",
@@ -786,7 +760,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Short: "List clients that ctrld discovered",
 		Args:  cobra.NoArgs,
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
@@ -874,7 +847,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		ValidArgs: []string{upgradeChannelDev, upgradeChannelProd},
 		Args:      cobra.MaximumNArgs(1),
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
