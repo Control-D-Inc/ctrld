@@ -249,6 +249,13 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	numListeners := len(p.cfg.Listener)
 	if !reload {
 		p.started = make(chan struct{}, numListeners)
+		if p.cs != nil {
+			p.registerControlServerHandler()
+			if err := p.cs.start(); err != nil {
+				mainLog.Load().Warn().Err(err).Msg("could not start control server")
+			}
+			mainLog.Load().Debug().Msgf("control server started: %s", p.cs.addr)
+		}
 	}
 	p.onStartedDone = make(chan struct{})
 	p.loop = make(map[string]bool)
@@ -380,12 +387,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		initLoggingWithBackup(false)
 		if p.logConn != nil {
 			_ = p.logConn.Close()
-		}
-		if p.cs != nil {
-			p.registerControlServerHandler()
-			if err := p.cs.start(); err != nil {
-				mainLog.Load().Warn().Err(err).Msg("could not start control server")
-			}
 		}
 	}
 	wg.Wait()

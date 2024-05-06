@@ -210,12 +210,9 @@ func (p *prog) serveDNS(listenerNum string) error {
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 			s, errCh := runDNSServer(addr, proto, handler)
 			defer s.Shutdown()
-			select {
-			case err := <-errCh:
-				return err
-			case <-time.After(5 * time.Second):
-				p.started <- struct{}{}
-			}
+
+			p.started <- struct{}{}
+
 			select {
 			case <-p.stopCh:
 			case <-ctx.Done():

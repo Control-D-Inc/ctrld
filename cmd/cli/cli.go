@@ -1598,24 +1598,13 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 
 	dir, err := socketDir()
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
+		mainLog.Load().Error().Err(err).Msg("failed to get ctrld listener status: could not get home directory")
 		return false, status, err
 	}
 	mainLog.Load().Debug().Msg("waiting for ctrld listener to be ready")
 	cc := newSocketControlClient(s, dir)
 	if cc == nil {
 		return false, status, errors.New("could not connect to control server")
-	}
-
-	resp, err := cc.post(startedPath, nil)
-	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("failed to connect to control server")
-		return false, status, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		mainLog.Load().Error().Msg("ctrld listener is not ready")
-		return false, status, errors.New("ctrld listener is not ready")
 	}
 
 	// Not a ctrld upstream, return status as-is.
@@ -2261,6 +2250,10 @@ func removeProvTokenFromArgs(sc *service.Config) {
 
 // newSocketControlClient returns new control client after control server was started.
 func newSocketControlClient(s service.Service, dir string) *controlClient {
+	// Return early if service is not running.
+	if status, err := s.Status(); err != nil || status != service.StatusRunning {
+		return nil
+	}
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 10 * time.Second
 	ctx := context.Background()
@@ -2270,28 +2263,21 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 	defer timeout.Stop()
 
 	// The socket control server may not start yet, so attempt to ping
-	// it until we got a response. For each iteration, check ctrld status
-	// to make sure ctrld is still running.
+	// it until we got a response.
 	for {
-		curStatus, err := s.Status()
-		if err != nil {
-			return nil
-		}
-		if curStatus != service.StatusRunning {
-			return nil
-		}
-		if _, err := cc.post("/", nil); err == nil {
+		_, err := cc.post(startedPath, nil)
+		if err == nil {
 			// Server was started, stop pinging.
 			break
 		}
 		// The socket control server is not ready yet, backoff for waiting it to be ready.
 		bo.BackOff(ctx, err)
+
 		select {
 		case <-timeout.C:
 			return nil
 		default:
 		}
-		continue
 	}
 
 	return cc
