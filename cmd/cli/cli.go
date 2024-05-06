@@ -2450,11 +2450,6 @@ func powershell(cmd string) ([]byte, error) {
 // windowsHasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.
 func windowsHasLocalDnsServerRunning() bool {
 	if runtime.GOOS == "windows" {
-		out, _ := powershell("Get-WindowsFeature -Name DNS")
-		if !bytes.Contains(bytes.ToLower(out), []byte("installed")) {
-			return false
-		}
-
 		_, err := powershell("Get-Process -Name DNS")
 		return err == nil
 	}
