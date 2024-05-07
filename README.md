@@ -4,6 +4,8 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/Control-D-Inc/ctrld.svg)](https://pkg.go.dev/github.com/Control-D-Inc/ctrld)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Control-D-Inc/ctrld)](https://goreportcard.com/report/github.com/Control-D-Inc/ctrld)
 
+![ctrld spash image](/docs/ctrldsplash.png)
+
 A highly configurable DNS forwarding proxy with support for:
 - Multiple listeners for incoming queries
 - Multiple upstreams with fallbacks
