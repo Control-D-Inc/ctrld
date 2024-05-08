@@ -21,12 +21,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Masterminds/semver"
 	"github.com/cuonglm/osinfo"
-	"github.com/fsnotify/fsnotify"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
@@ -251,13 +249,14 @@ func initCLI() {
 			// A buffer channel to gather log output from runCmd and report
 			// to user in case self-check process failed.
 			runCmdLogCh := make(chan string, 256)
-			if dir, err := userHomeDir(); err == nil {
-				setWorkingDirectory(sc, dir)
+			ud, err := userHomeDir()
+			sockDir := ud
+			if err == nil {
+				setWorkingDirectory(sc, ud)
 				if configPath == "" && writeDefaultConfig {
-					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
+					defaultConfigFile = filepath.Join(ud, defaultConfigFile)
 				}
-				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
-				sockDir := dir
+				sc.Arguments = append(sc.Arguments, "--homedir="+ud)
 				if d, err := socketDir(); err == nil {
 					sockDir = d
 				}
@@ -339,7 +338,7 @@ func initCLI() {
 					return
 				}
 
-				ok, status, err := selfCheckStatus(s)
+				ok, status, err := selfCheckStatus(s, ud, sockDir)
 				switch {
 				case ok && status == service.StatusRunning:
 					mainLog.Load().Notice().Msg("Service started")
@@ -1581,7 +1580,7 @@ func defaultIfaceName() string {
 // - External testing, ensuring query could be sent from ctrld -> upstream.
 //
 // Self-check is considered success only if both tests are ok.
-func selfCheckStatus(s service.Service) (bool, service.Status, error) {
+func selfCheckStatus(s service.Service, homedir, sockDir string) (bool, service.Status, error) {
 	status, err := s.Status()
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not get service status")
@@ -1596,73 +1595,50 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 		return true, status, nil
 	}
 
-	dir, err := socketDir()
-	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("failed to get ctrld listener status: could not get home directory")
-		return false, status, err
-	}
 	mainLog.Load().Debug().Msg("waiting for ctrld listener to be ready")
-	cc := newSocketControlClient(s, dir)
+	cc := newSocketControlClient(s, sockDir)
 	if cc == nil {
 		return false, status, errors.New("could not connect to control server")
 	}
 
-	// Not a ctrld upstream, return status as-is.
-	if cfg.FirstUpstream().VerifyDomain() == "" {
+	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
+	ctrld.SetConfigNameWithPath(v, "ctrld", homedir)
+	if configPath != "" {
+		v.SetConfigFile(configPath)
+	}
+	if err := v.ReadInConfig(); err != nil {
+		mainLog.Load().Error().Err(err).Msgf("failed to re-read configuration file: %s", v.ConfigFileUsed())
+		return false, status, err
+	}
+
+	cfg = ctrld.Config{}
+	if err := v.Unmarshal(&cfg); err != nil {
+		mainLog.Load().Error().Err(err).Msg("failed to update new config")
+		return false, status, err
+	}
+
+	selfCheckExternalDomain := cfg.FirstUpstream().VerifyDomain()
+	if selfCheckExternalDomain == "" {
+		// Nothing to do, return the status as-is.
 		return true, status, nil
 	}
 
 	mainLog.Load().Debug().Msg("ctrld listener is ready")
 	mainLog.Load().Debug().Msg("performing self-check")
-	var (
-		lcChanged map[string]*ctrld.ListenerConfig
-		ucChanged map[string]*ctrld.UpstreamConfig
-		mu        sync.Mutex
-	)
-
-	if err := v.ReadInConfig(); err != nil {
-		mainLog.Load().Fatal().Err(err).Msg("failed to read new config")
-	}
-	if err := v.Unmarshal(&cfg); err != nil {
-		mainLog.Load().Fatal().Err(err).Msg("failed to update new config")
-	}
-	domain := cfg.FirstUpstream().VerifyDomain()
-	if domain == "" {
-		// Nothing to do, return the status as-is.
-		return true, status, nil
-	}
-
-	v.OnConfigChange(func(in fsnotify.Event) {
-		mu.Lock()
-		defer mu.Unlock()
-		if err := v.UnmarshalKey("listener", &lcChanged); err != nil {
-			mainLog.Load().Error().Msgf("failed to unmarshal listener config: %v", err)
-			return
-		}
-		cfg.Listener = lcChanged
-		if err := v.UnmarshalKey("upstream", &ucChanged); err != nil {
-			mainLog.Load().Error().Msgf("failed to unmarshal upstream config: %v", err)
-			return
-		}
-		cfg.Upstream = ucChanged
-	})
-	v.WatchConfig()
 
 	lc := cfg.FirstListener()
 	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
-	getInternalDomainFn := func() string { return selfCheckInternalTestDomain }
-	getExternalDomainFn := func() string { return cfg.FirstUpstream().VerifyDomain() }
-	if err := selfCheckResolveDomain(context.TODO(), addr, "internal", getInternalDomainFn); err != nil {
+	if err := selfCheckResolveDomain(context.TODO(), addr, "internal", selfCheckInternalTestDomain); err != nil {
 		return false, status, err
 	}
-	if err := selfCheckResolveDomain(context.TODO(), addr, "external", getExternalDomainFn); err != nil {
+	if err := selfCheckResolveDomain(context.TODO(), addr, "external", selfCheckExternalDomain); err != nil {
 		return false, status, err
 	}
 	return true, status, nil
 }
 
 // selfCheckResolveDomain performs DNS test query against ctrld listener.
-func selfCheckResolveDomain(ctx context.Context, addr, scope string, getDomainFn func() string) error {
+func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain string) error {
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 500 * time.Millisecond
 	maxAttempts := 20
@@ -1672,11 +1648,10 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, getDomainFn
 		lastAnswer *dns.Msg
 		lastErr    error
 	)
-	domain := ""
+
 	for i := 0; i < maxAttempts; i++ {
-		domain = getDomainFn()
 		if domain == "" {
-			continue
+			return errors.New("empty test domain")
 		}
 		m := new(dns.Msg)
 		m.SetQuestion(domain+".", dns.TypeA)
