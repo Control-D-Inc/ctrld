@@ -336,7 +336,7 @@ The protocol that `ctrld` will use to send DNS requests to upstream.
 
  - Type: string
  - Required: yes
- - Valid values: `doh`, `doh3`, `dot`, `doq`, `legacy`, `os`
+ - Valid values: `doh`, `doh3`, `dot`, `doq`, `legacy`
 
 ### ip_stack
 Specifying what kind of ip stack that `ctrld` will use to connect to upstream.
