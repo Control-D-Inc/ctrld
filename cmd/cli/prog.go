@@ -194,15 +194,18 @@ func (p *prog) runWait() {
 }
 
 func (p *prog) preRun() {
-	if !service.Interactive() {
-		p.setDNS()
-	}
 	if runtime.GOOS == "darwin" {
 		p.onStopped = append(p.onStopped, func() {
 			if !service.Interactive() {
 				p.resetDNS()
 			}
 		})
+	}
+}
+
+func (p *prog) postRun() {
+	if !service.Interactive() {
+		p.setDNS()
 	}
 }
 
@@ -388,6 +391,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		if p.logConn != nil {
 			_ = p.logConn.Close()
 		}
+		p.postRun()
 	}
 	wg.Wait()
 }
