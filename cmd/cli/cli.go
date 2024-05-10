@@ -854,9 +854,9 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
+			svcInstalled := true
 			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
-				mainLog.Load().Warn().Msg("service not installed")
-				return
+				svcInstalled = false
 			}
 			bin, err := os.Executable()
 			if err != nil {
@@ -895,6 +895,9 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			}
 
 			doRestart := func() bool {
+				if !svcInstalled {
+					return true
+				}
 				tasks := []task{
 					{s.Stop, false},
 					{s.Start, false},
@@ -906,7 +909,9 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				}
 				return false
 			}
-			mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")
+			if svcInstalled {
+				mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")
+			}
 			if doRestart() {
 				_ = os.Remove(oldBin)
 				_ = os.Chmod(bin, 0755)
