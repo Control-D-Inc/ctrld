@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -863,7 +864,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
 			}
 			oldBin := bin + "_previous"
-			urlString := upgradeChannel[upgradeChannelDefault]
+			baseUrl := upgradeChannel[upgradeChannelDefault]
 			if len(args) > 0 {
 				channel := args[0]
 				switch channel {
@@ -871,12 +872,9 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				default:
 					mainLog.Load().Fatal().Msgf("uprade argument must be either %q or %q", upgradeChannelProd, upgradeChannelDev)
 				}
-				urlString = upgradeChannel[channel]
+				baseUrl = upgradeChannel[channel]
 			}
-			dlUrl := fmt.Sprintf("%s/%s-%s/ctrld", urlString, runtime.GOOS, runtime.GOARCH)
-			if runtime.GOOS == "windows" {
-				dlUrl += ".exe"
-			}
+			dlUrl := upgradeUrl(baseUrl)
 			mainLog.Load().Debug().Msgf("Downloading binary: %s", dlUrl)
 			resp, err := http.Get(dlUrl)
 			if err != nil {
@@ -2463,4 +2461,33 @@ func runInCdMode() bool {
 		}
 	}
 	return false
+}
+
+// goArm returns the GOARM value for the binary.
+func goArm() string {
+	if runtime.GOARCH != "arm" {
+		return ""
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range bi.Settings {
+			if setting.Key == "GOARM" {
+				return setting.Value
+			}
+		}
+	}
+	// Use ARM v5 as a fallback, since it works on all others.
+	return "5"
+}
+
+// upgradeUrl returns the url for downloading new ctrld binary.
+func upgradeUrl(baseUrl string) string {
+	dlPath := fmt.Sprintf("%s-%s/ctrld", runtime.GOOS, runtime.GOARCH)
+	if armVersion := goArm(); armVersion != "" {
+		dlPath = fmt.Sprintf("%s-%sv%s/ctrld", runtime.GOOS, runtime.GOARCH, armVersion)
+	}
+	dlUrl := fmt.Sprintf("%s/%s", baseUrl, dlPath)
+	if runtime.GOOS == "windows" {
+		dlUrl += ".exe"
+	}
+	return dlUrl
 }
