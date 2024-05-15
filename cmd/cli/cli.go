@@ -449,6 +449,23 @@ func initCLI() {
 			if doTasks([]task{{s.Stop, true}}) {
 				p.router.Cleanup()
 				p.resetDNS()
+				if router.WaitProcessExited() {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+					defer cancel()
+
+					for {
+						select {
+						case <-ctx.Done():
+							mainLog.Load().Error().Msg("timeout while waiting for service to stop")
+							return
+						default:
+						}
+						time.Sleep(time.Second)
+						if status, _ := s.Status(); status == service.StatusStopped {
+							break
+						}
+					}
+				}
 				mainLog.Load().Notice().Msg("Service stopped")
 			}
 		},

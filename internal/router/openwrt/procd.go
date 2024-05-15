@@ -18,6 +18,7 @@ start_service() {
     procd_set_param stdout 1            # forward stdout of the command to logd
     procd_set_param stderr 1            # same for stderr
     procd_set_param pidfile ${pid_file} # write a pid file on instance start and remove it on stop
+    procd_set_param term_timeout 10
     procd_close_instance
     echo "${name} has been started"
 }
