@@ -49,11 +49,15 @@ func (s *merlinSvc) Platform() string {
 }
 
 func (s *merlinSvc) configPath() string {
-	path, err := os.Executable()
-	if err != nil {
-		return ""
+	bin := s.Config.Executable
+	if bin == "" {
+		path, err := os.Executable()
+		if err != nil {
+			return ""
+		}
+		bin = path
 	}
-	return path + ".startup"
+	return bin + ".startup"
 }
 
 func (s *merlinSvc) template() *template.Template {

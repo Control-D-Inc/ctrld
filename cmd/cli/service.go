@@ -21,7 +21,7 @@ func newService(i service.Interface, c *service.Config) (service.Service, error)
 	}
 	switch {
 	case router.IsOldOpenwrt(), router.IsNetGearOrbi():
-		return &procd{&sysV{s}}, nil
+		return &procd{sysV: &sysV{s}, svcConfig: c}, nil
 	case router.IsGLiNet():
 		return &sysV{s}, nil
 	case s.Platform() == "unix-systemv":
@@ -89,18 +89,24 @@ func (s *sysV) Status() (service.Status, error) {
 // like old GL.iNET Opal router.
 type procd struct {
 	*sysV
+	svcConfig *service.Config
 }
 
 func (s *procd) Status() (service.Status, error) {
 	if !s.installed() {
 		return service.StatusUnknown, service.ErrNotInstalled
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return service.StatusUnknown, nil
+	bin := s.svcConfig.Executable
+	if bin == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return service.StatusUnknown, nil
+		}
+		bin = exe
 	}
+
 	// Looking for something like "/sbin/ctrld run ".
-	shellCmd := fmt.Sprintf("ps | grep -q %q", exe+" [r]un ")
+	shellCmd := fmt.Sprintf("ps | grep -q %q", bin+" [r]un ")
 	if err := exec.Command("sh", "-c", shellCmd).Run(); err != nil {
 		return service.StatusStopped, nil
 	}

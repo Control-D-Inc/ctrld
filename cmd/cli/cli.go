@@ -850,7 +850,14 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			s, err := newService(&prog{}, svcConfig)
+			bin, err := os.Executable()
+			if err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
+			}
+			sc := &service.Config{}
+			*sc = *svcConfig
+			sc.Executable = bin
+			s, err := newService(&prog{}, sc)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
 				return
@@ -858,10 +865,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			svcInstalled := true
 			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
 				svcInstalled = false
-			}
-			bin, err := os.Executable()
-			if err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
 			}
 			oldBin := bin + "_previous"
 			baseUrl := upgradeChannel[upgradeChannelDefault]
