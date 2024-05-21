@@ -377,7 +377,15 @@ func initCLI() {
 					uninstall(p, s)
 					os.Exit(1)
 				}
-				p.setDNS()
+				if cc := newSocketControlClient(s, sockDir); cc != nil {
+					if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
+						if iface == "auto" {
+							iface = defaultIfaceName()
+						}
+						logger := mainLog.Load().With().Str("iface", iface).Logger()
+						logger.Debug().Msg("setting DNS successfully")
+					}
+				}
 			}
 		},
 	}
@@ -482,7 +490,10 @@ func initCLI() {
 		Short: "Restart the ctrld service",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			s, err := newService(&prog{}, svcConfig)
+			readConfig(false)
+			v.Unmarshal(&cfg)
+			p := &prog{router: router.New(&cfg, runInCdMode())}
+			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
 				return
@@ -493,8 +504,10 @@ func initCLI() {
 			}
 			initLogging()
 
+			iface = runningIface(s)
 			tasks := []task{
 				{s.Stop, false},
+				{func() error { p.resetDNS(); return nil }, false},
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
@@ -2510,4 +2523,21 @@ func upgradeUrl(baseUrl string) string {
 		dlUrl += ".exe"
 	}
 	return dlUrl
+}
+
+// runningIface returns the value of the iface variable used by ctrld process which is running.
+func runningIface(s service.Service) string {
+	if sockDir, err := socketDir(); err == nil {
+		if cc := newSocketControlClient(s, sockDir); cc != nil {
+			resp, err := cc.post(ifacePath, nil)
+			if err != nil {
+				return ""
+			}
+			defer resp.Body.Close()
+			if buf, _ := io.ReadAll(resp.Body); len(buf) > 0 {
+				return string(buf)
+			}
+		}
+	}
+	return ""
 }

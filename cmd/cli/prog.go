@@ -69,6 +69,8 @@ type prog struct {
 	reloadDoneCh chan struct{}
 	logConn      net.Conn
 	cs           *controlServer
+	csSetDnsDone chan struct{}
+	csSetDnsOk   bool
 
 	cfg                  *ctrld.Config
 	localUpstreams       []string
@@ -204,6 +206,7 @@ func (p *prog) preRun() {
 }
 
 func (p *prog) postRun() {
+	mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ctrld.OsNameservers)
 	if !service.Interactive() {
 		p.setDNS()
 	}
@@ -253,6 +256,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	if !reload {
 		p.started = make(chan struct{}, numListeners)
 		if p.cs != nil {
+			p.csSetDnsDone = make(chan struct{}, 1)
 			p.registerControlServerHandler()
 			if err := p.cs.start(); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("could not start control server")
@@ -435,6 +439,13 @@ func (p *prog) deAllocateIP() error {
 }
 
 func (p *prog) setDNS() {
+	setDnsOK := false
+	defer func() {
+		p.csSetDnsOk = setDnsOK
+		p.csSetDnsDone <- struct{}{}
+		close(p.csSetDnsDone)
+	}()
+
 	if cfg.Listener == nil {
 		return
 	}
@@ -489,6 +500,7 @@ func (p *prog) setDNS() {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return
 	}
+	setDnsOK = true
 	logger.Debug().Msg("setting DNS successfully")
 	if shouldWatchResolvconf() {
 		servers := make([]netip.Addr, len(nameservers))

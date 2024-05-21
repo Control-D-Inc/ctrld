@@ -4,9 +4,8 @@ import (
 	"net"
 	"syscall"
 
-	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
-
 	"golang.org/x/sys/windows"
+	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
 
 func dnsFns() []dnsFn {
@@ -51,9 +50,6 @@ func dnsFromAdapter() []string {
 	for _, aa := range aas {
 		for dns := aa.FirstDNSServerAddress; dns != nil; dns = dns.Next {
 			do(dns.Address)
-		}
-		for gw := aa.FirstGatewayAddress; gw != nil; gw = gw.Next {
-			do(gw.Address)
 		}
 	}
 	return ns

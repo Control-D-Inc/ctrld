@@ -32,8 +32,12 @@ const (
 
 const bootstrapDNS = "76.76.2.22"
 
+// OsNameservers is the list of DNS nameservers used by OS resolver.
+// This reads OS settings at the time ctrld process starts.
+var OsNameservers = defaultNameservers()
+
 // or is the Resolver used for ResolverTypeOS.
-var or = &osResolver{nameservers: defaultNameservers()}
+var or = &osResolver{nameservers: OsNameservers}
 
 // defaultNameservers returns OS nameservers plus ctrld bootstrap nameserver.
 func defaultNameservers() []string {
