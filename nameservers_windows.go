@@ -1,10 +1,8 @@
 package ctrld
 
 import (
-	"net"
 	"syscall"
 
-	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
 
@@ -19,37 +17,23 @@ func dnsFromAdapter() []string {
 	}
 	ns := make([]string, 0, len(aas)*2)
 	seen := make(map[string]bool)
-	do := func(addr windows.SocketAddress) {
-		sa, err := addr.Sockaddr.Sockaddr()
-		if err != nil {
-			return
+	addressMap := make(map[string]struct{})
+	for _, aa := range aas {
+		for a := aa.FirstUnicastAddress; a != nil; a = a.Next {
+			addressMap[a.Address.IP().String()] = struct{}{}
 		}
-		var ip net.IP
-		switch sa := sa.(type) {
-		case *syscall.SockaddrInet4:
-			ip = net.IPv4(sa.Addr[0], sa.Addr[1], sa.Addr[2], sa.Addr[3])
-		case *syscall.SockaddrInet6:
-			ip = make(net.IP, net.IPv6len)
-			copy(ip, sa.Addr[:])
-			if ip[0] == 0xfe && ip[1] == 0xc0 {
-				// Ignore these fec0/10 ones. Windows seems to
-				// populate them as defaults on its misc rando
-				// interfaces.
-				return
-			}
-		default:
-			return
-
-		}
-		if ip.IsLoopback() || seen[ip.String()] {
-			return
-		}
-		seen[ip.String()] = true
-		ns = append(ns, ip.String())
 	}
 	for _, aa := range aas {
 		for dns := aa.FirstDNSServerAddress; dns != nil; dns = dns.Next {
-			do(dns.Address)
+			ip := dns.Address.IP()
+			if ip == nil || ip.IsLoopback() || seen[ip.String()] {
+				continue
+			}
+			if _, ok := addressMap[ip.String()]; ok {
+				continue
+			}
+			seen[ip.String()] = true
+			ns = append(ns, ip.String())
 		}
 	}
 	return ns

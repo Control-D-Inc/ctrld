@@ -507,7 +507,7 @@ func initCLI() {
 			iface = runningIface(s)
 			tasks := []task{
 				{s.Stop, false},
-				{func() error { p.resetDNS(); return nil }, false},
+				{func() error { resetDnsNoLog(p); return nil }, false},
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
@@ -887,7 +887,10 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			sc := &service.Config{}
 			*sc = *svcConfig
 			sc.Executable = bin
-			s, err := newService(&prog{}, sc)
+			readConfig(false)
+			v.Unmarshal(&cfg)
+			p := &prog{router: router.New(&cfg, runInCdMode())}
+			s, err := newService(p, sc)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
 				return
@@ -931,6 +934,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				}
 				tasks := []task{
 					{s.Stop, false},
+					{func() error { resetDnsNoLog(p); return nil }, false},
 					{s.Start, false},
 				}
 				if doTasks(tasks) {
@@ -2540,4 +2544,12 @@ func runningIface(s service.Service) string {
 		}
 	}
 	return ""
+}
+
+// resetDnsNoLog performs resetting DNS with logging disable.
+func resetDnsNoLog(p *prog) {
+	lvl := zerolog.GlobalLevel()
+	zerolog.SetGlobalLevel(zerolog.Disabled)
+	p.resetDNS()
+	zerolog.SetGlobalLevel(lvl)
 }
