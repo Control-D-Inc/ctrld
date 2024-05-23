@@ -184,9 +184,10 @@ func initCLI() {
 
 			status, err := s.Status()
 			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
+			isCtrldRunning := status == service.StatusRunning
 
 			// If pin code was set, do not allow running start command.
-			if status == service.StatusRunning {
+			if isCtrldRunning {
 				if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 					os.Exit(deactivationPinInvalidExitCode)
 				}
@@ -308,18 +309,25 @@ func initCLI() {
 			}
 
 			tasks := []task{
+				{func() error {
+					// Always reset DNS first, ensuring DNS setting is in a good state.
+					// resetDNS must use the "iface" value of current running ctrld
+					// process to reset what setDNS has done properly.
+					oldIface := iface
+					iface = "auto"
+					if isCtrldRunning {
+						iface = runningIface(s)
+					}
+					if isCtrldInstalled {
+						resetDnsNoLog(p)
+					}
+					iface = oldIface
+					return nil
+				}, false},
 				{s.Stop, false},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
 				{func() error { return ensureUninstall(s) }, false},
 				{func() error {
-					// If ctrld is installed, we should not save current DNS settings, because:
-					//
-					// - The DNS settings was being set by ctrld already.
-					// - We could not determine the state of DNS settings before installing ctrld.
-					if isCtrldInstalled {
-						return nil
-					}
-
 					// Save current DNS so we can restore later.
 					withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
 						return saveCurrentStaticDNS(i)

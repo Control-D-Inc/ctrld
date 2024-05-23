@@ -452,11 +452,12 @@ func (p *prog) setDNS() {
 	if iface == "" {
 		return
 	}
+	runningIface := iface
 	// allIfaces tracks whether we should set DNS for all physical interfaces.
 	allIfaces := false
-	if iface == "auto" {
-		iface = defaultIfaceName()
-		// If iface is "auto", it means user does not specify "--iface" flag.
+	if runningIface == "auto" {
+		runningIface = defaultIfaceName()
+		// If runningIface is "auto", it means user does not specify "--iface" flag.
 		// In this case, ctrld has to set DNS for all physical interfaces, so
 		// thing will still work when user switch from one to the other.
 		allIfaces = requiredMultiNICsConfig()
@@ -465,8 +466,8 @@ func (p *prog) setDNS() {
 	if lc == nil {
 		return
 	}
-	logger := mainLog.Load().With().Str("iface", iface).Logger()
-	netIface, err := netInterface(iface)
+	logger := mainLog.Load().With().Str("iface", runningIface).Logger()
+	netIface, err := netInterface(runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
@@ -520,14 +521,15 @@ func (p *prog) resetDNS() {
 	if iface == "" {
 		return
 	}
+	runningIface := iface
 	allIfaces := false
-	if iface == "auto" {
-		iface = defaultIfaceName()
+	if runningIface == "auto" {
+		runningIface = defaultIfaceName()
 		// See corresponding comments in (*prog).setDNS function.
 		allIfaces = requiredMultiNICsConfig()
 	}
-	logger := mainLog.Load().With().Str("iface", iface).Logger()
-	netIface, err := netInterface(iface)
+	logger := mainLog.Load().With().Str("iface", runningIface).Logger()
+	netIface, err := netInterface(runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
