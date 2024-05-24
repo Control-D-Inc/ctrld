@@ -183,7 +183,6 @@ func initCLI() {
 			}
 
 			status, err := s.Status()
-			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
 			isCtrldRunning := status == service.StatusRunning
 
 			// If pin code was set, do not allow running start command.
@@ -309,21 +308,7 @@ func initCLI() {
 			}
 
 			tasks := []task{
-				{func() error {
-					// Always reset DNS first, ensuring DNS setting is in a good state.
-					// resetDNS must use the "iface" value of current running ctrld
-					// process to reset what setDNS has done properly.
-					oldIface := iface
-					iface = "auto"
-					if isCtrldRunning {
-						iface = runningIface(s)
-					}
-					if isCtrldInstalled {
-						resetDnsNoLog(p)
-					}
-					iface = oldIface
-					return nil
-				}, false},
+				resetDnsTask(p, s),
 				{s.Stop, false},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
 				{func() error { return ensureUninstall(s) }, false},
@@ -903,6 +888,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
+
 			svcInstalled := true
 			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
 				svcInstalled = false
@@ -941,8 +927,8 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					return true
 				}
 				tasks := []task{
+					resetDnsTask(p, s),
 					{s.Stop, false},
-					{func() error { resetDnsNoLog(p); return nil }, false},
 					{s.Start, false},
 				}
 				if doTasks(tasks) {
@@ -2560,4 +2546,26 @@ func resetDnsNoLog(p *prog) {
 	zerolog.SetGlobalLevel(zerolog.Disabled)
 	p.resetDNS()
 	zerolog.SetGlobalLevel(lvl)
+}
+
+// resetDnsTask returns a task which perform reset DNS operation.
+func resetDnsTask(p *prog, s service.Service) task {
+	status, err := s.Status()
+	isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
+	isCtrldRunning := status == service.StatusRunning
+	return task{func() error {
+		// Always reset DNS first, ensuring DNS setting is in a good state.
+		// resetDNS must use the "iface" value of current running ctrld
+		// process to reset what setDNS has done properly.
+		oldIface := iface
+		iface = "auto"
+		if isCtrldRunning {
+			iface = runningIface(s)
+		}
+		if isCtrldInstalled {
+			resetDnsNoLog(p)
+		}
+		iface = oldIface
+		return nil
+	}, false}
 }
