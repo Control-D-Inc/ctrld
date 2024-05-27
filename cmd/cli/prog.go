@@ -206,8 +206,10 @@ func (p *prog) preRun() {
 }
 
 func (p *prog) postRun() {
-	mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ctrld.OsNameservers)
 	if !service.Interactive() {
+		p.resetDNS()
+		ns := ctrld.InitializeOsResolver()
+		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
 		p.setDNS()
 	}
 }

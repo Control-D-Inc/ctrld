@@ -182,7 +182,7 @@ func initCLI() {
 				return
 			}
 
-			status, err := s.Status()
+			status, _ := s.Status()
 			isCtrldRunning := status == service.StatusRunning
 
 			// If pin code was set, do not allow running start command.
@@ -500,7 +500,6 @@ func initCLI() {
 			iface = runningIface(s)
 			tasks := []task{
 				{s.Stop, false},
-				{func() error { resetDnsNoLog(p); return nil }, false},
 				{s.Start, true},
 			}
 			if doTasks(tasks) {
@@ -509,10 +508,12 @@ func initCLI() {
 					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
 					return
 				}
-				if cc := newSocketControlClient(s, dir); cc == nil {
+				cc := newSocketControlClient(s, dir)
+				if cc == nil {
 					mainLog.Load().Notice().Msg("Service was not restarted")
 					os.Exit(1)
 				}
+				_, _ = cc.post(ifacePath, nil)
 				mainLog.Load().Notice().Msg("Service restarted")
 			}
 		},
@@ -927,13 +928,15 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					return true
 				}
 				tasks := []task{
-					resetDnsTask(p, s),
 					{s.Stop, false},
 					{s.Start, false},
 				}
 				if doTasks(tasks) {
 					if dir, err := socketDir(); err == nil {
-						return newSocketControlClient(s, dir) != nil
+						if cc := newSocketControlClient(s, dir); cc != nil {
+							_, _ = cc.post(ifacePath, nil)
+							return true
+						}
 					}
 				}
 				return false
