@@ -35,11 +35,24 @@ const bootstrapDNS = "76.76.2.22"
 // or is the Resolver used for ResolverTypeOS.
 var or = &osResolver{nameservers: defaultNameservers()}
 
-// defaultNameservers returns OS nameservers plus ctrld bootstrap nameserver.
+// defaultNameservers returns nameservers used by the OS.
+// If no nameservers can be found, ctrld bootstrap nameserver will be used.
 func defaultNameservers() []string {
 	ns := nameservers()
-	ns = append(ns, net.JoinHostPort(bootstrapDNS, "53"))
+	if len(ns) == 0 {
+		ns = append(ns, net.JoinHostPort(bootstrapDNS, "53"))
+	}
 	return ns
+}
+
+// InitializeOsResolver initializes OS resolver using the current system DNS settings.
+// It returns the nameservers that is going to be used by the OS resolver.
+//
+// It's the caller's responsibility to ensure the system DNS is in a clean state before
+// calling this function.
+func InitializeOsResolver() []string {
+	or.nameservers = defaultNameservers()
+	return or.nameservers
 }
 
 // Resolver is the interface that wraps the basic DNS operations.

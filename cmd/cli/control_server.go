@@ -10,6 +10,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/kardianos/service"
+
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -22,6 +24,7 @@ const (
 	reloadPath       = "/reload"
 	deactivationPath = "/deactivation"
 	cdPath           = "/cd"
+	ifacePath        = "/iface"
 )
 
 type controlServer struct {
@@ -176,6 +179,17 @@ func (p *prog) registerControlServerHandler() {
 		if cdUID != "" {
 			w.WriteHeader(http.StatusOK)
 			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	p.cs.register(ifacePath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		// p.setDNS is only called when running as a service
+		if !service.Interactive() {
+			<-p.csSetDnsDone
+			if p.csSetDnsOk {
+				w.Write([]byte(iface))
+				return
+			}
 		}
 		w.WriteHeader(http.StatusBadRequest)
 	}))

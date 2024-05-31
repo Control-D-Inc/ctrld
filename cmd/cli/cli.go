@@ -18,15 +18,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Masterminds/semver"
 	"github.com/cuonglm/osinfo"
-	"github.com/fsnotify/fsnotify"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
@@ -86,7 +85,7 @@ var rootCmd = &cobra.Command{
 	Use:     "ctrld",
 	Short:   strings.TrimLeft(rootShortDesc, "\n"),
 	Version: curVersion(),
-	PreRun: func(cmd *cobra.Command, args []string) {
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		initConsoleLogging()
 	},
 }
@@ -127,9 +126,6 @@ func initCLI() {
 		Use:   "run",
 		Short: "Run the DNS proxy server",
 		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
-		},
 		Run: func(cmd *cobra.Command, args []string) {
 			RunCobraCommand(cmd)
 		},
@@ -158,7 +154,6 @@ func initCLI() {
 
 	startCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "start",
@@ -187,11 +182,11 @@ func initCLI() {
 				return
 			}
 
-			status, err := s.Status()
-			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
+			status, _ := s.Status()
+			isCtrldRunning := status == service.StatusRunning
 
 			// If pin code was set, do not allow running start command.
-			if status == service.StatusRunning {
+			if isCtrldRunning {
 				if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 					os.Exit(deactivationPinInvalidExitCode)
 				}
@@ -255,13 +250,14 @@ func initCLI() {
 			// A buffer channel to gather log output from runCmd and report
 			// to user in case self-check process failed.
 			runCmdLogCh := make(chan string, 256)
-			if dir, err := userHomeDir(); err == nil {
-				setWorkingDirectory(sc, dir)
+			ud, err := userHomeDir()
+			sockDir := ud
+			if err == nil {
+				setWorkingDirectory(sc, ud)
 				if configPath == "" && writeDefaultConfig {
-					defaultConfigFile = filepath.Join(dir, defaultConfigFile)
+					defaultConfigFile = filepath.Join(ud, defaultConfigFile)
 				}
-				sc.Arguments = append(sc.Arguments, "--homedir="+dir)
-				sockDir := dir
+				sc.Arguments = append(sc.Arguments, "--homedir="+ud)
 				if d, err := socketDir(); err == nil {
 					sockDir = d
 				}
@@ -312,18 +308,11 @@ func initCLI() {
 			}
 
 			tasks := []task{
+				resetDnsTask(p, s),
 				{s.Stop, false},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
 				{func() error { return ensureUninstall(s) }, false},
 				{func() error {
-					// If ctrld is installed, we should not save current DNS settings, because:
-					//
-					// - The DNS settings was being set by ctrld already.
-					// - We could not determine the state of DNS settings before installing ctrld.
-					if isCtrldInstalled {
-						return nil
-					}
-
 					// Save current DNS so we can restore later.
 					withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
 						return saveCurrentStaticDNS(i)
@@ -343,7 +332,7 @@ func initCLI() {
 					return
 				}
 
-				ok, status, err := selfCheckStatus(s)
+				ok, status, err := selfCheckStatus(s, ud, sockDir)
 				switch {
 				case ok && status == service.StatusRunning:
 					mainLog.Load().Notice().Msg("Service started")
@@ -381,7 +370,15 @@ func initCLI() {
 					uninstall(p, s)
 					os.Exit(1)
 				}
-				p.setDNS()
+				if cc := newSocketControlClient(s, sockDir); cc != nil {
+					if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
+						if iface == "auto" {
+							iface = defaultIfaceName()
+						}
+						logger := mainLog.Load().With().Str("iface", iface).Logger()
+						logger.Debug().Msg("setting DNS successfully")
+					}
+				}
 			}
 		},
 	}
@@ -401,12 +398,10 @@ func initCLI() {
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmd.Flags().StringVarP(&nextdns, nextdnsFlagName, "", "", "NextDNS resolver id")
 	startCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
+	startCmd.Flags().BoolVarP(&skipSelfChecks, "skip_self_checks", "", false, `Skip self checks after installing ctrld service`)
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
-		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
-		},
 		Run: func(cmd *cobra.Command, _ []string) {
 			exe, err := os.Executable()
 			if err != nil {
@@ -434,7 +429,6 @@ func initCLI() {
 
 	stopCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "stop",
@@ -456,6 +450,23 @@ func initCLI() {
 			if doTasks([]task{{s.Stop, true}}) {
 				p.router.Cleanup()
 				p.resetDNS()
+				if router.WaitProcessExited() {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+					defer cancel()
+
+					for {
+						select {
+						case <-ctx.Done():
+							mainLog.Load().Error().Msg("timeout while waiting for service to stop")
+							return
+						default:
+						}
+						time.Sleep(time.Second)
+						if status, _ := s.Status(); status == service.StatusStopped {
+							break
+						}
+					}
+				}
 				mainLog.Load().Notice().Msg("Service stopped")
 			}
 		},
@@ -466,14 +477,16 @@ func initCLI() {
 
 	restartCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "restart",
 		Short: "Restart the ctrld service",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			s, err := newService(&prog{}, svcConfig)
+			readConfig(false)
+			v.Unmarshal(&cfg)
+			p := &prog{router: router.New(&cfg, runInCdMode())}
+			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
 				return
@@ -484,6 +497,7 @@ func initCLI() {
 			}
 			initLogging()
 
+			iface = runningIface(s)
 			tasks := []task{
 				{s.Stop, false},
 				{s.Start, true},
@@ -494,10 +508,12 @@ func initCLI() {
 					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
 					return
 				}
-				if cc := newSocketControlClient(s, dir); cc == nil {
+				cc := newSocketControlClient(s, dir)
+				if cc == nil {
 					mainLog.Load().Notice().Msg("Service was not restarted")
 					os.Exit(1)
 				}
+				_, _ = cc.post(ifacePath, nil)
 				mainLog.Load().Notice().Msg("Service restarted")
 			}
 		},
@@ -505,7 +521,6 @@ func initCLI() {
 
 	reloadCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "reload",
@@ -551,9 +566,6 @@ func initCLI() {
 		Use:   "status",
 		Short: "Show status of the ctrld service",
 		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
-		},
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := newService(&prog{}, svcConfig)
 			if err != nil {
@@ -581,14 +593,12 @@ func initCLI() {
 	if runtime.GOOS == "darwin" {
 		// On darwin, running status command without privileges may return wrong information.
 		statusCmd.PreRun = func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		}
 	}
 
 	uninstallCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "uninstall",
@@ -623,9 +633,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Use:   "list",
 		Short: "List network interfaces of the host",
 		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
-		},
 		Run: func(cmd *cobra.Command, args []string) {
 			err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
 				fmt.Printf("Index : %d\n", i.Index)
@@ -686,7 +693,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	rootCmd.AddCommand(serviceCmd)
 	startCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "start",
@@ -704,7 +710,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	rootCmd.AddCommand(startCmdAlias)
 	stopCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "stop",
@@ -723,7 +728,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 
 	restartCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "restart",
@@ -736,7 +740,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 
 	reloadCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "reload",
@@ -751,16 +754,12 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Use:   "status",
 		Short: "Show status of the ctrld service",
 		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
-		},
-		Run: statusCmd.Run,
+		Run:   statusCmd.Run,
 	}
 	rootCmd.AddCommand(statusCmdAlias)
 
 	uninstallCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Use:   "uninstall",
@@ -785,7 +784,6 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Short: "List clients that ctrld discovered",
 		Args:  cobra.NoArgs,
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
@@ -873,25 +871,31 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		ValidArgs: []string{upgradeChannelDev, upgradeChannelProd},
 		Args:      cobra.MaximumNArgs(1),
 		PreRun: func(cmd *cobra.Command, args []string) {
-			initConsoleLogging()
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			s, err := newService(&prog{}, svcConfig)
-			if err != nil {
-				mainLog.Load().Error().Msg(err.Error())
-				return
-			}
-			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
-				mainLog.Load().Warn().Msg("service not installed")
-				return
-			}
 			bin, err := os.Executable()
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
 			}
+			sc := &service.Config{}
+			*sc = *svcConfig
+			sc.Executable = bin
+			readConfig(false)
+			v.Unmarshal(&cfg)
+			p := &prog{router: router.New(&cfg, runInCdMode())}
+			s, err := newService(p, sc)
+			if err != nil {
+				mainLog.Load().Error().Msg(err.Error())
+				return
+			}
+
+			svcInstalled := true
+			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
+				svcInstalled = false
+			}
 			oldBin := bin + "_previous"
-			urlString := upgradeChannel[upgradeChannelDefault]
+			baseUrl := upgradeChannel[upgradeChannelDefault]
 			if len(args) > 0 {
 				channel := args[0]
 				switch channel {
@@ -899,12 +903,9 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				default:
 					mainLog.Load().Fatal().Msgf("uprade argument must be either %q or %q", upgradeChannelProd, upgradeChannelDev)
 				}
-				urlString = upgradeChannel[channel]
+				baseUrl = upgradeChannel[channel]
 			}
-			dlUrl := fmt.Sprintf("%s/%s-%s/ctrld", urlString, runtime.GOOS, runtime.GOARCH)
-			if runtime.GOOS == "windows" {
-				dlUrl += ".exe"
-			}
+			dlUrl := upgradeUrl(baseUrl)
 			mainLog.Load().Debug().Msgf("Downloading binary: %s", dlUrl)
 			resp, err := http.Get(dlUrl)
 			if err != nil {
@@ -923,18 +924,26 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			}
 
 			doRestart := func() bool {
+				if !svcInstalled {
+					return true
+				}
 				tasks := []task{
 					{s.Stop, false},
 					{s.Start, false},
 				}
 				if doTasks(tasks) {
 					if dir, err := socketDir(); err == nil {
-						return newSocketControlClient(s, dir) != nil
+						if cc := newSocketControlClient(s, dir); cc != nil {
+							_, _ = cc.post(ifacePath, nil)
+							return true
+						}
 					}
 				}
 				return false
 			}
-			mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")
+			if svcInstalled {
+				mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")
+			}
 			if doRestart() {
 				_ = os.Remove(oldBin)
 				_ = os.Chmod(bin, 0755)
@@ -1608,7 +1617,7 @@ func defaultIfaceName() string {
 // - External testing, ensuring query could be sent from ctrld -> upstream.
 //
 // Self-check is considered success only if both tests are ok.
-func selfCheckStatus(s service.Service) (bool, service.Status, error) {
+func selfCheckStatus(s service.Service, homedir, sockDir string) (bool, service.Status, error) {
 	status, err := s.Status()
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not get service status")
@@ -1618,117 +1627,80 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 	if status != service.StatusRunning {
 		return false, status, nil
 	}
-	dir, err := socketDir()
-	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("failed to check ctrld listener status: could not get home directory")
-		return false, status, err
+	// Skip self checks if set.
+	if skipSelfChecks {
+		return true, status, nil
 	}
+
 	mainLog.Load().Debug().Msg("waiting for ctrld listener to be ready")
-	cc := newSocketControlClient(s, dir)
+	cc := newSocketControlClient(s, sockDir)
 	if cc == nil {
 		return false, status, errors.New("could not connect to control server")
 	}
 
-	resp, err := cc.post(startedPath, nil)
-	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("failed to connect to control server")
+	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
+	ctrld.SetConfigNameWithPath(v, "ctrld", homedir)
+	if configPath != "" {
+		v.SetConfigFile(configPath)
+	}
+	if err := v.ReadInConfig(); err != nil {
+		mainLog.Load().Error().Err(err).Msgf("failed to re-read configuration file: %s", v.ConfigFileUsed())
 		return false, status, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		mainLog.Load().Error().Msg("ctrld listener is not ready")
-		return false, status, errors.New("ctrld listener is not ready")
+
+	cfg = ctrld.Config{}
+	if err := v.Unmarshal(&cfg); err != nil {
+		mainLog.Load().Error().Err(err).Msg("failed to update new config")
+		return false, status, err
 	}
 
-	// Not a ctrld upstream, return status as-is.
-	if cfg.FirstUpstream().VerifyDomain() == "" {
+	selfCheckExternalDomain := cfg.FirstUpstream().VerifyDomain()
+	if selfCheckExternalDomain == "" {
+		// Nothing to do, return the status as-is.
 		return true, status, nil
 	}
 
 	mainLog.Load().Debug().Msg("ctrld listener is ready")
 	mainLog.Load().Debug().Msg("performing self-check")
-	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
-	bo.LogLongerThan = 500 * time.Millisecond
-	ctx := context.Background()
-	maxAttempts := 20
-	c := new(dns.Client)
-	var (
-		lcChanged map[string]*ctrld.ListenerConfig
-		ucChanged map[string]*ctrld.UpstreamConfig
-		mu        sync.Mutex
-	)
 
-	if err := v.ReadInConfig(); err != nil {
-		mainLog.Load().Fatal().Err(err).Msg("failed to read new config")
-	}
-	if err := v.Unmarshal(&cfg); err != nil {
-		mainLog.Load().Fatal().Err(err).Msg("failed to update new config")
-	}
-	domain := cfg.FirstUpstream().VerifyDomain()
-	if domain == "" {
-		// Nothing to do, return the status as-is.
-		return true, status, nil
-	}
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("could not watch config change")
+	lc := cfg.FirstListener()
+	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
+	if err := selfCheckResolveDomain(context.TODO(), addr, "internal", selfCheckInternalTestDomain); err != nil {
 		return false, status, err
 	}
-	defer watcher.Close()
+	if err := selfCheckResolveDomain(context.TODO(), addr, "external", selfCheckExternalDomain); err != nil {
+		return false, status, err
+	}
+	return true, status, nil
+}
 
-	v.OnConfigChange(func(in fsnotify.Event) {
-		mu.Lock()
-		defer mu.Unlock()
-		if err := v.UnmarshalKey("listener", &lcChanged); err != nil {
-			mainLog.Load().Error().Msgf("failed to unmarshal listener config: %v", err)
-			return
-		}
-		if err := v.UnmarshalKey("upstream", &ucChanged); err != nil {
-			mainLog.Load().Error().Msgf("failed to unmarshal upstream config: %v", err)
-			return
-		}
-	})
-	v.WatchConfig()
+// selfCheckResolveDomain performs DNS test query against ctrld listener.
+func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain string) error {
+	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
+	bo.LogLongerThan = 500 * time.Millisecond
+	maxAttempts := 20
+	c := new(dns.Client)
+
 	var (
-		lastAnswer     *dns.Msg
-		lastErr        error
-		internalTested bool
+		lastAnswer *dns.Msg
+		lastErr    error
 	)
-	for i := 0; i < maxAttempts; i++ {
-		mu.Lock()
-		if lcChanged != nil {
-			cfg.Listener = lcChanged
-		}
-		if ucChanged != nil {
-			cfg.Upstream = ucChanged
-		}
-		mu.Unlock()
-		lc := cfg.FirstListener()
-		domain = cfg.FirstUpstream().VerifyDomain()
-		if !internalTested {
-			domain = selfCheckInternalTestDomain
-		}
-		if domain == "" {
-			continue
-		}
 
+	for i := 0; i < maxAttempts; i++ {
+		if domain == "" {
+			return errors.New("empty test domain")
+		}
 		m := new(dns.Msg)
 		m.SetQuestion(domain+".", dns.TypeA)
 		m.RecursionDesired = true
-		r, _, exErr := exchangeContextWithTimeout(c, time.Second, m, net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port)))
+		r, _, exErr := exchangeContextWithTimeout(c, time.Second, m, addr)
 		if r != nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
-			internalTested = domain == selfCheckInternalTestDomain
-			if internalTested {
-				mainLog.Load().Debug().Msgf("internal self-check against %q succeeded", domain)
-				continue // internal domain test ok, continue with external test.
-			} else {
-				mainLog.Load().Debug().Msgf("external self-check against %q succeeded", domain)
-			}
-			return true, status, nil
+			mainLog.Load().Debug().Msgf("%s self-check against %q succeeded", scope, domain)
+			return nil
 		}
 		// Return early if this is a connection refused.
 		if errConnectionRefused(exErr) {
-			return false, status, exErr
+			return exErr
 		}
 		lastAnswer = r
 		lastErr = exErr
@@ -1741,8 +1713,6 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 			mainLog.Load().Err(err).Msgf("failed to connect to upstream.%s, endpoint: %s", name, uc.Endpoint)
 		}
 	}
-	lc := cfg.FirstListener()
-	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
 	marker := strings.Repeat("=", 32)
 	mainLog.Load().Debug().Msg(marker)
 	mainLog.Load().Debug().Msgf("listener address       : %s", addr)
@@ -1753,9 +1723,8 @@ func selfCheckStatus(s service.Service) (bool, service.Status, error) {
 		for _, s := range strings.Split(lastAnswer.String(), "\n") {
 			mainLog.Load().Debug().Msgf("%s", s)
 		}
-		return false, status, errSelfCheckNoAnswer
 	}
-	return false, status, lastErr
+	return errSelfCheckNoAnswer
 }
 
 func userHomeDir() (string, error) {
@@ -2293,6 +2262,10 @@ func removeProvTokenFromArgs(sc *service.Config) {
 
 // newSocketControlClient returns new control client after control server was started.
 func newSocketControlClient(s service.Service, dir string) *controlClient {
+	// Return early if service is not running.
+	if status, err := s.Status(); err != nil || status != service.StatusRunning {
+		return nil
+	}
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 10 * time.Second
 	ctx := context.Background()
@@ -2302,28 +2275,21 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 	defer timeout.Stop()
 
 	// The socket control server may not start yet, so attempt to ping
-	// it until we got a response. For each iteration, check ctrld status
-	// to make sure ctrld is still running.
+	// it until we got a response.
 	for {
-		curStatus, err := s.Status()
-		if err != nil {
-			return nil
-		}
-		if curStatus != service.StatusRunning {
-			return nil
-		}
-		if _, err := cc.post("/", nil); err == nil {
+		_, err := cc.post(startedPath, nil)
+		if err == nil {
 			// Server was started, stop pinging.
 			break
 		}
 		// The socket control server is not ready yet, backoff for waiting it to be ready.
 		bo.BackOff(ctx, err)
+
 		select {
 		case <-timeout.C:
 			return nil
 		default:
 		}
-		continue
 	}
 
 	return cc
@@ -2496,11 +2462,6 @@ func powershell(cmd string) ([]byte, error) {
 // windowsHasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.
 func windowsHasLocalDnsServerRunning() bool {
 	if runtime.GOOS == "windows" {
-		out, _ := powershell("Get-WindowsFeature -Name DNS")
-		if !bytes.Contains(bytes.ToLower(out), []byte("installed")) {
-			return false
-		}
-
 		_, err := powershell("Get-Process -Name DNS")
 		return err == nil
 	}
@@ -2534,4 +2495,80 @@ func runInCdMode() bool {
 		}
 	}
 	return false
+}
+
+// goArm returns the GOARM value for the binary.
+func goArm() string {
+	if runtime.GOARCH != "arm" {
+		return ""
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range bi.Settings {
+			if setting.Key == "GOARM" {
+				return setting.Value
+			}
+		}
+	}
+	// Use ARM v5 as a fallback, since it works on all others.
+	return "5"
+}
+
+// upgradeUrl returns the url for downloading new ctrld binary.
+func upgradeUrl(baseUrl string) string {
+	dlPath := fmt.Sprintf("%s-%s/ctrld", runtime.GOOS, runtime.GOARCH)
+	if armVersion := goArm(); armVersion != "" {
+		dlPath = fmt.Sprintf("%s-%sv%s/ctrld", runtime.GOOS, runtime.GOARCH, armVersion)
+	}
+	dlUrl := fmt.Sprintf("%s/%s", baseUrl, dlPath)
+	if runtime.GOOS == "windows" {
+		dlUrl += ".exe"
+	}
+	return dlUrl
+}
+
+// runningIface returns the value of the iface variable used by ctrld process which is running.
+func runningIface(s service.Service) string {
+	if sockDir, err := socketDir(); err == nil {
+		if cc := newSocketControlClient(s, sockDir); cc != nil {
+			resp, err := cc.post(ifacePath, nil)
+			if err != nil {
+				return ""
+			}
+			defer resp.Body.Close()
+			if buf, _ := io.ReadAll(resp.Body); len(buf) > 0 {
+				return string(buf)
+			}
+		}
+	}
+	return ""
+}
+
+// resetDnsNoLog performs resetting DNS with logging disable.
+func resetDnsNoLog(p *prog) {
+	lvl := zerolog.GlobalLevel()
+	zerolog.SetGlobalLevel(zerolog.Disabled)
+	p.resetDNS()
+	zerolog.SetGlobalLevel(lvl)
+}
+
+// resetDnsTask returns a task which perform reset DNS operation.
+func resetDnsTask(p *prog, s service.Service) task {
+	status, err := s.Status()
+	isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
+	isCtrldRunning := status == service.StatusRunning
+	return task{func() error {
+		// Always reset DNS first, ensuring DNS setting is in a good state.
+		// resetDNS must use the "iface" value of current running ctrld
+		// process to reset what setDNS has done properly.
+		oldIface := iface
+		iface = "auto"
+		if isCtrldRunning {
+			iface = runningIface(s)
+		}
+		if isCtrldInstalled {
+			resetDnsNoLog(p)
+		}
+		iface = oldIface
+		return nil
+	}, false}
 }

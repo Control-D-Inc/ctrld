@@ -35,6 +35,7 @@ var (
 	nextdns           string
 	cdUpstreamProto   string
 	deactivationPin   int64
+	skipSelfChecks    bool
 
 	mainLog       atomic.Pointer[zerolog.Logger]
 	consoleWriter zerolog.ConsoleWriter

@@ -69,6 +69,8 @@ type prog struct {
 	reloadDoneCh chan struct{}
 	logConn      net.Conn
 	cs           *controlServer
+	csSetDnsDone chan struct{}
+	csSetDnsOk   bool
 
 	cfg                  *ctrld.Config
 	localUpstreams       []string
@@ -194,15 +196,21 @@ func (p *prog) runWait() {
 }
 
 func (p *prog) preRun() {
-	if !service.Interactive() {
-		p.setDNS()
-	}
 	if runtime.GOOS == "darwin" {
 		p.onStopped = append(p.onStopped, func() {
 			if !service.Interactive() {
 				p.resetDNS()
 			}
 		})
+	}
+}
+
+func (p *prog) postRun() {
+	if !service.Interactive() {
+		p.resetDNS()
+		ns := ctrld.InitializeOsResolver()
+		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
+		p.setDNS()
 	}
 }
 
@@ -249,6 +257,14 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	numListeners := len(p.cfg.Listener)
 	if !reload {
 		p.started = make(chan struct{}, numListeners)
+		if p.cs != nil {
+			p.csSetDnsDone = make(chan struct{}, 1)
+			p.registerControlServerHandler()
+			if err := p.cs.start(); err != nil {
+				mainLog.Load().Warn().Err(err).Msg("could not start control server")
+			}
+			mainLog.Load().Debug().Msgf("control server started: %s", p.cs.addr)
+		}
 	}
 	p.onStartedDone = make(chan struct{})
 	p.loop = make(map[string]bool)
@@ -381,12 +397,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		if p.logConn != nil {
 			_ = p.logConn.Close()
 		}
-		if p.cs != nil {
-			p.registerControlServerHandler()
-			if err := p.cs.start(); err != nil {
-				mainLog.Load().Warn().Err(err).Msg("could not start control server")
-			}
-		}
+		p.postRun()
 	}
 	wg.Wait()
 }
@@ -430,17 +441,25 @@ func (p *prog) deAllocateIP() error {
 }
 
 func (p *prog) setDNS() {
+	setDnsOK := false
+	defer func() {
+		p.csSetDnsOk = setDnsOK
+		p.csSetDnsDone <- struct{}{}
+		close(p.csSetDnsDone)
+	}()
+
 	if cfg.Listener == nil {
 		return
 	}
 	if iface == "" {
 		return
 	}
+	runningIface := iface
 	// allIfaces tracks whether we should set DNS for all physical interfaces.
 	allIfaces := false
-	if iface == "auto" {
-		iface = defaultIfaceName()
-		// If iface is "auto", it means user does not specify "--iface" flag.
+	if runningIface == "auto" {
+		runningIface = defaultIfaceName()
+		// If runningIface is "auto", it means user does not specify "--iface" flag.
 		// In this case, ctrld has to set DNS for all physical interfaces, so
 		// thing will still work when user switch from one to the other.
 		allIfaces = requiredMultiNICsConfig()
@@ -449,8 +468,8 @@ func (p *prog) setDNS() {
 	if lc == nil {
 		return
 	}
-	logger := mainLog.Load().With().Str("iface", iface).Logger()
-	netIface, err := netInterface(iface)
+	logger := mainLog.Load().With().Str("iface", runningIface).Logger()
+	netIface, err := netInterface(runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
@@ -484,6 +503,7 @@ func (p *prog) setDNS() {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return
 	}
+	setDnsOK = true
 	logger.Debug().Msg("setting DNS successfully")
 	if shouldWatchResolvconf() {
 		servers := make([]netip.Addr, len(nameservers))
@@ -503,14 +523,15 @@ func (p *prog) resetDNS() {
 	if iface == "" {
 		return
 	}
+	runningIface := iface
 	allIfaces := false
-	if iface == "auto" {
-		iface = defaultIfaceName()
+	if runningIface == "auto" {
+		runningIface = defaultIfaceName()
 		// See corresponding comments in (*prog).setDNS function.
 		allIfaces = requiredMultiNICsConfig()
 	}
-	logger := mainLog.Load().With().Str("iface", iface).Logger()
-	netIface, err := netInterface(iface)
+	logger := mainLog.Load().With().Str("iface", runningIface).Logger()
+	netIface, err := netInterface(runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return

@@ -105,6 +105,10 @@ func (p *prog) checkDnsLoop() {
 	for uid := range p.loop {
 		msg := loopTestMsg(uid)
 		uc := upstream[uid]
+		// Skipping upstream which is being marked as down.
+		if uc == nil {
+			continue
+		}
 		resolver, err := ctrld.NewResolver(uc)
 		if err != nil {
 			mainLog.Load().Warn().Err(err).Msgf("could not perform loop check for upstream: %q, endpoint: %q", uc.Name, uc.Endpoint)

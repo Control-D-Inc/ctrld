@@ -41,17 +41,12 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		// Configuring the Dns server to forward queries to ctrld instead.
 		if windowsHasLocalDnsServerRunning() {
 			file := absHomeDir(forwardersFilename)
-			if data, _ := os.ReadFile(file); len(data) > 0 {
-				if err := removeDnsServerForwarders(strings.Split(string(data), ",")); err != nil {
-					mainLog.Load().Error().Err(err).Msg("could not remove current forwarders settings")
-				} else {
-					mainLog.Load().Debug().Msg("removed current forwarders settings.")
-				}
-			}
+			oldForwardersContent, _ := os.ReadFile(file)
 			if err := os.WriteFile(file, []byte(strings.Join(nameservers, ",")), 0600); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("could not save forwarders settings")
 			}
-			if err := addDnsServerForwarders(nameservers); err != nil {
+			oldForwarders := strings.Split(string(oldForwardersContent), ",")
+			if err := addDnsServerForwarders(nameservers, oldForwarders); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("could not set forwarders settings")
 			}
 		}
@@ -213,13 +208,31 @@ func currentStaticDNS(iface *net.Interface) ([]string, error) {
 	return ns, nil
 }
 
-// addDnsServerForwarders adds given nameservers to DNS server forwarders list.
-func addDnsServerForwarders(nameservers []string) error {
-	for _, ns := range nameservers {
-		cmd := fmt.Sprintf("Add-DnsServerForwarder -IPAddress %s", ns)
-		if out, err := powershell(cmd); err != nil {
-			return fmt.Errorf("%w: %s", err, string(out))
+// addDnsServerForwarders adds given nameservers to DNS server forwarders list,
+// and also removing old forwarders if provided.
+func addDnsServerForwarders(nameservers, old []string) error {
+	newForwardersMap := make(map[string]struct{})
+	newForwarders := make([]string, len(nameservers))
+	for i := range nameservers {
+		newForwardersMap[nameservers[i]] = struct{}{}
+		newForwarders[i] = fmt.Sprintf("%q", nameservers[i])
+	}
+	oldForwarders := old[:0]
+	for _, fwd := range old {
+		if _, ok := newForwardersMap[fwd]; !ok {
+			oldForwarders = append(oldForwarders, fwd)
 		}
+	}
+	// NOTE: It is important to add new forwarder before removing old one.
+	//       Testing on Windows Server 2022 shows that removing forwarder1
+	//       then adding forwarder2 sometimes ends up adding both of them
+	//       to the forwarders list.
+	cmd := fmt.Sprintf("Add-DnsServerForwarder -IPAddress %s", strings.Join(newForwarders, ","))
+	if len(oldForwarders) > 0 {
+		cmd = fmt.Sprintf("%s ; Remove-DnsServerForwarder -IPAddress %s -Force", cmd, strings.Join(oldForwarders, ","))
+	}
+	if out, err := powershell(cmd); err != nil {
+		return fmt.Errorf("%w: %s", err, string(out))
 	}
 	return nil
 }

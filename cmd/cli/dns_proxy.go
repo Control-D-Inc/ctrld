@@ -210,12 +210,9 @@ func (p *prog) serveDNS(listenerNum string) error {
 			addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 			s, errCh := runDNSServer(addr, proto, handler)
 			defer s.Shutdown()
-			select {
-			case err := <-errCh:
-				return err
-			case <-time.After(5 * time.Second):
-				p.started <- struct{}{}
-			}
+
+			p.started <- struct{}{}
+
 			select {
 			case <-p.stopCh:
 			case <-ctx.Done():
@@ -752,20 +749,19 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 		Handler: handler,
 	}
 
-	waitLock := sync.Mutex{}
-	waitLock.Lock()
-	s.NotifyStartedFunc = waitLock.Unlock
+	startedCh := make(chan struct{})
+	s.NotifyStartedFunc = func() { sync.OnceFunc(func() { close(startedCh) })() }
 
 	errCh := make(chan error)
 	go func() {
 		defer close(errCh)
 		if err := s.ListenAndServe(); err != nil {
-			waitLock.Unlock()
+			s.NotifyStartedFunc()
 			mainLog.Load().Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
 			errCh <- err
 		}
 	}()
-	waitLock.Lock()
+	<-startedCh
 	return s, errCh
 }
 

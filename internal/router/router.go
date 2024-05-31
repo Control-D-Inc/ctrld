@@ -98,6 +98,11 @@ func IsOldOpenwrt() bool {
 	return cmd == ""
 }
 
+// WaitProcessExited reports whether the "ctrld stop" command have to wait until ctrld process exited.
+func WaitProcessExited() bool {
+	return Name() == openwrt.Name
+}
+
 var routerPlatform atomic.Pointer[router]
 
 type router struct {

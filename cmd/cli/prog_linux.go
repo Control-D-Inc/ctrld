@@ -1,7 +1,12 @@
 package cli
 
 import (
+	"bufio"
+	"bytes"
+	"io"
 	"os"
+	"os/exec"
+	"strings"
 
 	"github.com/kardianos/service"
 
@@ -24,12 +29,34 @@ func setDependencies(svc *service.Config) {
 		"After=network-online.target",
 		"Wants=NetworkManager-wait-online.service",
 		"After=NetworkManager-wait-online.service",
-		"Wants=systemd-networkd-wait-online.service",
 		"Wants=nss-lookup.target",
 		"After=nss-lookup.target",
+	}
+	if out, _ := exec.Command("networkctl", "--no-pager").CombinedOutput(); len(out) > 0 {
+		if wantsSystemDNetworkdWaitOnline(bytes.NewReader(out)) {
+			svc.Dependencies = append(svc.Dependencies, "Wants=systemd-networkd-wait-online.service")
+		}
 	}
 }
 
 func setWorkingDirectory(svc *service.Config, dir string) {
 	svc.WorkingDirectory = dir
+}
+
+// wantsSystemDNetworkdWaitOnline reports whether "systemd-networkd-wait-online" service
+// is required to be added to ctrld dependencies services.
+// The input reader r is the output of "networkctl --no-pager" command.
+func wantsSystemDNetworkdWaitOnline(r io.Reader) bool {
+	scanner := bufio.NewScanner(r)
+	// Skip header
+	scanner.Scan()
+	configured := false
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) > 0 && fields[len(fields)-1] == "configured" {
+			configured = true
+			break
+		}
+	}
+	return configured
 }
