@@ -122,8 +122,8 @@ func (m *mdns) probeLoop(conns []*net.UDPConn, remoteAddr net.Addr, quitCh chan 
 	bo := backoff.NewBackoff("mdns probe", func(format string, args ...any) {}, time.Second*30)
 	for {
 		err := m.probe(conns, remoteAddr)
-		if isErrNetUnreachableOrInvalid(err) {
-			ctrld.ProxyLogger.Load().Warn().Msgf("stop probing %q: network unreachable or invalid", remoteAddr)
+		if shouldStopProbing(err) {
+			ctrld.ProxyLogger.Load().Warn().Msgf("stop probing %q: %v", remoteAddr, err)
 			break
 		}
 		if err != nil {
@@ -273,10 +273,14 @@ func multicastInterfaces() ([]net.Interface, error) {
 	return interfaces, nil
 }
 
-func isErrNetUnreachableOrInvalid(err error) bool {
+// shouldStopProbing reports whether ctrld should stop probing mdns.
+func shouldStopProbing(err error) bool {
 	var se *os.SyscallError
 	if errors.As(err, &se) {
-		return se.Err == syscall.ENETUNREACH || se.Err == syscall.EINVAL
+		switch se.Err {
+		case syscall.ENETUNREACH, syscall.EINVAL, syscall.EPERM:
+			return true
+		}
 	}
 	return false
 }
