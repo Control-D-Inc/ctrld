@@ -165,7 +165,7 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 		}
 
 		var ip, name string
-		rrs := make([]dns.RR, 0, len(msg.Answer)+len(msg.Extra))
+		var rrs []dns.RR
 		rrs = append(rrs, msg.Answer...)
 		rrs = append(rrs, msg.Extra...)
 		for _, rr := range rrs {
