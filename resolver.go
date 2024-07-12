@@ -30,18 +30,18 @@ const (
 	ResolverTypePrivate = "private"
 )
 
-const bootstrapDNS = "76.76.2.22"
+const (
+	controldBootstrapDns = "76.76.2.22"
+	controldPublicDns    = "76.76.2.0"
+)
 
 // or is the Resolver used for ResolverTypeOS.
 var or = &osResolver{nameservers: defaultNameservers()}
 
-// defaultNameservers returns nameservers used by the OS.
-// If no nameservers can be found, ctrld bootstrap nameserver will be used.
+// defaultNameservers returns OS nameservers plus ControlD public DNS.
 func defaultNameservers() []string {
 	ns := nameservers()
-	if len(ns) == 0 {
-		ns = append(ns, net.JoinHostPort(bootstrapDNS, "53"))
-	}
+	ns = append(ns, net.JoinHostPort(controldPublicDns, "53"))
 	return ns
 }
 
@@ -120,15 +120,21 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		}(server)
 	}
 
+	var nonSuccessAnswer *dns.Msg
 	errs := make([]error, 0, numServers)
 	for res := range ch {
-		if res.err == nil {
-			cancel()
-			return res.answer, res.err
+		if res.answer != nil {
+			if res.answer.Rcode == dns.RcodeSuccess {
+				cancel()
+				return res.answer, nil
+			}
+			nonSuccessAnswer = res.answer
 		}
 		errs = append(errs, res.err)
 	}
-
+	if nonSuccessAnswer != nil {
+		return nonSuccessAnswer, nil
+	}
 	return nil, errors.Join(errs...)
 }
 
@@ -138,7 +144,7 @@ type legacyResolver struct {
 
 func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	// See comment in (*dotResolver).resolve method.
-	dialer := newDialer(net.JoinHostPort(bootstrapDNS, "53"))
+	dialer := newDialer(net.JoinHostPort(controldBootstrapDns, "53"))
 	dnsTyp := uint16(0)
 	if msg != nil && len(msg.Question) > 0 {
 		dnsTyp = msg.Question[0].Qtype
@@ -176,7 +182,7 @@ func LookupIP(domain string) []string {
 func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) {
 	resolver := &osResolver{nameservers: nameservers()}
 	if withBootstrapDNS {
-		resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
+		resolver.nameservers = append([]string{net.JoinHostPort(controldBootstrapDns, "53")}, resolver.nameservers...)
 	}
 	ProxyLogger.Load().Debug().Msgf("resolving %q using bootstrap DNS %q", domain, resolver.nameservers)
 	timeoutMs := 2000
@@ -252,7 +258,7 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 //   - Input servers.
 func NewBootstrapResolver(servers ...string) Resolver {
 	resolver := &osResolver{nameservers: nameservers()}
-	resolver.nameservers = append([]string{net.JoinHostPort(bootstrapDNS, "53")}, resolver.nameservers...)
+	resolver.nameservers = append([]string{net.JoinHostPort(controldPublicDns, "53")}, resolver.nameservers...)
 	for _, ns := range servers {
 		resolver.nameservers = append([]string{net.JoinHostPort(ns, "53")}, resolver.nameservers...)
 	}

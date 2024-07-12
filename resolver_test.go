@@ -2,6 +2,8 @@ package ctrld
 
 import (
 	"context"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +30,57 @@ func Test_osResolver_Resolve(t *testing.T) {
 	}
 }
 
+func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
+	ns := make([]string, 0, 2)
+	servers := make([]*dns.Server, 0, 2)
+	successHandler := dns.HandlerFunc(func(w dns.ResponseWriter, msg *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(msg, dns.RcodeSuccess)
+		w.WriteMsg(m)
+	})
+	nonSuccessHandlerWithRcode := func(rcode int) dns.HandlerFunc {
+		return dns.HandlerFunc(func(w dns.ResponseWriter, msg *dns.Msg) {
+			m := new(dns.Msg)
+			m.SetRcode(msg, rcode)
+			w.WriteMsg(m)
+		})
+	}
+
+	handlers := []dns.Handler{
+		nonSuccessHandlerWithRcode(dns.RcodeRefused),
+		nonSuccessHandlerWithRcode(dns.RcodeNameError),
+		successHandler,
+	}
+	for i := range handlers {
+		pc, err := net.ListenPacket("udp", ":0")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		s, addr, err := runLocalPacketConnTestServer(t, pc, handlers[i])
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		ns = append(ns, addr)
+		servers = append(servers, s)
+	}
+	defer func() {
+		for _, server := range servers {
+			server.Shutdown()
+		}
+	}()
+	resolver := &osResolver{nameservers: ns}
+	msg := new(dns.Msg)
+	msg.SetQuestion(".", dns.TypeNS)
+	answer, err := resolver.Resolve(context.Background(), msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer.Rcode != dns.RcodeSuccess {
+		t.Errorf("unexpected return code: %s", dns.RcodeToString[answer.Rcode])
+	}
+}
+
 func Test_upstreamTypeFromEndpoint(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -50,4 +103,34 @@ func Test_upstreamTypeFromEndpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+func runLocalPacketConnTestServer(t *testing.T, pc net.PacketConn, handler dns.Handler, opts ...func(*dns.Server)) (*dns.Server, string, error) {
+	t.Helper()
+
+	server := &dns.Server{
+		PacketConn:   pc,
+		ReadTimeout:  time.Hour,
+		WriteTimeout: time.Hour,
+		Handler:      handler,
+	}
+
+	waitLock := sync.Mutex{}
+	waitLock.Lock()
+	server.NotifyStartedFunc = waitLock.Unlock
+
+	for _, opt := range opts {
+		opt(server)
+	}
+
+	addr, closer := pc.LocalAddr().String(), pc
+	go func() {
+		if err := server.ActivateAndServe(); err != nil {
+			t.Error(err)
+		}
+		closer.Close()
+	}()
+
+	waitLock.Lock()
+	return server, addr, nil
 }
