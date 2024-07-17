@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 
 	"github.com/kardianos/service"
@@ -164,6 +165,16 @@ func HomeDir() (string, error) {
 			return "", err
 		}
 		return filepath.Dir(exe), nil
+	case edgeos.Name:
+		exe, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		// Using binary directory as home dir if it is located in /config.
+		// Otherwise, fallback to old behavior for compatibility.
+		if strings.HasPrefix(exe, "/config/") {
+			return filepath.Dir(exe), nil
+		}
 	}
 	return "", nil
 }
