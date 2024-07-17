@@ -193,38 +193,7 @@ func initCLI() {
 			}
 
 			if cdUID != "" {
-				rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
-				if err != nil {
-					mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid: %s", cdUID)
-				}
-				// validateCdRemoteConfig clobbers v, saving it here to restore later.
-				oldV := v
-				if err := validateCdRemoteConfig(rc, &ctrld.Config{}); err != nil {
-					if errors.As(err, &viper.ConfigParseError{}) {
-						if configStr, _ := base64.StdEncoding.DecodeString(rc.Ctrld.CustomConfig); len(configStr) > 0 {
-							tmpDir := os.TempDir()
-							tmpConfFile := filepath.Join(tmpDir, "ctrld.toml")
-							errorLogged := false
-							// Write remote config to a temporary file to get details error.
-							if we := os.WriteFile(tmpConfFile, configStr, 0600); we == nil {
-								if de := decoderErrorFromTomlFile(tmpConfFile); de != nil {
-									row, col := de.Position()
-									mainLog.Load().Error().Msgf("failed to parse custom config at line: %d, column: %d, error: %s", row, col, de.Error())
-									errorLogged = true
-								}
-								_ = os.Remove(tmpConfFile)
-							}
-							// If we could not log details error, emit what we have already got.
-							if !errorLogged {
-								mainLog.Load().Error().Msgf("failed to parse custom config: %v", err)
-							}
-						}
-					} else {
-						mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
-					}
-					mainLog.Load().Warn().Msg("disregarding invalid custom config")
-				}
-				v = oldV
+				doValidateCdRemoteConfig(cdUID)
 			} else if uid := cdUIDFromProvToken(); uid != "" {
 				cdUID = uid
 				mainLog.Load().Debug().Msg("using uid from provision token")
@@ -485,7 +454,10 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, args []string) {
 			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg, runInCdMode())}
+			cdUID = curCdUID()
+			cdMode := cdUID != ""
+
+			p := &prog{router: router.New(&cfg, cdMode)}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
@@ -496,6 +468,10 @@ func initCLI() {
 				return
 			}
 			initLogging()
+
+			if cdMode {
+				doValidateCdRemoteConfig(cdUID)
+			}
 
 			iface = runningIface(s)
 			tasks := []task{
@@ -2482,6 +2458,11 @@ func absHomeDir(filename string) string {
 
 // runInCdMode reports whether ctrld service is running in cd mode.
 func runInCdMode() bool {
+	return curCdUID() != ""
+}
+
+// curCdUID returns the current ControlD UID used by running ctrld process.
+func curCdUID() string {
 	if s, _ := newService(&prog{}, svcConfig); s != nil {
 		if dir, _ := socketDir(); dir != "" {
 			cc := newSocketControlClient(s, dir)
@@ -2489,12 +2470,13 @@ func runInCdMode() bool {
 				resp, _ := cc.post(cdPath, nil)
 				if resp != nil {
 					defer resp.Body.Close()
-					return resp.StatusCode == http.StatusOK
+					buf, _ := io.ReadAll(resp.Body)
+					return string(buf)
 				}
 			}
 		}
 	}
-	return false
+	return ""
 }
 
 // goArm returns the GOARM value for the binary.
@@ -2571,4 +2553,40 @@ func resetDnsTask(p *prog, s service.Service) task {
 		iface = oldIface
 		return nil
 	}, false}
+}
+
+// doValidateCdRemoteConfig fetches and validates custom config for cdUID.
+func doValidateCdRemoteConfig(cdUID string) {
+	rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+	if err != nil {
+		mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid: %s", cdUID)
+	}
+	// validateCdRemoteConfig clobbers v, saving it here to restore later.
+	oldV := v
+	if err := validateCdRemoteConfig(rc, &ctrld.Config{}); err != nil {
+		if errors.As(err, &viper.ConfigParseError{}) {
+			if configStr, _ := base64.StdEncoding.DecodeString(rc.Ctrld.CustomConfig); len(configStr) > 0 {
+				tmpDir := os.TempDir()
+				tmpConfFile := filepath.Join(tmpDir, "ctrld.toml")
+				errorLogged := false
+				// Write remote config to a temporary file to get details error.
+				if we := os.WriteFile(tmpConfFile, configStr, 0600); we == nil {
+					if de := decoderErrorFromTomlFile(tmpConfFile); de != nil {
+						row, col := de.Position()
+						mainLog.Load().Error().Msgf("failed to parse custom config at line: %d, column: %d, error: %s", row, col, de.Error())
+						errorLogged = true
+					}
+					_ = os.Remove(tmpConfFile)
+				}
+				// If we could not log details error, emit what we have already got.
+				if !errorLogged {
+					mainLog.Load().Error().Msgf("failed to parse custom config: %v", err)
+				}
+			}
+		} else {
+			mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
+		}
+		mainLog.Load().Warn().Msg("disregarding invalid custom config")
+	}
+	v = oldV
 }

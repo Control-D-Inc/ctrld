@@ -178,6 +178,7 @@ func (p *prog) registerControlServerHandler() {
 	p.cs.register(cdPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if cdUID != "" {
 			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(cdUID))
 			return
 		}
 		w.WriteHeader(http.StatusBadRequest)
