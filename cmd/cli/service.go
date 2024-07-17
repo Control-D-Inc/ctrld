@@ -28,6 +28,9 @@ func newService(i service.Interface, c *service.Config) (service.Service, error)
 		return &sysV{s}, nil
 	case s.Platform() == "linux-systemd":
 		return &systemd{s}, nil
+	case s.Platform() == "darwin-launchd":
+		return &launchd{s}, nil
+
 	}
 	return s, nil
 }
@@ -113,7 +116,7 @@ func (s *procd) Status() (service.Status, error) {
 	return service.StatusRunning, nil
 }
 
-// procd wraps a service.Service, and provide status command to
+// systemd wraps a service.Service, and provide status command to
 // report the status correctly.
 type systemd struct {
 	service.Service
@@ -125,6 +128,21 @@ func (s *systemd) Status() (service.Status, error) {
 		return service.StatusStopped, nil
 	}
 	return s.Service.Status()
+}
+
+// launchd wraps a service.Service, and provide status command to
+// report the status correctly when not running as root on Darwin.
+//
+// TODO: remove this wrapper once https://github.com/kardianos/service/issues/400 fixed.
+type launchd struct {
+	service.Service
+}
+
+func (l *launchd) Status() (service.Status, error) {
+	if os.Geteuid() != 0 {
+		return service.StatusUnknown, errors.New("permission denied")
+	}
+	return l.Service.Status()
 }
 
 type task struct {
