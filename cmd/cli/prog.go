@@ -12,11 +12,13 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/kardianos/service"
 	"github.com/spf13/viper"
@@ -38,6 +40,7 @@ const (
 	upstreamPrefix             = "upstream."
 	upstreamOS                 = upstreamPrefix + "os"
 	upstreamPrivate            = upstreamPrefix + "private"
+	dnsWatchdogInterval        = time.Minute
 )
 
 // ControlSocketName returns name for control unix socket.
@@ -62,15 +65,16 @@ var svcConfig = &service.Config{
 var useSystemdResolved = false
 
 type prog struct {
-	mu           sync.Mutex
-	waitCh       chan struct{}
-	stopCh       chan struct{}
-	reloadCh     chan struct{} // For Windows.
-	reloadDoneCh chan struct{}
-	logConn      net.Conn
-	cs           *controlServer
-	csSetDnsDone chan struct{}
-	csSetDnsOk   bool
+	mu              sync.Mutex
+	waitCh          chan struct{}
+	stopCh          chan struct{}
+	reloadCh        chan struct{} // For Windows.
+	reloadDoneCh    chan struct{}
+	logConn         net.Conn
+	cs              *controlServer
+	csSetDnsDone    chan struct{}
+	csSetDnsOk      bool
+	dnsWatchDogOnce sync.Once
 
 	cfg                  *ctrld.Config
 	localUpstreams       []string
@@ -517,6 +521,45 @@ func (p *prog) setDNS() {
 			return setDnsIgnoreUnusableInterface(i, nameservers)
 		})
 	}
+	go p.dnsWatchdog(netIface, nameservers, allIfaces)
+}
+
+// dnsWatchdog watches for DNS changes on Darwin and Windows then re-applying ctrld's settings.
+// This is only works when deactivation pin set.
+func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces bool) {
+	switch runtime.GOOS {
+	case "darwin", "windows":
+	default:
+		return
+	}
+	if deactivationPinNotSet() {
+		return
+	}
+	p.dnsWatchDogOnce.Do(func() {
+		mainLog.Load().Debug().Msg("start DNS settings watchdog")
+		ns := nameservers
+		slices.Sort(ns)
+		ticker := time.NewTicker(dnsWatchdogInterval)
+		logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
+		for range ticker.C {
+			if dnsChanged(iface, ns) {
+				logger.Debug().Msg("DNS settings were changed, re-applying settings")
+				if err := setDNS(iface, ns); err != nil {
+					mainLog.Load().Error().Err(err).Str("iface", iface.Name).Msgf("could not re-apply DNS settings")
+				}
+			}
+			if allIfaces {
+				withEachPhysicalInterfaces(iface.Name, "re-applying DNS", func(i *net.Interface) error {
+					if dnsChanged(i, ns) {
+						if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
+							mainLog.Load().Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
+						}
+					}
+					return nil
+				})
+			}
+		}
+	})
 }
 
 func (p *prog) resetDNS() {
@@ -805,4 +848,12 @@ func savedStaticNameservers(iface *net.Interface) []string {
 		return strings.Split(string(data), ",")
 	}
 	return nil
+}
+
+// dnsChanged reports whether DNS settings for given interface was changed.
+// The caller must sort the nameservers before calling this function.
+func dnsChanged(iface *net.Interface, nameservers []string) bool {
+	curNameservers := currentDNS(iface)
+	slices.Sort(curNameservers)
+	return !slices.Equal(curNameservers, nameservers)
 }
