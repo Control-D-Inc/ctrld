@@ -89,6 +89,11 @@ type prog struct {
 	ptrLoopGuard         *loopGuard
 	lanLoopGuard         *loopGuard
 
+	selfUninstallMu       sync.Mutex
+	refusedQueryCount     int
+	canSelfUninstall      bool
+	checkingSelfUninstall bool
+
 	loopMu sync.Mutex
 	loop   map[string]bool
 
@@ -221,9 +226,11 @@ func (p *prog) postRun() {
 func (p *prog) setupUpstream(cfg *ctrld.Config) {
 	localUpstreams := make([]string, 0, len(cfg.Upstream))
 	ptrNameservers := make([]string, 0, len(cfg.Upstream))
+	isControlDUpstream := false
 	for n := range cfg.Upstream {
 		uc := cfg.Upstream[n]
 		uc.Init()
+		isControlDUpstream = isControlDUpstream || uc.IsControlD()
 		if uc.BootstrapIP == "" {
 			uc.SetupBootstrapIP()
 			mainLog.Load().Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
@@ -239,6 +246,10 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 		if uc.IsDiscoverable() {
 			ptrNameservers = append(ptrNameservers, uc.Endpoint)
 		}
+	}
+	// Self-uninstallation is ok If there is only 1 ControlD upstream, and no remote config.
+	if len(cfg.Upstream) == 1 && isControlDUpstream {
+		p.canSelfUninstall = true
 	}
 	p.localUpstreams = localUpstreams
 	p.ptrNameservers = ptrNameservers

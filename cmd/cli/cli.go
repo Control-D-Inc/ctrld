@@ -1104,36 +1104,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				return
 			}
 
-			uninstallIfInvalidCdUID := func() {
-				cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
-				if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
-					s, err := newService(&prog{}, svcConfig)
-					if err != nil {
-						cdLogger.Warn().Err(err).Msg("failed to create new service")
-						return
-					}
-					if netIface, _ := netInterface(iface); netIface != nil {
-						if err := restoreNetworkManager(); err != nil {
-							cdLogger.Error().Err(err).Msg("could not restore NetworkManager")
-							return
-						}
-						cdLogger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS for interface")
-						if err := resetDNS(netIface); err != nil {
-							cdLogger.Warn().Err(err).Msg("something went wrong while restoring DNS")
-						} else {
-							cdLogger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS successfully")
-						}
-					}
-
-					tasks := []task{{s.Uninstall, true}}
-					if doTasks(tasks) {
-						cdLogger.Info().Msg("uninstalled service")
-					}
-					cdLogger.Fatal().Err(uer).Msg("failed to fetch resolver config")
-					return
-				}
-			}
-			uninstallIfInvalidCdUID()
+			cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
+			_ = uninstallIfInvalidCdUID(err, cdLogger)
+			cdLogger.Fatal().Err(err).Msg("failed to fetch resolver config")
 		}
 	}
 
@@ -2589,4 +2562,35 @@ func doValidateCdRemoteConfig(cdUID string) {
 		mainLog.Load().Warn().Msg("disregarding invalid custom config")
 	}
 	v = oldV
+}
+
+// uninstallIfInvalidCdUID performs self-uninstallation if the ControlD device does not exist.
+func uninstallIfInvalidCdUID(err error, logger zerolog.Logger) bool {
+	var uer *controld.UtilityErrorResponse
+	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+		s, err := newService(&prog{}, svcConfig)
+		if err != nil {
+			logger.Warn().Err(err).Msg("failed to create new service")
+			return false
+		}
+		if netIface, _ := netInterface(iface); netIface != nil {
+			if err := restoreNetworkManager(); err != nil {
+				logger.Error().Err(err).Msg("could not restore NetworkManager")
+				return false
+			}
+			logger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS for interface")
+			if err := resetDNS(netIface); err != nil {
+				logger.Warn().Err(err).Msg("something went wrong while restoring DNS")
+			} else {
+				logger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS successfully")
+			}
+		}
+
+		tasks := []task{{s.Uninstall, true}}
+		if doTasks(tasks) {
+			logger.Info().Msg("uninstalled service")
+			return true
+		}
+	}
+	return false
 }

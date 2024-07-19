@@ -316,7 +316,7 @@ func (uc *UpstreamConfig) Init() {
 		}
 	}
 	if uc.IPStack == "" {
-		if uc.isControlD() {
+		if uc.IsControlD() {
 			uc.IPStack = IpStackSplit
 		} else {
 			uc.IPStack = IpStackBoth
@@ -354,7 +354,7 @@ func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
 	}
 	switch uc.Type {
 	case ResolverTypeDOH, ResolverTypeDOH3:
-		if uc.isControlD() || uc.isNextDNS() {
+		if uc.IsControlD() || uc.isNextDNS() {
 			return true
 		}
 	}
@@ -401,7 +401,7 @@ func (uc *UpstreamConfig) UID() string {
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
 	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
-	isControlD := uc.isControlD()
+	isControlD := uc.IsControlD()
 	for {
 		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, withBootstrapDNS)
 		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
@@ -572,7 +572,8 @@ func (uc *UpstreamConfig) ping() error {
 	return nil
 }
 
-func (uc *UpstreamConfig) isControlD() bool {
+// IsControlD reports whether this is a ControlD upstream.
+func (uc *UpstreamConfig) IsControlD() bool {
 	domain := uc.Domain
 	if domain == "" {
 		if u, err := url.Parse(uc.Endpoint); err == nil {

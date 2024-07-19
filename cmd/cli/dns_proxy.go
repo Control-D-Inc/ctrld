@@ -21,6 +21,7 @@ import (
 	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
@@ -32,6 +33,9 @@ const (
 	// https://thekelleys.org.uk/gitweb/?p=dnsmasq.git;a=blob;f=src/dns-protocol.h;h=76ac66a8c28317e9c121a74ab5fd0e20f6237dc8;hb=HEAD#l81
 	// This is also dns.EDNS0LOCALSTART, but define our own constant here for clarification.
 	EDNS0_OPTION_MAC = 0xFDE9
+
+	// selfUninstallMaxQueries is number of REFUSED queries seen before checking for self-uninstallation.
+	selfUninstallMaxQueries = 32
 )
 
 var osUpstreamConfig = &ctrld.UpstreamConfig{
@@ -143,6 +147,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 				failoverRcodes: failoverRcode,
 				ufr:            ur,
 			})
+			go p.doSelfUninstall(pr.answer)
 			answer = pr.answer
 			rtt := time.Since(t)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
@@ -834,6 +839,52 @@ func (p *prog) spoofLoopbackIpInClientInfo(ci *ctrld.ClientInfo) {
 	if ip := p.ciTable.LookupRFC1918IPv4(ci.Mac); ip != "" {
 		ci.IP = ip
 	}
+}
+
+// doSelfUninstall performs self-uninstall if these condition met:
+//
+// - There is only 1 ControlD upstream in-use.
+// - Number of refused queries seen so far equals to selfUninstallMaxQueries.
+// - The cdUID is deleted.
+func (p *prog) doSelfUninstall(answer *dns.Msg) {
+	if !p.canSelfUninstall || answer == nil || answer.Rcode != dns.RcodeRefused {
+		return
+	}
+
+	p.selfUninstallMu.Lock()
+	defer p.selfUninstallMu.Unlock()
+	if p.checkingSelfUninstall {
+		return
+	}
+
+	logger := mainLog.Load().With().Str("mode", "self-uninstall").Logger()
+	if p.refusedQueryCount > selfUninstallMaxQueries {
+		p.checkingSelfUninstall = true
+		_, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
+		if uninstallIfInvalidCdUID(err, logger) {
+			logger.Fatal().Msgf("service was uninstalled because device %q does not exist", cdUID)
+		}
+		if err != nil {
+			logger.Warn().Err(err).Msg("could not fetch resolver config")
+		}
+		// Cool-of period to prevent abusing the API.
+		go p.selfUninstallCoolOfPeriod()
+		return
+	}
+	p.refusedQueryCount++
+}
+
+// selfUninstallCoolOfPeriod waits for 30 minutes before
+// calling API again for checking ControlD device status.
+func (p *prog) selfUninstallCoolOfPeriod() {
+	t := time.NewTimer(time.Minute * 30)
+	defer t.Stop()
+	<-t.C
+	p.selfUninstallMu.Lock()
+	p.checkingSelfUninstall = false
+	p.refusedQueryCount = 0
+	p.selfUninstallMu.Unlock()
 }
 
 // queryFromSelf reports whether the input IP is from device running ctrld.

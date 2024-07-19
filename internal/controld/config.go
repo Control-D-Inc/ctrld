@@ -26,7 +26,7 @@ const (
 	apiDomainDev       = "api.controld.dev"
 	resolverDataURLCom = "https://api.controld.com/utility"
 	resolverDataURLDev = "https://api.controld.dev/utility"
-	InvalidConfigCode  = 40401
+	InvalidConfigCode  = 40402
 )
 
 // ResolverConfig represents Control D resolver data.
