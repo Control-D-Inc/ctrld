@@ -599,11 +599,41 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				os.Exit(deactivationPinInvalidExitCode)
 			}
 			uninstall(p, s)
+			if cleanup {
+				var files []string
+				// Config file.
+				files = append(files, v.ConfigFileUsed())
+				// Log file.
+				files = append(files, cfg.Service.LogPath)
+				// Socket files.
+				if dir, _ := socketDir(); dir != "" {
+					files = append(files, filepath.Join(dir, ctrldControlUnixSock))
+					files = append(files, filepath.Join(dir, ctrldLogUnixSock))
+				}
+				// Binary itself.
+				if bin, _ := os.Executable(); bin != "" {
+					files = append(files, bin)
+				}
+				for _, file := range files {
+					if file == "" {
+						continue
+					}
+					if err := os.Remove(file); err != nil {
+						if os.IsNotExist(err) {
+							continue
+						}
+						mainLog.Load().Warn().Err(err).Msg("failed to remove file")
+					} else {
+						mainLog.Load().Debug().Msgf("file removed: %s", file)
+					}
+				}
+			}
 		},
 	}
 	uninstallCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, use "auto" for the default gateway interface`)
 	uninstallCmd.Flags().Int64VarP(&deactivationPin, "pin", "", defaultDeactivationPin, `Pin code for uninstalling ctrld`)
 	_ = uninstallCmd.Flags().MarkHidden("pin")
+	uninstallCmd.Flags().BoolVarP(&cleanup, "cleanup", "", false, `Removing ctrld binary and config files`)
 
 	listIfacesCmd := &cobra.Command{
 		Use:   "list",
@@ -752,7 +782,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		},
 	}
 	uninstallCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
-	uninstallCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
+	uninstallCmdAlias.Flags().AddFlagSet(uninstallCmd.Flags())
 	rootCmd.AddCommand(uninstallCmdAlias)
 
 	listClientsCmd := &cobra.Command{

@@ -36,6 +36,7 @@ var (
 	cdUpstreamProto   string
 	deactivationPin   int64
 	skipSelfChecks    bool
+	cleanup           bool
 
 	mainLog       atomic.Pointer[zerolog.Logger]
 	consoleWriter zerolog.ConsoleWriter
