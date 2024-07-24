@@ -48,6 +48,7 @@ import (
 
 // selfCheckInternalTestDomain is used for testing ctrld self response to clients.
 const selfCheckInternalTestDomain = "ctrld" + loopTestDomain
+const windowsForwardersFilename = ".forwarders.txt"
 
 var (
 	version = "dev"
@@ -610,8 +611,22 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					files = append(files, filepath.Join(dir, ctrldControlUnixSock))
 					files = append(files, filepath.Join(dir, ctrldLogUnixSock))
 				}
+				// Static DNS settings files.
+				withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+					file := savedStaticDnsSettingsFilePath(i)
+					if _, err := os.Stat(file); err == nil {
+						files = append(files, file)
+					}
+					return nil
+				})
+				// Windows forwarders file.
+				if windowsHasLocalDnsServerRunning() {
+					files = append(files, absHomeDir(windowsForwardersFilename))
+				}
 				// Binary itself.
-				if bin, _ := os.Executable(); bin != "" {
+
+				bin, _ := os.Executable()
+				if bin != "" && supportedSelfDelete {
 					files = append(files, bin)
 				}
 				for _, file := range files {
@@ -625,6 +640,13 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 						mainLog.Load().Warn().Err(err).Msg("failed to remove file")
 					} else {
 						mainLog.Load().Debug().Msgf("file removed: %s", file)
+					}
+				}
+				if err := selfDeleteExe(); err != nil {
+					mainLog.Load().Warn().Err(err).Msg("failed to remove file")
+				} else {
+					if !supportedSelfDelete {
+						mainLog.Load().Debug().Msgf("file removed: %s", bin)
 					}
 				}
 			}

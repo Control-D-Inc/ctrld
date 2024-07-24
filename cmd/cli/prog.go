@@ -797,7 +797,9 @@ func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.
 		}
 		// TODO: investigate whether we should report this error?
 		if err := f(netIface); err == nil {
-			mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
+			if context != "" {
+				mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
+			}
 		} else if !errors.Is(err, errSaveCurrentStaticDNSNotSupported) {
 			mainLog.Load().Err(err).Msgf("%s for interface %q failed", context, i.Name)
 		}
