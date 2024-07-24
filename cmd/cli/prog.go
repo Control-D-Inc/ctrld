@@ -538,14 +538,10 @@ func (p *prog) setDNS() {
 // dnsWatchdog watches for DNS changes on Darwin and Windows then re-applying ctrld's settings.
 // This is only works when deactivation pin set.
 func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces bool) {
-	switch runtime.GOOS {
-	case "darwin", "windows":
-	default:
+	if !requiredMultiNICsConfig() {
 		return
 	}
-	if deactivationPinNotSet() {
-		return
-	}
+
 	p.dnsWatchDogOnce.Do(func() {
 		mainLog.Load().Debug().Msg("start DNS settings watchdog")
 		ns := nameservers
