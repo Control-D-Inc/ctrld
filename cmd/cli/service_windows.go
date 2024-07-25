@@ -1,6 +1,11 @@
 package cli
 
-import "golang.org/x/sys/windows"
+import (
+	"os"
+	"syscall"
+
+	"golang.org/x/sys/windows"
+)
 
 func hasElevatedPrivilege() (bool, error) {
 	var sid *windows.SID
@@ -21,4 +26,56 @@ func hasElevatedPrivilege() (bool, error) {
 	}
 	token := windows.Token(0)
 	return token.IsMember(sid)
+}
+
+func openLogFile(path string, mode int) (*os.File, error) {
+	if len(path) == 0 {
+		return nil, &os.PathError{Path: path, Op: "open", Err: syscall.ERROR_FILE_NOT_FOUND}
+	}
+
+	pathP, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	var access uint32
+	switch mode & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR) {
+	case os.O_RDONLY:
+		access = windows.GENERIC_READ
+	case os.O_WRONLY:
+		access = windows.GENERIC_WRITE
+	case os.O_RDWR:
+		access = windows.GENERIC_READ | windows.GENERIC_WRITE
+	}
+	if mode&os.O_CREATE != 0 {
+		access |= windows.GENERIC_WRITE
+	}
+	if mode&os.O_APPEND != 0 {
+		access &^= windows.GENERIC_WRITE
+		access |= windows.FILE_APPEND_DATA
+	}
+
+	shareMode := uint32(syscall.FILE_SHARE_READ | syscall.FILE_SHARE_WRITE | syscall.FILE_SHARE_DELETE)
+
+	var sa *syscall.SecurityAttributes
+
+	var createMode uint32
+	switch {
+	case mode&(os.O_CREATE|os.O_EXCL) == (os.O_CREATE | os.O_EXCL):
+		createMode = windows.CREATE_NEW
+	case mode&(os.O_CREATE|os.O_TRUNC) == (os.O_CREATE | os.O_TRUNC):
+		createMode = windows.CREATE_ALWAYS
+	case mode&os.O_CREATE == os.O_CREATE:
+		createMode = windows.OPEN_ALWAYS
+	case mode&os.O_TRUNC == os.O_TRUNC:
+		createMode = windows.TRUNCATE_EXISTING
+	default:
+		createMode = windows.OPEN_EXISTING
+	}
+
+	handle, err := syscall.CreateFile(pathP, access, shareMode, sa, createMode, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, &os.PathError{Path: path, Op: "open", Err: err}
+	}
+
+	return os.NewFile(uintptr(handle), path), nil
 }

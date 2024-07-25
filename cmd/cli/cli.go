@@ -48,7 +48,11 @@ import (
 
 // selfCheckInternalTestDomain is used for testing ctrld self response to clients.
 const selfCheckInternalTestDomain = "ctrld" + loopTestDomain
-const windowsForwardersFilename = ".forwarders.txt"
+const (
+	windowsForwardersFilename = ".forwarders.txt"
+	oldBinSuffix              = "_previous"
+	oldLogSuffix              = ".1"
+)
 
 var (
 	version = "dev"
@@ -605,7 +609,13 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				// Config file.
 				files = append(files, v.ConfigFileUsed())
 				// Log file.
-				files = append(files, cfg.Service.LogPath)
+				logFile := normalizeLogFilePath(cfg.Service.LogPath)
+				files = append(files, logFile)
+				// Backup log file.
+				oldLogFile := logFile + oldLogSuffix
+				if _, err := os.Stat(oldLogFile); err == nil {
+					files = append(files, oldLogFile)
+				}
 				// Socket files.
 				if dir, _ := socketDir(); dir != "" {
 					files = append(files, filepath.Join(dir, ctrldControlUnixSock))
@@ -624,10 +634,14 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					files = append(files, absHomeDir(windowsForwardersFilename))
 				}
 				// Binary itself.
-
 				bin, _ := os.Executable()
 				if bin != "" && supportedSelfDelete {
 					files = append(files, bin)
+				}
+				// Backup file after upgrading.
+				oldBin := bin + oldBinSuffix
+				if _, err := os.Stat(oldBin); err == nil {
+					files = append(files, oldBin)
 				}
 				for _, file := range files {
 					if file == "" {
@@ -922,7 +936,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
 				svcInstalled = false
 			}
-			oldBin := bin + "_previous"
+			oldBin := bin + oldBinSuffix
 			baseUrl := upgradeChannel[upgradeChannelDefault]
 			if len(args) > 0 {
 				channel := args[0]
