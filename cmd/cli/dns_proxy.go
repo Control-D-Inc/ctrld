@@ -862,9 +862,8 @@ func (p *prog) doSelfUninstall(answer *dns.Msg) {
 		p.checkingSelfUninstall = true
 		_, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
 		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
-		if uninstallIfInvalidCdUID(err, logger) {
-			logger.Fatal().Msgf("service was uninstalled because device %q does not exist", cdUID)
-		}
+		selfUninstall(err, p, logger)
+
 		if err != nil {
 			logger.Warn().Err(err).Msg("could not fetch resolver config")
 		}
