@@ -40,7 +40,7 @@ const (
 	upstreamPrefix             = "upstream."
 	upstreamOS                 = upstreamPrefix + "os"
 	upstreamPrivate            = upstreamPrefix + "private"
-	dnsWatchdogInterval        = time.Minute
+	dnsWatchdogDefaultInterval = 20 * time.Second
 )
 
 // ControlSocketName returns name for control unix socket.
@@ -532,7 +532,27 @@ func (p *prog) setDNS() {
 			return setDnsIgnoreUnusableInterface(i, nameservers)
 		})
 	}
-	go p.dnsWatchdog(netIface, nameservers, allIfaces)
+	if p.dnsWatchdogEnabled() {
+		go p.dnsWatchdog(netIface, nameservers, allIfaces)
+	}
+}
+
+// dnsWatchdogEnabled reports whether DNS watchdog is enabled.
+func (p *prog) dnsWatchdogEnabled() bool {
+	if ptr := p.cfg.Service.DnsWatchdogEnabled; ptr != nil {
+		return *ptr
+	}
+	return true
+}
+
+// dnsWatchdogDuration returns the time duration between each DNS watchdog loop.
+func (p *prog) dnsWatchdogDuration() time.Duration {
+	if ptr := p.cfg.Service.DnsWatchdogInvterval; ptr != nil {
+		if (*ptr).Seconds() > 0 {
+			return *ptr
+		}
+	}
+	return dnsWatchdogDefaultInterval
 }
 
 // dnsWatchdog watches for DNS changes on Darwin and Windows then re-applying ctrld's settings.
@@ -546,7 +566,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 		mainLog.Load().Debug().Msg("start DNS settings watchdog")
 		ns := nameservers
 		slices.Sort(ns)
-		ticker := time.NewTicker(dnsWatchdogInterval)
+		ticker := time.NewTicker(p.dnsWatchdogDuration())
 		logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
 		for range ticker.C {
 			if dnsChanged(iface, ns) {

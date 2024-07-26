@@ -252,6 +252,27 @@ Specifying the `ip` and `port` of the Prometheus metrics server. The Prometheus 
 - Required: no
 - Default: ""
 
+### dns_watchdog_enabled
+Checking DNS changes to network interfaces and reverting to ctrld's own settings.
+
+The DNS watchdog process only runs on Windows and MacOS.
+
+- Type: boolean
+- Required: no
+- Default: true
+
+### dns_watchdog_interval
+Time duration between each DNS watchdog iteration.
+
+A duration string is a possibly signed sequence of decimal numbers, each with optional fraction and a unit suffix,
+such as "300ms", "-1.5h" or "2h45m". Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
+
+If the time duration is non-positive, default value will be used.
+
+- Type: time duration string
+- Required: no
+- Default: 20s
+
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.
 

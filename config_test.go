@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/spf13/viper"
@@ -22,6 +23,8 @@ func TestLoadConfig(t *testing.T) {
 
 	assert.Equal(t, "info", cfg.Service.LogLevel)
 	assert.Equal(t, "/path/to/log.log", cfg.Service.LogPath)
+	assert.Equal(t, false, *cfg.Service.DnsWatchdogEnabled)
+	assert.Equal(t, time.Duration(20*time.Second), *cfg.Service.DnsWatchdogInvterval)
 
 	assert.Len(t, cfg.Network, 2)
 	assert.Contains(t, cfg.Network, "0")
