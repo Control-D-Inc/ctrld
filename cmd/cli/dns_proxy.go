@@ -93,6 +93,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 			_ = w.WriteMsg(answer)
 			return
 		}
+		listenerConfig := p.cfg.Listener[listenerNum]
 		reqId := requestID()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
 		if !listenerConfig.AllowWanClients && isWanClient(w.RemoteAddr()) {
@@ -847,7 +848,7 @@ func (p *prog) spoofLoopbackIpInClientInfo(ci *ctrld.ClientInfo) {
 // - Number of refused queries seen so far equals to selfUninstallMaxQueries.
 // - The cdUID is deleted.
 func (p *prog) doSelfUninstall(answer *dns.Msg) {
-	if !p.canSelfUninstall || answer == nil || answer.Rcode != dns.RcodeRefused {
+	if !p.canSelfUninstall.Load() || answer == nil || answer.Rcode != dns.RcodeRefused {
 		return
 	}
 

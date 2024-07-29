@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -88,10 +89,11 @@ type prog struct {
 	router               router.Router
 	ptrLoopGuard         *loopGuard
 	lanLoopGuard         *loopGuard
+	metricsQueryStats    atomic.Bool
 
 	selfUninstallMu       sync.Mutex
 	refusedQueryCount     int
-	canSelfUninstall      bool
+	canSelfUninstall      atomic.Bool
 	checkingSelfUninstall bool
 
 	loopMu sync.Mutex
@@ -187,6 +189,10 @@ func (p *prog) runWait() {
 			continue
 		}
 
+		if err := writeConfigFile(newCfg); err != nil {
+			logger.Err(err).Msg("could not write new config")
+		}
+
 		// This needs to be done here, otherwise, the DNS handler may observe an invalid
 		// upstream config because its initialization function have not been called yet.
 		mainLog.Load().Debug().Msg("setup upstream with new config")
@@ -197,6 +203,7 @@ func (p *prog) runWait() {
 		p.mu.Unlock()
 
 		logger.Notice().Msg("reloading config successfully")
+
 		select {
 		case p.reloadDoneCh <- struct{}{}:
 		default:
@@ -249,7 +256,7 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 	}
 	// Self-uninstallation is ok If there is only 1 ControlD upstream, and no remote config.
 	if len(cfg.Upstream) == 1 && isControlDUpstream {
-		p.canSelfUninstall = true
+		p.canSelfUninstall.Store(true)
 	}
 	p.localUpstreams = localUpstreams
 	p.ptrNameservers = ptrNameservers
@@ -286,6 +293,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	p.lanLoopGuard = newLoopGuard()
 	p.ptrLoopGuard = newLoopGuard()
 	p.cacheFlushDomainsMap = nil
+	p.metricsQueryStats.Store(p.cfg.Service.MetricsQueryStats)
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {

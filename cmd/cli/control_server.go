@@ -73,7 +73,7 @@ func (p *prog) registerControlServerHandler() {
 		sort.Slice(clients, func(i, j int) bool {
 			return clients[i].IP.Less(clients[j].IP)
 		})
-		if p.cfg.Service.MetricsQueryStats {
+		if p.metricsQueryStats.Load() {
 			for _, client := range clients {
 				client.IncludeQueryCount = true
 				dm := &dto.Metric{}

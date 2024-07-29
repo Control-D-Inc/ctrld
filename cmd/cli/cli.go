@@ -1183,7 +1183,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	if updated {
-		if err := writeConfigFile(); err != nil {
+		if err := writeConfigFile(&cfg); err != nil {
 			mainLog.Load().Fatal().Err(err).Msg("failed to write config file")
 		} else {
 			mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
@@ -1277,7 +1277,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 }
 
-func writeConfigFile() error {
+func writeConfigFile(cfg *ctrld.Config) error {
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
 	} else if configPath != "" {
@@ -1330,7 +1330,7 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		}
 		nop := zerolog.Nop()
 		_, _ = tryUpdateListenerConfig(&cfg, &nop, true)
-		if err := writeConfigFile(); err != nil {
+		if err := writeConfigFile(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
 		} else {
 			fp, err := filepath.Abs(defaultConfigFile)
@@ -2391,7 +2391,7 @@ func doGenerateNextDNSConfig(uid string) error {
 	mainLog.Load().Notice().Msgf("Generating nextdns config: %s", defaultConfigFile)
 	generateNextDNSConfig(uid)
 	updateListenerConfig(&cfg)
-	return writeConfigFile()
+	return writeConfigFile(&cfg)
 }
 
 func noticeWritingControlDConfig() error {
