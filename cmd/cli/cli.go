@@ -1654,9 +1654,10 @@ func selfCheckStatus(s service.Service, homedir, sockDir string) (bool, service.
 	}
 
 	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
-	ctrld.SetConfigNameWithPath(v, "ctrld", homedir)
 	if configPath != "" {
 		v.SetConfigFile(configPath)
+	} else {
+		v.SetConfigFile(defaultConfigFile)
 	}
 	if err := v.ReadInConfig(); err != nil {
 		mainLog.Load().Error().Err(err).Msgf("failed to re-read configuration file: %s", v.ConfigFileUsed())
