@@ -115,7 +115,7 @@ func initCLI() {
 		&verbose,
 		"verbose",
 		"v",
-		`verbose log output, "-v" basic logging, "-vv" debug level logging`,
+		`verbose log output, "-v" basic logging, "-vv" debug logging`,
 	)
 	rootCmd.PersistentFlags().BoolVarP(
 		&silent,
@@ -163,7 +163,10 @@ func initCLI() {
 		},
 		Use:   "start",
 		Short: "Install and start the ctrld service",
-		Args:  cobra.NoArgs,
+		Long: `Install and start the ctrld service
+
+NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			checkStrFlagEmpty(cmd, cdUidFlagName)
 			checkStrFlagEmpty(cmd, cdOrgFlagName)
@@ -187,14 +190,63 @@ func initCLI() {
 				return
 			}
 
-			status, _ := s.Status()
+			status, err := s.Status()
 			isCtrldRunning := status == service.StatusRunning
+			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
 
 			// If pin code was set, do not allow running start command.
 			if isCtrldRunning {
 				if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 					os.Exit(deactivationPinInvalidExitCode)
 				}
+			}
+
+			if !startOnly {
+				startOnly = len(osArgs) == 0
+			}
+			// If user run "ctrld start" and ctrld is already installed, starting existing service.
+			if startOnly && isCtrldInstalled {
+				tryReadingConfigWithNotice(false, true)
+				if err := v.Unmarshal(&cfg); err != nil {
+					mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
+				}
+
+				initLogging()
+				tasks := []task{
+					resetDnsTask(p, s),
+					{s.Stop, false},
+					{func() error {
+						// Save current DNS so we can restore later.
+						withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
+							return saveCurrentStaticDNS(i)
+						})
+						return nil
+					}, false},
+					{s.Start, true},
+					{noticeWritingControlDConfig, false},
+				}
+				mainLog.Load().Notice().Msg("Starting existing ctrld service")
+				if doTasks(tasks) {
+					mainLog.Load().Notice().Msg("Service started")
+					sockDir, err := socketDir()
+					if err != nil {
+						mainLog.Load().Warn().Err(err).Msg("Failed to get socket directory")
+						os.Exit(1)
+					}
+					if cc := newSocketControlClient(s, sockDir); cc != nil {
+						if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
+							if iface == "auto" {
+								iface = defaultIfaceName()
+							}
+							logger := mainLog.Load().With().Str("iface", iface).Logger()
+							logger.Debug().Msg("setting DNS successfully")
+						}
+					}
+				} else {
+					mainLog.Load().Error().Err(err).Msg("Failed to start existing ctrld service")
+					os.Exit(1)
+				}
+				return
 			}
 
 			if cdUID != "" {
@@ -373,6 +425,8 @@ func initCLI() {
 	startCmd.Flags().StringVarP(&nextdns, nextdnsFlagName, "", "", "NextDNS resolver id")
 	startCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 	startCmd.Flags().BoolVarP(&skipSelfChecks, "skip_self_checks", "", false, `Skip self checks after installing ctrld service`)
+	startCmd.Flags().BoolVarP(&startOnly, "start_only", "", false, "Do not install new service")
+	_ = startCmd.Flags().MarkHidden("start_only")
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
@@ -739,7 +793,13 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		},
 		Use:   "start",
 		Short: "Quick start service and configure DNS on interface",
+		Long: `Quick start service and configure DNS on interface
+
+NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
 		Run: func(cmd *cobra.Command, args []string) {
+			if len(os.Args) == 2 {
+				startOnly = true
+			}
 			if !cmd.Flags().Changed("iface") {
 				os.Args = append(os.Args, "--iface="+ifaceStartStop)
 			}

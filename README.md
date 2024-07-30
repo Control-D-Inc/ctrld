@@ -105,9 +105,11 @@ Available Commands:
   start       Quick start service and configure DNS on interface
   stop        Quick stop service and remove DNS from interface
   restart     Restart the ctrld service
+  reload      Reload the ctrld service
   status      Show status of the ctrld service
   uninstall   Stop and uninstall the ctrld service
   clients     Manage clients
+  upgrade     Upgrading ctrld to latest version
 
 Flags:
   -h, --help            help for ctrld
