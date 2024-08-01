@@ -868,13 +868,14 @@ func canBeLocalUpstream(addr string) bool {
 // the interface that matches excludeIfaceName. The context is used to clarify the
 // log message when error happens.
 func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.Interface) error) {
+	validIfacesMap := validInterfacesMap()
 	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
 		// Skip loopback/virtual interface.
 		if i.IsLoopback() || len(i.HardwareAddr) == 0 {
 			return
 		}
 		// Skip invalid interface.
-		if !validInterface(i.Interface) {
+		if !validInterface(i.Interface, validIfacesMap) {
 			return
 		}
 		netIface := i.Interface
