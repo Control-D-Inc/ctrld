@@ -651,6 +651,8 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 					if dnsChanged(i, ns) {
 						if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
 							mainLog.Load().Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
+						} else {
+							mainLog.Load().Debug().Msgf("re-applying DNS for interface %q successfully", i.Name)
 						}
 					}
 					return nil
