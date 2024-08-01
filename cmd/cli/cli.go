@@ -1139,6 +1139,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		stopCh:       stopCh,
 		reloadCh:     make(chan struct{}),
 		reloadDoneCh: make(chan struct{}),
+		apiReloadCh:  make(chan *ctrld.Config),
 		cfg:          &cfg,
 		appCallback:  appCallback,
 	}

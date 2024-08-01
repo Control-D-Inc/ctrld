@@ -28,6 +28,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
+	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
@@ -71,6 +72,7 @@ type prog struct {
 	stopCh          chan struct{}
 	reloadCh        chan struct{} // For Windows.
 	reloadDoneCh    chan struct{}
+	apiReloadCh     chan *ctrld.Config
 	logConn         net.Conn
 	cs              *controlServer
 	csSetDnsDone    chan struct{}
@@ -128,11 +130,15 @@ func (p *prog) runWait() {
 			p.run(reload, reloadCh)
 			reload = true
 		}()
+
+		var newCfg *ctrld.Config
 		select {
 		case sig := <-reloadSigCh:
 			logger.Notice().Msgf("got signal: %s, reloading...", sig.String())
 		case <-p.reloadCh:
 			logger.Notice().Msg("reloading...")
+		case apiCfg := <-p.apiReloadCh:
+			newCfg = apiCfg
 		case <-p.stopCh:
 			close(reloadCh)
 			return
@@ -142,27 +148,30 @@ func (p *prog) runWait() {
 			close(reloadCh)
 			<-done
 		}
-		newCfg := &ctrld.Config{}
-		v := viper.NewWithOptions(viper.KeyDelimiter("::"))
-		ctrld.InitConfig(v, "ctrld")
-		if configPath != "" {
-			v.SetConfigFile(configPath)
-		}
-		if err := v.ReadInConfig(); err != nil {
-			logger.Err(err).Msg("could not read new config")
-			waitOldRunDone()
-			continue
-		}
-		if err := v.Unmarshal(&newCfg); err != nil {
-			logger.Err(err).Msg("could not unmarshal new config")
-			waitOldRunDone()
-			continue
-		}
-		if cdUID != "" {
-			if err := processCDFlags(newCfg); err != nil {
-				logger.Err(err).Msg("could not fetch ControlD config")
+
+		if newCfg == nil {
+			newCfg = &ctrld.Config{}
+			v := viper.NewWithOptions(viper.KeyDelimiter("::"))
+			ctrld.InitConfig(v, "ctrld")
+			if configPath != "" {
+				v.SetConfigFile(configPath)
+			}
+			if err := v.ReadInConfig(); err != nil {
+				logger.Err(err).Msg("could not read new config")
 				waitOldRunDone()
 				continue
+			}
+			if err := v.Unmarshal(&newCfg); err != nil {
+				logger.Err(err).Msg("could not unmarshal new config")
+				waitOldRunDone()
+				continue
+			}
+			if cdUID != "" {
+				if err := processCDFlags(newCfg); err != nil {
+					logger.Err(err).Msg("could not fetch ControlD config")
+					waitOldRunDone()
+					continue
+				}
 			}
 		}
 
@@ -227,6 +236,59 @@ func (p *prog) postRun() {
 		ns := ctrld.InitializeOsResolver()
 		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
 		p.setDNS()
+	}
+}
+
+// apiConfigReload calls API to check for latest config update then reload ctrld if necessary.
+func (p *prog) apiConfigReload() {
+	if cdUID == "" {
+		return
+	}
+
+	secs := 3600
+	if p.cfg.Service.RefreshTime != nil && *p.cfg.Service.RefreshTime > 0 {
+		secs = *p.cfg.Service.RefreshTime
+	}
+
+	ticker := time.NewTicker(time.Duration(secs) * time.Second)
+	defer ticker.Stop()
+
+	logger := mainLog.Load().With().Str("mode", "api-reload").Logger()
+	logger.Debug().Msg("starting custom config reload timer")
+	lastUpdated := time.Now().Unix()
+	for {
+		select {
+		case <-ticker.C:
+			resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+			selfUninstall(err, p, logger)
+			if err != nil {
+				logger.Warn().Err(err).Msg("could not fetch resolver config")
+				continue
+			}
+
+			if resolverConfig.Ctrld.CustomConfig == "" {
+				continue
+			}
+
+			if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated {
+				lastUpdated = time.Now().Unix()
+				cfg := &ctrld.Config{}
+				if err := validateCdRemoteConfig(resolverConfig, cfg); err != nil {
+					logger.Warn().Err(err).Msg("skipping invalid custom config")
+					if _, err := controld.UpdateCustomLastFailed(cdUID, rootCmd.Version, cdDev, true); err != nil {
+						logger.Error().Err(err).Msg("could not mark custom last update failed")
+					}
+					break
+				}
+				setListenerDefaultValue(cfg)
+				logger.Debug().Msg("custom config changes detected, reloading...")
+				p.apiReloadCh <- cfg
+			} else {
+				logger.Debug().Msg("custom config does not change")
+			}
+		case <-p.stopCh:
+			return
+		}
 	}
 }
 
@@ -420,6 +482,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		if p.logConn != nil {
 			_ = p.logConn.Close()
 		}
+		go p.apiConfigReload()
 		p.postRun()
 	}
 	wg.Wait()

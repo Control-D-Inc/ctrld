@@ -273,6 +273,14 @@ If the time duration is non-positive, default value will be used.
 - Required: no
 - Default: 20s
 
+### refresh_time
+Time in seconds between each iteration that reloads custom config if changed.
+
+The value must be a positive number, any invalid value will be ignored and default value will be used.
+- Type: number
+- Required: no
+- Default: 3600
+
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.
 
