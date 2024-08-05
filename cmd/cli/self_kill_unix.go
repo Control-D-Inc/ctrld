@@ -14,15 +14,15 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func selfUninstall(err error, p *prog, logger zerolog.Logger) {
+func selfUninstall(uninstallErr error, p *prog, logger zerolog.Logger) {
 	var uer *controld.UtilityErrorResponse
-	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		if runtime.GOOS == "linux" {
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				logger.Warn().Err(err).Msg("failed to create new service")
 			} else {
-				selfUninstallLinux(err, p, logger)
+				selfUninstallLinux(uninstallErr, p, logger)
 				_ = s.Stop()
 				os.Exit(0)
 			}
