@@ -956,7 +956,7 @@ func savedStaticNameservers(iface *net.Interface) []string {
 // dnsChanged reports whether DNS settings for given interface was changed.
 // The caller must sort the nameservers before calling this function.
 func dnsChanged(iface *net.Interface, nameservers []string) bool {
-	curNameservers := currentDNS(iface)
+	curNameservers, _ := currentStaticDNS(iface)
 	slices.Sort(curNameservers)
 	return !slices.Equal(curNameservers, nameservers)
 }
