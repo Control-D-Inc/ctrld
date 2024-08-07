@@ -78,6 +78,7 @@ type prog struct {
 	csSetDnsDone    chan struct{}
 	csSetDnsOk      bool
 	dnsWatchDogOnce sync.Once
+	dnsWg           sync.WaitGroup
 
 	cfg                  *ctrld.Config
 	localUpstreams       []string
@@ -596,7 +597,11 @@ func (p *prog) setDNS() {
 		for i := range nameservers {
 			servers[i] = netip.MustParseAddr(nameservers[i])
 		}
-		go watchResolvConf(netIface, servers, setResolvConf)
+		p.dnsWg.Add(1)
+		go func() {
+			defer p.dnsWg.Done()
+			p.watchResolvConf(netIface, servers, setResolvConf)
+		}()
 	}
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
@@ -604,7 +609,11 @@ func (p *prog) setDNS() {
 		})
 	}
 	if p.dnsWatchdogEnabled() {
-		go p.dnsWatchdog(netIface, nameservers, allIfaces)
+		p.dnsWg.Add(1)
+		go func() {
+			defer p.dnsWg.Done()
+			p.dnsWatchdog(netIface, nameservers, allIfaces)
+		}()
 	}
 }
 
@@ -639,24 +648,30 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 		slices.Sort(ns)
 		ticker := time.NewTicker(p.dnsWatchdogDuration())
 		logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
-		for range ticker.C {
-			if dnsChanged(iface, ns) {
-				logger.Debug().Msg("DNS settings were changed, re-applying settings")
-				if err := setDNS(iface, ns); err != nil {
-					mainLog.Load().Error().Err(err).Str("iface", iface.Name).Msgf("could not re-apply DNS settings")
-				}
-			}
-			if allIfaces {
-				withEachPhysicalInterfaces(iface.Name, "re-applying DNS", func(i *net.Interface) error {
-					if dnsChanged(i, ns) {
-						if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
-							mainLog.Load().Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
-						} else {
-							mainLog.Load().Debug().Msgf("re-applying DNS for interface %q successfully", i.Name)
-						}
+		for {
+			select {
+			case <-p.stopCh:
+				mainLog.Load().Debug().Msg("stop dns watchdog")
+				return
+			case <-ticker.C:
+				if dnsChanged(iface, ns) {
+					logger.Debug().Msg("DNS settings were changed, re-applying settings")
+					if err := setDNS(iface, ns); err != nil {
+						mainLog.Load().Error().Err(err).Str("iface", iface.Name).Msgf("could not re-apply DNS settings")
 					}
-					return nil
-				})
+				}
+				if allIfaces {
+					withEachPhysicalInterfaces(iface.Name, "re-applying DNS", func(i *net.Interface) error {
+						if dnsChanged(i, ns) {
+							if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
+								mainLog.Load().Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
+							} else {
+								mainLog.Load().Debug().Msgf("re-applying DNS for interface %q successfully", i.Name)
+							}
+						}
+						return nil
+					})
+				}
 			}
 		}
 	})

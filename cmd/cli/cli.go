@@ -1333,6 +1333,10 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	close(waitCh)
 	<-stopCh
+
+	// Wait goroutines which watches/manipulates DNS settings terminated,
+	// ensuring that changes to DNS since here won't be reverted.
+	p.dnsWg.Wait()
 	for _, f := range p.onStopped {
 		f()
 	}
