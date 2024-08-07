@@ -2500,7 +2500,7 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 			return nil // the server is running older version of ctrld
 		}
 	}
-	mainLog.Load().Error().Msg(errInvalidDeactivationPin.Error())
+	mainLog.Load().Error().Err(err).Msg(errInvalidDeactivationPin.Error())
 	return errInvalidDeactivationPin
 }
 
