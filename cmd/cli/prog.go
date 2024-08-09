@@ -247,8 +247,8 @@ func (p *prog) apiConfigReload() {
 	}
 
 	secs := 3600
-	if p.cfg.Service.RefreshTime != nil && *p.cfg.Service.RefreshTime > 0 {
-		secs = *p.cfg.Service.RefreshTime
+	if p.cfg.Service.RefetchTime != nil && *p.cfg.Service.RefetchTime > 0 {
+		secs = *p.cfg.Service.RefetchTime
 	}
 
 	ticker := time.NewTicker(time.Duration(secs) * time.Second)

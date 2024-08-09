@@ -209,7 +209,7 @@ type ServiceConfig struct {
 	MetricsListener         string         `mapstructure:"metrics_listener" toml:"metrics_listener,omitempty"`
 	DnsWatchdogEnabled      *bool          `mapstructure:"dns_watchdog_enabled" toml:"dns_watchdog_enabled,omitempty"`
 	DnsWatchdogInvterval    *time.Duration `mapstructure:"dns_watchdog_interval" toml:"dns_watchdog_interval,omitempty"`
-	RefreshTime             *int           `mapstructure:"refresh_time" toml:"refresh_time,omitempty"`
+	RefetchTime             *int           `mapstructure:"refetch_time" toml:"refetch_time,omitempty"`
 	Daemon                  bool           `mapstructure:"-" toml:"-"`
 	AllocateIP              bool           `mapstructure:"-" toml:"-"`
 }
