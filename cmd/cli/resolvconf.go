@@ -34,6 +34,8 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 
 	for {
 		select {
+		case <-p.dnsWatcherStopCh:
+			return
 		case <-p.stopCh:
 			mainLog.Load().Debug().Msgf("stopping watcher for %s", resolvConfPath)
 			return

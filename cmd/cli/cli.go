@@ -1135,13 +1135,14 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 	waitCh := make(chan struct{})
 	p := &prog{
-		waitCh:       waitCh,
-		stopCh:       stopCh,
-		reloadCh:     make(chan struct{}),
-		reloadDoneCh: make(chan struct{}),
-		apiReloadCh:  make(chan *ctrld.Config),
-		cfg:          &cfg,
-		appCallback:  appCallback,
+		waitCh:           waitCh,
+		stopCh:           stopCh,
+		reloadCh:         make(chan struct{}),
+		reloadDoneCh:     make(chan struct{}),
+		dnsWatcherStopCh: make(chan struct{}),
+		apiReloadCh:      make(chan *ctrld.Config),
+		cfg:              &cfg,
+		appCallback:      appCallback,
 	}
 	if homedir == "" {
 		if dir, err := userHomeDir(); err == nil {
@@ -1232,7 +1233,11 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			}
 
 			cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
-			_ = uninstallIfInvalidCdUID(err, p, cdLogger)
+			// Performs self-uninstallation if the ControlD device does not exist.
+			var uer *controld.UtilityErrorResponse
+			if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+				_ = uninstallInvalidCdUID(p, cdLogger, false)
+			}
 			cdLogger.Fatal().Err(err).Msg("failed to fetch resolver config")
 		}
 	}
@@ -2696,23 +2701,23 @@ func doValidateCdRemoteConfig(cdUID string) {
 	v = oldV
 }
 
-// uninstallIfInvalidCdUID performs self-uninstallation if the ControlD device does not exist.
-func uninstallIfInvalidCdUID(err error, p *prog, logger zerolog.Logger) bool {
-	var uer *controld.UtilityErrorResponse
-	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
-		s, err := newService(p, svcConfig)
-		if err != nil {
-			logger.Warn().Err(err).Msg("failed to create new service")
-			return false
-		}
+// uninstallInvalidCdUID performs self-uninstallation because the ControlD device does not exist.
+func uninstallInvalidCdUID(p *prog, logger zerolog.Logger, doStop bool) bool {
+	s, err := newService(p, svcConfig)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to create new service")
+		return false
+	}
 
-		p.resetDNS()
+	p.resetDNS()
 
-		tasks := []task{{s.Uninstall, true}}
-		if doTasks(tasks) {
-			logger.Info().Msg("uninstalled service")
-			return true
+	tasks := []task{{s.Uninstall, true}}
+	if doTasks(tasks) {
+		logger.Info().Msg("uninstalled service")
+		if doStop {
+			_ = s.Stop()
 		}
+		return true
 	}
 	return false
 }

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/kardianos/service"
+	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 	"tailscale.com/net/interfaces"
 	"tailscale.com/net/tsaddr"
@@ -67,18 +68,19 @@ var svcConfig = &service.Config{
 var useSystemdResolved = false
 
 type prog struct {
-	mu              sync.Mutex
-	waitCh          chan struct{}
-	stopCh          chan struct{}
-	reloadCh        chan struct{} // For Windows.
-	reloadDoneCh    chan struct{}
-	apiReloadCh     chan *ctrld.Config
-	logConn         net.Conn
-	cs              *controlServer
-	csSetDnsDone    chan struct{}
-	csSetDnsOk      bool
-	dnsWatchDogOnce sync.Once
-	dnsWg           sync.WaitGroup
+	mu               sync.Mutex
+	waitCh           chan struct{}
+	stopCh           chan struct{}
+	reloadCh         chan struct{} // For Windows.
+	reloadDoneCh     chan struct{}
+	apiReloadCh      chan *ctrld.Config
+	logConn          net.Conn
+	cs               *controlServer
+	csSetDnsDone     chan struct{}
+	csSetDnsOk       bool
+	dnsWatchDogOnce  sync.Once
+	dnsWg            sync.WaitGroup
+	dnsWatcherStopCh chan struct{}
 
 	cfg                  *ctrld.Config
 	localUpstreams       []string
@@ -261,7 +263,7 @@ func (p *prog) apiConfigReload() {
 		select {
 		case <-ticker.C:
 			resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
-			selfUninstall(err, p, logger)
+			selfUninstallCheck(err, p, logger)
 			if err != nil {
 				logger.Warn().Err(err).Msg("could not fetch resolver config")
 				continue
@@ -650,6 +652,8 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 		logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
 		for {
 			select {
+			case <-p.dnsWatcherStopCh:
+				return
 			case <-p.stopCh:
 				mainLog.Load().Debug().Msg("stop dns watchdog")
 				return
@@ -974,4 +978,17 @@ func dnsChanged(iface *net.Interface, nameservers []string) bool {
 	curNameservers, _ := currentStaticDNS(iface)
 	slices.Sort(curNameservers)
 	return !slices.Equal(curNameservers, nameservers)
+}
+
+// selfUninstallCheck checks if the error dues to controld.InvalidConfigCode, perform self-uninstall then.
+func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
+	var uer *controld.UtilityErrorResponse
+	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+		// Ensure all DNS watchers goroutine are terminated, so it won't mess up with self-uninstall.
+		close(p.dnsWatcherStopCh)
+		p.dnsWg.Wait()
+
+		// Perform self-uninstall now.
+		selfUninstall(p, logger)
+	}
 }
