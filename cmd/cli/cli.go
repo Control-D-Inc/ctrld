@@ -2649,6 +2649,9 @@ func resetDnsTask(p *prog, s service.Service) task {
 	isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
 	isCtrldRunning := status == service.StatusRunning
 	return task{func() error {
+		if iface == "" {
+			return nil
+		}
 		// Always reset DNS first, ensuring DNS setting is in a good state.
 		// resetDNS must use the "iface" value of current running ctrld
 		// process to reset what setDNS has done properly.
