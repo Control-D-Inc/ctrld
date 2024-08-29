@@ -25,6 +25,7 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	"golang.org/x/net/http2"
 	"golang.org/x/sync/singleflight"
 	"tailscale.com/logtail/backoff"
 	"tailscale.com/net/tsaddr"
@@ -487,6 +488,13 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 	transport.TLSClientConfig = &tls.Config{
 		RootCAs:            uc.certPool,
 		ClientSessionCache: tls.NewLRUClientSessionCache(0),
+	}
+
+	// Prevent bad tcp connection hanging the requests for too long.
+	// See: https://github.com/golang/go/issues/36026
+	if t2, err := http2.ConfigureTransports(transport); err == nil {
+		t2.ReadIdleTimeout = 10 * time.Second
+		t2.PingTimeout = 5 * time.Second
 	}
 
 	dialerTimeoutMs := 2000
