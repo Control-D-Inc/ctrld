@@ -21,10 +21,11 @@ import (
 	"syscall"
 	"time"
 
+	"tailscale.com/net/netmon"
+
 	"github.com/kardianos/service"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
-	"tailscale.com/net/interfaces"
 	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -834,7 +835,7 @@ func ifaceFirstPrivateIP(iface *net.Interface) string {
 
 // defaultRouteIP returns private IP string of the default route if present, prefer IPv4 over IPv6.
 func defaultRouteIP() string {
-	dr, err := interfaces.DefaultRoute()
+	dr, err := netmon.DefaultRoute()
 	if err != nil {
 		return ""
 	}
@@ -854,7 +855,7 @@ func defaultRouteIP() string {
 	// There could be multiple LAN interfaces with the same Mac address, so we find all private
 	// IPs then using the smallest one.
 	var addrs []netip.Addr
-	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		if i.Name == drNetIface.Name {
 			return
 		}
@@ -894,7 +895,7 @@ func canBeLocalUpstream(addr string) bool {
 // log message when error happens.
 func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.Interface) error) {
 	validIfacesMap := validInterfacesMap()
-	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		// Skip loopback/virtual interface.
 		if i.IsLoopback() || len(i.HardwareAddr) == 0 {
 			return

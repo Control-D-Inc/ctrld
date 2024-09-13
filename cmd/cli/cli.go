@@ -37,7 +37,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"tailscale.com/logtail/backoff"
-	"tailscale.com/net/interfaces"
+	"tailscale.com/net/netmon"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
@@ -730,7 +730,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Short: "List network interfaces of the host",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+			err := netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 				fmt.Printf("Index : %d\n", i.Index)
 				fmt.Printf("Name  : %s\n", i.Name)
 				addrs, _ := i.Addrs()
@@ -1662,7 +1662,7 @@ func netInterface(ifaceName string) (*net.Interface, error) {
 		ifaceName = defaultIfaceName()
 	}
 	var iface *net.Interface
-	err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+	err := netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		if i.Name == ifaceName {
 			iface = i.Interface
 		}
@@ -1680,7 +1680,7 @@ func defaultIfaceName() string {
 	if ifaceName := router.DefaultInterfaceName(); ifaceName != "" {
 		return ifaceName
 	}
-	dri, err := interfaces.DefaultRouteInterface()
+	dri, err := netmon.DefaultRouteInterface()
 	if err != nil {
 		// On WSL 1, the route table does not have any default route. But the fact that
 		// it only uses /etc/resolv.conf for setup DNS, so we can use "lo" here.

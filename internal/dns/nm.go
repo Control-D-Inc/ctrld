@@ -1,6 +1,5 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 //go:build linux
 
@@ -11,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sort"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -24,14 +24,19 @@ const (
 	lowerPriority   = int32(200) // lower than all builtin auto priorities
 )
 
+// reconfigTimeout is the time interval within which Manager.{Up,Down} should complete.
+//
+// This is particularly useful because certain conditions can cause indefinite hangs
+// (such as improper dbus auth followed by contextless dbus.Object.Call).
+// Such operations should be wrapped in a timeout context.
+const reconfigTimeout = time.Second
+
 // nmManager uses the NetworkManager DBus API.
 type nmManager struct {
 	interfaceName string
 	manager       dbus.BusObject
 	dnsManager    dbus.BusObject
 }
-
-var _ OSConfigurator = (*nmManager)(nil)
 
 func newNMManager(interfaceName string) (*nmManager, error) {
 	conn, err := dbus.SystemBus()
@@ -141,18 +146,17 @@ func (m *nmManager) trySet(ctx context.Context, config OSConfig) error {
 	// tell it explicitly to keep it. Read out the current interface
 	// settings and mirror them out to NetworkManager.
 	var addrs6 []map[string]any
-	if netIface, err := net.InterfaceByName(m.interfaceName); err == nil {
-		if addrs, err := netIface.Addrs(); err == nil {
-			for _, a := range addrs {
-				if ipnet, ok := a.(*net.IPNet); ok {
-					nip, ok := netip.AddrFromSlice(ipnet.IP)
-					nip = nip.Unmap()
-					if ok && nip.Is6() {
-						addrs6 = append(addrs6, map[string]any{
-							"address": nip.String(),
-							"prefix":  uint32(128),
-						})
-					}
+	if tsIf, err := net.InterfaceByName(m.interfaceName); err == nil {
+		addrs, _ := tsIf.Addrs()
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				nip, ok := netip.AddrFromSlice(ipnet.IP)
+				nip = nip.Unmap()
+				if ok && nip.Is6() {
+					addrs6 = append(addrs6, map[string]any{
+						"address": nip.String(),
+						"prefix":  uint32(128),
+					})
 				}
 			}
 		}
@@ -258,6 +262,125 @@ func (m *nmManager) trySet(ctx context.Context, config OSConfig) error {
 	}
 
 	return nil
+}
+
+func (m *nmManager) SupportsSplitDNS() bool {
+	var mode string
+	v, err := m.dnsManager.GetProperty("org.freedesktop.NetworkManager.DnsManager.Mode")
+	if err != nil {
+		return false
+	}
+	mode, ok := v.Value().(string)
+	if !ok {
+		return false
+	}
+
+	// Per NM's documentation, it only does split-DNS when it's
+	// programming dnsmasq or systemd-resolved. All other modes are
+	// primary-only.
+	return mode == "dnsmasq" || mode == "systemd-resolved"
+}
+
+func (m *nmManager) GetBaseConfig() (OSConfig, error) {
+	conn, err := dbus.SystemBus()
+	if err != nil {
+		return OSConfig{}, err
+	}
+
+	nm := conn.Object("org.freedesktop.NetworkManager", dbus.ObjectPath("/org/freedesktop/NetworkManager/DnsManager"))
+	v, err := nm.GetProperty("org.freedesktop.NetworkManager.DnsManager.Configuration")
+	if err != nil {
+		return OSConfig{}, err
+	}
+	cfgs, ok := v.Value().([]map[string]dbus.Variant)
+	if !ok {
+		return OSConfig{}, fmt.Errorf("unexpected NM config type %T", v.Value())
+	}
+
+	if len(cfgs) == 0 {
+		return OSConfig{}, nil
+	}
+
+	type dnsPrio struct {
+		resolvers []netip.Addr
+		domains   []string
+		priority  int32
+	}
+	order := make([]dnsPrio, 0, len(cfgs)-1)
+
+	for _, cfg := range cfgs {
+		if name, ok := cfg["interface"]; ok {
+			if s, ok := name.Value().(string); ok && s == m.interfaceName {
+				// Config for the tailscale interface, skip.
+				continue
+			}
+		}
+
+		var p dnsPrio
+
+		if v, ok := cfg["nameservers"]; ok {
+			if ips, ok := v.Value().([]string); ok {
+				for _, s := range ips {
+					ip, err := netip.ParseAddr(s)
+					if err != nil {
+						// hmm, what do? Shouldn't really happen.
+						continue
+					}
+					p.resolvers = append(p.resolvers, ip)
+				}
+			}
+		}
+		if v, ok := cfg["domains"]; ok {
+			if domains, ok := v.Value().([]string); ok {
+				p.domains = domains
+			}
+		}
+		if v, ok := cfg["priority"]; ok {
+			if prio, ok := v.Value().(int32); ok {
+				p.priority = prio
+			}
+		}
+
+		order = append(order, p)
+	}
+
+	sort.Slice(order, func(i, j int) bool {
+		return order[i].priority < order[j].priority
+	})
+
+	var (
+		ret           OSConfig
+		seenResolvers = map[netip.Addr]bool{}
+		seenSearch    = map[string]bool{}
+	)
+
+	for _, cfg := range order {
+		for _, resolver := range cfg.resolvers {
+			if seenResolvers[resolver] {
+				continue
+			}
+			ret.Nameservers = append(ret.Nameservers, resolver)
+			seenResolvers[resolver] = true
+		}
+		for _, dom := range cfg.domains {
+			if seenSearch[dom] {
+				continue
+			}
+			fqdn, err := dnsname.ToFQDN(dom)
+			if err != nil {
+				continue
+			}
+			ret.SearchDomains = append(ret.SearchDomains, fqdn)
+			seenSearch[dom] = true
+		}
+		if cfg.priority < 0 {
+			// exclusive configurations preempt all other
+			// configurations, so we're done.
+			break
+		}
+	}
+
+	return ret, nil
 }
 
 func (m *nmManager) Close() error {

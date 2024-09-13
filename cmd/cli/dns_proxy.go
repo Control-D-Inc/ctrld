@@ -14,9 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/net/netmon"
+
 	"github.com/miekg/dns"
 	"golang.org/x/sync/errgroup"
-	"tailscale.com/net/interfaces"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/tsaddr"
 
@@ -890,7 +891,7 @@ func (p *prog) selfUninstallCoolOfPeriod() {
 // queryFromSelf reports whether the input IP is from device running ctrld.
 func queryFromSelf(ip string) bool {
 	netIP := netip.MustParseAddr(ip)
-	ifaces, err := interfaces.GetList()
+	ifaces, err := netmon.GetInterfaceList()
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not get interfaces list")
 		return false

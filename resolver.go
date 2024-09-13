@@ -10,8 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/net/netmon"
+
 	"github.com/miekg/dns"
-	"tailscale.com/net/interfaces"
 )
 
 const (
@@ -346,7 +347,7 @@ func NewResolverWithNameserver(nameservers []string) Resolver {
 // Rfc1918Addresses returns the list of local interfaces private IP addresses
 func Rfc1918Addresses() []string {
 	var res []string
-	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		addrs, _ := i.Addrs()
 		for _, addr := range addrs {
 			ipNet, ok := addr.(*net.IPNet)
