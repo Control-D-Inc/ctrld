@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"runtime"
@@ -14,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"tailscale.com/net/netmon"
-
 	"github.com/miekg/dns"
 	"golang.org/x/sync/errgroup"
+	"tailscale.com/net/captivedetection"
 	"tailscale.com/net/netaddr"
+	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -494,11 +495,20 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		answer, err := resolve1(n, upstreamConfig, msg)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
-			if errNetworkError(err) {
+			isNetworkErr := errNetworkError(err)
+			if isNetworkErr {
 				p.um.increaseFailureCount(upstreams[n])
 				if p.um.isDown(upstreams[n]) {
 					go p.um.checkUpstream(upstreams[n], upstreamConfig)
 				}
+			}
+			if cdUID != "" && (isNetworkErr || err == io.EOF) {
+				p.captivePortalMu.Lock()
+				if !p.captivePortalCheckWasRun {
+					p.captivePortalCheckWasRun = true
+					go p.performCaptivePortalDetection()
+				}
+				p.captivePortalMu.Unlock()
 			}
 			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
 			var e net.Error
@@ -585,6 +595,9 @@ func (p *prog) upstreamsAndUpstreamConfigForLanAndPtr(upstreams []string, upstre
 }
 
 func (p *prog) upstreamConfigsFromUpstreamNumbers(upstreams []string) []*ctrld.UpstreamConfig {
+	if p.captivePortalDetected.Load() {
+		return nil // always use OS resolver if behind captive portal.
+	}
 	upstreamConfigs := make([]*ctrld.UpstreamConfig, 0, len(upstreams))
 	for _, upstream := range upstreams {
 		upstreamNum := strings.TrimPrefix(upstream, upstreamPrefix)
@@ -886,6 +899,31 @@ func (p *prog) selfUninstallCoolOfPeriod() {
 	p.checkingSelfUninstall = false
 	p.refusedQueryCount = 0
 	p.selfUninstallMu.Unlock()
+}
+
+// performCaptivePortalDetection check if ctrld is running behind a captive portal.
+func (p *prog) performCaptivePortalDetection() {
+	mainLog.Load().Warn().Msg("Performing captive portal detection")
+	d := captivedetection.NewDetector(logf)
+	found := true
+	var resetDnsOnce sync.Once
+	for found {
+		time.Sleep(2 * time.Second)
+		found = d.Detect(context.Background(), netmon.NewStatic(), nil, 0)
+		if found {
+			resetDnsOnce.Do(func() {
+				mainLog.Load().Warn().Msg("found captive portal, leaking query to OS resolver")
+				p.resetDNS()
+			})
+		}
+		p.captivePortalDetected.Store(found)
+	}
+
+	p.captivePortalMu.Lock()
+	p.captivePortalCheckWasRun = false
+	p.captivePortalMu.Unlock()
+	p.setDNS()
+	mainLog.Load().Warn().Msg("captive portal login finished, stop leaking query")
 }
 
 // queryFromSelf reports whether the input IP is from device running ctrld.

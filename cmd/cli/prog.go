@@ -105,6 +105,10 @@ type prog struct {
 	loopMu sync.Mutex
 	loop   map[string]bool
 
+	captivePortalMu          sync.Mutex
+	captivePortalCheckWasRun bool
+	captivePortalDetected    atomic.Bool
+
 	started       chan struct{}
 	onStartedDone chan struct{}
 	onStarted     []func()
@@ -240,6 +244,8 @@ func (p *prog) postRun() {
 		ns := ctrld.InitializeOsResolver()
 		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
 		p.setDNS()
+		p.csSetDnsDone <- struct{}{}
+		close(p.csSetDnsDone)
 	}
 }
 
@@ -534,8 +540,6 @@ func (p *prog) setDNS() {
 	setDnsOK := false
 	defer func() {
 		p.csSetDnsOk = setDnsOK
-		p.csSetDnsDone <- struct{}{}
-		close(p.csSetDnsDone)
 	}()
 
 	if cfg.Listener == nil {
