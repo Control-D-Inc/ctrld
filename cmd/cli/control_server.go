@@ -73,7 +73,7 @@ func (p *prog) registerControlServerHandler() {
 		sort.Slice(clients, func(i, j int) bool {
 			return clients[i].IP.Less(clients[j].IP)
 		})
-		if p.cfg.Service.MetricsQueryStats {
+		if p.metricsQueryStats.Load() {
 			for _, client := range clients {
 				client.IncludeQueryCount = true
 				dm := &dto.Metric{}
@@ -178,6 +178,7 @@ func (p *prog) registerControlServerHandler() {
 	p.cs.register(cdPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if cdUID != "" {
 			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(cdUID))
 			return
 		}
 		w.WriteHeader(http.StatusBadRequest)

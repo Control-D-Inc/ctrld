@@ -24,6 +24,8 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
+const resolvConfBackupFailedMsg = "open /etc/resolv.pre-ctrld-backup.conf: read-only file system"
+
 // allocate loopback ip
 // sudo ip a add 127.0.0.2/24 dev lo
 func allocateIP(ip string) error {

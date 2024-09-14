@@ -107,7 +107,7 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 
 	reg := prometheus.NewRegistry()
 	// Register queries count stats if enabled.
-	if cfg.Service.MetricsQueryStats {
+	if p.metricsQueryStats.Load() {
 		reg.MustRegister(statsQueriesCount)
 		reg.MustRegister(statsClientQueriesCount)
 	}

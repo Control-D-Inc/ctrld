@@ -27,6 +27,8 @@ var sampleConfigContent = `
 [service]
 log_level = "info"
 log_path = "/path/to/log.log"
+dns_watchdog_enabled = false
+dns_watchdog_interval = "20s"
 
 [network.0]
 name = "Home Wifi"

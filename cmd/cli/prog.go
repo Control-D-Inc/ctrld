@@ -12,19 +12,24 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/kardianos/service"
+	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 	"tailscale.com/net/interfaces"
 	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
+	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
@@ -38,6 +43,7 @@ const (
 	upstreamPrefix             = "upstream."
 	upstreamOS                 = upstreamPrefix + "os"
 	upstreamPrivate            = upstreamPrefix + "private"
+	dnsWatchdogDefaultInterval = 20 * time.Second
 )
 
 // ControlSocketName returns name for control unix socket.
@@ -62,15 +68,19 @@ var svcConfig = &service.Config{
 var useSystemdResolved = false
 
 type prog struct {
-	mu           sync.Mutex
-	waitCh       chan struct{}
-	stopCh       chan struct{}
-	reloadCh     chan struct{} // For Windows.
-	reloadDoneCh chan struct{}
-	logConn      net.Conn
-	cs           *controlServer
-	csSetDnsDone chan struct{}
-	csSetDnsOk   bool
+	mu               sync.Mutex
+	waitCh           chan struct{}
+	stopCh           chan struct{}
+	reloadCh         chan struct{} // For Windows.
+	reloadDoneCh     chan struct{}
+	apiReloadCh      chan *ctrld.Config
+	logConn          net.Conn
+	cs               *controlServer
+	csSetDnsDone     chan struct{}
+	csSetDnsOk       bool
+	dnsWatchDogOnce  sync.Once
+	dnsWg            sync.WaitGroup
+	dnsWatcherStopCh chan struct{}
 
 	cfg                  *ctrld.Config
 	localUpstreams       []string
@@ -84,6 +94,12 @@ type prog struct {
 	router               router.Router
 	ptrLoopGuard         *loopGuard
 	lanLoopGuard         *loopGuard
+	metricsQueryStats    atomic.Bool
+
+	selfUninstallMu       sync.Mutex
+	refusedQueryCount     int
+	canSelfUninstall      atomic.Bool
+	checkingSelfUninstall bool
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -117,11 +133,15 @@ func (p *prog) runWait() {
 			p.run(reload, reloadCh)
 			reload = true
 		}()
+
+		var newCfg *ctrld.Config
 		select {
 		case sig := <-reloadSigCh:
 			logger.Notice().Msgf("got signal: %s, reloading...", sig.String())
 		case <-p.reloadCh:
 			logger.Notice().Msg("reloading...")
+		case apiCfg := <-p.apiReloadCh:
+			newCfg = apiCfg
 		case <-p.stopCh:
 			close(reloadCh)
 			return
@@ -131,27 +151,30 @@ func (p *prog) runWait() {
 			close(reloadCh)
 			<-done
 		}
-		newCfg := &ctrld.Config{}
-		v := viper.NewWithOptions(viper.KeyDelimiter("::"))
-		ctrld.InitConfig(v, "ctrld")
-		if configPath != "" {
-			v.SetConfigFile(configPath)
-		}
-		if err := v.ReadInConfig(); err != nil {
-			logger.Err(err).Msg("could not read new config")
-			waitOldRunDone()
-			continue
-		}
-		if err := v.Unmarshal(&newCfg); err != nil {
-			logger.Err(err).Msg("could not unmarshal new config")
-			waitOldRunDone()
-			continue
-		}
-		if cdUID != "" {
-			if err := processCDFlags(newCfg); err != nil {
-				logger.Err(err).Msg("could not fetch ControlD config")
+
+		if newCfg == nil {
+			newCfg = &ctrld.Config{}
+			v := viper.NewWithOptions(viper.KeyDelimiter("::"))
+			ctrld.InitConfig(v, "ctrld")
+			if configPath != "" {
+				v.SetConfigFile(configPath)
+			}
+			if err := v.ReadInConfig(); err != nil {
+				logger.Err(err).Msg("could not read new config")
 				waitOldRunDone()
 				continue
+			}
+			if err := v.Unmarshal(&newCfg); err != nil {
+				logger.Err(err).Msg("could not unmarshal new config")
+				waitOldRunDone()
+				continue
+			}
+			if cdUID != "" {
+				if err := processCDFlags(newCfg); err != nil {
+					logger.Err(err).Msg("could not fetch ControlD config")
+					waitOldRunDone()
+					continue
+				}
 			}
 		}
 
@@ -178,6 +201,10 @@ func (p *prog) runWait() {
 			continue
 		}
 
+		if err := writeConfigFile(newCfg); err != nil {
+			logger.Err(err).Msg("could not write new config")
+		}
+
 		// This needs to be done here, otherwise, the DNS handler may observe an invalid
 		// upstream config because its initialization function have not been called yet.
 		mainLog.Load().Debug().Msg("setup upstream with new config")
@@ -188,6 +215,7 @@ func (p *prog) runWait() {
 		p.mu.Unlock()
 
 		logger.Notice().Msg("reloading config successfully")
+
 		select {
 		case p.reloadDoneCh <- struct{}{}:
 		default:
@@ -214,12 +242,67 @@ func (p *prog) postRun() {
 	}
 }
 
+// apiConfigReload calls API to check for latest config update then reload ctrld if necessary.
+func (p *prog) apiConfigReload() {
+	if cdUID == "" {
+		return
+	}
+
+	secs := 3600
+	if p.cfg.Service.RefetchTime != nil && *p.cfg.Service.RefetchTime > 0 {
+		secs = *p.cfg.Service.RefetchTime
+	}
+
+	ticker := time.NewTicker(time.Duration(secs) * time.Second)
+	defer ticker.Stop()
+
+	logger := mainLog.Load().With().Str("mode", "api-reload").Logger()
+	logger.Debug().Msg("starting custom config reload timer")
+	lastUpdated := time.Now().Unix()
+	for {
+		select {
+		case <-ticker.C:
+			resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+			selfUninstallCheck(err, p, logger)
+			if err != nil {
+				logger.Warn().Err(err).Msg("could not fetch resolver config")
+				continue
+			}
+
+			if resolverConfig.Ctrld.CustomConfig == "" {
+				continue
+			}
+
+			if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated {
+				lastUpdated = time.Now().Unix()
+				cfg := &ctrld.Config{}
+				if err := validateCdRemoteConfig(resolverConfig, cfg); err != nil {
+					logger.Warn().Err(err).Msg("skipping invalid custom config")
+					if _, err := controld.UpdateCustomLastFailed(cdUID, rootCmd.Version, cdDev, true); err != nil {
+						logger.Error().Err(err).Msg("could not mark custom last update failed")
+					}
+					break
+				}
+				setListenerDefaultValue(cfg)
+				logger.Debug().Msg("custom config changes detected, reloading...")
+				p.apiReloadCh <- cfg
+			} else {
+				logger.Debug().Msg("custom config does not change")
+			}
+		case <-p.stopCh:
+			return
+		}
+	}
+}
+
 func (p *prog) setupUpstream(cfg *ctrld.Config) {
 	localUpstreams := make([]string, 0, len(cfg.Upstream))
 	ptrNameservers := make([]string, 0, len(cfg.Upstream))
+	isControlDUpstream := false
 	for n := range cfg.Upstream {
 		uc := cfg.Upstream[n]
 		uc.Init()
+		isControlDUpstream = isControlDUpstream || uc.IsControlD()
 		if uc.BootstrapIP == "" {
 			uc.SetupBootstrapIP()
 			mainLog.Load().Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
@@ -235,6 +318,10 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 		if uc.IsDiscoverable() {
 			ptrNameservers = append(ptrNameservers, uc.Endpoint)
 		}
+	}
+	// Self-uninstallation is ok If there is only 1 ControlD upstream, and no remote config.
+	if len(cfg.Upstream) == 1 && isControlDUpstream {
+		p.canSelfUninstall.Store(true)
 	}
 	p.localUpstreams = localUpstreams
 	p.ptrNameservers = ptrNameservers
@@ -271,6 +358,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	p.lanLoopGuard = newLoopGuard()
 	p.ptrLoopGuard = newLoopGuard()
 	p.cacheFlushDomainsMap = nil
+	p.metricsQueryStats.Store(p.cfg.Service.MetricsQueryStats)
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -397,6 +485,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		if p.logConn != nil {
 			_ = p.logConn.Close()
 		}
+		go p.apiConfigReload()
 		p.postRun()
 	}
 	wg.Wait()
@@ -510,13 +599,86 @@ func (p *prog) setDNS() {
 		for i := range nameservers {
 			servers[i] = netip.MustParseAddr(nameservers[i])
 		}
-		go watchResolvConf(netIface, servers, setResolvConf)
+		p.dnsWg.Add(1)
+		go func() {
+			defer p.dnsWg.Done()
+			p.watchResolvConf(netIface, servers, setResolvConf)
+		}()
 	}
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
 			return setDnsIgnoreUnusableInterface(i, nameservers)
 		})
 	}
+	if p.dnsWatchdogEnabled() {
+		p.dnsWg.Add(1)
+		go func() {
+			defer p.dnsWg.Done()
+			p.dnsWatchdog(netIface, nameservers, allIfaces)
+		}()
+	}
+}
+
+// dnsWatchdogEnabled reports whether DNS watchdog is enabled.
+func (p *prog) dnsWatchdogEnabled() bool {
+	if ptr := p.cfg.Service.DnsWatchdogEnabled; ptr != nil {
+		return *ptr
+	}
+	return true
+}
+
+// dnsWatchdogDuration returns the time duration between each DNS watchdog loop.
+func (p *prog) dnsWatchdogDuration() time.Duration {
+	if ptr := p.cfg.Service.DnsWatchdogInvterval; ptr != nil {
+		if (*ptr).Seconds() > 0 {
+			return *ptr
+		}
+	}
+	return dnsWatchdogDefaultInterval
+}
+
+// dnsWatchdog watches for DNS changes on Darwin and Windows then re-applying ctrld's settings.
+// This is only works when deactivation pin set.
+func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces bool) {
+	if !requiredMultiNICsConfig() {
+		return
+	}
+
+	p.dnsWatchDogOnce.Do(func() {
+		mainLog.Load().Debug().Msg("start DNS settings watchdog")
+		ns := nameservers
+		slices.Sort(ns)
+		ticker := time.NewTicker(p.dnsWatchdogDuration())
+		logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
+		for {
+			select {
+			case <-p.dnsWatcherStopCh:
+				return
+			case <-p.stopCh:
+				mainLog.Load().Debug().Msg("stop dns watchdog")
+				return
+			case <-ticker.C:
+				if dnsChanged(iface, ns) {
+					logger.Debug().Msg("DNS settings were changed, re-applying settings")
+					if err := setDNS(iface, ns); err != nil {
+						mainLog.Load().Error().Err(err).Str("iface", iface.Name).Msgf("could not re-apply DNS settings")
+					}
+				}
+				if allIfaces {
+					withEachPhysicalInterfaces(iface.Name, "re-applying DNS", func(i *net.Interface) error {
+						if dnsChanged(i, ns) {
+							if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
+								mainLog.Load().Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
+							} else {
+								mainLog.Load().Debug().Msgf("re-applying DNS for interface %q successfully", i.Name)
+							}
+						}
+						return nil
+					})
+				}
+			}
+		}
+	})
 }
 
 func (p *prog) resetDNS() {
@@ -727,13 +889,14 @@ func canBeLocalUpstream(addr string) bool {
 // the interface that matches excludeIfaceName. The context is used to clarify the
 // log message when error happens.
 func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.Interface) error) {
+	validIfacesMap := validInterfacesMap()
 	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
 		// Skip loopback/virtual interface.
 		if i.IsLoopback() || len(i.HardwareAddr) == 0 {
 			return
 		}
 		// Skip invalid interface.
-		if !validInterface(i.Interface) {
+		if !validInterface(i.Interface, validIfacesMap) {
 			return
 		}
 		netIface := i.Interface
@@ -747,7 +910,9 @@ func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.
 		}
 		// TODO: investigate whether we should report this error?
 		if err := f(netIface); err == nil {
-			mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
+			if context != "" {
+				mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
+			}
 		} else if !errors.Is(err, errSaveCurrentStaticDNSNotSupported) {
 			mainLog.Load().Err(err).Msgf("%s for interface %q failed", context, i.Name)
 		}
@@ -805,4 +970,25 @@ func savedStaticNameservers(iface *net.Interface) []string {
 		return strings.Split(string(data), ",")
 	}
 	return nil
+}
+
+// dnsChanged reports whether DNS settings for given interface was changed.
+// The caller must sort the nameservers before calling this function.
+func dnsChanged(iface *net.Interface, nameservers []string) bool {
+	curNameservers, _ := currentStaticDNS(iface)
+	slices.Sort(curNameservers)
+	return !slices.Equal(curNameservers, nameservers)
+}
+
+// selfUninstallCheck checks if the error dues to controld.InvalidConfigCode, perform self-uninstall then.
+func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
+	var uer *controld.UtilityErrorResponse
+	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+		// Ensure all DNS watchers goroutine are terminated, so it won't mess up with self-uninstall.
+		close(p.dnsWatcherStopCh)
+		p.dnsWg.Wait()
+
+		// Perform self-uninstall now.
+		selfUninstall(p, logger)
+	}
 }

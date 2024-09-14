@@ -48,6 +48,11 @@ import (
 
 // selfCheckInternalTestDomain is used for testing ctrld self response to clients.
 const selfCheckInternalTestDomain = "ctrld" + loopTestDomain
+const (
+	windowsForwardersFilename = ".forwarders.txt"
+	oldBinSuffix              = "_previous"
+	oldLogSuffix              = ".1"
+)
 
 var (
 	version = "dev"
@@ -110,7 +115,7 @@ func initCLI() {
 		&verbose,
 		"verbose",
 		"v",
-		`verbose log output, "-v" basic logging, "-vv" debug level logging`,
+		`verbose log output, "-v" basic logging, "-vv" debug logging`,
 	)
 	rootCmd.PersistentFlags().BoolVarP(
 		&silent,
@@ -158,7 +163,10 @@ func initCLI() {
 		},
 		Use:   "start",
 		Short: "Install and start the ctrld service",
-		Args:  cobra.NoArgs,
+		Long: `Install and start the ctrld service
+
+NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
+		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			checkStrFlagEmpty(cmd, cdUidFlagName)
 			checkStrFlagEmpty(cmd, cdOrgFlagName)
@@ -182,8 +190,9 @@ func initCLI() {
 				return
 			}
 
-			status, _ := s.Status()
+			status, err := s.Status()
 			isCtrldRunning := status == service.StatusRunning
+			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
 
 			// If pin code was set, do not allow running start command.
 			if isCtrldRunning {
@@ -192,39 +201,56 @@ func initCLI() {
 				}
 			}
 
-			if cdUID != "" {
-				rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
-				if err != nil {
-					mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid: %s", cdUID)
+			if !startOnly {
+				startOnly = len(osArgs) == 0
+			}
+			// If user run "ctrld start" and ctrld is already installed, starting existing service.
+			if startOnly && isCtrldInstalled {
+				tryReadingConfigWithNotice(false, true)
+				if err := v.Unmarshal(&cfg); err != nil {
+					mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 				}
-				// validateCdRemoteConfig clobbers v, saving it here to restore later.
-				oldV := v
-				if err := validateCdRemoteConfig(rc, &ctrld.Config{}); err != nil {
-					if errors.As(err, &viper.ConfigParseError{}) {
-						if configStr, _ := base64.StdEncoding.DecodeString(rc.Ctrld.CustomConfig); len(configStr) > 0 {
-							tmpDir := os.TempDir()
-							tmpConfFile := filepath.Join(tmpDir, "ctrld.toml")
-							errorLogged := false
-							// Write remote config to a temporary file to get details error.
-							if we := os.WriteFile(tmpConfFile, configStr, 0600); we == nil {
-								if de := decoderErrorFromTomlFile(tmpConfFile); de != nil {
-									row, col := de.Position()
-									mainLog.Load().Error().Msgf("failed to parse custom config at line: %d, column: %d, error: %s", row, col, de.Error())
-									errorLogged = true
-								}
-								_ = os.Remove(tmpConfFile)
-							}
-							// If we could not log details error, emit what we have already got.
-							if !errorLogged {
-								mainLog.Load().Error().Msgf("failed to parse custom config: %v", err)
-							}
-						}
-					} else {
-						mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
+
+				initLogging()
+				tasks := []task{
+					resetDnsTask(p, s),
+					{s.Stop, false},
+					{func() error {
+						// Save current DNS so we can restore later.
+						withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
+							return saveCurrentStaticDNS(i)
+						})
+						return nil
+					}, false},
+					{s.Start, true},
+					{noticeWritingControlDConfig, false},
+				}
+				mainLog.Load().Notice().Msg("Starting existing ctrld service")
+				if doTasks(tasks) {
+					mainLog.Load().Notice().Msg("Service started")
+					sockDir, err := socketDir()
+					if err != nil {
+						mainLog.Load().Warn().Err(err).Msg("Failed to get socket directory")
+						os.Exit(1)
 					}
-					mainLog.Load().Warn().Msg("disregarding invalid custom config")
+					if cc := newSocketControlClient(s, sockDir); cc != nil {
+						if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
+							if iface == "auto" {
+								iface = defaultIfaceName()
+							}
+							logger := mainLog.Load().With().Str("iface", iface).Logger()
+							logger.Debug().Msg("setting DNS successfully")
+						}
+					}
+				} else {
+					mainLog.Load().Error().Err(err).Msg("Failed to start existing ctrld service")
+					os.Exit(1)
 				}
-				v = oldV
+				return
+			}
+
+			if cdUID != "" {
+				doValidateCdRemoteConfig(cdUID)
 			} else if uid := cdUIDFromProvToken(); uid != "" {
 				cdUID = uid
 				mainLog.Load().Debug().Msg("using uid from provision token")
@@ -399,6 +425,8 @@ func initCLI() {
 	startCmd.Flags().StringVarP(&nextdns, nextdnsFlagName, "", "", "NextDNS resolver id")
 	startCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 	startCmd.Flags().BoolVarP(&skipSelfChecks, "skip_self_checks", "", false, `Skip self checks after installing ctrld service`)
+	startCmd.Flags().BoolVarP(&startOnly, "start_only", "", false, "Do not install new service")
+	_ = startCmd.Flags().MarkHidden("start_only")
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
@@ -485,7 +513,10 @@ func initCLI() {
 		Run: func(cmd *cobra.Command, args []string) {
 			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg, runInCdMode())}
+			cdUID = curCdUID()
+			cdMode := cdUID != ""
+
+			p := &prog{router: router.New(&cfg, cdMode)}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
@@ -496,6 +527,10 @@ func initCLI() {
 				return
 			}
 			initLogging()
+
+			if cdMode {
+				doValidateCdRemoteConfig(cdUID)
+			}
 
 			iface = runningIface(s)
 			tasks := []task{
@@ -623,11 +658,72 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				os.Exit(deactivationPinInvalidExitCode)
 			}
 			uninstall(p, s)
+			if cleanup {
+				var files []string
+				// Config file.
+				files = append(files, v.ConfigFileUsed())
+				// Log file.
+				logFile := normalizeLogFilePath(cfg.Service.LogPath)
+				files = append(files, logFile)
+				// Backup log file.
+				oldLogFile := logFile + oldLogSuffix
+				if _, err := os.Stat(oldLogFile); err == nil {
+					files = append(files, oldLogFile)
+				}
+				// Socket files.
+				if dir, _ := socketDir(); dir != "" {
+					files = append(files, filepath.Join(dir, ctrldControlUnixSock))
+					files = append(files, filepath.Join(dir, ctrldLogUnixSock))
+				}
+				// Static DNS settings files.
+				withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+					file := savedStaticDnsSettingsFilePath(i)
+					if _, err := os.Stat(file); err == nil {
+						files = append(files, file)
+					}
+					return nil
+				})
+				// Windows forwarders file.
+				if windowsHasLocalDnsServerRunning() {
+					files = append(files, absHomeDir(windowsForwardersFilename))
+				}
+				// Binary itself.
+				bin, _ := os.Executable()
+				if bin != "" && supportedSelfDelete {
+					files = append(files, bin)
+				}
+				// Backup file after upgrading.
+				oldBin := bin + oldBinSuffix
+				if _, err := os.Stat(oldBin); err == nil {
+					files = append(files, oldBin)
+				}
+				for _, file := range files {
+					if file == "" {
+						continue
+					}
+					if err := os.Remove(file); err != nil {
+						if os.IsNotExist(err) {
+							continue
+						}
+						mainLog.Load().Warn().Err(err).Msg("failed to remove file")
+					} else {
+						mainLog.Load().Debug().Msgf("file removed: %s", file)
+					}
+				}
+				if err := selfDeleteExe(); err != nil {
+					mainLog.Load().Warn().Err(err).Msg("failed to remove file")
+				} else {
+					if !supportedSelfDelete {
+						mainLog.Load().Debug().Msgf("file removed: %s", bin)
+					}
+				}
+			}
 		},
 	}
 	uninstallCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, use "auto" for the default gateway interface`)
 	uninstallCmd.Flags().Int64VarP(&deactivationPin, "pin", "", defaultDeactivationPin, `Pin code for uninstalling ctrld`)
 	_ = uninstallCmd.Flags().MarkHidden("pin")
+	uninstallCmd.Flags().BoolVarP(&cleanup, "cleanup", "", false, `Removing ctrld binary and config files`)
 
 	listIfacesCmd := &cobra.Command{
 		Use:   "list",
@@ -697,7 +793,13 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		},
 		Use:   "start",
 		Short: "Quick start service and configure DNS on interface",
+		Long: `Quick start service and configure DNS on interface
+
+NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
 		Run: func(cmd *cobra.Command, args []string) {
+			if len(os.Args) == 2 {
+				startOnly = true
+			}
 			if !cmd.Flags().Changed("iface") {
 				os.Args = append(os.Args, "--iface="+ifaceStartStop)
 			}
@@ -776,7 +878,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		},
 	}
 	uninstallCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
-	uninstallCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
+	uninstallCmdAlias.Flags().AddFlagSet(uninstallCmd.Flags())
 	rootCmd.AddCommand(uninstallCmdAlias)
 
 	listClientsCmd := &cobra.Command{
@@ -894,7 +996,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
 				svcInstalled = false
 			}
-			oldBin := bin + "_previous"
+			oldBin := bin + oldBinSuffix
 			baseUrl := upgradeChannel[upgradeChannelDefault]
 			if len(args) > 0 {
 				channel := args[0]
@@ -1033,12 +1135,14 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 	waitCh := make(chan struct{})
 	p := &prog{
-		waitCh:       waitCh,
-		stopCh:       stopCh,
-		reloadCh:     make(chan struct{}),
-		reloadDoneCh: make(chan struct{}),
-		cfg:          &cfg,
-		appCallback:  appCallback,
+		waitCh:           waitCh,
+		stopCh:           stopCh,
+		reloadCh:         make(chan struct{}),
+		reloadDoneCh:     make(chan struct{}),
+		dnsWatcherStopCh: make(chan struct{}),
+		apiReloadCh:      make(chan *ctrld.Config),
+		cfg:              &cfg,
+		appCallback:      appCallback,
 	}
 	if homedir == "" {
 		if dir, err := userHomeDir(); err == nil {
@@ -1128,36 +1232,13 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				return
 			}
 
-			uninstallIfInvalidCdUID := func() {
-				cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
-				if uer, ok := err.(*controld.UtilityErrorResponse); ok && uer.ErrorField.Code == controld.InvalidConfigCode {
-					s, err := newService(&prog{}, svcConfig)
-					if err != nil {
-						cdLogger.Warn().Err(err).Msg("failed to create new service")
-						return
-					}
-					if netIface, _ := netInterface(iface); netIface != nil {
-						if err := restoreNetworkManager(); err != nil {
-							cdLogger.Error().Err(err).Msg("could not restore NetworkManager")
-							return
-						}
-						cdLogger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS for interface")
-						if err := resetDNS(netIface); err != nil {
-							cdLogger.Warn().Err(err).Msg("something went wrong while restoring DNS")
-						} else {
-							cdLogger.Debug().Str("iface", netIface.Name).Msg("Restoring DNS successfully")
-						}
-					}
-
-					tasks := []task{{s.Uninstall, true}}
-					if doTasks(tasks) {
-						cdLogger.Info().Msg("uninstalled service")
-					}
-					cdLogger.Fatal().Err(uer).Msg("failed to fetch resolver config")
-					return
-				}
+			cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
+			// Performs self-uninstallation if the ControlD device does not exist.
+			var uer *controld.UtilityErrorResponse
+			if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+				_ = uninstallInvalidCdUID(p, cdLogger, false)
 			}
-			uninstallIfInvalidCdUID()
+			cdLogger.Fatal().Err(err).Msg("failed to fetch resolver config")
 		}
 	}
 
@@ -1168,7 +1249,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	if updated {
-		if err := writeConfigFile(); err != nil {
+		if err := writeConfigFile(&cfg); err != nil {
 			mainLog.Load().Fatal().Err(err).Msg("failed to write config file")
 		} else {
 			mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
@@ -1257,12 +1338,16 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	close(waitCh)
 	<-stopCh
+
+	// Wait goroutines which watches/manipulates DNS settings terminated,
+	// ensuring that changes to DNS since here won't be reverted.
+	p.dnsWg.Wait()
 	for _, f := range p.onStopped {
 		f()
 	}
 }
 
-func writeConfigFile() error {
+func writeConfigFile(cfg *ctrld.Config) error {
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
 	} else if configPath != "" {
@@ -1315,7 +1400,7 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		}
 		nop := zerolog.Nop()
 		_, _ = tryUpdateListenerConfig(&cfg, &nop, true)
-		if err := writeConfigFile(); err != nil {
+		if err := writeConfigFile(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
 		} else {
 			fp, err := filepath.Abs(defaultConfigFile)
@@ -1639,9 +1724,10 @@ func selfCheckStatus(s service.Service, homedir, sockDir string) (bool, service.
 	}
 
 	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
-	ctrld.SetConfigNameWithPath(v, "ctrld", homedir)
 	if configPath != "" {
 		v.SetConfigFile(configPath)
+	} else {
+		v.SetConfigFile(defaultConfigFile)
 	}
 	if err := v.ReadInConfig(); err != nil {
 		mainLog.Load().Error().Err(err).Msgf("failed to re-read configuration file: %s", v.ConfigFileUsed())
@@ -2375,7 +2461,7 @@ func doGenerateNextDNSConfig(uid string) error {
 	mainLog.Load().Notice().Msgf("Generating nextdns config: %s", defaultConfigFile)
 	generateNextDNSConfig(uid)
 	updateListenerConfig(&cfg)
-	return writeConfigFile()
+	return writeConfigFile(&cfg)
 }
 
 func noticeWritingControlDConfig() error {
@@ -2423,7 +2509,7 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 			return nil // the server is running older version of ctrld
 		}
 	}
-	mainLog.Load().Error().Msg(errInvalidDeactivationPin.Error())
+	mainLog.Load().Error().Err(err).Msg(errInvalidDeactivationPin.Error())
 	return errInvalidDeactivationPin
 }
 
@@ -2482,6 +2568,11 @@ func absHomeDir(filename string) string {
 
 // runInCdMode reports whether ctrld service is running in cd mode.
 func runInCdMode() bool {
+	return curCdUID() != ""
+}
+
+// curCdUID returns the current ControlD UID used by running ctrld process.
+func curCdUID() string {
 	if s, _ := newService(&prog{}, svcConfig); s != nil {
 		if dir, _ := socketDir(); dir != "" {
 			cc := newSocketControlClient(s, dir)
@@ -2489,12 +2580,13 @@ func runInCdMode() bool {
 				resp, _ := cc.post(cdPath, nil)
 				if resp != nil {
 					defer resp.Body.Close()
-					return resp.StatusCode == http.StatusOK
+					buf, _ := io.ReadAll(resp.Body)
+					return string(buf)
 				}
 			}
 		}
 	}
-	return false
+	return ""
 }
 
 // goArm returns the GOARM value for the binary.
@@ -2557,6 +2649,9 @@ func resetDnsTask(p *prog, s service.Service) task {
 	isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
 	isCtrldRunning := status == service.StatusRunning
 	return task{func() error {
+		if iface == "" {
+			return nil
+		}
 		// Always reset DNS first, ensuring DNS setting is in a good state.
 		// resetDNS must use the "iface" value of current running ctrld
 		// process to reset what setDNS has done properly.
@@ -2571,4 +2666,61 @@ func resetDnsTask(p *prog, s service.Service) task {
 		iface = oldIface
 		return nil
 	}, false}
+}
+
+// doValidateCdRemoteConfig fetches and validates custom config for cdUID.
+func doValidateCdRemoteConfig(cdUID string) {
+	rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+	if err != nil {
+		mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid: %s", cdUID)
+	}
+	// validateCdRemoteConfig clobbers v, saving it here to restore later.
+	oldV := v
+	if err := validateCdRemoteConfig(rc, &ctrld.Config{}); err != nil {
+		if errors.As(err, &viper.ConfigParseError{}) {
+			if configStr, _ := base64.StdEncoding.DecodeString(rc.Ctrld.CustomConfig); len(configStr) > 0 {
+				tmpDir := os.TempDir()
+				tmpConfFile := filepath.Join(tmpDir, "ctrld.toml")
+				errorLogged := false
+				// Write remote config to a temporary file to get details error.
+				if we := os.WriteFile(tmpConfFile, configStr, 0600); we == nil {
+					if de := decoderErrorFromTomlFile(tmpConfFile); de != nil {
+						row, col := de.Position()
+						mainLog.Load().Error().Msgf("failed to parse custom config at line: %d, column: %d, error: %s", row, col, de.Error())
+						errorLogged = true
+					}
+					_ = os.Remove(tmpConfFile)
+				}
+				// If we could not log details error, emit what we have already got.
+				if !errorLogged {
+					mainLog.Load().Error().Msgf("failed to parse custom config: %v", err)
+				}
+			}
+		} else {
+			mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
+		}
+		mainLog.Load().Warn().Msg("disregarding invalid custom config")
+	}
+	v = oldV
+}
+
+// uninstallInvalidCdUID performs self-uninstallation because the ControlD device does not exist.
+func uninstallInvalidCdUID(p *prog, logger zerolog.Logger, doStop bool) bool {
+	s, err := newService(p, svcConfig)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to create new service")
+		return false
+	}
+
+	p.resetDNS()
+
+	tasks := []task{{s.Uninstall, true}}
+	if doTasks(tasks) {
+		logger.Info().Msg("uninstalled service")
+		if doStop {
+			_ = s.Stop()
+		}
+		return true
+	}
+	return false
 }

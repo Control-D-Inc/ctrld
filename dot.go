@@ -18,7 +18,7 @@ func (r *dotResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	// dns.controld.dev first. By using a dialer with custom resolver,
 	// we ensure that we can always resolve the bootstrap domain
 	// regardless of the machine DNS status.
-	dialer := newDialer(net.JoinHostPort(bootstrapDNS, "53"))
+	dialer := newDialer(net.JoinHostPort(controldBootstrapDns, "53"))
 	dnsTyp := uint16(0)
 	if msg != nil && len(msg.Question) > 0 {
 		dnsTyp = msg.Question[0].Qtype

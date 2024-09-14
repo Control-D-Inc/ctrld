@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	forwardersFilename       = ".forwarders.txt"
 	v4InterfaceKeyPathFormat = `HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\`
 	v6InterfaceKeyPathFormat = `HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\`
 )
@@ -40,7 +39,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		// If there's a Dns server running, that means we are on AD with Dns feature enabled.
 		// Configuring the Dns server to forward queries to ctrld instead.
 		if windowsHasLocalDnsServerRunning() {
-			file := absHomeDir(forwardersFilename)
+			file := absHomeDir(windowsForwardersFilename)
 			oldForwardersContent, _ := os.ReadFile(file)
 			if err := os.WriteFile(file, []byte(strings.Join(nameservers, ",")), 0600); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("could not save forwarders settings")
@@ -72,7 +71,7 @@ func resetDNS(iface *net.Interface) error {
 	resetDNSOnce.Do(func() {
 		// See corresponding comment in setDNS.
 		if windowsHasLocalDnsServerRunning() {
-			file := absHomeDir(forwardersFilename)
+			file := absHomeDir(windowsForwardersFilename)
 			content, err := os.ReadFile(file)
 			if err != nil {
 				mainLog.Load().Error().Err(err).Msg("could not read forwarders settings")

@@ -36,6 +36,8 @@ var (
 	cdUpstreamProto   string
 	deactivationPin   int64
 	skipSelfChecks    bool
+	cleanup           bool
+	startOnly         bool
 
 	mainLog       atomic.Pointer[zerolog.Logger]
 	consoleWriter zerolog.ConsoleWriter
@@ -63,8 +65,11 @@ func Main() {
 }
 
 func normalizeLogFilePath(logFilePath string) string {
-	if logFilePath == "" || filepath.IsAbs(logFilePath) || service.Interactive() {
-		return logFilePath
+	// In cleanup mode, we always want the full log file path.
+	if !cleanup {
+		if logFilePath == "" || filepath.IsAbs(logFilePath) || service.Interactive() {
+			return logFilePath
+		}
 	}
 	if homedir != "" {
 		return filepath.Join(homedir, logFilePath)
@@ -121,14 +126,14 @@ func initLoggingWithBackup(doBackup bool) {
 		flags := os.O_CREATE | os.O_RDWR | os.O_APPEND
 		if doBackup {
 			// Backup old log file with .1 suffix.
-			if err := os.Rename(logFilePath, logFilePath+".1"); err != nil && !os.IsNotExist(err) {
+			if err := os.Rename(logFilePath, logFilePath+oldLogSuffix); err != nil && !os.IsNotExist(err) {
 				mainLog.Load().Error().Msgf("could not backup old log file: %v", err)
 			} else {
 				// Backup was created, set flags for truncating old log file.
 				flags = os.O_CREATE | os.O_RDWR
 			}
 		}
-		logFile, err := os.OpenFile(logFilePath, flags, os.FileMode(0o600))
+		logFile, err := openLogFile(logFilePath, flags)
 		if err != nil {
 			mainLog.Load().Error().Msgf("failed to create log file: %v", err)
 			os.Exit(1)

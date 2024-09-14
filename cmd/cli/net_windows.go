@@ -10,7 +10,7 @@ func patchNetIfaceName(iface *net.Interface) error {
 
 // validInterface reports whether the *net.Interface is a valid one.
 // On Windows, only physical interfaces are considered valid.
-func validInterface(iface *net.Interface) bool {
+func validInterface(iface *net.Interface, validIfacesMap map[string]struct{}) bool {
 	if iface == nil {
 		return false
 	}
@@ -19,3 +19,5 @@ func validInterface(iface *net.Interface) bool {
 	}
 	return false
 }
+
+func validInterfacesMap() map[string]struct{} { return nil }

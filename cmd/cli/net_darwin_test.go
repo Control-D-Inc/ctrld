@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -55,5 +56,49 @@ func Test_networkServiceName(t *testing.T) {
 			name := networkServiceName(tc.ifaceName, strings.NewReader(listnetworkserviceorderOutput))
 			assert.Equal(t, tc.networkServiceName, name)
 		})
+	}
+}
+
+const listallhardwareportsOutput = `
+Hardware Port: Ethernet Adapter (en6)
+Device: en6
+Ethernet Address: 3a:3e:fc:1e:ab:41
+
+Hardware Port: Ethernet Adapter (en7)
+Device: en7
+Ethernet Address: 3a:3e:fc:1e:ab:42
+
+Hardware Port: Thunderbolt Bridge
+Device: bridge0
+Ethernet Address: 36:21:bb:3a:7a:40
+
+Hardware Port: Wi-Fi
+Device: en0
+Ethernet Address: a0:78:17:68:56:3f
+
+Hardware Port: Thunderbolt 1
+Device: en1
+Ethernet Address: 36:21:bb:3a:7a:40
+
+Hardware Port: Thunderbolt 2
+Device: en2
+Ethernet Address: 36:21:bb:3a:7a:44
+
+VLAN Configurations
+===================
+`
+
+func Test_parseListAllHardwarePorts(t *testing.T) {
+	expected := map[string]struct{}{
+		"en0":     {},
+		"en1":     {},
+		"en2":     {},
+		"en6":     {},
+		"en7":     {},
+		"bridge0": {},
+	}
+	m := parseListAllHardwarePorts(strings.NewReader(listallhardwareportsOutput))
+	if !maps.Equal(m, expected) {
+		t.Errorf("unexpected output, want: %v, got: %v", expected, m)
 	}
 }

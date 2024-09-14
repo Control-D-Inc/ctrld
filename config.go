@@ -25,6 +25,7 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+	"golang.org/x/net/http2"
 	"golang.org/x/sync/singleflight"
 	"tailscale.com/logtail/backoff"
 	"tailscale.com/net/tsaddr"
@@ -188,27 +189,30 @@ func (c *Config) FirstUpstream() *UpstreamConfig {
 
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
-	LogLevel                string   `mapstructure:"log_level" toml:"log_level,omitempty"`
-	LogPath                 string   `mapstructure:"log_path" toml:"log_path,omitempty"`
-	CacheEnable             bool     `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
-	CacheSize               int      `mapstructure:"cache_size" toml:"cache_size,omitempty"`
-	CacheTTLOverride        int      `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
-	CacheServeStale         bool     `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
-	CacheFlushDomains       []string `mapstructure:"cache_flush_domains" toml:"cache_flush_domains" validate:"max=256"`
-	MaxConcurrentRequests   *int     `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
-	DHCPLeaseFile           string   `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
-	DHCPLeaseFileFormat     string   `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
-	DiscoverMDNS            *bool    `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
-	DiscoverARP             *bool    `mapstructure:"discover_arp" toml:"discover_arp,omitempty"`
-	DiscoverDHCP            *bool    `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
-	DiscoverPtr             *bool    `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
-	DiscoverHosts           *bool    `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
-	DiscoverRefreshInterval int      `mapstructure:"discover_refresh_interval" toml:"discover_refresh_interval,omitempty"`
-	ClientIDPref            string   `mapstructure:"client_id_preference" toml:"client_id_preference,omitempty" validate:"omitempty,oneof=host mac"`
-	MetricsQueryStats       bool     `mapstructure:"metrics_query_stats" toml:"metrics_query_stats,omitempty"`
-	MetricsListener         string   `mapstructure:"metrics_listener" toml:"metrics_listener,omitempty"`
-	Daemon                  bool     `mapstructure:"-" toml:"-"`
-	AllocateIP              bool     `mapstructure:"-" toml:"-"`
+	LogLevel                string         `mapstructure:"log_level" toml:"log_level,omitempty"`
+	LogPath                 string         `mapstructure:"log_path" toml:"log_path,omitempty"`
+	CacheEnable             bool           `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
+	CacheSize               int            `mapstructure:"cache_size" toml:"cache_size,omitempty"`
+	CacheTTLOverride        int            `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
+	CacheServeStale         bool           `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
+	CacheFlushDomains       []string       `mapstructure:"cache_flush_domains" toml:"cache_flush_domains" validate:"max=256"`
+	MaxConcurrentRequests   *int           `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
+	DHCPLeaseFile           string         `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
+	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
+	DiscoverMDNS            *bool          `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
+	DiscoverARP             *bool          `mapstructure:"discover_arp" toml:"discover_arp,omitempty"`
+	DiscoverDHCP            *bool          `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
+	DiscoverPtr             *bool          `mapstructure:"discover_ptr" toml:"discover_ptr,omitempty"`
+	DiscoverHosts           *bool          `mapstructure:"discover_hosts" toml:"discover_hosts,omitempty"`
+	DiscoverRefreshInterval int            `mapstructure:"discover_refresh_interval" toml:"discover_refresh_interval,omitempty"`
+	ClientIDPref            string         `mapstructure:"client_id_preference" toml:"client_id_preference,omitempty" validate:"omitempty,oneof=host mac"`
+	MetricsQueryStats       bool           `mapstructure:"metrics_query_stats" toml:"metrics_query_stats,omitempty"`
+	MetricsListener         string         `mapstructure:"metrics_listener" toml:"metrics_listener,omitempty"`
+	DnsWatchdogEnabled      *bool          `mapstructure:"dns_watchdog_enabled" toml:"dns_watchdog_enabled,omitempty"`
+	DnsWatchdogInvterval    *time.Duration `mapstructure:"dns_watchdog_interval" toml:"dns_watchdog_interval,omitempty"`
+	RefetchTime             *int           `mapstructure:"refetch_time" toml:"refetch_time,omitempty"`
+	Daemon                  bool           `mapstructure:"-" toml:"-"`
+	AllocateIP              bool           `mapstructure:"-" toml:"-"`
 }
 
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.
@@ -316,7 +320,7 @@ func (uc *UpstreamConfig) Init() {
 		}
 	}
 	if uc.IPStack == "" {
-		if uc.isControlD() {
+		if uc.IsControlD() {
 			uc.IPStack = IpStackSplit
 		} else {
 			uc.IPStack = IpStackBoth
@@ -354,7 +358,7 @@ func (uc *UpstreamConfig) UpstreamSendClientInfo() bool {
 	}
 	switch uc.Type {
 	case ResolverTypeDOH, ResolverTypeDOH3:
-		if uc.isControlD() || uc.isNextDNS() {
+		if uc.IsControlD() || uc.isNextDNS() {
 			return true
 		}
 	}
@@ -401,7 +405,7 @@ func (uc *UpstreamConfig) UID() string {
 // The first usable IP will be used as bootstrap IP of the upstream.
 func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
 	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
-	isControlD := uc.isControlD()
+	isControlD := uc.IsControlD()
 	for {
 		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, withBootstrapDNS)
 		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
@@ -484,6 +488,13 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 	transport.TLSClientConfig = &tls.Config{
 		RootCAs:            uc.certPool,
 		ClientSessionCache: tls.NewLRUClientSessionCache(0),
+	}
+
+	// Prevent bad tcp connection hanging the requests for too long.
+	// See: https://github.com/golang/go/issues/36026
+	if t2, err := http2.ConfigureTransports(transport); err == nil {
+		t2.ReadIdleTimeout = 10 * time.Second
+		t2.PingTimeout = 5 * time.Second
 	}
 
 	dialerTimeoutMs := 2000
@@ -572,7 +583,8 @@ func (uc *UpstreamConfig) ping() error {
 	return nil
 }
 
-func (uc *UpstreamConfig) isControlD() bool {
+// IsControlD reports whether this is a ControlD upstream.
+func (uc *UpstreamConfig) IsControlD() bool {
 	domain := uc.Domain
 	if domain == "" {
 		if u, err := url.Parse(uc.Endpoint); err == nil {

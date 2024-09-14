@@ -147,7 +147,7 @@ func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
 			printed = ci.Mac != "" || ci.IP != "" || ci.Hostname != ""
 			switch {
-			case uc.isControlD():
+			case uc.IsControlD():
 				dohHeader = newControlDHeaders(ci)
 			case uc.isNextDNS():
 				dohHeader = newNextDNSHeaders(ci)

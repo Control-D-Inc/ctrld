@@ -26,14 +26,15 @@ const (
 	apiDomainDev       = "api.controld.dev"
 	resolverDataURLCom = "https://api.controld.com/utility"
 	resolverDataURLDev = "https://api.controld.dev/utility"
-	InvalidConfigCode  = 40401
+	InvalidConfigCode  = 40402
 )
 
 // ResolverConfig represents Control D resolver data.
 type ResolverConfig struct {
 	DOH   string `json:"doh"`
 	Ctrld struct {
-		CustomConfig string `json:"custom_config"`
+		CustomConfig     string `json:"custom_config"`
+		CustomLastUpdate int64  `json:"custom_last_update"`
 	} `json:"ctrld"`
 	Exclude         []string `json:"exclude"`
 	UID             string   `json:"uid"`
@@ -76,17 +77,28 @@ func FetchResolverConfig(rawUID, version string, cdDev bool) (*ResolverConfig, e
 		req.ClientID = clientID
 	}
 	body, _ := json.Marshal(req)
-	return postUtilityAPI(version, cdDev, bytes.NewReader(body))
+	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
 }
 
 // FetchResolverUID fetch resolver uid from provision token.
 func FetchResolverUID(pt, version string, cdDev bool) (*ResolverConfig, error) {
 	hostname, _ := os.Hostname()
 	body, _ := json.Marshal(utilityOrgRequest{ProvToken: pt, Hostname: hostname})
-	return postUtilityAPI(version, cdDev, bytes.NewReader(body))
+	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
 }
 
-func postUtilityAPI(version string, cdDev bool, body io.Reader) (*ResolverConfig, error) {
+// UpdateCustomLastFailed calls API to mark custom config is bad.
+func UpdateCustomLastFailed(rawUID, version string, cdDev, lastUpdatedFailed bool) (*ResolverConfig, error) {
+	uid, clientID := ParseRawUID(rawUID)
+	req := utilityRequest{UID: uid}
+	if clientID != "" {
+		req.ClientID = clientID
+	}
+	body, _ := json.Marshal(req)
+	return postUtilityAPI(version, cdDev, true, bytes.NewReader(body))
+}
+
+func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reader) (*ResolverConfig, error) {
 	apiUrl := resolverDataURLCom
 	if cdDev {
 		apiUrl = resolverDataURLDev
@@ -98,6 +110,9 @@ func postUtilityAPI(version string, cdDev bool, body io.Reader) (*ResolverConfig
 	q := req.URL.Query()
 	q.Set("platform", "ctrld")
 	q.Set("version", version)
+	if lastUpdatedFailed {
+		q.Set("custom_last_failed", "1")
+	}
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/json")
 	transport := http.DefaultTransport.(*http.Transport).Clone()

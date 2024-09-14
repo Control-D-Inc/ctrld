@@ -8,15 +8,15 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-const (
-	resolvConfPath            = "/etc/resolv.conf"
-	resolvConfBackupFailedMsg = "open /etc/resolv.pre-ctrld-backup.conf: read-only file system"
-)
-
 // watchResolvConf watches any changes to /etc/resolv.conf file,
 // and reverting to the original config set by ctrld.
-func watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn func(iface *net.Interface, ns []netip.Addr) error) {
-	mainLog.Load().Debug().Msg("start watching /etc/resolv.conf file")
+func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn func(iface *net.Interface, ns []netip.Addr) error) {
+	resolvConfPath := "/etc/resolv.conf"
+	// Evaluating symbolics link to watch the target file that /etc/resolv.conf point to.
+	if rp, _ := filepath.EvalSymlinks(resolvConfPath); rp != "" {
+		resolvConfPath = rp
+	}
+	mainLog.Load().Debug().Msgf("start watching %s file", resolvConfPath)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not create watcher for /etc/resolv.conf")
@@ -28,12 +28,17 @@ func watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn func(iface 
 	// see: https://github.com/fsnotify/fsnotify#watching-a-file-doesnt-work-well
 	watchDir := filepath.Dir(resolvConfPath)
 	if err := watcher.Add(watchDir); err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not add /etc/resolv.conf to watcher list")
+		mainLog.Load().Warn().Err(err).Msgf("could not add %s to watcher list", watchDir)
 		return
 	}
 
 	for {
 		select {
+		case <-p.dnsWatcherStopCh:
+			return
+		case <-p.stopCh:
+			mainLog.Load().Debug().Msgf("stopping watcher for %s", resolvConfPath)
+			return
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return
