@@ -59,6 +59,10 @@ const (
 	controlDComDomain = "controld.com"
 	controlDNetDomain = "controld.net"
 	controlDDevDomain = "controld.dev"
+
+	endpointPrefixHTTPS = "https://"
+	endpointPrefixQUIC  = "quic://"
+	endpointPrefixH3    = "h3://"
 )
 
 var (
@@ -677,12 +681,16 @@ func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
 // initDoHScheme initializes the endpoint scheme for DoH/DoH3 upstream if not present.
 func (uc *UpstreamConfig) initDoHScheme() {
 	switch uc.Type {
-	case ResolverTypeDOH, ResolverTypeDOH3:
+	case ResolverTypeDOH:
+	case ResolverTypeDOH3:
+		if after, found := strings.CutPrefix(uc.Endpoint, endpointPrefixH3); found {
+			uc.Endpoint = endpointPrefixHTTPS + after
+		}
 	default:
 		return
 	}
-	if !strings.HasPrefix(uc.Endpoint, "https://") {
-		uc.Endpoint = "https://" + uc.Endpoint
+	if !strings.HasPrefix(uc.Endpoint, endpointPrefixHTTPS) {
+		uc.Endpoint = endpointPrefixHTTPS + uc.Endpoint
 	}
 }
 
@@ -767,13 +775,16 @@ func defaultPortFor(typ string) string {
 // - If endpoint is an IP address ->  ResolverTypeLegacy
 // - If endpoint starts with "https://" -> ResolverTypeDOH
 // - If endpoint starts with "quic://" -> ResolverTypeDOQ
+// - If endpoint starts with "h3://" -> ResolverTypeDOH3
 // - For anything else -> ResolverTypeDOT
 func ResolverTypeFromEndpoint(endpoint string) string {
 	switch {
-	case strings.HasPrefix(endpoint, "https://"):
+	case strings.HasPrefix(endpoint, endpointPrefixHTTPS):
 		return ResolverTypeDOH
-	case strings.HasPrefix(endpoint, "quic://"):
+	case strings.HasPrefix(endpoint, endpointPrefixQUIC):
 		return ResolverTypeDOQ
+	case strings.HasPrefix(endpoint, endpointPrefixH3):
+		return ResolverTypeDOH3
 	}
 	host := endpoint
 	if strings.Contains(endpoint, ":") {

@@ -178,6 +178,27 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				u:              u2,
 			},
 		},
+		{
+			"h3",
+			&UpstreamConfig{
+				Name:        "doh3",
+				Type:        "doh3",
+				Endpoint:    "h3://example.com",
+				BootstrapIP: "",
+				Domain:      "",
+				Timeout:     0,
+			},
+			&UpstreamConfig{
+				Name:        "doh3",
+				Type:        "doh3",
+				Endpoint:    "https://example.com",
+				BootstrapIP: "",
+				Domain:      "example.com",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+				u:           u1,
+			},
+		},
 	}
 
 	for _, tc := range tests {

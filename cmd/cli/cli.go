@@ -1473,7 +1473,11 @@ func processNoConfigFlags(noConfigStart bool) {
 
 	endpointAndTyp := func(endpoint string) (string, string) {
 		typ := ctrld.ResolverTypeFromEndpoint(endpoint)
-		return strings.TrimPrefix(endpoint, "quic://"), typ
+		endpoint = strings.TrimPrefix(endpoint, "quic://")
+		if after, found := strings.CutPrefix(endpoint, "h3://"); found {
+			endpoint = "https://" + after
+		}
+		return endpoint, typ
 	}
 	pEndpoint, pType := endpointAndTyp(primaryUpstream)
 	upstream := map[string]*ctrld.UpstreamConfig{
