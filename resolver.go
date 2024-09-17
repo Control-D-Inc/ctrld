@@ -30,6 +30,9 @@ const (
 	ResolverTypeLegacy = "legacy"
 	// ResolverTypePrivate is like ResolverTypeOS, but use for local resolver only.
 	ResolverTypePrivate = "private"
+	// ResolverTypeSDNS specifies resolver with information encoded using DNS Stamps.
+	// See: https://dnscrypt.info/stamps-specifications/
+	ResolverTypeSDNS = "sdns"
 )
 
 const (

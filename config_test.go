@@ -127,6 +127,21 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+func TestConfigValidationDoNotChangeEndpoint(t *testing.T) {
+	cfg := configWithInvalidDoHEndpoint(t)
+	endpointMap := map[string]struct{}{}
+	for _, uc := range cfg.Upstream {
+		endpointMap[uc.Endpoint] = struct{}{}
+	}
+	validate := validator.New()
+	_ = ctrld.ValidateConfig(validate, cfg)
+	for _, uc := range cfg.Upstream {
+		if _, ok := endpointMap[uc.Endpoint]; !ok {
+			t.Fatalf("expected endpoint '%s' to exist", uc.Endpoint)
+		}
+	}
+}
+
 func TestConfigDiscoverOverride(t *testing.T) {
 	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
 	ctrld.InitConfig(v, "test_config_discover_override")

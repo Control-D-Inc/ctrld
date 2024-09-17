@@ -308,7 +308,11 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 	isControlDUpstream := false
 	for n := range cfg.Upstream {
 		uc := cfg.Upstream[n]
+		sdns := uc.Type == ctrld.ResolverTypeSDNS
 		uc.Init()
+		if sdns {
+			mainLog.Load().Debug().Msgf("initialized DNS Stamps with endpoint: %s, type: %s", uc.Endpoint, uc.Type)
+		}
 		isControlDUpstream = isControlDUpstream || uc.IsControlD()
 		if uc.BootstrapIP == "" {
 			uc.SetupBootstrapIP()

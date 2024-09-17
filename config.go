@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ameshkov/dnsstamps"
 	"github.com/go-playground/validator/v10"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -229,7 +231,7 @@ type NetworkConfig struct {
 // UpstreamConfig specifies configuration for upstreams that ctrld will forward requests to.
 type UpstreamConfig struct {
 	Name        string `mapstructure:"name" toml:"name,omitempty"`
-	Type        string `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy"`
+	Type        string `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy sdns"`
 	Endpoint    string `mapstructure:"endpoint" toml:"endpoint,omitempty"`
 	BootstrapIP string `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
 	Domain      string `mapstructure:"-" toml:"-"`
@@ -303,10 +305,13 @@ type Rule map[string][]string
 
 // Init initialized necessary values for an UpstreamConfig.
 func (uc *UpstreamConfig) Init() {
+	if err := uc.initDnsStamps(); err != nil {
+		ProxyLogger.Load().Fatal().Err(err).Msg("invalid DNS Stamps")
+	}
 	uc.initDoHScheme()
 	uc.uid = upstreamUID()
 	if u, err := url.Parse(uc.Endpoint); err == nil {
-		uc.Domain = u.Host
+		uc.Domain = u.Hostname()
 		switch uc.Type {
 		case ResolverTypeDOH, ResolverTypeDOH3:
 			uc.u = u
@@ -694,6 +699,47 @@ func (uc *UpstreamConfig) initDoHScheme() {
 	}
 }
 
+// initDnsStamps initializes upstream config based on encoded DNS Stamps Endpoint.
+func (uc *UpstreamConfig) initDnsStamps() error {
+	if uc.Type != ResolverTypeSDNS {
+		return nil
+	}
+	sdns, err := dnsstamps.NewServerStampFromString(uc.Endpoint)
+	if err != nil {
+		return err
+	}
+	ip, port, _ := net.SplitHostPort(sdns.ServerAddrStr)
+	providerName, port2, _ := net.SplitHostPort(sdns.ProviderName)
+	if port2 != "" {
+		port = port2
+	}
+	if providerName == "" {
+		providerName = sdns.ProviderName
+	}
+	switch sdns.Proto {
+	case dnsstamps.StampProtoTypeDoH:
+		uc.Type = ResolverTypeDOH
+		host := sdns.ProviderName
+		if port != "" && port != defaultPortFor(uc.Type) {
+			host = net.JoinHostPort(providerName, port)
+		}
+		uc.Endpoint = "https://" + host + sdns.Path
+	case dnsstamps.StampProtoTypeTLS:
+		uc.Type = ResolverTypeDOT
+		uc.Endpoint = net.JoinHostPort(providerName, port)
+	case dnsstamps.StampProtoTypeDoQ:
+		uc.Type = ResolverTypeDOQ
+		uc.Endpoint = net.JoinHostPort(providerName, port)
+	case dnsstamps.StampProtoTypePlain:
+		uc.Type = ResolverTypeLegacy
+		uc.Endpoint = sdns.ServerAddrStr
+	default:
+		return fmt.Errorf("unsupported stamp protocol %q", sdns.Proto)
+	}
+	uc.BootstrapIP = ip
+	return nil
+}
+
 // Init initialized necessary values for an ListenerConfig.
 func (lc *ListenerConfig) Init() {
 	if lc.Policy != nil {
@@ -746,6 +792,17 @@ func upstreamConfigStructLevelValidation(sl validator.StructLevel) {
 		return
 	}
 
+	// initDoHScheme/initDnsStamps may change upstreams information,
+	// so restoring changed values after validation to keep original one.
+	defer func(ep, typ string) {
+		uc.Endpoint = ep
+		uc.Type = typ
+	}(uc.Endpoint, uc.Type)
+
+	if err := uc.initDnsStamps(); err != nil {
+		sl.ReportError(uc.Endpoint, "endpoint", "Endpoint", "http_url", "")
+		return
+	}
 	uc.initDoHScheme()
 	// DoH/DoH3 requires endpoint is an HTTP url.
 	if uc.Type == ResolverTypeDOH || uc.Type == ResolverTypeDOH3 {
