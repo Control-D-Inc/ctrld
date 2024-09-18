@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +30,14 @@ func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) e
 	return setDNS(iface, nameservers)
 }
 
+func setDnsPowershellCmd(iface *net.Interface, nameservers []string) string {
+	nss := make([]string, 0, len(nameservers))
+	for _, ns := range nameservers {
+		nss = append(nss, strconv.Quote(ns))
+	}
+	return fmt.Sprintf("Set-DnsClientServerAddress -InterfaceIndex %d -ServerAddresses (%s)", iface.Index, strings.Join(nss, ","))
+}
+
 // setDNS sets the dns server for the provided network interface
 func setDNS(iface *net.Interface, nameservers []string) error {
 	if len(nameservers) == 0 {
@@ -41,22 +49,25 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		if windowsHasLocalDnsServerRunning() {
 			file := absHomeDir(windowsForwardersFilename)
 			oldForwardersContent, _ := os.ReadFile(file)
-			if err := os.WriteFile(file, []byte(strings.Join(nameservers, ",")), 0600); err != nil {
+			hasLocalIPv6Listener := needLocalIPv6Listener()
+			forwarders := slices.DeleteFunc(slices.Clone(nameservers), func(s string) bool {
+				if !hasLocalIPv6Listener {
+					return false
+				}
+				return s == "::1"
+			})
+			if err := os.WriteFile(file, []byte(strings.Join(forwarders, ",")), 0600); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("could not save forwarders settings")
 			}
 			oldForwarders := strings.Split(string(oldForwardersContent), ",")
-			if err := addDnsServerForwarders(nameservers, oldForwarders); err != nil {
+			if err := addDnsServerForwarders(forwarders, oldForwarders); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("could not set forwarders settings")
 			}
 		}
 	})
-	primaryDNS := nameservers[0]
-	if err := setPrimaryDNS(iface, primaryDNS, true); err != nil {
-		return err
-	}
-	if len(nameservers) > 1 {
-		secondaryDNS := nameservers[1]
-		_ = addSecondaryDNS(iface, secondaryDNS)
+	out, err := powershell(setDnsPowershellCmd(iface, nameservers))
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, string(out))
 	}
 	return nil
 }
@@ -85,17 +96,13 @@ func resetDNS(iface *net.Interface) error {
 		}
 	})
 
-	// Restoring ipv6 first.
-	if ctrldnet.SupportsIPv6ListenLocal() {
-		if output, err := netsh("interface", "ipv6", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp"); err != nil {
-			mainLog.Load().Warn().Err(err).Msgf("failed to reset ipv6 DNS: %s", string(output))
-		}
-	}
-	// Restoring ipv4 DHCP.
-	output, err := netsh("interface", "ipv4", "set", "dnsserver", strconv.Itoa(iface.Index), "dhcp")
+	// Restoring DHCP settings.
+	cmd := fmt.Sprintf("Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses", iface.Index)
+	out, err := powershell(cmd)
 	if err != nil {
-		return fmt.Errorf("%s: %w", string(output), err)
+		return fmt.Errorf("%w: %s", err, string(out))
 	}
+
 	// If there's static DNS saved, restoring it.
 	if nss := savedStaticNameservers(iface); len(nss) > 0 {
 		v4ns := make([]string, 0, 2)
@@ -112,52 +119,12 @@ func resetDNS(iface *net.Interface) error {
 			if len(ns) == 0 {
 				continue
 			}
-			primaryDNS := ns[0]
-			if err := setPrimaryDNS(iface, primaryDNS, false); err != nil {
+			if err := setDNS(iface, ns); err != nil {
 				return err
-			}
-			if len(ns) > 1 {
-				secondaryDNS := ns[1]
-				_ = addSecondaryDNS(iface, secondaryDNS)
 			}
 		}
 	}
 	return nil
-}
-
-func setPrimaryDNS(iface *net.Interface, dns string, disablev6 bool) error {
-	ipVer := "ipv4"
-	if ctrldnet.IsIPv6(dns) {
-		ipVer = "ipv6"
-	}
-	idx := strconv.Itoa(iface.Index)
-	output, err := netsh("interface", ipVer, "set", "dnsserver", idx, "static", dns)
-	if err != nil {
-		mainLog.Load().Error().Err(err).Msgf("failed to set primary DNS: %s", string(output))
-		return err
-	}
-	if disablev6 && ipVer == "ipv4" && ctrldnet.SupportsIPv6ListenLocal() {
-		// Disable IPv6 DNS, so the query will be fallback to IPv4.
-		_, _ = netsh("interface", "ipv6", "set", "dnsserver", idx, "static", "::1", "primary")
-	}
-
-	return nil
-}
-
-func addSecondaryDNS(iface *net.Interface, dns string) error {
-	ipVer := "ipv4"
-	if ctrldnet.IsIPv6(dns) {
-		ipVer = "ipv6"
-	}
-	output, err := netsh("interface", ipVer, "add", "dns", strconv.Itoa(iface.Index), dns, "index=2")
-	if err != nil {
-		mainLog.Load().Warn().Err(err).Msgf("failed to add secondary DNS: %s", string(output))
-	}
-	return nil
-}
-
-func netsh(args ...string) ([]byte, error) {
-	return exec.Command("netsh", args...).Output()
 }
 
 func currentDNS(iface *net.Interface) []string {
@@ -200,7 +167,9 @@ func currentStaticDNS(iface *net.Interface) ([]string, error) {
 			out, err := powershell(cmd)
 			if err == nil && len(out) > 0 {
 				found = true
-				ns = append(ns, strings.Split(string(out), ",")...)
+				for _, e := range strings.Split(string(out), ",") {
+					ns = append(ns, strings.TrimRight(e, "\x00"))
+				}
 			}
 		}
 	}
