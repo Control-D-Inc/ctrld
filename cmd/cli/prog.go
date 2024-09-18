@@ -588,6 +588,10 @@ func (p *prog) setDNS() {
 	if needRFC1918Listeners(lc) {
 		nameservers = append(nameservers, ctrld.Rfc1918Addresses()...)
 	}
+	if needLocalIPv6Listener() {
+		nameservers = append(nameservers, "::1")
+	}
+	slices.Sort(nameservers)
 	if err := setDNS(netIface, nameservers); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return
@@ -665,7 +669,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 					}
 				}
 				if allIfaces {
-					withEachPhysicalInterfaces(iface.Name, "re-applying DNS", func(i *net.Interface) error {
+					withEachPhysicalInterfaces(iface.Name, "", func(i *net.Interface) error {
 						if dnsChanged(i, ns) {
 							if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
 								mainLog.Load().Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
@@ -977,7 +981,11 @@ func savedStaticNameservers(iface *net.Interface) []string {
 func dnsChanged(iface *net.Interface, nameservers []string) bool {
 	curNameservers, _ := currentStaticDNS(iface)
 	slices.Sort(curNameservers)
-	return !slices.Equal(curNameservers, nameservers)
+	if !slices.Equal(curNameservers, nameservers) {
+		mainLog.Load().Debug().Msgf("interface %q current DNS settings: %v, expected: %v", iface.Name, curNameservers, nameservers)
+		return true
+	}
+	return false
 }
 
 // selfUninstallCheck checks if the error dues to controld.InvalidConfigCode, perform self-uninstall then.
