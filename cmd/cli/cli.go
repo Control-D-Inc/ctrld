@@ -1141,6 +1141,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		reloadDoneCh:     make(chan struct{}),
 		dnsWatcherStopCh: make(chan struct{}),
 		apiReloadCh:      make(chan *ctrld.Config),
+		apiForceReloadCh: make(chan struct{}),
 		cfg:              &cfg,
 		appCallback:      appCallback,
 	}

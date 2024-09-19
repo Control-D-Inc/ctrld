@@ -21,11 +21,11 @@ import (
 	"syscall"
 	"time"
 
-	"tailscale.com/net/netmon"
-
 	"github.com/kardianos/service"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
+	"golang.org/x/sync/singleflight"
+	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -69,19 +69,21 @@ var svcConfig = &service.Config{
 var useSystemdResolved = false
 
 type prog struct {
-	mu               sync.Mutex
-	waitCh           chan struct{}
-	stopCh           chan struct{}
-	reloadCh         chan struct{} // For Windows.
-	reloadDoneCh     chan struct{}
-	apiReloadCh      chan *ctrld.Config
-	logConn          net.Conn
-	cs               *controlServer
-	csSetDnsDone     chan struct{}
-	csSetDnsOk       bool
-	dnsWatchDogOnce  sync.Once
-	dnsWg            sync.WaitGroup
-	dnsWatcherStopCh chan struct{}
+	mu                  sync.Mutex
+	waitCh              chan struct{}
+	stopCh              chan struct{}
+	reloadCh            chan struct{} // For Windows.
+	reloadDoneCh        chan struct{}
+	apiReloadCh         chan *ctrld.Config
+	apiForceReloadCh    chan struct{}
+	apiForceReloadGroup singleflight.Group
+	logConn             net.Conn
+	cs                  *controlServer
+	csSetDnsDone        chan struct{}
+	csSetDnsOk          bool
+	dnsWatchDogOnce     sync.Once
+	dnsWg               sync.WaitGroup
+	dnsWatcherStopCh    chan struct{}
 
 	cfg                  *ctrld.Config
 	localUpstreams       []string
@@ -255,47 +257,48 @@ func (p *prog) apiConfigReload() {
 		return
 	}
 
-	secs := 3600
-	if p.cfg.Service.RefetchTime != nil && *p.cfg.Service.RefetchTime > 0 {
-		secs = *p.cfg.Service.RefetchTime
-	}
-
-	ticker := time.NewTicker(time.Duration(secs) * time.Second)
+	ticker := time.NewTicker(timeDurationOrDefault(p.cfg.Service.RefetchTime, 3600) * time.Second)
 	defer ticker.Stop()
 
 	logger := mainLog.Load().With().Str("mode", "api-reload").Logger()
 	logger.Debug().Msg("starting custom config reload timer")
 	lastUpdated := time.Now().Unix()
+
+	doReloadApiConfig := func(forced bool, logger zerolog.Logger) {
+		resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+		selfUninstallCheck(err, p, logger)
+		if err != nil {
+			logger.Warn().Err(err).Msg("could not fetch resolver config")
+			return
+		}
+
+		if resolverConfig.Ctrld.CustomConfig == "" {
+			return
+		}
+
+		if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated || forced {
+			lastUpdated = time.Now().Unix()
+			cfg := &ctrld.Config{}
+			if err := validateCdRemoteConfig(resolverConfig, cfg); err != nil {
+				logger.Warn().Err(err).Msg("skipping invalid custom config")
+				if _, err := controld.UpdateCustomLastFailed(cdUID, rootCmd.Version, cdDev, true); err != nil {
+					logger.Error().Err(err).Msg("could not mark custom last update failed")
+				}
+				return
+			}
+			setListenerDefaultValue(cfg)
+			logger.Debug().Msg("custom config changes detected, reloading...")
+			p.apiReloadCh <- cfg
+		} else {
+			logger.Debug().Msg("custom config does not change")
+		}
+	}
 	for {
 		select {
+		case <-p.apiForceReloadCh:
+			doReloadApiConfig(true, logger.With().Bool("forced", true).Logger())
 		case <-ticker.C:
-			resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
-			selfUninstallCheck(err, p, logger)
-			if err != nil {
-				logger.Warn().Err(err).Msg("could not fetch resolver config")
-				continue
-			}
-
-			if resolverConfig.Ctrld.CustomConfig == "" {
-				continue
-			}
-
-			if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated {
-				lastUpdated = time.Now().Unix()
-				cfg := &ctrld.Config{}
-				if err := validateCdRemoteConfig(resolverConfig, cfg); err != nil {
-					logger.Warn().Err(err).Msg("skipping invalid custom config")
-					if _, err := controld.UpdateCustomLastFailed(cdUID, rootCmd.Version, cdDev, true); err != nil {
-						logger.Error().Err(err).Msg("could not mark custom last update failed")
-					}
-					break
-				}
-				setListenerDefaultValue(cfg)
-				logger.Debug().Msg("custom config changes detected, reloading...")
-				p.apiReloadCh <- cfg
-			} else {
-				logger.Debug().Msg("custom config does not change")
-			}
+			doReloadApiConfig(false, logger)
 		case <-p.stopCh:
 			return
 		}

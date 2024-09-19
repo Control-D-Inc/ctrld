@@ -217,6 +217,7 @@ type ServiceConfig struct {
 	DnsWatchdogEnabled      *bool          `mapstructure:"dns_watchdog_enabled" toml:"dns_watchdog_enabled,omitempty"`
 	DnsWatchdogInvterval    *time.Duration `mapstructure:"dns_watchdog_interval" toml:"dns_watchdog_interval,omitempty"`
 	RefetchTime             *int           `mapstructure:"refetch_time" toml:"refetch_time,omitempty"`
+	ForceRefetchWaitTime    *int           `mapstructure:"force_refetch_wait_time" toml:"force_refetch_wait_time,omitempty"`
 	Daemon                  bool           `mapstructure:"-" toml:"-"`
 	AllocateIP              bool           `mapstructure:"-" toml:"-"`
 }
