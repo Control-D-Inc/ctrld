@@ -34,7 +34,7 @@ func addExtraSplitDnsRule(lc *ctrld.ListenerConfig) {
 
 // getActiveDirectoryDomain returns AD domain name of this computer.
 func getActiveDirectoryDomain() (string, error) {
-	cmd := "$obj = GetWmiObject Win32_ComputerSystem; if ($obj.PartOfDomain) { $obj.Domain }"
+	cmd := "$obj = Get-WmiObject Win32_ComputerSystem; if ($obj.PartOfDomain) { $obj.Domain }"
 	output, err := powershell(cmd)
 	if err != nil {
 		return "", fmt.Errorf("failed to get domain name: %w, output:\n\n%s", err, string(output))
