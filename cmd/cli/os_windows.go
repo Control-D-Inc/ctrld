@@ -119,6 +119,7 @@ func resetDNS(iface *net.Interface) error {
 			if len(ns) == 0 {
 				continue
 			}
+			mainLog.Load().Debug().Msgf("setting static DNS for interface %q", iface.Name)
 			if err := setDNS(iface, ns); err != nil {
 				return err
 			}

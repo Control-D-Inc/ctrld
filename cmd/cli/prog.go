@@ -69,21 +69,21 @@ var svcConfig = &service.Config{
 var useSystemdResolved = false
 
 type prog struct {
-	mu                  sync.Mutex
-	waitCh              chan struct{}
-	stopCh              chan struct{}
-	reloadCh            chan struct{} // For Windows.
-	reloadDoneCh        chan struct{}
-	apiReloadCh         chan *ctrld.Config
-	apiForceReloadCh    chan struct{}
-	apiForceReloadGroup singleflight.Group
-	logConn             net.Conn
-	cs                  *controlServer
-	csSetDnsDone        chan struct{}
-	csSetDnsOk          bool
-	dnsWatchDogOnce     sync.Once
-	dnsWg               sync.WaitGroup
-	dnsWatcherStopCh    chan struct{}
+	mu                   sync.Mutex
+	waitCh               chan struct{}
+	stopCh               chan struct{}
+	reloadCh             chan struct{} // For Windows.
+	reloadDoneCh         chan struct{}
+	apiReloadCh          chan *ctrld.Config
+	apiForceReloadCh     chan struct{}
+	apiForceReloadGroup  singleflight.Group
+	logConn              net.Conn
+	cs                   *controlServer
+	csSetDnsDone         chan struct{}
+	csSetDnsOk           bool
+	dnsWg                sync.WaitGroup
+	dnsWatcherClosedOnce sync.Once
+	dnsWatcherStopCh     chan struct{}
 
 	cfg                  *ctrld.Config
 	localUpstreams       []string
@@ -512,6 +512,8 @@ func (p *prog) metricsEnabled() bool {
 }
 
 func (p *prog) Stop(s service.Service) error {
+	p.stopDnsWatchers()
+	mainLog.Load().Debug().Msg("dns watchers stopped")
 	mainLog.Load().Info().Msg("Service stopped")
 	close(p.stopCh)
 	if err := p.deAllocateIP(); err != nil {
@@ -519,6 +521,15 @@ func (p *prog) Stop(s service.Service) error {
 		return err
 	}
 	return nil
+}
+
+func (p *prog) stopDnsWatchers() {
+	// Ensure all DNS watchers goroutine are terminated,
+	// so it won't mess up with other DNS changes.
+	p.dnsWatcherClosedOnce.Do(func() {
+		close(p.dnsWatcherStopCh)
+	})
+	p.dnsWg.Wait()
 }
 
 func (p *prog) allocateIP(ip string) error {
@@ -611,6 +622,11 @@ func (p *prog) setDNS() {
 	}
 	setDnsOK = true
 	logger.Debug().Msg("setting DNS successfully")
+	if allIfaces {
+		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
+			return setDnsIgnoreUnusableInterface(i, nameservers)
+		})
+	}
 	if shouldWatchResolvconf() {
 		servers := make([]netip.Addr, len(nameservers))
 		for i := range nameservers {
@@ -621,11 +637,6 @@ func (p *prog) setDNS() {
 			defer p.dnsWg.Done()
 			p.watchResolvConf(netIface, servers, setResolvConf)
 		}()
-	}
-	if allIfaces {
-		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
-			return setDnsIgnoreUnusableInterface(i, nameservers)
-		})
 	}
 	if p.dnsWatchdogEnabled() {
 		p.dnsWg.Add(1)
@@ -661,41 +672,42 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 		return
 	}
 
-	p.dnsWatchDogOnce.Do(func() {
-		mainLog.Load().Debug().Msg("start DNS settings watchdog")
-		ns := nameservers
-		slices.Sort(ns)
-		ticker := time.NewTicker(p.dnsWatchdogDuration())
-		logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
-		for {
-			select {
-			case <-p.dnsWatcherStopCh:
+	mainLog.Load().Debug().Msg("start DNS settings watchdog")
+	ns := nameservers
+	slices.Sort(ns)
+	ticker := time.NewTicker(p.dnsWatchdogDuration())
+	logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
+	for {
+		select {
+		case <-p.dnsWatcherStopCh:
+			return
+		case <-p.stopCh:
+			mainLog.Load().Debug().Msg("stop dns watchdog")
+			return
+		case <-ticker.C:
+			if p.captivePortalDetected.Load() {
 				return
-			case <-p.stopCh:
-				mainLog.Load().Debug().Msg("stop dns watchdog")
-				return
-			case <-ticker.C:
-				if dnsChanged(iface, ns) {
-					logger.Debug().Msg("DNS settings were changed, re-applying settings")
-					if err := setDNS(iface, ns); err != nil {
-						mainLog.Load().Error().Err(err).Str("iface", iface.Name).Msgf("could not re-apply DNS settings")
-					}
-				}
-				if allIfaces {
-					withEachPhysicalInterfaces(iface.Name, "", func(i *net.Interface) error {
-						if dnsChanged(i, ns) {
-							if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
-								mainLog.Load().Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
-							} else {
-								mainLog.Load().Debug().Msgf("re-applying DNS for interface %q successfully", i.Name)
-							}
-						}
-						return nil
-					})
+			}
+			if dnsChanged(iface, ns) {
+				logger.Debug().Msg("DNS settings were changed, re-applying settings")
+				if err := setDNS(iface, ns); err != nil {
+					mainLog.Load().Error().Err(err).Str("iface", iface.Name).Msgf("could not re-apply DNS settings")
 				}
 			}
+			if allIfaces {
+				withEachPhysicalInterfaces(iface.Name, "", func(i *net.Interface) error {
+					if dnsChanged(i, ns) {
+						if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
+							mainLog.Load().Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
+						} else {
+							mainLog.Load().Debug().Msgf("re-applying DNS for interface %q successfully", i.Name)
+						}
+					}
+					return nil
+				})
+			}
 		}
-	})
+	}
 }
 
 func (p *prog) resetDNS() {
@@ -965,11 +977,13 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 	if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		mainLog.Load().Warn().Err(err).Msg("could not remove old static DNS settings file")
 	}
-	mainLog.Load().Debug().Msgf("DNS settings for %s is static, saving ...", iface.Name)
-	if err := os.WriteFile(file, []byte(strings.Join(ns, ",")), 0600); err != nil {
+	nss := strings.Join(ns, ",")
+	mainLog.Load().Debug().Msgf("DNS settings for %q is static: %v, saving ...", iface.Name, nss)
+	if err := os.WriteFile(file, []byte(nss), 0600); err != nil {
 		mainLog.Load().Err(err).Msgf("could not save DNS settings for iface: %s", iface.Name)
 		return err
 	}
+	mainLog.Load().Debug().Msgf("save DNS settings for interface %q successfully", iface.Name)
 	return nil
 }
 
@@ -1005,9 +1019,7 @@ func dnsChanged(iface *net.Interface, nameservers []string) bool {
 func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 	var uer *controld.UtilityErrorResponse
 	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
-		// Ensure all DNS watchers goroutine are terminated, so it won't mess up with self-uninstall.
-		close(p.dnsWatcherStopCh)
-		p.dnsWg.Wait()
+		p.stopDnsWatchers()
 
 		// Perform self-uninstall now.
 		selfUninstall(p, logger)

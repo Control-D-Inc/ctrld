@@ -194,11 +194,15 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			isCtrldRunning := status == service.StatusRunning
 			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
 
+			// Get current running iface, if any.
+			var currentIface string
+
 			// If pin code was set, do not allow running start command.
 			if isCtrldRunning {
 				if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 					os.Exit(deactivationPinInvalidExitCode)
 				}
+				currentIface = runningIface(s)
 			}
 
 			if !startOnly {
@@ -213,12 +217,15 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 
 				initLogging()
 				tasks := []task{
-					resetDnsTask(p, s),
 					{s.Stop, false},
+					resetDnsTask(p, s, isCtrldInstalled, currentIface),
 					{func() error {
 						// Save current DNS so we can restore later.
-						withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
-							return saveCurrentStaticDNS(i)
+						withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+							if err := saveCurrentStaticDNS(i); !errors.Is(err, errSaveCurrentStaticDNSNotSupported) && err != nil {
+								return err
+							}
+							return nil
 						})
 						return nil
 					}, false},
@@ -334,14 +341,17 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			}
 
 			tasks := []task{
-				resetDnsTask(p, s),
 				{s.Stop, false},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
 				{func() error { return ensureUninstall(s) }, false},
+				resetDnsTask(p, s, isCtrldInstalled, currentIface),
 				{func() error {
 					// Save current DNS so we can restore later.
-					withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
-						return saveCurrentStaticDNS(i)
+					withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+						if err := saveCurrentStaticDNS(i); !errors.Is(err, errSaveCurrentStaticDNSNotSupported) && err != nil {
+							return err
+						}
+						return nil
 					})
 					return nil
 				}, false},
@@ -1340,9 +1350,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	close(waitCh)
 	<-stopCh
 
-	// Wait goroutines which watches/manipulates DNS settings terminated,
-	// ensuring that changes to DNS since here won't be reverted.
-	p.dnsWg.Wait()
+	p.stopDnsWatchers()
 	for _, f := range p.onStopped {
 		f()
 	}
@@ -2642,17 +2650,20 @@ func runningIface(s service.Service) string {
 
 // resetDnsNoLog performs resetting DNS with logging disable.
 func resetDnsNoLog(p *prog) {
-	lvl := zerolog.GlobalLevel()
-	zerolog.SetGlobalLevel(zerolog.Disabled)
+	// Normally, disable log to prevent annoying users.
+	if verbose < 3 {
+		lvl := zerolog.GlobalLevel()
+		zerolog.SetGlobalLevel(zerolog.Disabled)
+		p.resetDNS()
+		zerolog.SetGlobalLevel(lvl)
+		return
+	}
+	// For debugging purpose, still emit log.
 	p.resetDNS()
-	zerolog.SetGlobalLevel(lvl)
 }
 
 // resetDnsTask returns a task which perform reset DNS operation.
-func resetDnsTask(p *prog, s service.Service) task {
-	status, err := s.Status()
-	isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
-	isCtrldRunning := status == service.StatusRunning
+func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, currentRunningIface string) task {
 	return task{func() error {
 		if iface == "" {
 			return nil
@@ -2662,11 +2673,14 @@ func resetDnsTask(p *prog, s service.Service) task {
 		// process to reset what setDNS has done properly.
 		oldIface := iface
 		iface = "auto"
-		if isCtrldRunning {
-			iface = runningIface(s)
+		if currentRunningIface != "" {
+			iface = currentRunningIface
 		}
 		if isCtrldInstalled {
 			mainLog.Load().Debug().Msg("restore system DNS settings")
+			if status, _ := s.Status(); status == service.StatusRunning {
+				mainLog.Load().Fatal().Msg("reset DNS while ctrld still running is not safe")
+			}
 			resetDnsNoLog(p)
 		}
 		iface = oldIface

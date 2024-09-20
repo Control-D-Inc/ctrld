@@ -915,6 +915,8 @@ func (p *prog) performCaptivePortalDetection() {
 		if found {
 			resetDnsOnce.Do(func() {
 				mainLog.Load().Warn().Msg("found captive portal, leaking query to OS resolver")
+				// Store the result once here, so changes made below won't be reverted by DNS watchers.
+				p.captivePortalDetected.Store(found)
 				p.resetDNS()
 			})
 		}
