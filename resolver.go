@@ -70,11 +70,14 @@ func InitializeOsResolver() []string {
 // testPlainDnsNameserver sends a test query to DNS nameserver to check if the server is available.
 func testNameserver(addr string) bool {
 	msg := new(dns.Msg)
-	msg.SetQuestion(".", dns.TypeNS)
+	msg.SetQuestion("controld.com.", dns.TypeNS)
 	client := new(dns.Client)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_, _, err := client.ExchangeContext(ctx, msg, addr)
+	if err != nil {
+		ProxyLogger.Load().Debug().Err(err).Msgf("failed to connect to OS nameserver: %s", addr)
+	}
 	return err == nil
 }
 
