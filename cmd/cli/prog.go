@@ -98,6 +98,7 @@ type prog struct {
 	ptrLoopGuard         *loopGuard
 	lanLoopGuard         *loopGuard
 	metricsQueryStats    atomic.Bool
+	queryFromSelfMap     sync.Map
 
 	selfUninstallMu       sync.Mutex
 	refusedQueryCount     int

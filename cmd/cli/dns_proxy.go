@@ -838,7 +838,7 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	} else {
 		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	}
-	ci.Self = queryFromSelf(ci.IP)
+	ci.Self = p.queryFromSelf(ci.IP)
 	// If this is a query from self, but ci.IP is not loopback IP,
 	// try using hostname mapping for lookback IP if presents.
 	if ci.Self {
@@ -956,7 +956,10 @@ func timeDurationOrDefault(n *int, defaultN int) time.Duration {
 }
 
 // queryFromSelf reports whether the input IP is from device running ctrld.
-func queryFromSelf(ip string) bool {
+func (p *prog) queryFromSelf(ip string) bool {
+	if val, ok := p.queryFromSelfMap.Load(ip); ok {
+		return val.(bool)
+	}
 	netIP := netip.MustParseAddr(ip)
 	ifaces, err := netmon.GetInterfaceList()
 	if err != nil {
@@ -973,11 +976,13 @@ func queryFromSelf(ip string) bool {
 			switch v := a.(type) {
 			case *net.IPNet:
 				if pfx, ok := netaddr.FromStdIPNet(v); ok && pfx.Addr().Compare(netIP) == 0 {
+					p.queryFromSelfMap.Store(ip, true)
 					return true
 				}
 			}
 		}
 	}
+	p.queryFromSelfMap.Store(ip, false)
 	return false
 }
 
