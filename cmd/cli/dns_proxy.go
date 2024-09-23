@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"runtime"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/miekg/dns"
 	"golang.org/x/sync/errgroup"
-	"tailscale.com/net/captivedetection"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
@@ -412,6 +410,16 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	upstreams := req.ufr.upstreams
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
+
+	// If ctrld is going to leak query to OS resolver, check remote upstream in background,
+	// so ctrld could be back to normal operation as long as the network is back online.
+	if len(upstreamConfigs) > 0 && p.leakingQuery.Load() {
+		for n, uc := range upstreamConfigs {
+			go p.checkUpstream(upstreams[n], uc)
+		}
+		upstreamConfigs = nil
+	}
+
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 		upstreams = []string{upstreamOS}
@@ -501,16 +509,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			if isNetworkErr {
 				p.um.increaseFailureCount(upstreams[n])
 				if p.um.isDown(upstreams[n]) {
-					go p.um.checkUpstream(upstreams[n], upstreamConfig)
+					go p.checkUpstream(upstreams[n], upstreamConfig)
 				}
-			}
-			if cdUID != "" && (isNetworkErr || err == io.EOF) {
-				p.captivePortalMu.Lock()
-				if !p.captivePortalCheckWasRun {
-					p.captivePortalCheckWasRun = true
-					go p.performCaptivePortalDetection()
-				}
-				p.captivePortalMu.Unlock()
 			}
 			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
 			var e net.Error
@@ -580,6 +580,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		return res
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
+	if cdUID != "" && p.leakOnUpstreamFailure() {
+		p.leakingQueryMu.Lock()
+		if !p.leakingQueryWasRun {
+			p.leakingQueryWasRun = true
+			go p.performLeakingQuery()
+		}
+		p.leakingQueryMu.Unlock()
+	}
 	answer := new(dns.Msg)
 	answer.SetRcode(req.msg, dns.RcodeServerFailure)
 	res.answer = answer
@@ -597,9 +605,6 @@ func (p *prog) upstreamsAndUpstreamConfigForLanAndPtr(upstreams []string, upstre
 }
 
 func (p *prog) upstreamConfigsFromUpstreamNumbers(upstreams []string) []*ctrld.UpstreamConfig {
-	if p.captivePortalDetected.Load() {
-		return nil // always use OS resolver if behind captive portal.
-	}
 	upstreamConfigs := make([]*ctrld.UpstreamConfig, 0, len(upstreams))
 	for _, upstream := range upstreams {
 		upstreamNum := strings.TrimPrefix(upstream, upstreamPrefix)
@@ -903,31 +908,16 @@ func (p *prog) selfUninstallCoolOfPeriod() {
 	p.selfUninstallMu.Unlock()
 }
 
-// performCaptivePortalDetection check if ctrld is running behind a captive portal.
-func (p *prog) performCaptivePortalDetection() {
-	mainLog.Load().Warn().Msg("Performing captive portal detection")
-	d := captivedetection.NewDetector(logf)
-	found := true
-	var resetDnsOnce sync.Once
-	for found {
-		time.Sleep(2 * time.Second)
-		found = d.Detect(context.Background(), netmon.NewStatic(), nil, 0)
-		if found {
-			resetDnsOnce.Do(func() {
-				mainLog.Load().Warn().Msg("found captive portal, leaking query to OS resolver")
-				// Store the result once here, so changes made below won't be reverted by DNS watchers.
-				p.captivePortalDetected.Store(found)
-				p.resetDNS()
-			})
-		}
-		p.captivePortalDetected.Store(found)
-	}
-
-	p.captivePortalMu.Lock()
-	p.captivePortalCheckWasRun = false
-	p.captivePortalMu.Unlock()
+// performLeakingQuery performs necessary works to leak queries to OS resolver.
+func (p *prog) performLeakingQuery() {
+	mainLog.Load().Warn().Msg("leaking query to OS resolver")
+	// Signal dns watchers to stop, so changes made below won't be reverted.
+	p.leakingQuery.Store(true)
+	p.resetDNS()
+	ns := ctrld.InitializeOsResolver()
+	mainLog.Load().Debug().Msgf("re-initialized OS resolver with nameservers: %v", ns)
+	p.dnsWg.Wait()
 	p.setDNS()
-	mainLog.Load().Warn().Msg("captive portal login finished, stop leaking query")
 }
 
 // forceFetchingAPI sends signal to force syncing API config if run in cd mode,

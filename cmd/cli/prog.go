@@ -107,9 +107,9 @@ type prog struct {
 	loopMu sync.Mutex
 	loop   map[string]bool
 
-	captivePortalMu          sync.Mutex
-	captivePortalCheckWasRun bool
-	captivePortalDetected    atomic.Bool
+	leakingQueryMu     sync.Mutex
+	leakingQueryWasRun bool
+	leakingQuery       atomic.Bool
 
 	started       chan struct{}
 	onStartedDone chan struct{}
@@ -685,7 +685,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 			mainLog.Load().Debug().Msg("stop dns watchdog")
 			return
 		case <-ticker.C:
-			if p.captivePortalDetected.Load() {
+			if p.leakingQuery.Load() {
 				return
 			}
 			if dnsChanged(iface, ns) {
@@ -740,6 +740,18 @@ func (p *prog) resetDNS() {
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDnsIgnoreUnusableInterface)
 	}
+}
+
+// leakOnUpstreamFailure reports whether ctrld should leak query to OS resolver when failed to connect all upstreams.
+func (p *prog) leakOnUpstreamFailure() bool {
+	if ptr := p.cfg.Service.LeakOnUpstreamFailure; ptr != nil {
+		return *ptr
+	}
+	// Default is false on routers, since this leaking is only useful for devices that move between networks.
+	if router.Name() != "" {
+		return false
+	}
+	return true
 }
 
 func randomLocalIP() string {
