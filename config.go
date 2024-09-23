@@ -65,6 +65,7 @@ const (
 	endpointPrefixHTTPS = "https://"
 	endpointPrefixQUIC  = "quic://"
 	endpointPrefixH3    = "h3://"
+	endpointPrefixSdns  = "sdns://"
 )
 
 var (
@@ -233,7 +234,7 @@ type NetworkConfig struct {
 // UpstreamConfig specifies configuration for upstreams that ctrld will forward requests to.
 type UpstreamConfig struct {
 	Name        string `mapstructure:"name" toml:"name,omitempty"`
-	Type        string `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy sdns"`
+	Type        string `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy sdns ''"`
 	Endpoint    string `mapstructure:"endpoint" toml:"endpoint,omitempty"`
 	BootstrapIP string `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
 	Domain      string `mapstructure:"-" toml:"-"`
@@ -687,6 +688,9 @@ func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
 
 // initDoHScheme initializes the endpoint scheme for DoH/DoH3 upstream if not present.
 func (uc *UpstreamConfig) initDoHScheme() {
+	if strings.HasPrefix(uc.Endpoint, endpointPrefixH3) && uc.Type == "" {
+		uc.Type = ResolverTypeDOH3
+	}
 	switch uc.Type {
 	case ResolverTypeDOH:
 	case ResolverTypeDOH3:
@@ -703,6 +707,9 @@ func (uc *UpstreamConfig) initDoHScheme() {
 
 // initDnsStamps initializes upstream config based on encoded DNS Stamps Endpoint.
 func (uc *UpstreamConfig) initDnsStamps() error {
+	if strings.HasPrefix(uc.Endpoint, endpointPrefixSdns) && uc.Type == "" {
+		uc.Type = ResolverTypeSDNS
+	}
 	if uc.Type != ResolverTypeSDNS {
 		return nil
 	}
@@ -794,6 +801,12 @@ func upstreamConfigStructLevelValidation(sl validator.StructLevel) {
 		return
 	}
 
+	// Empty type is ok only for endpoints starts with "h3://" and "sdns://".
+	if uc.Type == "" && !strings.HasPrefix(uc.Endpoint, endpointPrefixH3) && !strings.HasPrefix(uc.Endpoint, endpointPrefixSdns) {
+		sl.ReportError(uc.Endpoint, "type", "type", "oneof", "doh doh3 dot doq os legacy sdns")
+		return
+	}
+
 	// initDoHScheme/initDnsStamps may change upstreams information,
 	// so restoring changed values after validation to keep original one.
 	defer func(ep, typ string) {
@@ -835,6 +848,7 @@ func defaultPortFor(typ string) string {
 // - If endpoint starts with "https://" -> ResolverTypeDOH
 // - If endpoint starts with "quic://" -> ResolverTypeDOQ
 // - If endpoint starts with "h3://" -> ResolverTypeDOH3
+// - If endpoint starts with "sdns://" -> ResolverTypeSDNS
 // - For anything else -> ResolverTypeDOT
 func ResolverTypeFromEndpoint(endpoint string) string {
 	switch {
@@ -844,6 +858,8 @@ func ResolverTypeFromEndpoint(endpoint string) string {
 		return ResolverTypeDOQ
 	case strings.HasPrefix(endpoint, endpointPrefixH3):
 		return ResolverTypeDOH3
+	case strings.HasPrefix(endpoint, endpointPrefixSdns):
+		return ResolverTypeSDNS
 	}
 	host := endpoint
 	if strings.Contains(endpoint, ":") {

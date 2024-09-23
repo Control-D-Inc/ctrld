@@ -201,6 +201,26 @@ func TestUpstreamConfig_Init(t *testing.T) {
 			},
 		},
 		{
+			"h3 without type",
+			&UpstreamConfig{
+				Name:        "doh3",
+				Endpoint:    "h3://example.com",
+				BootstrapIP: "",
+				Domain:      "",
+				Timeout:     0,
+			},
+			&UpstreamConfig{
+				Name:        "doh3",
+				Type:        "doh3",
+				Endpoint:    "https://example.com",
+				BootstrapIP: "",
+				Domain:      "example.com",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+				u:           u1,
+			},
+		},
+		{
 			"sdns -> doh",
 			&UpstreamConfig{
 				Name:        "sdns",
@@ -269,6 +289,26 @@ func TestUpstreamConfig_Init(t *testing.T) {
 			&UpstreamConfig{
 				Name:        "sdns",
 				Type:        "sdns",
+				Endpoint:    "sdns://AAcAAAAAAAAACjc2Ljc2LjIuMTE",
+				BootstrapIP: "",
+				Domain:      "",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+			},
+			&UpstreamConfig{
+				Name:        "sdns",
+				Type:        "legacy",
+				Endpoint:    "76.76.2.11:53",
+				BootstrapIP: "76.76.2.11",
+				Domain:      "76.76.2.11",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+			},
+		},
+		{
+			"sdns without type",
+			&UpstreamConfig{
+				Name:        "sdns",
 				Endpoint:    "sdns://AAcAAAAAAAAACjc2Ljc2LjIuMTE",
 				BootstrapIP: "",
 				Domain:      "",

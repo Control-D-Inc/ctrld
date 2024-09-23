@@ -1489,22 +1489,24 @@ func processNoConfigFlags(noConfigStart bool) {
 		return endpoint, typ
 	}
 	pEndpoint, pType := endpointAndTyp(primaryUpstream)
-	upstream := map[string]*ctrld.UpstreamConfig{
-		"0": {
-			Name:     pEndpoint,
-			Endpoint: pEndpoint,
-			Type:     pType,
-			Timeout:  5000,
-		},
+	puc := &ctrld.UpstreamConfig{
+		Name:     pEndpoint,
+		Endpoint: pEndpoint,
+		Type:     pType,
+		Timeout:  5000,
 	}
+	puc.Init()
+	upstream := map[string]*ctrld.UpstreamConfig{"0": puc}
 	if secondaryUpstream != "" {
 		sEndpoint, sType := endpointAndTyp(secondaryUpstream)
-		upstream["1"] = &ctrld.UpstreamConfig{
+		suc := &ctrld.UpstreamConfig{
 			Name:     sEndpoint,
 			Endpoint: sEndpoint,
 			Type:     sType,
 			Timeout:  5000,
 		}
+		suc.Init()
+		upstream["1"] = suc
 		rules := make([]ctrld.Rule, 0, len(domains))
 		for _, domain := range domains {
 			rules = append(rules, ctrld.Rule{domain: []string{"upstream.1"}})

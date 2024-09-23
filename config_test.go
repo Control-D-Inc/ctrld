@@ -107,6 +107,9 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid doh/doh3 endpoint", configWithInvalidDoHEndpoint(t), true},
 		{"invalid client id pref", configWithInvalidClientIDPref(t), true},
 		{"doh endpoint without scheme", dohUpstreamEndpointWithoutScheme(t), false},
+		{"doh endpoint without type", dohUpstreamEndpointWithoutType(t), true},
+		{"doh3 endpoint without type", doh3UpstreamEndpointWithoutType(t), false},
+		{"sdns endpoint without type", sdnsUpstreamEndpointWithoutType(t), false},
 		{"maximum number of flush cache domains", configWithInvalidFlushCacheDomain(t), true},
 	}
 
@@ -191,6 +194,27 @@ func invalidUpstreamType(t *testing.T) *ctrld.Config {
 func dohUpstreamEndpointWithoutScheme(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Upstream["0"].Endpoint = "freedns.controld.com/p1"
+	return cfg
+}
+
+func dohUpstreamEndpointWithoutType(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Upstream["0"].Endpoint = "https://freedns.controld.com/p1"
+	cfg.Upstream["0"].Type = ""
+	return cfg
+}
+
+func doh3UpstreamEndpointWithoutType(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Upstream["0"].Endpoint = "h3://freedns.controld.com/p1"
+	cfg.Upstream["0"].Type = ""
+	return cfg
+}
+
+func sdnsUpstreamEndpointWithoutType(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Upstream["0"].Endpoint = "sdns://AgMAAAAAAAAACjc2Ljc2LjIuMTEAFGZyZWVkbnMuY29udHJvbGQuY29tAy9wMQ"
+	cfg.Upstream["0"].Type = ""
 	return cfg
 }
 
