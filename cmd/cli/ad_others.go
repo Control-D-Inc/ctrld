@@ -7,4 +7,4 @@ import (
 )
 
 // addExtraSplitDnsRule adds split DNS rule if present.
-func addExtraSplitDnsRule(_ *ctrld.ListenerConfig) {}
+func addExtraSplitDnsRule(_ *ctrld.Config) {}

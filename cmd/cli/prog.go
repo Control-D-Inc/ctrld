@@ -439,7 +439,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()
-		addExtraSplitDnsRule(p.cfg.Listener[listenerNum])
 		if !reload {
 			go func(listenerNum string) {
 				listenerConfig := p.cfg.Listener[listenerNum]

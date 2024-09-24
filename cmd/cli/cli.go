@@ -1383,6 +1383,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 }
 
 func writeConfigFile(cfg *ctrld.Config) error {
+	addExtraSplitDnsRule(cfg)
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
 	} else if configPath != "" {
