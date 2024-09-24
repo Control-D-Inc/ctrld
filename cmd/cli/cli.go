@@ -52,6 +52,7 @@ const (
 	windowsForwardersFilename = ".forwarders.txt"
 	oldBinSuffix              = "_previous"
 	oldLogSuffix              = ".1"
+	msgExit                   = "$$EXIT$$"
 )
 
 var (
@@ -205,6 +206,71 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				currentIface = runningIface(s)
 			}
 
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			reportSetDnsOk := func(sockDir string) {
+				if cc := newSocketControlClient(ctx, s, sockDir); cc != nil {
+					if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
+						if iface == "auto" {
+							iface = defaultIfaceName()
+						}
+						logger := mainLog.Load().With().Str("iface", iface).Logger()
+						logger.Debug().Msg("setting DNS successfully")
+					}
+				}
+			}
+
+			// No config path, generating config in HOME directory.
+			noConfigStart := isNoConfigStart(cmd)
+			writeDefaultConfig := !noConfigStart && configBase64 == ""
+
+			logServerStarted := make(chan struct{})
+			// A buffer channel to gather log output from runCmd and report
+			// to user in case self-check process failed.
+			runCmdLogCh := make(chan string, 256)
+			ud, err := userHomeDir()
+			sockDir := ud
+			if err != nil {
+				mainLog.Load().Warn().Msg("log server did not start")
+				close(logServerStarted)
+			} else {
+				setWorkingDirectory(sc, ud)
+				if configPath == "" && writeDefaultConfig {
+					defaultConfigFile = filepath.Join(ud, defaultConfigFile)
+				}
+				sc.Arguments = append(sc.Arguments, "--homedir="+ud)
+				if d, err := socketDir(); err == nil {
+					sockDir = d
+				}
+				sockPath := filepath.Join(sockDir, ctrldLogUnixSock)
+				_ = os.Remove(sockPath)
+				go func() {
+					defer func() {
+						close(runCmdLogCh)
+						_ = os.Remove(sockPath)
+					}()
+					close(logServerStarted)
+					if conn := runLogServer(sockPath); conn != nil {
+						// Enough buffer for log message, we don't produce
+						// such long log message, but just in case.
+						buf := make([]byte, 1024)
+						for {
+							n, err := conn.Read(buf)
+							if err != nil {
+								return
+							}
+							msg := string(buf[:n])
+							if _, _, found := strings.Cut(msg, msgExit); found {
+								cancel()
+							}
+							runCmdLogCh <- msg
+						}
+					}
+				}()
+			}
+			<-logServerStarted
+
 			if !startOnly {
 				startOnly = len(osArgs) == 0
 			}
@@ -240,15 +306,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 						mainLog.Load().Warn().Err(err).Msg("Failed to get socket directory")
 						os.Exit(1)
 					}
-					if cc := newSocketControlClient(s, sockDir); cc != nil {
-						if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
-							if iface == "auto" {
-								iface = defaultIfaceName()
-							}
-							logger := mainLog.Load().With().Str("iface", iface).Logger()
-							logger.Debug().Msg("setting DNS successfully")
-						}
-					}
+					reportSetDnsOk(sockDir)
 				} else {
 					mainLog.Load().Error().Err(err).Msg("Failed to start existing ctrld service")
 					os.Exit(1)
@@ -273,47 +331,8 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				mainLog.Load().Fatal().Err(err).Msg("failed to configure service on router")
 			}
 
-			// No config path, generating config in HOME directory.
-			noConfigStart := isNoConfigStart(cmd)
-			writeDefaultConfig := !noConfigStart && configBase64 == ""
 			if configPath != "" {
 				v.SetConfigFile(configPath)
-			}
-
-			// A buffer channel to gather log output from runCmd and report
-			// to user in case self-check process failed.
-			runCmdLogCh := make(chan string, 256)
-			ud, err := userHomeDir()
-			sockDir := ud
-			if err == nil {
-				setWorkingDirectory(sc, ud)
-				if configPath == "" && writeDefaultConfig {
-					defaultConfigFile = filepath.Join(ud, defaultConfigFile)
-				}
-				sc.Arguments = append(sc.Arguments, "--homedir="+ud)
-				if d, err := socketDir(); err == nil {
-					sockDir = d
-				}
-				sockPath := filepath.Join(sockDir, ctrldLogUnixSock)
-				_ = os.Remove(sockPath)
-				go func() {
-					defer func() {
-						close(runCmdLogCh)
-						_ = os.Remove(sockPath)
-					}()
-					if conn := runLogServer(sockPath); conn != nil {
-						// Enough buffer for log message, we don't produce
-						// such long log message, but just in case.
-						buf := make([]byte, 1024)
-						for {
-							n, err := conn.Read(buf)
-							if err != nil {
-								return
-							}
-							runCmdLogCh <- string(buf[:n])
-						}
-					}
-				}()
 			}
 
 			tryReadingConfigWithNotice(writeDefaultConfig, true)
@@ -368,19 +387,19 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					return
 				}
 
-				ok, status, err := selfCheckStatus(s, ud, sockDir)
+				ok, status, err := selfCheckStatus(ctx, s, sockDir)
 				switch {
 				case ok && status == service.StatusRunning:
 					mainLog.Load().Notice().Msg("Service started")
 				default:
 					marker := bytes.Repeat([]byte("="), 32)
 					// If ctrld service is not running, emitting log obtained from ctrld process.
-					if status != service.StatusRunning {
+					if status != service.StatusRunning || ctx.Err() != nil {
 						mainLog.Load().Error().Msg("ctrld service may not have started due to an error or misconfiguration, service log:")
 						_, _ = mainLog.Load().Write(marker)
 						haveLog := false
 						for msg := range runCmdLogCh {
-							_, _ = mainLog.Load().Write([]byte(msg))
+							_, _ = mainLog.Load().Write([]byte(strings.ReplaceAll(msg, msgExit, "")))
 							haveLog = true
 						}
 						// If we're unable to get log from "ctrld run", notice users about it.
@@ -406,15 +425,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					uninstall(p, s)
 					os.Exit(1)
 				}
-				if cc := newSocketControlClient(s, sockDir); cc != nil {
-					if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
-						if iface == "auto" {
-							iface = defaultIfaceName()
-						}
-						logger := mainLog.Load().With().Str("iface", iface).Logger()
-						logger.Debug().Msg("setting DNS successfully")
-					}
-				}
+				reportSetDnsOk(sockDir)
 			}
 		},
 	}
@@ -553,7 +564,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
 					return
 				}
-				cc := newSocketControlClient(s, dir)
+				cc := newSocketControlClient(context.TODO(), s, dir)
 				if cc == nil {
 					mainLog.Load().Notice().Msg("Service was not restarted")
 					os.Exit(1)
@@ -1045,7 +1056,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				}
 				if doTasks(tasks) {
 					if dir, err := socketDir(); err == nil {
-						if cc := newSocketControlClient(s, dir); cc != nil {
+						if cc := newSocketControlClient(context.TODO(), s, dir); cc != nil {
 							_, _ = cc.post(ifacePath, nil)
 							return true
 						}
@@ -1172,6 +1183,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			p.logConn = lc
 		}
 	}
+	notifyExitToLogServer := func() {
+		_, _ = p.logConn.Write([]byte(msgExit))
+	}
 
 	if daemon && runtime.GOOS == "windows" {
 		mainLog.Load().Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
@@ -1197,8 +1211,12 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		mainLog.Load().Fatal().Err(err).Msg("failed to read base64 config")
 	}
 	processNoConfigFlags(noConfigStart)
+
+	// After s.Run() was called, if ctrld is going to be terminated for any reason,
+	// write msgExit to p.logConn so others (like "ctrld start") won't have to wait for timeout.
 	p.mu.Lock()
 	if err := v.Unmarshal(&cfg); err != nil {
+		notifyExitToLogServer()
 		mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 	}
 	p.mu.Unlock()
@@ -1214,6 +1232,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	// Wait for network up.
 	if !ctrldnet.Up() {
+		notifyExitToLogServer()
 		mainLog.Load().Fatal().Msg("network is not up yet")
 	}
 
@@ -1228,6 +1247,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// time for validating server certificate. Some routers need NTP synchronization
 	// to set the current time, so this check must happen before processCDFlags.
 	if err := p.router.PreRun(); err != nil {
+		notifyExitToLogServer()
 		mainLog.Load().Fatal().Err(err).Msg("failed to perform router pre-run check")
 	}
 
@@ -1249,6 +1269,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 				_ = uninstallInvalidCdUID(p, cdLogger, false)
 			}
+			notifyExitToLogServer()
 			cdLogger.Fatal().Err(err).Msg("failed to fetch resolver config")
 		}
 	}
@@ -1261,6 +1282,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	if updated {
 		if err := writeConfigFile(&cfg); err != nil {
+			notifyExitToLogServer()
 			mainLog.Load().Fatal().Err(err).Msg("failed to write config file")
 		} else {
 			mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
@@ -1282,6 +1304,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	if err := validateConfig(&cfg); err != nil {
+		notifyExitToLogServer()
 		os.Exit(1)
 	}
 	initCache()
@@ -1290,11 +1313,13 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		exe, err := os.Executable()
 		if err != nil {
 			mainLog.Load().Error().Err(err).Msg("failed to find the binary")
+			notifyExitToLogServer()
 			os.Exit(1)
 		}
 		curDir, err := os.Getwd()
 		if err != nil {
 			mainLog.Load().Error().Err(err).Msg("failed to get current working directory")
+			notifyExitToLogServer()
 			os.Exit(1)
 		}
 		// If running as daemon, re-run the command in background, with daemon off.
@@ -1302,6 +1327,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		cmd.Dir = curDir
 		if err := cmd.Start(); err != nil {
 			mainLog.Load().Error().Err(err).Msg("failed to start process as daemon")
+			notifyExitToLogServer()
 			os.Exit(1)
 		}
 		mainLog.Load().Info().Int("pid", cmd.Process.Pid).Msg("DNS proxy started")
@@ -1717,7 +1743,7 @@ func defaultIfaceName() string {
 // - External testing, ensuring query could be sent from ctrld -> upstream.
 //
 // Self-check is considered success only if both tests are ok.
-func selfCheckStatus(s service.Service, homedir, sockDir string) (bool, service.Status, error) {
+func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bool, service.Status, error) {
 	status, err := s.Status()
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not get service status")
@@ -1733,7 +1759,7 @@ func selfCheckStatus(s service.Service, homedir, sockDir string) (bool, service.
 	}
 
 	mainLog.Load().Debug().Msg("waiting for ctrld listener to be ready")
-	cc := newSocketControlClient(s, sockDir)
+	cc := newSocketControlClient(ctx, s, sockDir)
 	if cc == nil {
 		return false, status, errors.New("could not connect to control server")
 	}
@@ -2362,14 +2388,13 @@ func removeProvTokenFromArgs(sc *service.Config) {
 }
 
 // newSocketControlClient returns new control client after control server was started.
-func newSocketControlClient(s service.Service, dir string) *controlClient {
+func newSocketControlClient(ctx context.Context, s service.Service, dir string) *controlClient {
 	// Return early if service is not running.
 	if status, err := s.Status(); err != nil || status != service.StatusRunning {
 		return nil
 	}
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 10 * time.Second
-	ctx := context.Background()
 
 	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
 	timeout := time.NewTimer(30 * time.Second)
@@ -2388,6 +2413,8 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 
 		select {
 		case <-timeout.C:
+			return nil
+		case <-ctx.Done():
 			return nil
 		default:
 		}
@@ -2506,7 +2533,7 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	if s == nil {
 		cc = newSocketControlClientMobile(dir, stopCh)
 	} else {
-		cc = newSocketControlClient(s, dir)
+		cc = newSocketControlClient(context.TODO(), s, dir)
 	}
 	if cc == nil {
 		return nil // ctrld is not running.
@@ -2590,7 +2617,7 @@ func runInCdMode() bool {
 func curCdUID() string {
 	if s, _ := newService(&prog{}, svcConfig); s != nil {
 		if dir, _ := socketDir(); dir != "" {
-			cc := newSocketControlClient(s, dir)
+			cc := newSocketControlClient(context.TODO(), s, dir)
 			if cc != nil {
 				resp, _ := cc.post(cdPath, nil)
 				if resp != nil {
@@ -2636,7 +2663,7 @@ func upgradeUrl(baseUrl string) string {
 // runningIface returns the value of the iface variable used by ctrld process which is running.
 func runningIface(s service.Service) string {
 	if sockDir, err := socketDir(); err == nil {
-		if cc := newSocketControlClient(s, sockDir); cc != nil {
+		if cc := newSocketControlClient(context.TODO(), s, sockDir); cc != nil {
 			resp, err := cc.post(ifacePath, nil)
 			if err != nil {
 				return ""
