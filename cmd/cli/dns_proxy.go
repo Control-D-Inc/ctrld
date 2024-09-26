@@ -411,6 +411,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
 
+	leaked := false
 	// If ctrld is going to leak query to OS resolver, check remote upstream in background,
 	// so ctrld could be back to normal operation as long as the network is back online.
 	if len(upstreamConfigs) > 0 && p.leakingQuery.Load() {
@@ -418,6 +419,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			go p.checkUpstream(upstreams[n], uc)
 		}
 		upstreamConfigs = nil
+		leaked = true
+		ctrld.Log(ctx, mainLog.Load().Debug(), "%v is down, leaking query to OS resolver", upstreams)
 	}
 
 	if len(upstreamConfigs) == 0 {
@@ -435,7 +438,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// 4. Try remote upstream.
 	isLanOrPtrQuery := false
 	if req.ufr.matched {
-		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+		if leaked {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v (leaked)", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+		} else {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+		}
 	} else {
 		switch {
 		case isPrivatePtrLookup(req.msg):
