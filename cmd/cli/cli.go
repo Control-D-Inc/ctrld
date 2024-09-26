@@ -1814,6 +1814,7 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 		lastErr    error
 	)
 
+	oi := osinfo.New()
 	for i := 0; i < maxAttempts; i++ {
 		if domain == "" {
 			return errors.New("empty test domain")
@@ -1828,6 +1829,12 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 		}
 		// Return early if this is a connection refused.
 		if errConnectionRefused(exErr) {
+			return exErr
+		}
+		// Return early if this is MacOS 15.0 and error is timeout error.
+		var e net.Error
+		if oi.Name == "darwin" && oi.Version == "15.0" && errors.As(exErr, &e) && e.Timeout() {
+			mainLog.Load().Warn().Msg("MacOS 15.0 Sequoia has a bug with the firewall which may prevent ctrld from starting. Disable the MacOS firewall and try again")
 			return exErr
 		}
 		lastAnswer = r
