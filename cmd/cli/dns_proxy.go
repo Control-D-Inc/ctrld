@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,7 +17,6 @@ import (
 
 	"github.com/miekg/dns"
 	"golang.org/x/sync/errgroup"
-	"tailscale.com/net/netaddr"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
 
@@ -968,25 +968,15 @@ func (p *prog) queryFromSelf(ip string) bool {
 		return val.(bool)
 	}
 	netIP := netip.MustParseAddr(ip)
-	ifaces, err := netmon.GetInterfaceList()
+	regularIPs, loopbackIPs, err := netmon.LocalAddresses()
 	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not get interfaces list")
+		mainLog.Load().Warn().Err(err).Msg("could not get local addresses")
 		return false
 	}
-	for _, iface := range ifaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			mainLog.Load().Warn().Err(err).Msgf("could not get interfaces addresses: %s", iface.Name)
-			continue
-		}
-		for _, a := range addrs {
-			switch v := a.(type) {
-			case *net.IPNet:
-				if pfx, ok := netaddr.FromStdIPNet(v); ok && pfx.Addr().Compare(netIP) == 0 {
-					p.queryFromSelfMap.Store(ip, true)
-					return true
-				}
-			}
+	for _, localIP := range slices.Concat(regularIPs, loopbackIPs) {
+		if localIP.Compare(netIP) == 0 {
+			p.queryFromSelfMap.Store(ip, true)
+			return true
 		}
 	}
 	p.queryFromSelfMap.Store(ip, false)
