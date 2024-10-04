@@ -58,7 +58,16 @@ func defaultNameservers() []string {
 // calling this function.
 func InitializeOsResolver() []string {
 	or.nameservers = or.nameservers[:0]
+	// Ignore local addresses to prevent loop.
+	regularIPs, loopbackIPs, _ := netmon.LocalAddresses()
+	machineIPsMap := make(map[string]struct{}, len(regularIPs))
+	for _, v := range slices.Concat(regularIPs, loopbackIPs) {
+		machineIPsMap[net.JoinHostPort(v.String(), "53")] = struct{}{}
+	}
 	for _, ns := range defaultNameservers() {
+		if _, ok := machineIPsMap[ns]; ok {
+			continue
+		}
 		if testNameserver(ns) {
 			or.nameservers = append(or.nameservers, ns)
 		}
