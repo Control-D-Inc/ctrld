@@ -1,6 +1,5 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 package dns
 
@@ -71,7 +70,7 @@ func TestLinuxDNSMode(t *testing.T) {
 		{
 			name:    "resolved_alone_without_ping",
 			env:     env(resolvDotConf("# Managed by systemd-resolved", "nameserver 127.0.0.53")),
-			wantLog: "dns: ResolvConfMode error: dbus property not found\ndns: [rc=resolved nm=no resolv-conf-mode=error ret=systemd-resolved]",
+			wantLog: "dns: ResolvConfMode error: dbus property not found\ndns: [rc=resolved resolved=file nm=no resolv-conf-mode=error ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		{
@@ -79,8 +78,38 @@ func TestLinuxDNSMode(t *testing.T) {
 			env: env(
 				resolvDotConf("# Managed by systemd-resolved", "nameserver 127.0.0.53"),
 				resolvedRunning()),
-			wantLog: "dns: [resolved-ping=yes rc=resolved nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			wantLog: "dns: [resolved-ping=yes rc=resolved resolved=file nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
 			want:    "systemd-resolved",
+		},
+		{
+			name: "resolved_and_nsswitch_resolve",
+			env: env(
+				resolvDotConf("# Managed by systemd-resolved", "nameserver 1.1.1.1"),
+				resolvedRunning(),
+				nsswitchDotConf("hosts: files resolve [!UNAVAIL=return] dns"),
+			),
+			wantLog: "dns: [resolved-ping=yes rc=resolved resolved=nss nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			want:    "systemd-resolved",
+		},
+		{
+			name: "resolved_and_nsswitch_dns",
+			env: env(
+				resolvDotConf("# Managed by systemd-resolved", "nameserver 1.1.1.1"),
+				resolvedRunning(),
+				nsswitchDotConf("hosts: files dns resolve [!UNAVAIL=return]"),
+			),
+			wantLog: "dns: resolvedIsActuallyResolver error: resolv.conf doesn't point to systemd-resolved; points to [1.1.1.1]\ndns: [resolved-ping=yes rc=resolved resolved=not-in-use ret=direct]",
+			want:    "direct",
+		},
+		{
+			name: "resolved_and_nsswitch_none",
+			env: env(
+				resolvDotConf("# Managed by systemd-resolved", "nameserver 1.1.1.1"),
+				resolvedRunning(),
+				nsswitchDotConf("hosts:"),
+			),
+			wantLog: "dns: resolvedIsActuallyResolver error: resolv.conf doesn't point to systemd-resolved; points to [1.1.1.1]\ndns: [resolved-ping=yes rc=resolved resolved=not-in-use ret=direct]",
+			want:    "direct",
 		},
 		{
 			name: "resolved_and_networkmanager_not_using_resolved",
@@ -88,7 +117,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				resolvDotConf("# Managed by systemd-resolved", "nameserver 127.0.0.53"),
 				resolvedRunning(),
 				nmRunning("1.2.3", false)),
-			wantLog: "dns: [resolved-ping=yes rc=resolved nm=yes nm-resolved=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			wantLog: "dns: [resolved-ping=yes rc=resolved resolved=file nm=yes nm-resolved=no resolv-conf-mode=fortests ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		{
@@ -97,7 +126,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				resolvDotConf("# Managed by systemd-resolved", "nameserver 127.0.0.53"),
 				resolvedRunning(),
 				nmRunning("1.26.2", true)),
-			wantLog: "dns: [resolved-ping=yes rc=resolved nm=yes nm-resolved=yes nm-safe=yes ret=network-manager]",
+			wantLog: "dns: [resolved-ping=yes rc=resolved resolved=file nm=yes nm-resolved=yes nm-safe=yes ret=network-manager]",
 			want:    "network-manager",
 		},
 		{
@@ -106,7 +135,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				resolvDotConf("# Managed by systemd-resolved", "nameserver 127.0.0.53"),
 				resolvedRunning(),
 				nmRunning("1.27.0", true)),
-			wantLog: "dns: [resolved-ping=yes rc=resolved nm=yes nm-resolved=yes nm-safe=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			wantLog: "dns: [resolved-ping=yes rc=resolved resolved=file nm=yes nm-resolved=yes nm-safe=no resolv-conf-mode=fortests ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		{
@@ -115,7 +144,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				resolvDotConf("# Managed by systemd-resolved", "nameserver 127.0.0.53"),
 				resolvedRunning(),
 				nmRunning("1.22.0", true)),
-			wantLog: "dns: [resolved-ping=yes rc=resolved nm=yes nm-resolved=yes nm-safe=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			wantLog: "dns: [resolved-ping=yes rc=resolved resolved=file nm=yes nm-resolved=yes nm-safe=no resolv-conf-mode=fortests ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		// Regression tests for extreme corner cases below.
@@ -141,7 +170,7 @@ func TestLinuxDNSMode(t *testing.T) {
 					"nameserver 127.0.0.53",
 					"nameserver 127.0.0.53"),
 				resolvedRunning()),
-			wantLog: "dns: [resolved-ping=yes rc=resolved nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			wantLog: "dns: [resolved-ping=yes rc=resolved resolved=file nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		{
@@ -156,7 +185,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				"# run \"systemd-resolve --status\" to see details about the actual nameservers.",
 				"nameserver 127.0.0.53"),
 				resolvedRunning()),
-			wantLog: "dns: [resolved-ping=yes rc=resolved nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			wantLog: "dns: [resolved-ping=yes rc=resolved resolved=file nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		{
@@ -171,7 +200,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				"# 127.0.0.53 is the systemd-resolved stub resolver.",
 				"# run \"systemd-resolve --status\" to see details about the actual nameservers.",
 				"nameserver 127.0.0.53")),
-			wantLog: "dns: ResolvConfMode error: dbus property not found\ndns: [rc=resolved nm=no resolv-conf-mode=error ret=systemd-resolved]",
+			wantLog: "dns: ResolvConfMode error: dbus property not found\ndns: [rc=resolved resolved=file nm=no resolv-conf-mode=error ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		{
@@ -183,7 +212,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				"options edns0 trust-ad"),
 				resolvedRunning(),
 				nmRunning("1.32.12", true)),
-			wantLog: "dns: [resolved-ping=yes rc=nm nm-resolved=yes nm-safe=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			wantLog: "dns: [resolved-ping=yes rc=nm resolved=file nm-resolved=yes nm-safe=no resolv-conf-mode=fortests ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		{
@@ -194,7 +223,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				"nameserver 127.0.0.53",
 				"options edns0 trust-ad"),
 				nmRunning("1.32.12", true)),
-			wantLog: "dns: ResolvConfMode error: dbus property not found\ndns: [rc=nm nm-resolved=yes nm-safe=no resolv-conf-mode=error ret=systemd-resolved]",
+			wantLog: "dns: ResolvConfMode error: dbus property not found\ndns: [rc=nm resolved=file nm-resolved=yes nm-safe=no resolv-conf-mode=error ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		{
@@ -206,7 +235,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				"options edns0 trust-ad"),
 				resolvedRunning(),
 				nmRunning("1.26.3", true)),
-			wantLog: "dns: [resolved-ping=yes rc=nm nm-resolved=yes nm-safe=yes ret=network-manager]",
+			wantLog: "dns: [resolved-ping=yes rc=nm resolved=file nm-resolved=yes nm-safe=yes ret=network-manager]",
 			want:    "network-manager",
 		},
 		{
@@ -217,7 +246,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				"nameserver 127.0.0.53",
 				"options edns0 trust-ad"),
 				resolvedRunning()),
-			wantLog: "dns: [resolved-ping=yes rc=nm nm-resolved=yes nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			wantLog: "dns: [resolved-ping=yes rc=nm resolved=file nm-resolved=yes nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		{
@@ -228,7 +257,7 @@ func TestLinuxDNSMode(t *testing.T) {
 				"search lan",
 				"nameserver 127.0.0.53"),
 				resolvedRunning()),
-			wantLog: "dns: [resolved-ping=yes rc=nm nm-resolved=yes nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			wantLog: "dns: [resolved-ping=yes rc=nm resolved=file nm-resolved=yes nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
 			want:    "systemd-resolved",
 		},
 		{
@@ -238,14 +267,26 @@ func TestLinuxDNSMode(t *testing.T) {
 				resolvDotConf("# Managed by systemd-resolved", "nameserver 127.0.0.53"),
 				resolvedDbusProperty(),
 			)),
-			wantLog: "dns: [resolved-ping=yes rc=resolved nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
+			wantLog: "dns: [resolved-ping=yes rc=resolved resolved=file nm=no resolv-conf-mode=fortests ret=systemd-resolved]",
 			want:    "systemd-resolved",
+		},
+		{
+			// regression test for https://github.com/tailscale/tailscale/issues/9687
+			name: "networkmanager_endeavouros",
+			env: env(resolvDotConf(
+				"# Generated by NetworkManager",
+				"search example.com localdomain",
+				"nameserver 10.0.0.1"),
+				nmRunning("1.44.2", false)),
+			wantLog: "dns: resolvedIsActuallyResolver error: resolv.conf doesn't point to systemd-resolved; points to [10.0.0.1]\n" +
+				"dns: [rc=nm resolved=not-in-use ret=direct]",
+			want: "direct",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logBuf tstest.MemLogger
-			got, err := dnsMode(logBuf.Logf, tt.env)
+			got, err := dnsMode(logBuf.Logf, nil, tt.env)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -272,8 +313,9 @@ func (m memFS) Stat(name string) (isRegular bool, err error) {
 	return false, nil
 }
 
-func (m memFS) Rename(_, _ string) error { panic("TODO") }
-func (m memFS) Remove(_ string) error    { panic("TODO") }
+func (m memFS) Chmod(name string, mode os.FileMode) error { panic("TODO") }
+func (m memFS) Rename(oldName, newName string) error      { panic("TODO") }
+func (m memFS) Remove(name string) error                  { panic("TODO") }
 func (m memFS) ReadFile(name string) ([]byte, error) {
 	v, ok := m[name]
 	if !ok {
@@ -297,7 +339,7 @@ func (m memFS) Truncate(name string) error {
 	return nil
 }
 
-func (m memFS) WriteFile(name string, contents []byte, _ os.FileMode) error {
+func (m memFS) WriteFile(name string, contents []byte, perm os.FileMode) error {
 	m[name] = string(contents)
 	return nil
 }
@@ -378,6 +420,12 @@ func env(opts ...envOption) newOSConfigEnv {
 func resolvDotConf(ss ...string) envOption {
 	return envOpt(func(b *envBuilder) {
 		b.fs["/etc/resolv.conf"] = strings.Join(ss, "\n")
+	})
+}
+
+func nsswitchDotConf(ss ...string) envOption {
+	return envOpt(func(b *envBuilder) {
+		b.fs["/etc/nsswitch.conf"] = strings.Join(ss, "\n")
 	})
 }
 

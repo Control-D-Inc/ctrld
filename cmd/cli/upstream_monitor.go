@@ -71,19 +71,19 @@ func (um *upstreamMonitor) reset(upstream string) {
 
 // checkUpstream checks the given upstream status, periodically sending query to upstream
 // until successfully. An upstream status/counter will be reset once it becomes reachable.
-func (um *upstreamMonitor) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
-	um.mu.Lock()
-	isChecking := um.checking[upstream]
+func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
+	p.um.mu.Lock()
+	isChecking := p.um.checking[upstream]
 	if isChecking {
-		um.mu.Unlock()
+		p.um.mu.Unlock()
 		return
 	}
-	um.checking[upstream] = true
-	um.mu.Unlock()
+	p.um.checking[upstream] = true
+	p.um.mu.Unlock()
 	defer func() {
-		um.mu.Lock()
-		um.checking[upstream] = false
-		um.mu.Unlock()
+		p.um.mu.Lock()
+		p.um.checking[upstream] = false
+		p.um.mu.Unlock()
 	}()
 
 	resolver, err := ctrld.NewResolver(uc)
@@ -104,7 +104,13 @@ func (um *upstreamMonitor) checkUpstream(upstream string, uc *ctrld.UpstreamConf
 	for {
 		if err := check(); err == nil {
 			mainLog.Load().Debug().Msgf("upstream %q is online", uc.Endpoint)
-			um.reset(upstream)
+			p.um.reset(upstream)
+			if p.leakingQuery.CompareAndSwap(true, false) {
+				p.leakingQueryMu.Lock()
+				p.leakingQueryWasRun = false
+				p.leakingQueryMu.Unlock()
+				mainLog.Load().Warn().Msg("stop leaking query")
+			}
 			return
 		}
 		time.Sleep(checkUpstreamBackoffSleep)

@@ -10,8 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/net/netmon"
+
 	"github.com/miekg/dns"
-	"tailscale.com/net/interfaces"
 )
 
 const (
@@ -29,6 +30,9 @@ const (
 	ResolverTypeLegacy = "legacy"
 	// ResolverTypePrivate is like ResolverTypeOS, but use for local resolver only.
 	ResolverTypePrivate = "private"
+	// ResolverTypeSDNS specifies resolver with information encoded using DNS Stamps.
+	// See: https://dnscrypt.info/stamps-specifications/
+	ResolverTypeSDNS = "sdns"
 )
 
 const (
@@ -54,7 +58,16 @@ func defaultNameservers() []string {
 // calling this function.
 func InitializeOsResolver() []string {
 	or.nameservers = or.nameservers[:0]
+	// Ignore local addresses to prevent loop.
+	regularIPs, loopbackIPs, _ := netmon.LocalAddresses()
+	machineIPsMap := make(map[string]struct{}, len(regularIPs))
+	for _, v := range slices.Concat(regularIPs, loopbackIPs) {
+		machineIPsMap[net.JoinHostPort(v.String(), "53")] = struct{}{}
+	}
 	for _, ns := range defaultNameservers() {
+		if _, ok := machineIPsMap[ns]; ok {
+			continue
+		}
 		if testNameserver(ns) {
 			or.nameservers = append(or.nameservers, ns)
 		}
@@ -66,11 +79,14 @@ func InitializeOsResolver() []string {
 // testPlainDnsNameserver sends a test query to DNS nameserver to check if the server is available.
 func testNameserver(addr string) bool {
 	msg := new(dns.Msg)
-	msg.SetQuestion(".", dns.TypeNS)
+	msg.SetQuestion("controld.com.", dns.TypeNS)
 	client := new(dns.Client)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_, _, err := client.ExchangeContext(ctx, msg, addr)
+	if err != nil {
+		ProxyLogger.Load().Debug().Err(err).Msgf("failed to connect to OS nameserver: %s", addr)
+	}
 	return err == nil
 }
 
@@ -346,7 +362,7 @@ func NewResolverWithNameserver(nameservers []string) Resolver {
 // Rfc1918Addresses returns the list of local interfaces private IP addresses
 func Rfc1918Addresses() []string {
 	var res []string
-	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		addrs, _ := i.Addrs()
 		for _, addr := range addrs {
 			ipNet, ok := addr.(*net.IPNet)
