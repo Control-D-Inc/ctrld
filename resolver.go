@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,9 +125,9 @@ type osResolver struct {
 }
 
 type osResolverResult struct {
-	answer              *dns.Msg
-	err                 error
-	isControlDPublicDNS bool
+	answer *dns.Msg
+	err    error
+	server string
 }
 
 // Resolve resolves DNS queries using pre-configured nameservers.
@@ -152,33 +153,45 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		go func(server string) {
 			defer wg.Done()
 			answer, _, err := dnsClient.ExchangeContext(ctx, msg.Copy(), server)
-			ch <- &osResolverResult{answer: answer, err: err, isControlDPublicDNS: server == controldPublicDnsWithPort}
+			ch <- &osResolverResult{answer: answer, err: err, server: server}
 		}(server)
 	}
 
+	logAnswer := func(server string) {
+		if before, _, found := strings.Cut(server, ":"); found {
+			server = before
+		}
+		Log(ctx, ProxyLogger.Load().Debug(), "got answer from nameserver: %s", server)
+	}
 	var (
 		nonSuccessAnswer      *dns.Msg
+		nonSuccessServer      string
 		controldSuccessAnswer *dns.Msg
 	)
 	errs := make([]error, 0, numServers)
 	for res := range ch {
 		switch {
 		case res.answer != nil && res.answer.Rcode == dns.RcodeSuccess:
-			if res.isControlDPublicDNS {
+			if res.server == controldPublicDnsWithPort {
 				controldSuccessAnswer = res.answer // only use ControlD answer as last one.
 			} else {
 				cancel()
+				logAnswer(res.server)
 				return res.answer, nil
 			}
 		case res.answer != nil:
 			nonSuccessAnswer = res.answer
+			nonSuccessServer = res.server
 		}
 		errs = append(errs, res.err)
 	}
-	for _, answer := range []*dns.Msg{controldSuccessAnswer, nonSuccessAnswer} {
-		if answer != nil {
-			return answer, nil
-		}
+	if controldSuccessAnswer != nil {
+		logAnswer(controldPublicDnsWithPort)
+		return controldSuccessAnswer, nil
+	}
+	if nonSuccessAnswer != nil {
+		logAnswer(nonSuccessServer)
+		return nonSuccessAnswer, nil
 	}
 	return nil, errors.Join(errs...)
 }
