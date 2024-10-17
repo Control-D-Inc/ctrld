@@ -1,10 +1,10 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 package dns
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -79,7 +79,10 @@ func testDirect(t *testing.T, fs wholeFileFS) {
 		}
 	}
 
-	m := directManager{logf: t.Logf, fs: fs}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m := directManager{logf: t.Logf, fs: fs, ctx: ctx, ctxClose: cancel}
 	if err := m.SetDNS(OSConfig{
 		Nameservers:   []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("8.8.4.4")},
 		SearchDomains: []dnsname.FQDN{"controld.com."},
@@ -121,7 +124,7 @@ type brokenRemoveFS struct {
 	directFS
 }
 
-func (b brokenRemoveFS) Rename(_, _ string) error {
+func (b brokenRemoveFS) Rename(old, new string) error {
 	return errors.New("nyaaah I'm a silly container!")
 }
 
@@ -178,12 +181,12 @@ func TestReadResolve(t *testing.T) {
 				SearchDomains: []dnsname.FQDN{"controld.com."},
 			},
 		},
-		{in: `search controld.com # typo`,
+		{in: `search controld.com # comment`,
 			want: OSConfig{
 				SearchDomains: []dnsname.FQDN{"controld.com."},
 			},
 		},
-		{in: `searchcontrold.com`, wantErr: true},
+		{in: `searchctrld.com`, wantErr: true},
 		{in: `search`, wantErr: true},
 	}
 

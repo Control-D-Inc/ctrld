@@ -16,7 +16,8 @@ func Test_osResolver_Resolve(t *testing.T) {
 
 	go func() {
 		defer cancel()
-		resolver := &osResolver{nameservers: []string{"127.0.0.127:5353"}}
+		resolver := &osResolver{}
+		resolver.nameservers.Store(&[]string{"127.0.0.127:5353"})
 		m := new(dns.Msg)
 		m.SetQuestion("controld.com.", dns.TypeA)
 		m.RecursionDesired = true
@@ -69,7 +70,8 @@ func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 			server.Shutdown()
 		}
 	}()
-	resolver := &osResolver{nameservers: ns}
+	resolver := &osResolver{}
+	resolver.nameservers.Store(&ns)
 	msg := new(dns.Msg)
 	msg.SetQuestion(".", dns.TypeNS)
 	answer, err := resolver.Resolve(context.Background(), msg)
@@ -79,6 +81,19 @@ func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 	if answer.Rcode != dns.RcodeSuccess {
 		t.Errorf("unexpected return code: %s", dns.RcodeToString[answer.Rcode])
 	}
+}
+
+func Test_osResolver_InitializationRace(t *testing.T) {
+	var wg sync.WaitGroup
+	n := 10
+	wg.Add(n)
+	for range n {
+		go func() {
+			defer wg.Done()
+			InitializeOsResolver()
+		}()
+	}
+	wg.Wait()
 }
 
 func Test_upstreamTypeFromEndpoint(t *testing.T) {
