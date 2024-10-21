@@ -83,31 +83,53 @@ func availableNameservers() []string {
 // It's the caller's responsibility to ensure the system DNS is in a clean state before
 // calling this function.
 func InitializeOsResolver() []string {
+	return initializeOsResolver(availableNameservers())
+}
+func initializeOsResolver(servers []string) []string {
 	var (
 		nss       []string
 		publicNss []string
 	)
-	var curLanServer netip.Addr
+	var (
+		lastLanServer         netip.Addr
+		curLanServer          netip.Addr
+		curLanServerAvailable bool
+	)
 	if p := or.currentLanServer.Load(); p != nil {
 		curLanServer = *p
 		or.currentLanServer.Store(nil)
 	}
-	for _, ns := range availableNameservers() {
+	if p := or.lastLanServer.Load(); p != nil {
+		lastLanServer = *p
+		or.lastLanServer.Store(nil)
+	}
+	for _, ns := range servers {
 		addr, err := netip.ParseAddr(ns)
 		if err != nil {
 			continue
 		}
 		server := net.JoinHostPort(ns, "53")
-		if isLanAddr(addr) {
-			if addr.Compare(curLanServer) != 0 && or.currentLanServer.CompareAndSwap(nil, &addr) {
-				nss = append(nss, server)
-			}
-		} else {
+		// Always use new public nameserver.
+		if !isLanAddr(addr) {
 			publicNss = append(publicNss, server)
 			nss = append(nss, server)
+			continue
+		}
+		// For LAN server, storing only current and last LAN server if any.
+		if addr.Compare(curLanServer) == 0 {
+			curLanServerAvailable = true
+		} else {
+			if addr.Compare(lastLanServer) == 0 {
+				or.lastLanServer.Store(&addr)
+			} else {
+				if or.currentLanServer.CompareAndSwap(nil, &addr) {
+					nss = append(nss, server)
+				}
+			}
 		}
 	}
-	if curLanServer.IsValid() {
+	// Store current LAN server as last one only if it's still available.
+	if curLanServerAvailable && curLanServer.IsValid() {
 		or.lastLanServer.Store(&curLanServer)
 		nss = append(nss, net.JoinHostPort(curLanServer.String(), "53"))
 	}

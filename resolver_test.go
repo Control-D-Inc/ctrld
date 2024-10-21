@@ -3,9 +3,12 @@ package ctrld
 import (
 	"context"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 
 	"github.com/miekg/dns"
 )
@@ -148,4 +151,43 @@ func runLocalPacketConnTestServer(t *testing.T, pc net.PacketConn, handler dns.H
 
 	waitLock.Lock()
 	return server, addr, nil
+}
+
+func Test_initializeOsResolver(t *testing.T) {
+	lanServer1 := "192.168.1.1"
+	lanServer2 := "10.0.10.69"
+	wanServer := "1.1.1.1"
+	publicServers := []string{net.JoinHostPort(wanServer, "53")}
+
+	// First initialization.
+	initializeOsResolver([]string{lanServer1, wanServer})
+	p := or.currentLanServer.Load()
+	assert.NotNil(t, p)
+	assert.Equal(t, lanServer1, p.String())
+	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
+
+	// No new LAN server, current LAN server -> last LAN server.
+	initializeOsResolver([]string{lanServer1, wanServer})
+	p = or.currentLanServer.Load()
+	assert.Nil(t, p)
+	p = or.lastLanServer.Load()
+	assert.NotNil(t, p)
+	assert.Equal(t, lanServer1, p.String())
+	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
+
+	// New LAN server detected.
+	initializeOsResolver([]string{lanServer2, lanServer1, wanServer})
+	p = or.currentLanServer.Load()
+	assert.NotNil(t, p)
+	assert.Equal(t, lanServer2, p.String())
+	p = or.lastLanServer.Load()
+	assert.NotNil(t, p)
+	assert.Equal(t, lanServer1, p.String())
+	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
+
+	// No LAN server available.
+	initializeOsResolver([]string{wanServer})
+	assert.Nil(t, or.currentLanServer.Load())
+	assert.Nil(t, or.lastLanServer.Load())
+	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
 }
