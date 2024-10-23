@@ -29,6 +29,7 @@ var (
 	silent            bool
 	cdUID             string
 	cdOrg             string
+	customHostname    string
 	cdDev             bool
 	iface             string
 	ifaceStartStop    string
@@ -45,9 +46,10 @@ var (
 )
 
 const (
-	cdUidFlagName   = "cd"
-	cdOrgFlagName   = "cd-org"
-	nextdnsFlagName = "nextdns"
+	cdUidFlagName          = "cd"
+	cdOrgFlagName          = "cd-org"
+	customHostnameFlagName = "custom-hostname"
+	nextdnsFlagName        = "nextdns"
 )
 
 func init() {

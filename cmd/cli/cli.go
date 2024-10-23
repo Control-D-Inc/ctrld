@@ -147,6 +147,7 @@ func initCLI() {
 	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	runCmd.Flags().StringVarP(&cdUID, cdUidFlagName, "", "", "Control D resolver uid")
 	runCmd.Flags().StringVarP(&cdOrg, cdOrgFlagName, "", "", "Control D provision token")
+	runCmd.Flags().StringVarP(&customHostname, customHostnameFlagName, "", "", "Custom hostname passed to ControlD API")
 	runCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = runCmd.Flags().MarkHidden("dev")
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
@@ -319,7 +320,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			} else if uid := cdUIDFromProvToken(); uid != "" {
 				cdUID = uid
 				mainLog.Load().Debug().Msg("using uid from provision token")
-				removeProvTokenFromArgs(sc)
+				removeOrgFlagsFromArgs(sc)
 				// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
 				sc.Arguments = append(sc.Arguments, "--cd="+cdUID)
 			}
@@ -440,6 +441,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, cdUidFlagName, "", "", "Control D resolver uid")
 	startCmd.Flags().StringVarP(&cdOrg, cdOrgFlagName, "", "", "Control D provision token")
+	startCmd.Flags().StringVarP(&customHostname, customHostnameFlagName, "", "", "Custom hostname passed to ControlD API")
 	startCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
@@ -2363,17 +2365,30 @@ func cdUIDFromProvToken() string {
 	if cdOrg == "" {
 		return ""
 	}
-
+	// Validate custom hostname if provided.
+	if customHostname != "" && !validHostname(customHostname) {
+		mainLog.Load().Fatal().Msgf("invalid custom hostname: %q", customHostname)
+	}
+	req := &controld.UtilityOrgRequest{ProvToken: cdOrg, Hostname: customHostname}
 	// Process provision token if provided.
-	resolverConfig, err := controld.FetchResolverUID(cdOrg, rootCmd.Version, cdDev)
+	resolverConfig, err := controld.FetchResolverUID(req, rootCmd.Version, cdDev)
 	if err != nil {
 		mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid with provision token: %s", cdOrg)
 	}
 	return resolverConfig.UID
 }
 
-// removeProvTokenFromArgs removes the --cd-org from command line arguments.
-func removeProvTokenFromArgs(sc *service.Config) {
+// removeOrgFlagsFromArgs removes organization flags from command line arguments.
+// The flags are:
+//
+// - "--cd-org"
+// - "--custom-hostname"
+//
+// This is necessary because "ctrld run" only need a valid UID, which could be fetched
+// using "--cd-org". So if "ctrld start" have already been called with "--cd-org", we
+// already have a valid UID to pass to "ctrld run", so we don't have to force "ctrld run"
+// to re-do the already done job.
+func removeOrgFlagsFromArgs(sc *service.Config) {
 	a := sc.Arguments[:0]
 	skip := false
 	for _, x := range sc.Arguments {
@@ -2381,13 +2396,14 @@ func removeProvTokenFromArgs(sc *service.Config) {
 			skip = false
 			continue
 		}
-		// For "--cd-org XXX", skip it and mark next arg skipped.
-		if x == "--"+cdOrgFlagName {
+		// For "--cd-org XXX"/"--custom-hostname XXX", skip them and mark next arg skipped.
+		if x == "--"+cdOrgFlagName || x == "--"+customHostnameFlagName {
 			skip = true
 			continue
 		}
-		// For "--cd-org=XXX", just skip it.
-		if strings.HasPrefix(x, "--"+cdOrgFlagName+"=") {
+		// For "--cd-org=XXX"/"--custom-hostname=XXX", just skip them.
+		if strings.HasPrefix(x, "--"+cdOrgFlagName+"=") ||
+			strings.HasPrefix(x, "--"+customHostnameFlagName+"=") {
 			continue
 		}
 		a = append(a, x)
