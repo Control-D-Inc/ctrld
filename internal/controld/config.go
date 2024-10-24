@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -64,7 +65,8 @@ type utilityRequest struct {
 	ClientID string `json:"client_id,omitempty"`
 }
 
-type utilityOrgRequest struct {
+// UtilityOrgRequest contains request data for calling Org API.
+type UtilityOrgRequest struct {
 	ProvToken string `json:"prov_token"`
 	Hostname  string `json:"hostname"`
 }
@@ -81,9 +83,15 @@ func FetchResolverConfig(rawUID, version string, cdDev bool) (*ResolverConfig, e
 }
 
 // FetchResolverUID fetch resolver uid from provision token.
-func FetchResolverUID(pt, version string, cdDev bool) (*ResolverConfig, error) {
-	hostname, _ := os.Hostname()
-	body, _ := json.Marshal(utilityOrgRequest{ProvToken: pt, Hostname: hostname})
+func FetchResolverUID(req *UtilityOrgRequest, version string, cdDev bool) (*ResolverConfig, error) {
+	if req == nil {
+		return nil, errors.New("invalid request")
+	}
+	hostname := req.Hostname
+	if hostname == "" {
+		hostname, _ = os.Hostname()
+	}
+	body, _ := json.Marshal(UtilityOrgRequest{ProvToken: req.ProvToken, Hostname: hostname})
 	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
 }
 

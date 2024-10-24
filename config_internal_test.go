@@ -17,7 +17,7 @@ func TestUpstreamConfig_SetupBootstrapIP(t *testing.T) {
 	uc.Init()
 	uc.setupBootstrapIP(false)
 	if len(uc.bootstrapIPs) == 0 {
-		t.Log(nameservers())
+		t.Log(defaultNameservers())
 		t.Fatal("could not bootstrap ip without bootstrap DNS")
 	}
 	t.Log(uc)
@@ -26,6 +26,7 @@ func TestUpstreamConfig_SetupBootstrapIP(t *testing.T) {
 func TestUpstreamConfig_Init(t *testing.T) {
 	u1, _ := url.Parse("https://example.com")
 	u2, _ := url.Parse("https://example.com?k=v")
+	u3, _ := url.Parse("https://freedns.controld.com/p1")
 	tests := []struct {
 		name     string
 		uc       *UpstreamConfig
@@ -176,6 +177,152 @@ func TestUpstreamConfig_Init(t *testing.T) {
 				SendClientInfo: ptrBool(false),
 				IPStack:        IpStackBoth,
 				u:              u2,
+			},
+		},
+		{
+			"h3",
+			&UpstreamConfig{
+				Name:        "doh3",
+				Type:        "doh3",
+				Endpoint:    "h3://example.com",
+				BootstrapIP: "",
+				Domain:      "",
+				Timeout:     0,
+			},
+			&UpstreamConfig{
+				Name:        "doh3",
+				Type:        "doh3",
+				Endpoint:    "https://example.com",
+				BootstrapIP: "",
+				Domain:      "example.com",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+				u:           u1,
+			},
+		},
+		{
+			"h3 without type",
+			&UpstreamConfig{
+				Name:        "doh3",
+				Endpoint:    "h3://example.com",
+				BootstrapIP: "",
+				Domain:      "",
+				Timeout:     0,
+			},
+			&UpstreamConfig{
+				Name:        "doh3",
+				Type:        "doh3",
+				Endpoint:    "https://example.com",
+				BootstrapIP: "",
+				Domain:      "example.com",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+				u:           u1,
+			},
+		},
+		{
+			"sdns -> doh",
+			&UpstreamConfig{
+				Name:        "sdns",
+				Type:        "sdns",
+				Endpoint:    "sdns://AgMAAAAAAAAACjc2Ljc2LjIuMTEAFGZyZWVkbnMuY29udHJvbGQuY29tAy9wMQ",
+				BootstrapIP: "",
+				Domain:      "",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+			},
+			&UpstreamConfig{
+				Name:        "sdns",
+				Type:        "doh",
+				Endpoint:    "https://freedns.controld.com/p1",
+				BootstrapIP: "76.76.2.11",
+				Domain:      "freedns.controld.com",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+				u:           u3,
+			},
+		},
+		{
+			"sdns -> dot",
+			&UpstreamConfig{
+				Name:        "sdns",
+				Type:        "sdns",
+				Endpoint:    "sdns://AwcAAAAAAAAACjc2Ljc2LjIuMTEAFGZyZWVkbnMuY29udHJvbGQuY29t",
+				BootstrapIP: "",
+				Domain:      "",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+			},
+			&UpstreamConfig{
+				Name:        "sdns",
+				Type:        "dot",
+				Endpoint:    "freedns.controld.com:843",
+				BootstrapIP: "76.76.2.11",
+				Domain:      "freedns.controld.com",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+			},
+		},
+		{
+			"sdns -> doq",
+			&UpstreamConfig{
+				Name:        "sdns",
+				Type:        "sdns",
+				Endpoint:    "sdns://BAcAAAAAAAAACjc2Ljc2LjIuMTEAFGZyZWVkbnMuY29udHJvbGQuY29t",
+				BootstrapIP: "",
+				Domain:      "",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+			},
+			&UpstreamConfig{
+				Name:        "sdns",
+				Type:        "doq",
+				Endpoint:    "freedns.controld.com:784",
+				BootstrapIP: "76.76.2.11",
+				Domain:      "freedns.controld.com",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+			},
+		},
+		{
+			"sdns -> legacy",
+			&UpstreamConfig{
+				Name:        "sdns",
+				Type:        "sdns",
+				Endpoint:    "sdns://AAcAAAAAAAAACjc2Ljc2LjIuMTE",
+				BootstrapIP: "",
+				Domain:      "",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+			},
+			&UpstreamConfig{
+				Name:        "sdns",
+				Type:        "legacy",
+				Endpoint:    "76.76.2.11:53",
+				BootstrapIP: "76.76.2.11",
+				Domain:      "76.76.2.11",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+			},
+		},
+		{
+			"sdns without type",
+			&UpstreamConfig{
+				Name:        "sdns",
+				Endpoint:    "sdns://AAcAAAAAAAAACjc2Ljc2LjIuMTE",
+				BootstrapIP: "",
+				Domain:      "",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
+			},
+			&UpstreamConfig{
+				Name:        "sdns",
+				Type:        "legacy",
+				Endpoint:    "76.76.2.11:53",
+				BootstrapIP: "76.76.2.11",
+				Domain:      "76.76.2.11",
+				Timeout:     0,
+				IPStack:     IpStackBoth,
 			},
 		},
 	}

@@ -1,12 +1,12 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 //go:build linux || freebsd || openbsd
 
 package dns
 
 import (
+	"bytes"
 	"os/exec"
 )
 
@@ -14,12 +14,16 @@ func resolvconfStyle() string {
 	if _, err := exec.LookPath("resolvconf"); err != nil {
 		return ""
 	}
-	if _, err := exec.Command("resolvconf", "--version").CombinedOutput(); err != nil {
+	output, err := exec.Command("resolvconf", "--version").CombinedOutput()
+	if err != nil {
 		// Debian resolvconf doesn't understand --version, and
 		// exits with a specific error code.
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 99 {
 			return "debian"
 		}
+	}
+	if bytes.HasPrefix(output, []byte("Debian resolvconf")) {
+		return "debian"
 	}
 	// Treat everything else as openresolv, by far the more popular implementation.
 	return "openresolv"

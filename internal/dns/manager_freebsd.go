@@ -1,6 +1,5 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 package dns
 
@@ -8,13 +7,18 @@ import (
 	"fmt"
 	"os"
 
+	"tailscale.com/control/controlknobs"
+	"tailscale.com/health"
 	"tailscale.com/types/logger"
 )
 
-func NewOSConfigurator(logf logger.Logf, _ string) (OSConfigurator, error) {
+// NewOSConfigurator creates a new OS configurator.
+//
+// The health tracker may be nil; the knobs may be nil and are ignored on this platform.
+func NewOSConfigurator(logf logger.Logf, health *health.Tracker, _ *controlknobs.Knobs, _ string) (OSConfigurator, error) {
 	bs, err := os.ReadFile("/etc/resolv.conf")
 	if os.IsNotExist(err) {
-		return newDirectManager(logf), nil
+		return newDirectManager(logf, health), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading /etc/resolv.conf: %w", err)
@@ -24,16 +28,16 @@ func NewOSConfigurator(logf logger.Logf, _ string) (OSConfigurator, error) {
 	case "resolvconf":
 		switch resolvconfStyle() {
 		case "":
-			return newDirectManager(logf), nil
+			return newDirectManager(logf, health), nil
 		case "debian":
 			return newDebianResolvconfManager(logf)
 		case "openresolv":
-			return newOpenresolvManager()
+			return newOpenresolvManager(logf)
 		default:
 			logf("[unexpected] got unknown flavor of resolvconf %q, falling back to direct manager", resolvconfStyle())
-			return newDirectManager(logf), nil
+			return newDirectManager(logf, health), nil
 		}
 	default:
-		return newDirectManager(logf), nil
+		return newDirectManager(logf, health), nil
 	}
 }

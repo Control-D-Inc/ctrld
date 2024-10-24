@@ -1,9 +1,8 @@
 package ctrld
 
-import "net"
-
 type dnsFn func() []string
 
+// nameservers returns DNS nameservers from system settings.
 func nameservers() []string {
 	var dns []string
 	seen := make(map[string]bool)
@@ -21,7 +20,7 @@ func nameservers() []string {
 				continue
 			}
 			seen[ns] = true
-			dns = append(dns, net.JoinHostPort(ns, "53"))
+			dns = append(dns, ns)
 		}
 	}
 

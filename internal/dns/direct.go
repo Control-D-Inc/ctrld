@@ -1,9 +1,5 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
-//lint:file-ignore U1000 Ignore, this file is forked from upstream code.
-//lint:file-ignore ST1005 Ignore, this file is forked from upstream code.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 package dns
 
@@ -20,21 +16,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"tailscale.com/health"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/dnsname"
 	"tailscale.com/version/distro"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns/resolvconffile"
-)
-
-const (
-	backupConf = "/etc/resolv.pre-ctrld-backup.conf"
-	resolvConf = "/etc/resolv.conf"
 )
 
 // writeResolvConf writes DNS configuration in resolv.conf format to the given writer.
@@ -60,6 +53,8 @@ func readResolv(r io.Reader) (OSConfig, error) {
 // resolvOwner returns the apparent owner of the resolv.conf
 // configuration in bs - one of "resolvconf", "systemd-resolved" or
 // "NetworkManager", or "" if no known owner was found.
+//
+//lint:ignore U1000 used in linux and freebsd code
 func resolvOwner(bs []byte) string {
 	likely := ""
 	b := bytes.NewBuffer(bs)
@@ -123,8 +118,9 @@ func restartResolved() error {
 // The caller must call Down before program shutdown
 // or as cleanup if the program terminates unexpectedly.
 type directManager struct {
-	logf logger.Logf
-	fs   wholeFileFS
+	logf   logger.Logf
+	health *health.Tracker
+	fs     wholeFileFS
 	// renameBroken is set if fs.Rename to or from /etc/resolv.conf
 	// fails. This can happen in some container runtimes, where
 	// /etc/resolv.conf is bind-mounted from outside the container,
@@ -140,19 +136,22 @@ type directManager struct {
 	ctx      context.Context    // valid until Close
 	ctxClose context.CancelFunc // closes ctx
 
-	mu               sync.Mutex
-	wantResolvConf   []byte // if non-nil, what we expect /etc/resolv.conf to contain
+	mu             sync.Mutex
+	wantResolvConf []byte // if non-nil, what we expect /etc/resolv.conf to contain
+	//lint:ignore U1000 used in direct_linux.go
 	lastWarnContents []byte // last resolv.conf contents that we warned about
 }
 
-func newDirectManager(logf logger.Logf) *directManager {
-	return newDirectManagerOnFS(logf, directFS{})
+//lint:ignore U1000 used in manager_{freebsd,openbsd}.go
+func newDirectManager(logf logger.Logf, health *health.Tracker) *directManager {
+	return newDirectManagerOnFS(logf, health, directFS{})
 }
 
-func newDirectManagerOnFS(logf logger.Logf, fs wholeFileFS) *directManager {
+func newDirectManagerOnFS(logf logger.Logf, health *health.Tracker, fs wholeFileFS) *directManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &directManager{
 		logf:     logf,
+		health:   health,
 		fs:       fs,
 		ctx:      ctx,
 		ctxClose: cancel,
@@ -193,13 +192,13 @@ func (m *directManager) ownedByCtrld() (bool, error) {
 }
 
 // backupConfig creates or updates a backup of /etc/resolv.conf, if
-// resolv.conf does not currently contain a Tailscale-managed config.
+// resolv.conf does not currently contain a ctrld-managed config.
 func (m *directManager) backupConfig() error {
 	if _, err := m.fs.Stat(resolvConf); err != nil {
 		if os.IsNotExist(err) {
 			// No resolv.conf, nothing to back up. Also get rid of any
 			// existing backup file, to avoid restoring something old.
-			_ = m.fs.Remove(backupConf)
+			m.fs.Remove(backupConf)
 			return nil
 		}
 		return err
@@ -237,7 +236,7 @@ func (m *directManager) restoreBackup() (restored bool, err error) {
 	if resolvConfExists && !owned {
 		// There's already a non-ctrld config in place, get rid of
 		// our backup.
-		_ = m.fs.Remove(backupConf)
+		m.fs.Remove(backupConf)
 		return false, nil
 	}
 
@@ -278,6 +277,14 @@ func (m *directManager) rename(old, new string) error {
 		return fmt.Errorf("writing to %q in rename of %q: %w", new, old, err)
 	}
 
+	// Explicitly set the permissions on the new file. This ensures that
+	// if we have a umask set which prevents creating world-readable files,
+	// the file will still have the correct permissions once it's renamed
+	// into place. See #12609.
+	if err := m.fs.Chmod(new, 0644); err != nil {
+		return fmt.Errorf("chmod %q in rename of %q: %w", new, old, err)
+	}
+
 	if err := m.fs.Remove(old); err != nil {
 		err2 := m.fs.Truncate(old)
 		if err2 != nil {
@@ -296,53 +303,6 @@ func (m *directManager) setWant(want []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.wantResolvConf = want
-}
-
-var warnTrample = health.NewWarnable()
-
-// checkForFileTrample checks whether /etc/resolv.conf has been trampled
-// by another program on the system. (e.g. a DHCP client)
-func (m *directManager) checkForFileTrample() {
-	m.mu.Lock()
-	want := m.wantResolvConf
-	lastWarn := m.lastWarnContents
-	m.mu.Unlock()
-
-	if want == nil {
-		return
-	}
-
-	cur, err := m.fs.ReadFile(resolvConf)
-	if err != nil {
-		m.logf("trample: read error: %v", err)
-		return
-	}
-	if bytes.Equal(cur, want) {
-		warnTrample.Set(nil)
-		if lastWarn != nil {
-			m.mu.Lock()
-			m.lastWarnContents = nil
-			m.mu.Unlock()
-			m.logf("trample: resolv.conf again matches expected content")
-		}
-		return
-	}
-	if bytes.Equal(cur, lastWarn) {
-		// We already logged about this, so not worth doing it again.
-		return
-	}
-
-	m.mu.Lock()
-	m.lastWarnContents = cur
-	m.mu.Unlock()
-
-	show := cur
-	if len(show) > 1024 {
-		show = show[:1024]
-	}
-	m.logf("trample: resolv.conf changed from what we expected. did some other program interfere? current contents: %q", show)
-	//lint:ignore ST1005 This error is for human.
-	warnTrample.Set(errors.New("Linux DNS config not ideal. /etc/resolv.conf overwritten. See https://tailscale.com/s/dns-fight"))
 }
 
 func (m *directManager) SetDNS(config OSConfig) (err error) {
@@ -370,7 +330,7 @@ func (m *directManager) SetDNS(config OSConfig) (err error) {
 		}
 
 		buf := new(bytes.Buffer)
-		_ = writeResolvConf(buf, config.Nameservers, config.SearchDomains)
+		writeResolvConf(buf, config.Nameservers, config.SearchDomains)
 		if err := m.atomicWriteFile(m.fs, resolvConf, buf.Bytes(), 0644); err != nil {
 			return err
 		}
@@ -411,12 +371,57 @@ func (m *directManager) SetDNS(config OSConfig) (err error) {
 	return nil
 }
 
+func (m *directManager) SupportsSplitDNS() bool {
+	return false
+}
+
+func (m *directManager) GetBaseConfig() (OSConfig, error) {
+	owned, err := m.ownedByCtrld()
+	if err != nil {
+		return OSConfig{}, err
+	}
+	fileToRead := resolvConf
+	if owned {
+		fileToRead = backupConf
+	}
+
+	oscfg, err := m.readResolvFile(fileToRead)
+	if err != nil {
+		return OSConfig{}, err
+	}
+
+	// On some systems, the backup configuration file is actually a
+	// symbolic link to something owned by another DNS service (commonly,
+	// resolved). Thus, it can be updated out from underneath us to contain
+	// the Tailscale service IP, which results in an infinite loop of us
+	// trying to send traffic to resolved, which sends back to us, and so
+	// on. To solve this, drop the Tailscale service IP from the base
+	// configuration; we do this in all situations since there's
+	// essentially no world where we want to forward to ourselves.
+	//
+	// See: https://github.com/tailscale/tailscale/issues/7816
+	var removed bool
+	oscfg.Nameservers = slices.DeleteFunc(oscfg.Nameservers, func(ip netip.Addr) bool {
+		if ip == tsaddr.TailscaleServiceIP() || ip == tsaddr.TailscaleServiceIPv6() {
+			removed = true
+			return true
+		}
+		return false
+	})
+	if removed {
+		m.logf("[v1] dropped Tailscale IP from base config that was a symlink")
+	}
+	return oscfg, nil
+}
+
 func (m *directManager) Close() error {
-	// We used to keep a file for the ctrld config and symlinked
+	m.ctxClose()
+
+	// We used to keep a file for the tailscale config and symlinked
 	// to it, but then we stopped because /etc/resolv.conf being a
 	// symlink to surprising places breaks snaps and other sandboxing
 	// things. Clean it up if it's still there.
-	_ = m.fs.Remove("/etc/resolv.ctrld.conf")
+	m.fs.Remove("/etc/resolv.ctrld.conf")
 
 	if _, err := m.fs.Stat(backupConf); err != nil {
 		if os.IsNotExist(err) {
@@ -436,9 +441,9 @@ func (m *directManager) Close() error {
 	resolvConfExists := !os.IsNotExist(err)
 
 	if resolvConfExists && !owned {
-		// There's already a non-ctrld config in place, get rid of
+		// There's already a non-tailscale config in place, get rid of
 		// our backup.
-		_ = m.fs.Remove(backupConf)
+		m.fs.Remove(backupConf)
 		return nil
 	}
 
@@ -475,6 +480,14 @@ func (m *directManager) atomicWriteFile(fs wholeFileFS, filename string, data []
 	if err := fs.WriteFile(tmpName, data, perm); err != nil {
 		return fmt.Errorf("atomicWriteFile: %w", err)
 	}
+	// Explicitly set the permissions on the temporary file before renaming
+	// it. This ensures that if we have a umask set which prevents creating
+	// world-readable files, the file will still have the correct
+	// permissions once it's renamed into place. See #12609.
+	if err := fs.Chmod(tmpName, perm); err != nil {
+		return fmt.Errorf("atomicWriteFile: Chmod: %w", err)
+	}
+
 	return m.rename(tmpName, filename)
 }
 
@@ -483,10 +496,11 @@ func (m *directManager) atomicWriteFile(fs wholeFileFS, filename string, data []
 //
 // All name parameters are absolute paths.
 type wholeFileFS interface {
-	Stat(name string) (isRegular bool, err error)
-	Rename(oldName, newName string) error
-	Remove(name string) error
+	Chmod(name string, mode os.FileMode) error
 	ReadFile(name string) ([]byte, error)
+	Remove(name string) error
+	Rename(oldName, newName string) error
+	Stat(name string) (isRegular bool, err error)
 	Truncate(name string) error
 	WriteFile(name string, contents []byte, perm os.FileMode) error
 }
@@ -508,6 +522,10 @@ func (fs directFS) Stat(name string) (isRegular bool, err error) {
 		return false, err
 	}
 	return fi.Mode().IsRegular(), nil
+}
+
+func (fs directFS) Chmod(name string, mode os.FileMode) error {
+	return os.Chmod(fs.path(name), mode)
 }
 
 func (fs directFS) Rename(oldName, newName string) error {

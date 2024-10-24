@@ -49,6 +49,7 @@ func validInterface(iface *net.Interface, validIfacesMap map[string]struct{}) bo
 	return ok
 }
 
+// validInterfacesMap returns a set of all valid hardware ports.
 func validInterfacesMap() map[string]struct{} {
 	b, err := exec.Command("networksetup", "-listallhardwareports").Output()
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ameshkov/dnsstamps"
 	"github.com/go-playground/validator/v10"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -59,6 +61,11 @@ const (
 	controlDComDomain = "controld.com"
 	controlDNetDomain = "controld.net"
 	controlDDevDomain = "controld.dev"
+
+	endpointPrefixHTTPS = "https://"
+	endpointPrefixQUIC  = "quic://"
+	endpointPrefixH3    = "h3://"
+	endpointPrefixSdns  = "sdns://"
 )
 
 var (
@@ -211,6 +218,8 @@ type ServiceConfig struct {
 	DnsWatchdogEnabled      *bool          `mapstructure:"dns_watchdog_enabled" toml:"dns_watchdog_enabled,omitempty"`
 	DnsWatchdogInvterval    *time.Duration `mapstructure:"dns_watchdog_interval" toml:"dns_watchdog_interval,omitempty"`
 	RefetchTime             *int           `mapstructure:"refetch_time" toml:"refetch_time,omitempty"`
+	ForceRefetchWaitTime    *int           `mapstructure:"force_refetch_wait_time" toml:"force_refetch_wait_time,omitempty"`
+	LeakOnUpstreamFailure   *bool          `mapstructure:"leak_on_upstream_failure" toml:"leak_on_upstream_failure,omitempty"`
 	Daemon                  bool           `mapstructure:"-" toml:"-"`
 	AllocateIP              bool           `mapstructure:"-" toml:"-"`
 }
@@ -225,7 +234,7 @@ type NetworkConfig struct {
 // UpstreamConfig specifies configuration for upstreams that ctrld will forward requests to.
 type UpstreamConfig struct {
 	Name        string `mapstructure:"name" toml:"name,omitempty"`
-	Type        string `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy"`
+	Type        string `mapstructure:"type" toml:"type,omitempty" validate:"oneof=doh doh3 dot doq os legacy sdns ''"`
 	Endpoint    string `mapstructure:"endpoint" toml:"endpoint,omitempty"`
 	BootstrapIP string `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
 	Domain      string `mapstructure:"-" toml:"-"`
@@ -299,10 +308,13 @@ type Rule map[string][]string
 
 // Init initialized necessary values for an UpstreamConfig.
 func (uc *UpstreamConfig) Init() {
+	if err := uc.initDnsStamps(); err != nil {
+		ProxyLogger.Load().Fatal().Err(err).Msg("invalid DNS Stamps")
+	}
 	uc.initDoHScheme()
 	uc.uid = upstreamUID()
 	if u, err := url.Parse(uc.Endpoint); err == nil {
-		uc.Domain = u.Host
+		uc.Domain = u.Hostname()
 		switch uc.Type {
 		case ResolverTypeDOH, ResolverTypeDOH3:
 			uc.u = u
@@ -676,14 +688,65 @@ func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
 
 // initDoHScheme initializes the endpoint scheme for DoH/DoH3 upstream if not present.
 func (uc *UpstreamConfig) initDoHScheme() {
+	if strings.HasPrefix(uc.Endpoint, endpointPrefixH3) && uc.Type == "" {
+		uc.Type = ResolverTypeDOH3
+	}
 	switch uc.Type {
-	case ResolverTypeDOH, ResolverTypeDOH3:
+	case ResolverTypeDOH:
+	case ResolverTypeDOH3:
+		if after, found := strings.CutPrefix(uc.Endpoint, endpointPrefixH3); found {
+			uc.Endpoint = endpointPrefixHTTPS + after
+		}
 	default:
 		return
 	}
-	if !strings.HasPrefix(uc.Endpoint, "https://") {
-		uc.Endpoint = "https://" + uc.Endpoint
+	if !strings.HasPrefix(uc.Endpoint, endpointPrefixHTTPS) {
+		uc.Endpoint = endpointPrefixHTTPS + uc.Endpoint
 	}
+}
+
+// initDnsStamps initializes upstream config based on encoded DNS Stamps Endpoint.
+func (uc *UpstreamConfig) initDnsStamps() error {
+	if strings.HasPrefix(uc.Endpoint, endpointPrefixSdns) && uc.Type == "" {
+		uc.Type = ResolverTypeSDNS
+	}
+	if uc.Type != ResolverTypeSDNS {
+		return nil
+	}
+	sdns, err := dnsstamps.NewServerStampFromString(uc.Endpoint)
+	if err != nil {
+		return err
+	}
+	ip, port, _ := net.SplitHostPort(sdns.ServerAddrStr)
+	providerName, port2, _ := net.SplitHostPort(sdns.ProviderName)
+	if port2 != "" {
+		port = port2
+	}
+	if providerName == "" {
+		providerName = sdns.ProviderName
+	}
+	switch sdns.Proto {
+	case dnsstamps.StampProtoTypeDoH:
+		uc.Type = ResolverTypeDOH
+		host := sdns.ProviderName
+		if port != "" && port != defaultPortFor(uc.Type) {
+			host = net.JoinHostPort(providerName, port)
+		}
+		uc.Endpoint = "https://" + host + sdns.Path
+	case dnsstamps.StampProtoTypeTLS:
+		uc.Type = ResolverTypeDOT
+		uc.Endpoint = net.JoinHostPort(providerName, port)
+	case dnsstamps.StampProtoTypeDoQ:
+		uc.Type = ResolverTypeDOQ
+		uc.Endpoint = net.JoinHostPort(providerName, port)
+	case dnsstamps.StampProtoTypePlain:
+		uc.Type = ResolverTypeLegacy
+		uc.Endpoint = sdns.ServerAddrStr
+	default:
+		return fmt.Errorf("unsupported stamp protocol %q", sdns.Proto)
+	}
+	uc.BootstrapIP = ip
+	return nil
 }
 
 // Init initialized necessary values for an ListenerConfig.
@@ -738,6 +801,23 @@ func upstreamConfigStructLevelValidation(sl validator.StructLevel) {
 		return
 	}
 
+	// Empty type is ok only for endpoints starts with "h3://" and "sdns://".
+	if uc.Type == "" && !strings.HasPrefix(uc.Endpoint, endpointPrefixH3) && !strings.HasPrefix(uc.Endpoint, endpointPrefixSdns) {
+		sl.ReportError(uc.Endpoint, "type", "type", "oneof", "doh doh3 dot doq os legacy sdns")
+		return
+	}
+
+	// initDoHScheme/initDnsStamps may change upstreams information,
+	// so restoring changed values after validation to keep original one.
+	defer func(ep, typ string) {
+		uc.Endpoint = ep
+		uc.Type = typ
+	}(uc.Endpoint, uc.Type)
+
+	if err := uc.initDnsStamps(); err != nil {
+		sl.ReportError(uc.Endpoint, "endpoint", "Endpoint", "http_url", "")
+		return
+	}
 	uc.initDoHScheme()
 	// DoH/DoH3 requires endpoint is an HTTP url.
 	if uc.Type == ResolverTypeDOH || uc.Type == ResolverTypeDOH3 {
@@ -767,13 +847,19 @@ func defaultPortFor(typ string) string {
 // - If endpoint is an IP address ->  ResolverTypeLegacy
 // - If endpoint starts with "https://" -> ResolverTypeDOH
 // - If endpoint starts with "quic://" -> ResolverTypeDOQ
+// - If endpoint starts with "h3://" -> ResolverTypeDOH3
+// - If endpoint starts with "sdns://" -> ResolverTypeSDNS
 // - For anything else -> ResolverTypeDOT
 func ResolverTypeFromEndpoint(endpoint string) string {
 	switch {
-	case strings.HasPrefix(endpoint, "https://"):
+	case strings.HasPrefix(endpoint, endpointPrefixHTTPS):
 		return ResolverTypeDOH
-	case strings.HasPrefix(endpoint, "quic://"):
+	case strings.HasPrefix(endpoint, endpointPrefixQUIC):
 		return ResolverTypeDOQ
+	case strings.HasPrefix(endpoint, endpointPrefixH3):
+		return ResolverTypeDOH3
+	case strings.HasPrefix(endpoint, endpointPrefixSdns):
+		return ResolverTypeSDNS
 	}
 	host := endpoint
 	if strings.Contains(endpoint, ":") {
