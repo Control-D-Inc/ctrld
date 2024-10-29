@@ -1,6 +1,5 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 //go:build linux
 
@@ -20,8 +19,6 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/util/dnsname"
 )
-
-const reconfigTimeout = time.Second
 
 // DBus entities we talk to.
 //
@@ -97,16 +94,14 @@ type resolvedManager struct {
 	ctx    context.Context
 	cancel func() // terminate the context, for close
 
-	logf  logger.Logf
-	ifidx int
+	logf   logger.Logf
+	health *health.Tracker
+	ifidx  int
 
 	configCR chan changeRequest // tracks OSConfigs changes and error responses
-	revertCh chan struct{}
 }
 
-var _ OSConfigurator = (*resolvedManager)(nil)
-
-func newResolvedManager(logf logger.Logf, interfaceName string) (*resolvedManager, error) {
+func newResolvedManager(logf logger.Logf, health *health.Tracker, interfaceName string) (*resolvedManager, error) {
 	iface, err := net.InterfaceByName(interfaceName)
 	if err != nil {
 		return nil, err
@@ -119,11 +114,11 @@ func newResolvedManager(logf logger.Logf, interfaceName string) (*resolvedManage
 		ctx:    ctx,
 		cancel: cancel,
 
-		logf:  logf,
-		ifidx: iface.Index,
+		logf:   logf,
+		health: health,
+		ifidx:  iface.Index,
 
 		configCR: make(chan changeRequest),
-		revertCh: make(chan struct{}),
 	}
 
 	go mgr.run(ctx)
@@ -132,8 +127,10 @@ func newResolvedManager(logf logger.Logf, interfaceName string) (*resolvedManage
 }
 
 func (m *resolvedManager) SetDNS(config OSConfig) error {
+	// NOTE: don't close this channel, since it's possible that the SetDNS
+	// call will time out and return before the run loop answers, at which
+	// point it will send on the now-closed channel.
 	errc := make(chan error, 1)
-	defer close(errc)
 
 	select {
 	case <-m.ctx.Done():
@@ -221,14 +218,12 @@ func (m *resolvedManager) run(ctx context.Context) {
 		if err = conn.AddMatchSignal(dbus.WithMatchObjectPath(dbusPath), dbus.WithMatchInterface(dbusInterface), dbus.WithMatchMember(dbusOwnerSignal), dbus.WithMatchArg(0, dbusResolvedObject)); err != nil {
 			m.logf("[v1] Setting DBus signal filter failed: %v", err)
 		}
-		if err = conn.AddMatchSignal(dbus.WithMatchObjectPath(dbusPath), dbus.WithMatchInterface(dbusInterface), dbus.WithMatchMember(dbusOwnerSignal), dbus.WithMatchArg(0, dbusNetworkdObject)); err != nil {
-			m.logf("[v1] Setting DBus signal filter failed: %v", err)
-		}
 		conn.Signal(signals)
 
 		// Reset backoff and SetNSOSHealth after successful on reconnect.
 		bo.BackOff(ctx, nil)
-		health.SetDNSOSHealth(nil)
+		//lint:ignore SA1019 upstream code still use it.
+		m.health.SetDNSOSHealth(nil)
 		return nil
 	}
 
@@ -243,15 +238,13 @@ func (m *resolvedManager) run(ctx context.Context) {
 			if rManager == nil {
 				return
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			// RevertLink resets all per-interface settings on systemd-resolved to defaults.
 			// When ctx goes away systemd-resolved auto reverts.
 			// Keeping for potential use in future refactor.
 			if call := rManager.CallWithContext(ctx, dbusRevertLink, 0, m.ifidx); call.Err != nil {
 				m.logf("[v1] RevertLink: %v", call.Err)
+				return
 			}
-			cancel()
-			close(m.revertCh)
 			return
 		case configCR := <-m.configCR:
 			// Track and update sync with latest config change.
@@ -308,7 +301,8 @@ func (m *resolvedManager) run(ctx context.Context) {
 			// Set health while holding the lock, because this will
 			// graciously serialize the resync's health outcome with a
 			// concurrent SetDNS call.
-			health.SetDNSOSHealth(err)
+			//lint:ignore SA1019 upstream code still use it.
+			m.health.SetDNSOSHealth(err)
 			if err != nil {
 				m.logf("failed to configure systemd-resolved: %v", err)
 			}
@@ -426,18 +420,22 @@ func (m *resolvedManager) setConfigOverDBus(ctx context.Context, rManager dbus.B
 		m.logf("[v1] failed to disable DoT: %v", call.Err)
 	}
 
-	if rManager.Path() == dbusResolvedPath {
-		if call := rManager.CallWithContext(ctx, dbusFlushCaches, 0); call.Err != nil {
-			m.logf("failed to flush resolved DNS cache: %v", call.Err)
-		}
+	if call := rManager.CallWithContext(ctx, dbusFlushCaches, 0); call.Err != nil {
+		m.logf("failed to flush resolved DNS cache: %v", call.Err)
 	}
-
 	return nil
+}
+
+func (m *resolvedManager) SupportsSplitDNS() bool {
+	return true
+}
+
+func (m *resolvedManager) GetBaseConfig() (OSConfig, error) {
+	return OSConfig{}, ErrGetBaseConfigNotSupported
 }
 
 func (m *resolvedManager) Close() error {
 	m.cancel() // stops the 'run' method goroutine
-	<-m.revertCh
 	return nil
 }
 

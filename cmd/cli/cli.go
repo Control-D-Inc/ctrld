@@ -37,7 +37,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"tailscale.com/logtail/backoff"
-	"tailscale.com/net/interfaces"
+	"tailscale.com/net/netmon"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
@@ -52,6 +52,7 @@ const (
 	windowsForwardersFilename = ".forwarders.txt"
 	oldBinSuffix              = "_previous"
 	oldLogSuffix              = ".1"
+	msgExit                   = "$$EXIT$$"
 )
 
 var (
@@ -146,6 +147,7 @@ func initCLI() {
 	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	runCmd.Flags().StringVarP(&cdUID, cdUidFlagName, "", "", "Control D resolver uid")
 	runCmd.Flags().StringVarP(&cdOrg, cdOrgFlagName, "", "", "Control D provision token")
+	runCmd.Flags().StringVarP(&customHostname, customHostnameFlagName, "", "", "Custom hostname passed to ControlD API")
 	runCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = runCmd.Flags().MarkHidden("dev")
 	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
@@ -194,91 +196,46 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			isCtrldRunning := status == service.StatusRunning
 			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
 
+			// Get current running iface, if any.
+			var currentIface string
+
 			// If pin code was set, do not allow running start command.
 			if isCtrldRunning {
 				if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 					os.Exit(deactivationPinInvalidExitCode)
 				}
+				currentIface = runningIface(s)
 			}
 
-			if !startOnly {
-				startOnly = len(osArgs) == 0
-			}
-			// If user run "ctrld start" and ctrld is already installed, starting existing service.
-			if startOnly && isCtrldInstalled {
-				tryReadingConfigWithNotice(false, true)
-				if err := v.Unmarshal(&cfg); err != nil {
-					mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
-				}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-				initLogging()
-				tasks := []task{
-					resetDnsTask(p, s),
-					{s.Stop, false},
-					{func() error {
-						// Save current DNS so we can restore later.
-						withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
-							return saveCurrentStaticDNS(i)
-						})
-						return nil
-					}, false},
-					{s.Start, true},
-					{noticeWritingControlDConfig, false},
-				}
-				mainLog.Load().Notice().Msg("Starting existing ctrld service")
-				if doTasks(tasks) {
-					mainLog.Load().Notice().Msg("Service started")
-					sockDir, err := socketDir()
-					if err != nil {
-						mainLog.Load().Warn().Err(err).Msg("Failed to get socket directory")
-						os.Exit(1)
-					}
-					if cc := newSocketControlClient(s, sockDir); cc != nil {
-						if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
-							if iface == "auto" {
-								iface = defaultIfaceName()
-							}
-							logger := mainLog.Load().With().Str("iface", iface).Logger()
-							logger.Debug().Msg("setting DNS successfully")
+			reportSetDnsOk := func(sockDir string) {
+				if cc := newSocketControlClient(ctx, s, sockDir); cc != nil {
+					if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
+						if iface == "auto" {
+							iface = defaultIfaceName()
 						}
+						logger := mainLog.Load().With().Str("iface", iface).Logger()
+						logger.Debug().Msg("setting DNS successfully")
 					}
-				} else {
-					mainLog.Load().Error().Err(err).Msg("Failed to start existing ctrld service")
-					os.Exit(1)
 				}
-				return
-			}
-
-			if cdUID != "" {
-				doValidateCdRemoteConfig(cdUID)
-			} else if uid := cdUIDFromProvToken(); uid != "" {
-				cdUID = uid
-				mainLog.Load().Debug().Msg("using uid from provision token")
-				removeProvTokenFromArgs(sc)
-				// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
-				sc.Arguments = append(sc.Arguments, "--cd="+cdUID)
-			}
-			if cdUID != "" {
-				validateCdUpstreamProtocol()
-			}
-
-			if err := p.router.ConfigureService(sc); err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to configure service on router")
 			}
 
 			// No config path, generating config in HOME directory.
 			noConfigStart := isNoConfigStart(cmd)
 			writeDefaultConfig := !noConfigStart && configBase64 == ""
-			if configPath != "" {
-				v.SetConfigFile(configPath)
-			}
 
+			logServerStarted := make(chan struct{})
 			// A buffer channel to gather log output from runCmd and report
 			// to user in case self-check process failed.
 			runCmdLogCh := make(chan string, 256)
 			ud, err := userHomeDir()
 			sockDir := ud
-			if err == nil {
+			if err != nil {
+				mainLog.Load().Warn().Msg("log server did not start")
+				close(logServerStarted)
+			} else {
 				setWorkingDirectory(sc, ud)
 				if configPath == "" && writeDefaultConfig {
 					defaultConfigFile = filepath.Join(ud, defaultConfigFile)
@@ -294,6 +251,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 						close(runCmdLogCh)
 						_ = os.Remove(sockPath)
 					}()
+					close(logServerStarted)
 					if conn := runLogServer(sockPath); conn != nil {
 						// Enough buffer for log message, we don't produce
 						// such long log message, but just in case.
@@ -303,10 +261,79 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 							if err != nil {
 								return
 							}
-							runCmdLogCh <- string(buf[:n])
+							msg := string(buf[:n])
+							if _, _, found := strings.Cut(msg, msgExit); found {
+								cancel()
+							}
+							runCmdLogCh <- msg
 						}
 					}
 				}()
+			}
+			<-logServerStarted
+
+			if !startOnly {
+				startOnly = len(osArgs) == 0
+			}
+			// If user run "ctrld start" and ctrld is already installed, starting existing service.
+			if startOnly && isCtrldInstalled {
+				tryReadingConfigWithNotice(false, true)
+				if err := v.Unmarshal(&cfg); err != nil {
+					mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
+				}
+
+				initLogging()
+				tasks := []task{
+					{s.Stop, false},
+					resetDnsTask(p, s, isCtrldInstalled, currentIface),
+					{func() error {
+						// Save current DNS so we can restore later.
+						withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+							if err := saveCurrentStaticDNS(i); !errors.Is(err, errSaveCurrentStaticDNSNotSupported) && err != nil {
+								return err
+							}
+							return nil
+						})
+						return nil
+					}, false},
+					{s.Start, true},
+					{noticeWritingControlDConfig, false},
+				}
+				mainLog.Load().Notice().Msg("Starting existing ctrld service")
+				if doTasks(tasks) {
+					mainLog.Load().Notice().Msg("Service started")
+					sockDir, err := socketDir()
+					if err != nil {
+						mainLog.Load().Warn().Err(err).Msg("Failed to get socket directory")
+						os.Exit(1)
+					}
+					reportSetDnsOk(sockDir)
+				} else {
+					mainLog.Load().Error().Err(err).Msg("Failed to start existing ctrld service")
+					os.Exit(1)
+				}
+				return
+			}
+
+			if cdUID != "" {
+				doValidateCdRemoteConfig(cdUID)
+			} else if uid := cdUIDFromProvToken(); uid != "" {
+				cdUID = uid
+				mainLog.Load().Debug().Msg("using uid from provision token")
+				removeOrgFlagsFromArgs(sc)
+				// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
+				sc.Arguments = append(sc.Arguments, "--cd="+cdUID)
+			}
+			if cdUID != "" {
+				validateCdUpstreamProtocol()
+			}
+
+			if err := p.router.ConfigureService(sc); err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to configure service on router")
+			}
+
+			if configPath != "" {
+				v.SetConfigFile(configPath)
 			}
 
 			tryReadingConfigWithNotice(writeDefaultConfig, true)
@@ -334,14 +361,17 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			}
 
 			tasks := []task{
-				resetDnsTask(p, s),
 				{s.Stop, false},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
 				{func() error { return ensureUninstall(s) }, false},
+				resetDnsTask(p, s, isCtrldInstalled, currentIface),
 				{func() error {
 					// Save current DNS so we can restore later.
-					withEachPhysicalInterfaces("", "save DNS settings", func(i *net.Interface) error {
-						return saveCurrentStaticDNS(i)
+					withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+						if err := saveCurrentStaticDNS(i); !errors.Is(err, errSaveCurrentStaticDNSNotSupported) && err != nil {
+							return err
+						}
+						return nil
 					})
 					return nil
 				}, false},
@@ -358,19 +388,19 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					return
 				}
 
-				ok, status, err := selfCheckStatus(s, ud, sockDir)
+				ok, status, err := selfCheckStatus(ctx, s, sockDir)
 				switch {
 				case ok && status == service.StatusRunning:
 					mainLog.Load().Notice().Msg("Service started")
 				default:
 					marker := bytes.Repeat([]byte("="), 32)
 					// If ctrld service is not running, emitting log obtained from ctrld process.
-					if status != service.StatusRunning {
+					if status != service.StatusRunning || ctx.Err() != nil {
 						mainLog.Load().Error().Msg("ctrld service may not have started due to an error or misconfiguration, service log:")
 						_, _ = mainLog.Load().Write(marker)
 						haveLog := false
 						for msg := range runCmdLogCh {
-							_, _ = mainLog.Load().Write([]byte(msg))
+							_, _ = mainLog.Load().Write([]byte(strings.ReplaceAll(msg, msgExit, "")))
 							haveLog = true
 						}
 						// If we're unable to get log from "ctrld run", notice users about it.
@@ -396,15 +426,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					uninstall(p, s)
 					os.Exit(1)
 				}
-				if cc := newSocketControlClient(s, sockDir); cc != nil {
-					if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
-						if iface == "auto" {
-							iface = defaultIfaceName()
-						}
-						logger := mainLog.Load().With().Str("iface", iface).Logger()
-						logger.Debug().Msg("setting DNS successfully")
-					}
-				}
+				reportSetDnsOk(sockDir)
 			}
 		},
 	}
@@ -419,6 +441,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
 	startCmd.Flags().StringVarP(&cdUID, cdUidFlagName, "", "", "Control D resolver uid")
 	startCmd.Flags().StringVarP(&cdOrg, cdOrgFlagName, "", "", "Control D provision token")
+	startCmd.Flags().StringVarP(&customHostname, customHostnameFlagName, "", "", "Custom hostname passed to ControlD API")
 	startCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
 	_ = startCmd.Flags().MarkHidden("dev")
 	startCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
@@ -543,7 +566,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
 					return
 				}
-				cc := newSocketControlClient(s, dir)
+				cc := newSocketControlClient(context.TODO(), s, dir)
 				if cc == nil {
 					mainLog.Load().Notice().Msg("Service was not restarted")
 					os.Exit(1)
@@ -730,7 +753,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Short: "List network interfaces of the host",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+			err := netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 				fmt.Printf("Index : %d\n", i.Index)
 				fmt.Printf("Name  : %s\n", i.Name)
 				addrs, _ := i.Addrs()
@@ -1035,7 +1058,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				}
 				if doTasks(tasks) {
 					if dir, err := socketDir(); err == nil {
-						if cc := newSocketControlClient(s, dir); cc != nil {
+						if cc := newSocketControlClient(context.TODO(), s, dir); cc != nil {
 							_, _ = cc.post(ifacePath, nil)
 							return true
 						}
@@ -1141,6 +1164,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		reloadDoneCh:     make(chan struct{}),
 		dnsWatcherStopCh: make(chan struct{}),
 		apiReloadCh:      make(chan *ctrld.Config),
+		apiForceReloadCh: make(chan struct{}),
 		cfg:              &cfg,
 		appCallback:      appCallback,
 	}
@@ -1160,6 +1184,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			consoleWriter.Out = io.MultiWriter(os.Stdout, lc)
 			p.logConn = lc
 		}
+	}
+	notifyExitToLogServer := func() {
+		_, _ = p.logConn.Write([]byte(msgExit))
 	}
 
 	if daemon && runtime.GOOS == "windows" {
@@ -1186,8 +1213,12 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		mainLog.Load().Fatal().Err(err).Msg("failed to read base64 config")
 	}
 	processNoConfigFlags(noConfigStart)
+
+	// After s.Run() was called, if ctrld is going to be terminated for any reason,
+	// write msgExit to p.logConn so others (like "ctrld start") won't have to wait for timeout.
 	p.mu.Lock()
 	if err := v.Unmarshal(&cfg); err != nil {
+		notifyExitToLogServer()
 		mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 	}
 	p.mu.Unlock()
@@ -1203,6 +1234,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	// Wait for network up.
 	if !ctrldnet.Up() {
+		notifyExitToLogServer()
 		mainLog.Load().Fatal().Msg("network is not up yet")
 	}
 
@@ -1217,6 +1249,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// time for validating server certificate. Some routers need NTP synchronization
 	// to set the current time, so this check must happen before processCDFlags.
 	if err := p.router.PreRun(); err != nil {
+		notifyExitToLogServer()
 		mainLog.Load().Fatal().Err(err).Msg("failed to perform router pre-run check")
 	}
 
@@ -1238,6 +1271,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 				_ = uninstallInvalidCdUID(p, cdLogger, false)
 			}
+			notifyExitToLogServer()
 			cdLogger.Fatal().Err(err).Msg("failed to fetch resolver config")
 		}
 	}
@@ -1250,6 +1284,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	if updated {
 		if err := writeConfigFile(&cfg); err != nil {
+			notifyExitToLogServer()
 			mainLog.Load().Fatal().Err(err).Msg("failed to write config file")
 		} else {
 			mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
@@ -1271,6 +1306,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	if err := validateConfig(&cfg); err != nil {
+		notifyExitToLogServer()
 		os.Exit(1)
 	}
 	initCache()
@@ -1279,11 +1315,13 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		exe, err := os.Executable()
 		if err != nil {
 			mainLog.Load().Error().Err(err).Msg("failed to find the binary")
+			notifyExitToLogServer()
 			os.Exit(1)
 		}
 		curDir, err := os.Getwd()
 		if err != nil {
 			mainLog.Load().Error().Err(err).Msg("failed to get current working directory")
+			notifyExitToLogServer()
 			os.Exit(1)
 		}
 		// If running as daemon, re-run the command in background, with daemon off.
@@ -1291,6 +1329,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		cmd.Dir = curDir
 		if err := cmd.Start(); err != nil {
 			mainLog.Load().Error().Err(err).Msg("failed to start process as daemon")
+			notifyExitToLogServer()
 			os.Exit(1)
 		}
 		mainLog.Load().Info().Int("pid", cmd.Process.Pid).Msg("DNS proxy started")
@@ -1339,15 +1378,14 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	close(waitCh)
 	<-stopCh
 
-	// Wait goroutines which watches/manipulates DNS settings terminated,
-	// ensuring that changes to DNS since here won't be reverted.
-	p.dnsWg.Wait()
+	p.stopDnsWatchers()
 	for _, f := range p.onStopped {
 		f()
 	}
 }
 
 func writeConfigFile(cfg *ctrld.Config) error {
+	addExtraSplitDnsRule(cfg)
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
 	} else if configPath != "" {
@@ -1473,25 +1511,31 @@ func processNoConfigFlags(noConfigStart bool) {
 
 	endpointAndTyp := func(endpoint string) (string, string) {
 		typ := ctrld.ResolverTypeFromEndpoint(endpoint)
-		return strings.TrimPrefix(endpoint, "quic://"), typ
+		endpoint = strings.TrimPrefix(endpoint, "quic://")
+		if after, found := strings.CutPrefix(endpoint, "h3://"); found {
+			endpoint = "https://" + after
+		}
+		return endpoint, typ
 	}
 	pEndpoint, pType := endpointAndTyp(primaryUpstream)
-	upstream := map[string]*ctrld.UpstreamConfig{
-		"0": {
-			Name:     pEndpoint,
-			Endpoint: pEndpoint,
-			Type:     pType,
-			Timeout:  5000,
-		},
+	puc := &ctrld.UpstreamConfig{
+		Name:     pEndpoint,
+		Endpoint: pEndpoint,
+		Type:     pType,
+		Timeout:  5000,
 	}
+	puc.Init()
+	upstream := map[string]*ctrld.UpstreamConfig{"0": puc}
 	if secondaryUpstream != "" {
 		sEndpoint, sType := endpointAndTyp(secondaryUpstream)
-		upstream["1"] = &ctrld.UpstreamConfig{
+		suc := &ctrld.UpstreamConfig{
 			Name:     sEndpoint,
 			Endpoint: sEndpoint,
 			Type:     sType,
 			Timeout:  5000,
 		}
+		suc.Init()
+		upstream["1"] = suc
 		rules := make([]ctrld.Rule, 0, len(domains))
 		for _, domain := range domains {
 			rules = append(rules, ctrld.Rule{domain: []string{"upstream.1"}})
@@ -1662,7 +1706,7 @@ func netInterface(ifaceName string) (*net.Interface, error) {
 		ifaceName = defaultIfaceName()
 	}
 	var iface *net.Interface
-	err := interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+	err := netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		if i.Name == ifaceName {
 			iface = i.Interface
 		}
@@ -1680,7 +1724,7 @@ func defaultIfaceName() string {
 	if ifaceName := router.DefaultInterfaceName(); ifaceName != "" {
 		return ifaceName
 	}
-	dri, err := interfaces.DefaultRouteInterface()
+	dri, err := netmon.DefaultRouteInterface()
 	if err != nil {
 		// On WSL 1, the route table does not have any default route. But the fact that
 		// it only uses /etc/resolv.conf for setup DNS, so we can use "lo" here.
@@ -1702,7 +1746,7 @@ func defaultIfaceName() string {
 // - External testing, ensuring query could be sent from ctrld -> upstream.
 //
 // Self-check is considered success only if both tests are ok.
-func selfCheckStatus(s service.Service, homedir, sockDir string) (bool, service.Status, error) {
+func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bool, service.Status, error) {
 	status, err := s.Status()
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not get service status")
@@ -1718,7 +1762,7 @@ func selfCheckStatus(s service.Service, homedir, sockDir string) (bool, service.
 	}
 
 	mainLog.Load().Debug().Msg("waiting for ctrld listener to be ready")
-	cc := newSocketControlClient(s, sockDir)
+	cc := newSocketControlClient(ctx, s, sockDir)
 	if cc == nil {
 		return false, status, errors.New("could not connect to control server")
 	}
@@ -1772,6 +1816,7 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 		lastErr    error
 	)
 
+	oi := osinfo.New()
 	for i := 0; i < maxAttempts; i++ {
 		if domain == "" {
 			return errors.New("empty test domain")
@@ -1786,6 +1831,12 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 		}
 		// Return early if this is a connection refused.
 		if errConnectionRefused(exErr) {
+			return exErr
+		}
+		// Return early if this is MacOS 15.0 and error is timeout error.
+		var e net.Error
+		if oi.Name == "darwin" && oi.Version == "15.0" && errors.As(exErr, &e) && e.Timeout() {
+			mainLog.Load().Warn().Msg("MacOS 15.0 Sequoia has a bug with the firewall which may prevent ctrld from starting. Disable the MacOS firewall and try again")
 			return exErr
 		}
 		lastAnswer = r
@@ -2314,17 +2365,30 @@ func cdUIDFromProvToken() string {
 	if cdOrg == "" {
 		return ""
 	}
-
+	// Validate custom hostname if provided.
+	if customHostname != "" && !validHostname(customHostname) {
+		mainLog.Load().Fatal().Msgf("invalid custom hostname: %q", customHostname)
+	}
+	req := &controld.UtilityOrgRequest{ProvToken: cdOrg, Hostname: customHostname}
 	// Process provision token if provided.
-	resolverConfig, err := controld.FetchResolverUID(cdOrg, rootCmd.Version, cdDev)
+	resolverConfig, err := controld.FetchResolverUID(req, rootCmd.Version, cdDev)
 	if err != nil {
 		mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid with provision token: %s", cdOrg)
 	}
 	return resolverConfig.UID
 }
 
-// removeProvTokenFromArgs removes the --cd-org from command line arguments.
-func removeProvTokenFromArgs(sc *service.Config) {
+// removeOrgFlagsFromArgs removes organization flags from command line arguments.
+// The flags are:
+//
+// - "--cd-org"
+// - "--custom-hostname"
+//
+// This is necessary because "ctrld run" only need a valid UID, which could be fetched
+// using "--cd-org". So if "ctrld start" have already been called with "--cd-org", we
+// already have a valid UID to pass to "ctrld run", so we don't have to force "ctrld run"
+// to re-do the already done job.
+func removeOrgFlagsFromArgs(sc *service.Config) {
 	a := sc.Arguments[:0]
 	skip := false
 	for _, x := range sc.Arguments {
@@ -2332,13 +2396,14 @@ func removeProvTokenFromArgs(sc *service.Config) {
 			skip = false
 			continue
 		}
-		// For "--cd-org XXX", skip it and mark next arg skipped.
-		if x == "--"+cdOrgFlagName {
+		// For "--cd-org XXX"/"--custom-hostname XXX", skip them and mark next arg skipped.
+		if x == "--"+cdOrgFlagName || x == "--"+customHostnameFlagName {
 			skip = true
 			continue
 		}
-		// For "--cd-org=XXX", just skip it.
-		if strings.HasPrefix(x, "--"+cdOrgFlagName+"=") {
+		// For "--cd-org=XXX"/"--custom-hostname=XXX", just skip them.
+		if strings.HasPrefix(x, "--"+cdOrgFlagName+"=") ||
+			strings.HasPrefix(x, "--"+customHostnameFlagName+"=") {
 			continue
 		}
 		a = append(a, x)
@@ -2347,14 +2412,13 @@ func removeProvTokenFromArgs(sc *service.Config) {
 }
 
 // newSocketControlClient returns new control client after control server was started.
-func newSocketControlClient(s service.Service, dir string) *controlClient {
+func newSocketControlClient(ctx context.Context, s service.Service, dir string) *controlClient {
 	// Return early if service is not running.
 	if status, err := s.Status(); err != nil || status != service.StatusRunning {
 		return nil
 	}
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 10 * time.Second
-	ctx := context.Background()
 
 	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
 	timeout := time.NewTimer(30 * time.Second)
@@ -2373,6 +2437,8 @@ func newSocketControlClient(s service.Service, dir string) *controlClient {
 
 		select {
 		case <-timeout.C:
+			return nil
+		case <-ctx.Done():
 			return nil
 		default:
 		}
@@ -2491,7 +2557,7 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	if s == nil {
 		cc = newSocketControlClientMobile(dir, stopCh)
 	} else {
-		cc = newSocketControlClient(s, dir)
+		cc = newSocketControlClient(context.TODO(), s, dir)
 	}
 	if cc == nil {
 		return nil // ctrld is not running.
@@ -2575,7 +2641,7 @@ func runInCdMode() bool {
 func curCdUID() string {
 	if s, _ := newService(&prog{}, svcConfig); s != nil {
 		if dir, _ := socketDir(); dir != "" {
-			cc := newSocketControlClient(s, dir)
+			cc := newSocketControlClient(context.TODO(), s, dir)
 			if cc != nil {
 				resp, _ := cc.post(cdPath, nil)
 				if resp != nil {
@@ -2621,7 +2687,7 @@ func upgradeUrl(baseUrl string) string {
 // runningIface returns the value of the iface variable used by ctrld process which is running.
 func runningIface(s service.Service) string {
 	if sockDir, err := socketDir(); err == nil {
-		if cc := newSocketControlClient(s, sockDir); cc != nil {
+		if cc := newSocketControlClient(context.TODO(), s, sockDir); cc != nil {
 			resp, err := cc.post(ifacePath, nil)
 			if err != nil {
 				return ""
@@ -2637,17 +2703,20 @@ func runningIface(s service.Service) string {
 
 // resetDnsNoLog performs resetting DNS with logging disable.
 func resetDnsNoLog(p *prog) {
-	lvl := zerolog.GlobalLevel()
-	zerolog.SetGlobalLevel(zerolog.Disabled)
+	// Normally, disable log to prevent annoying users.
+	if verbose < 3 {
+		lvl := zerolog.GlobalLevel()
+		zerolog.SetGlobalLevel(zerolog.Disabled)
+		p.resetDNS()
+		zerolog.SetGlobalLevel(lvl)
+		return
+	}
+	// For debugging purpose, still emit log.
 	p.resetDNS()
-	zerolog.SetGlobalLevel(lvl)
 }
 
 // resetDnsTask returns a task which perform reset DNS operation.
-func resetDnsTask(p *prog, s service.Service) task {
-	status, err := s.Status()
-	isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
-	isCtrldRunning := status == service.StatusRunning
+func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, currentRunningIface string) task {
 	return task{func() error {
 		if iface == "" {
 			return nil
@@ -2657,11 +2726,14 @@ func resetDnsTask(p *prog, s service.Service) task {
 		// process to reset what setDNS has done properly.
 		oldIface := iface
 		iface = "auto"
-		if isCtrldRunning {
-			iface = runningIface(s)
+		if currentRunningIface != "" {
+			iface = currentRunningIface
 		}
 		if isCtrldInstalled {
 			mainLog.Load().Debug().Msg("restore system DNS settings")
+			if status, _ := s.Status(); status == service.StatusRunning {
+				mainLog.Load().Fatal().Msg("reset DNS while ctrld still running is not safe")
+			}
 			resetDnsNoLog(p)
 		}
 		iface = oldIface

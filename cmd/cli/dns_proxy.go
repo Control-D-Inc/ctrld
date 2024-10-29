@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,8 +17,7 @@ import (
 
 	"github.com/miekg/dns"
 	"golang.org/x/sync/errgroup"
-	"tailscale.com/net/interfaces"
-	"tailscale.com/net/netaddr"
+	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -149,6 +149,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 				ufr:            ur,
 			})
 			go p.doSelfUninstall(pr.answer)
+
 			answer = pr.answer
 			rtt := time.Since(t)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received response of %d bytes in %s", answer.Len(), rtt)
@@ -166,6 +167,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		go func() {
 			p.WithLabelValuesInc(statsQueriesCount, labelValues...)
 			p.WithLabelValuesInc(statsClientQueriesCount, []string{ci.IP, ci.Mac, ci.Hostname}...)
+			p.forceFetchingAPI(domain)
 		}()
 		if err := w.WriteMsg(answer); err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "serveDNS: failed to send DNS response to client")
@@ -408,6 +410,19 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	upstreams := req.ufr.upstreams
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
+
+	leaked := false
+	// If ctrld is going to leak query to OS resolver, check remote upstream in background,
+	// so ctrld could be back to normal operation as long as the network is back online.
+	if len(upstreamConfigs) > 0 && p.leakingQuery.Load() {
+		for n, uc := range upstreamConfigs {
+			go p.checkUpstream(upstreams[n], uc)
+		}
+		upstreamConfigs = nil
+		leaked = true
+		ctrld.Log(ctx, mainLog.Load().Debug(), "%v is down, leaking query to OS resolver", upstreams)
+	}
+
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 		upstreams = []string{upstreamOS}
@@ -423,7 +438,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// 4. Try remote upstream.
 	isLanOrPtrQuery := false
 	if req.ufr.matched {
-		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+		if leaked {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v (leaked)", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+		} else {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+		}
 	} else {
 		switch {
 		case isPrivatePtrLookup(req.msg):
@@ -493,10 +512,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		answer, err := resolve1(n, upstreamConfig, msg)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
-			if errNetworkError(err) {
+			isNetworkErr := errNetworkError(err)
+			if isNetworkErr {
 				p.um.increaseFailureCount(upstreams[n])
 				if p.um.isDown(upstreams[n]) {
-					go p.um.checkUpstream(upstreams[n], upstreamConfig)
+					go p.checkUpstream(upstreams[n], upstreamConfig)
 				}
 			}
 			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
@@ -567,6 +587,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		return res
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
+	if cdUID != "" && p.leakOnUpstreamFailure() {
+		p.leakingQueryMu.Lock()
+		if !p.leakingQueryWasRun {
+			p.leakingQueryWasRun = true
+			go p.performLeakingQuery()
+		}
+		p.leakingQueryMu.Unlock()
+	}
 	answer := new(dns.Msg)
 	answer.SetRcode(req.msg, dns.RcodeServerFailure)
 	res.answer = answer
@@ -817,7 +845,7 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	} else {
 		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	}
-	ci.Self = queryFromSelf(ci.IP)
+	ci.Self = p.queryFromSelf(ci.IP)
 	// If this is a query from self, but ci.IP is not loopback IP,
 	// try using hostname mapping for lookback IP if presents.
 	if ci.Self {
@@ -887,29 +915,71 @@ func (p *prog) selfUninstallCoolOfPeriod() {
 	p.selfUninstallMu.Unlock()
 }
 
+// performLeakingQuery performs necessary works to leak queries to OS resolver.
+func (p *prog) performLeakingQuery() {
+	mainLog.Load().Warn().Msg("leaking query to OS resolver")
+	// Signal dns watchers to stop, so changes made below won't be reverted.
+	p.leakingQuery.Store(true)
+	p.resetDNS()
+	ns := ctrld.InitializeOsResolver()
+	mainLog.Load().Debug().Msgf("re-initialized OS resolver with nameservers: %v", ns)
+	p.dnsWg.Wait()
+	p.setDNS()
+}
+
+// forceFetchingAPI sends signal to force syncing API config if run in cd mode,
+// and the domain == "cdUID.verify.controld.com"
+func (p *prog) forceFetchingAPI(domain string) {
+	if cdUID == "" {
+		return
+	}
+	resolverID, parent, _ := strings.Cut(domain, ".")
+	if resolverID != cdUID {
+		return
+	}
+	switch {
+	case cdDev && parent == "verify.controld.dev":
+		// match ControlD dev
+	case parent == "verify.controld.com":
+		// match ControlD
+	default:
+		return
+	}
+	_ = p.apiForceReloadGroup.DoChan("force_sync_api", func() (interface{}, error) {
+		p.apiForceReloadCh <- struct{}{}
+		// Wait here to prevent abusing API if we are flooded.
+		time.Sleep(timeDurationOrDefault(p.cfg.Service.ForceRefetchWaitTime, 30) * time.Second)
+		return nil, nil
+	})
+}
+
+// timeDurationOrDefault returns time duration value from n if not nil.
+// Otherwise, it returns time duration value defaultN.
+func timeDurationOrDefault(n *int, defaultN int) time.Duration {
+	if n != nil && *n > 0 {
+		return time.Duration(*n)
+	}
+	return time.Duration(defaultN)
+}
+
 // queryFromSelf reports whether the input IP is from device running ctrld.
-func queryFromSelf(ip string) bool {
+func (p *prog) queryFromSelf(ip string) bool {
+	if val, ok := p.queryFromSelfMap.Load(ip); ok {
+		return val.(bool)
+	}
 	netIP := netip.MustParseAddr(ip)
-	ifaces, err := interfaces.GetList()
+	regularIPs, loopbackIPs, err := netmon.LocalAddresses()
 	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not get interfaces list")
+		mainLog.Load().Warn().Err(err).Msg("could not get local addresses")
 		return false
 	}
-	for _, iface := range ifaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			mainLog.Load().Warn().Err(err).Msgf("could not get interfaces addresses: %s", iface.Name)
-			continue
-		}
-		for _, a := range addrs {
-			switch v := a.(type) {
-			case *net.IPNet:
-				if pfx, ok := netaddr.FromStdIPNet(v); ok && pfx.Addr().Compare(netIP) == 0 {
-					return true
-				}
-			}
+	for _, localIP := range slices.Concat(regularIPs, loopbackIPs) {
+		if localIP.Compare(netIP) == 0 {
+			p.queryFromSelfMap.Store(ip, true)
+			return true
 		}
 	}
+	p.queryFromSelfMap.Store(ip, false)
 	return false
 }
 

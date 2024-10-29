@@ -281,6 +281,13 @@ The value must be a positive number, any invalid value will be ignored and defau
 - Required: no
 - Default: 3600
 
+### leak_on_upstream_failure
+Once ctrld is "offline", mean ctrld could not connect to any upstream, next queries will be leaked to OS resolver.
+
+- Type: boolean
+- Required: no
+- Default: true on Windows, MacOS and non-router Linux.
+
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.
 

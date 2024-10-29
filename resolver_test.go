@@ -3,9 +3,12 @@ package ctrld
 import (
 	"context"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 
 	"github.com/miekg/dns"
 )
@@ -16,7 +19,8 @@ func Test_osResolver_Resolve(t *testing.T) {
 
 	go func() {
 		defer cancel()
-		resolver := &osResolver{nameservers: []string{"127.0.0.127:5353"}}
+		resolver := &osResolver{}
+		resolver.publicServer.Store(&[]string{"127.0.0.127:5353"})
 		m := new(dns.Msg)
 		m.SetQuestion("controld.com.", dns.TypeA)
 		m.RecursionDesired = true
@@ -69,7 +73,8 @@ func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 			server.Shutdown()
 		}
 	}()
-	resolver := &osResolver{nameservers: ns}
+	resolver := &osResolver{}
+	resolver.publicServer.Store(&ns)
 	msg := new(dns.Msg)
 	msg.SetQuestion(".", dns.TypeNS)
 	answer, err := resolver.Resolve(context.Background(), msg)
@@ -79,6 +84,19 @@ func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 	if answer.Rcode != dns.RcodeSuccess {
 		t.Errorf("unexpected return code: %s", dns.RcodeToString[answer.Rcode])
 	}
+}
+
+func Test_osResolver_InitializationRace(t *testing.T) {
+	var wg sync.WaitGroup
+	n := 10
+	wg.Add(n)
+	for range n {
+		go func() {
+			defer wg.Done()
+			InitializeOsResolver()
+		}()
+	}
+	wg.Wait()
 }
 
 func Test_upstreamTypeFromEndpoint(t *testing.T) {
@@ -133,4 +151,43 @@ func runLocalPacketConnTestServer(t *testing.T, pc net.PacketConn, handler dns.H
 
 	waitLock.Lock()
 	return server, addr, nil
+}
+
+func Test_initializeOsResolver(t *testing.T) {
+	lanServer1 := "192.168.1.1"
+	lanServer2 := "10.0.10.69"
+	wanServer := "1.1.1.1"
+	publicServers := []string{net.JoinHostPort(wanServer, "53")}
+
+	// First initialization.
+	initializeOsResolver([]string{lanServer1, wanServer})
+	p := or.currentLanServer.Load()
+	assert.NotNil(t, p)
+	assert.Equal(t, lanServer1, p.String())
+	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
+
+	// No new LAN server, current LAN server -> last LAN server.
+	initializeOsResolver([]string{lanServer1, wanServer})
+	p = or.currentLanServer.Load()
+	assert.Nil(t, p)
+	p = or.lastLanServer.Load()
+	assert.NotNil(t, p)
+	assert.Equal(t, lanServer1, p.String())
+	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
+
+	// New LAN server detected.
+	initializeOsResolver([]string{lanServer2, lanServer1, wanServer})
+	p = or.currentLanServer.Load()
+	assert.NotNil(t, p)
+	assert.Equal(t, lanServer2, p.String())
+	p = or.lastLanServer.Load()
+	assert.NotNil(t, p)
+	assert.Equal(t, lanServer1, p.String())
+	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
+
+	// No LAN server available.
+	initializeOsResolver([]string{wanServer})
+	assert.Nil(t, or.currentLanServer.Load())
+	assert.Nil(t, or.lastLanServer.Load())
+	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
 }

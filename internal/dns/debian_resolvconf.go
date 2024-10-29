@@ -1,12 +1,12 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 //go:build linux || freebsd || openbsd
 
 package dns
 
 import (
+	"bufio"
 	"bytes"
 	_ "embed"
 	"fmt"
@@ -33,7 +33,7 @@ var workaroundScript []byte
 // resolvconf implementations encourage adding a suffix roughly
 // indicating where the config came from, and "inet" is the "none of
 // the above" value (rather than, say, "ppp" or "dhcp").
-const resolvconfConfigName = "ctrld.inet"
+const resolvconfConfigName = "tun-ctrld.inet"
 
 // resolvconfLibcHookPath is the directory containing libc update
 // scripts, which are run by Debian resolvconf when /etc/resolv.conf
@@ -52,8 +52,6 @@ type resolvconfManager struct {
 	interfacesDir   string
 	scriptInstalled bool // libc update script has been installed
 }
-
-var _ OSConfigurator = (*resolvconfManager)(nil)
 
 func newDebianResolvconfManager(logf logger.Logf) (*resolvconfManager, error) {
 	ret := &resolvconfManager{
@@ -133,6 +131,43 @@ func (m *resolvconfManager) SetDNS(config OSConfig) error {
 	}
 
 	return nil
+}
+
+func (m *resolvconfManager) SupportsSplitDNS() bool {
+	return false
+}
+
+func (m *resolvconfManager) GetBaseConfig() (OSConfig, error) {
+	var bs bytes.Buffer
+
+	cmd := exec.Command(m.listRecordsPath)
+	// list-records assumes it's being run with CWD set to the
+	// interfaces runtime dir, and returns nonsense otherwise.
+	cmd.Dir = m.interfacesDir
+	cmd.Stdout = &bs
+	if err := cmd.Run(); err != nil {
+		return OSConfig{}, err
+	}
+
+	var conf bytes.Buffer
+	sc := bufio.NewScanner(&bs)
+	for sc.Scan() {
+		if sc.Text() == resolvconfConfigName {
+			continue
+		}
+		bs, err := os.ReadFile(filepath.Join(m.interfacesDir, sc.Text()))
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Probably raced with a deletion, that's okay.
+				continue
+			}
+			return OSConfig{}, err
+		}
+		conf.Write(bs)
+		conf.WriteByte('\n')
+	}
+
+	return readResolv(&conf)
 }
 
 func (m *resolvconfManager) Close() error {

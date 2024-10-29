@@ -13,8 +13,9 @@ import (
 	"strings"
 	"sync"
 
+	"tailscale.com/net/netmon"
+
 	"github.com/fsnotify/fsnotify"
-	"tailscale.com/net/interfaces"
 	"tailscale.com/util/lineread"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -356,7 +357,7 @@ func (d *dhcp) addSelf() {
 	d.ip2name.Store(ipV4Loopback, hostname)
 	d.ip2name.Store(ipv6Loopback, hostname)
 	found := false
-	interfaces.ForeachInterface(func(i interfaces.Interface, prefixes []netip.Prefix) {
+	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		mac := i.HardwareAddr.String()
 		// Skip loopback interfaces, info was stored above.
 		if mac == "" {
