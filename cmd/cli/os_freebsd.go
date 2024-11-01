@@ -5,7 +5,8 @@ import (
 	"net/netip"
 	"os/exec"
 
-	"tailscale.com/tsd"
+	"tailscale.com/control/controlknobs"
+	"tailscale.com/health"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
@@ -38,8 +39,7 @@ func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) e
 
 // set the dns server for the provided network interface
 func setDNS(iface *net.Interface, nameservers []string) error {
-	sys := new(tsd.System)
-	r, err := dns.NewOSConfigurator(logf, sys.HealthTracker(), sys.ControlKnobs(), iface.Name)
+	r, err := dns.NewOSConfigurator(logf, &health.Tracker{}, &controlknobs.Knobs{}, iface.Name)
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to create DNS OS configurator")
 		return err
@@ -63,8 +63,7 @@ func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
 }
 
 func resetDNS(iface *net.Interface) error {
-	sys := new(tsd.System)
-	r, err := dns.NewOSConfigurator(logf, sys.HealthTracker(), sys.ControlKnobs(), iface.Name)
+	r, err := dns.NewOSConfigurator(logf, &health.Tracker{}, &controlknobs.Knobs{}, iface.Name)
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to create DNS OS configurator")
 		return err

@@ -7,16 +7,16 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"tailscale.com/tsd"
 
 	"github.com/kardianos/service"
+	"tailscale.com/control/controlknobs"
+	"tailscale.com/health"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
 )
 
 func init() {
-	sys := new(tsd.System)
-	if r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, sys.HealthTracker(), sys.ControlKnobs(), "lo"); err == nil {
+	if r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, &health.Tracker{}, &controlknobs.Knobs{}, "lo"); err == nil {
 		useSystemdResolved = r.Mode() == "systemd-resolved"
 	}
 	// Disable quic-go's ECN support by default, see https://github.com/quic-go/quic-go/issues/3911

@@ -14,11 +14,11 @@ import (
 	"syscall"
 	"time"
 
-	"tailscale.com/tsd"
-
 	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/dhcpv6/client6"
+	"tailscale.com/control/controlknobs"
+	"tailscale.com/health"
 	"tailscale.com/util/dnsname"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
@@ -56,8 +56,7 @@ func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) e
 }
 
 func setDNS(iface *net.Interface, nameservers []string) error {
-	sys := new(tsd.System)
-	r, err := dns.NewOSConfigurator(logf, sys.HealthTracker(), sys.ControlKnobs(), iface.Name)
+	r, err := dns.NewOSConfigurator(logf, &health.Tracker{}, &controlknobs.Knobs{}, iface.Name)
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to create DNS OS configurator")
 		return err
@@ -139,8 +138,7 @@ func resetDNS(iface *net.Interface) (err error) {
 		if exe, _ := exec.LookPath("/lib/systemd/systemd-networkd"); exe != "" {
 			_ = exec.Command("systemctl", "start", "systemd-networkd").Run()
 		}
-		sys := new(tsd.System)
-		if r, oerr := dns.NewOSConfigurator(logf, sys.HealthTracker(), sys.ControlKnobs(), iface.Name); oerr == nil {
+		if r, oerr := dns.NewOSConfigurator(logf, &health.Tracker{}, &controlknobs.Knobs{}, iface.Name); oerr == nil {
 			_ = r.SetDNS(dns.OSConfig{})
 			if err := r.Close(); err != nil {
 				mainLog.Load().Error().Err(err).Msg("failed to rollback DNS setting")
