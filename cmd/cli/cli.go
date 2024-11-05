@@ -685,13 +685,14 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				var files []string
 				// Config file.
 				files = append(files, v.ConfigFileUsed())
-				// Log file.
-				logFile := normalizeLogFilePath(cfg.Service.LogPath)
-				files = append(files, logFile)
-				// Backup log file.
-				oldLogFile := logFile + oldLogSuffix
-				if _, err := os.Stat(oldLogFile); err == nil {
-					files = append(files, oldLogFile)
+				// Log file and backup log file.
+				// For safety, only process if log file path is absolute.
+				if logFile := normalizeLogFilePath(cfg.Service.LogPath); filepath.IsAbs(logFile) {
+					files = append(files, logFile)
+					oldLogFile := logFile + oldLogSuffix
+					if _, err := os.Stat(oldLogFile); err == nil {
+						files = append(files, oldLogFile)
+					}
 				}
 				// Socket files.
 				if dir, _ := socketDir(); dir != "" {

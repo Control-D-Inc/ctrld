@@ -67,11 +67,8 @@ func Main() {
 }
 
 func normalizeLogFilePath(logFilePath string) string {
-	// In cleanup mode, we always want the full log file path.
-	if !cleanup {
-		if logFilePath == "" || filepath.IsAbs(logFilePath) || service.Interactive() {
-			return logFilePath
-		}
+	if logFilePath == "" || filepath.IsAbs(logFilePath) || service.Interactive() {
+		return logFilePath
 	}
 	if homedir != "" {
 		return filepath.Join(homedir, logFilePath)
