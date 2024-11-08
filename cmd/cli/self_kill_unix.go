@@ -23,7 +23,7 @@ func selfUninstall(p *prog, logger zerolog.Logger) {
 	}
 	args := []string{"uninstall"}
 	if !deactivationPinNotSet() {
-		args = append(args, fmt.Sprintf("--pin=%d", cdDeactivationPin))
+		args = append(args, fmt.Sprintf("--pin=%d", cdDeactivationPin.Load()))
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

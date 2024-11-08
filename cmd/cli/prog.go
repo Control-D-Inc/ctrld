@@ -275,15 +275,16 @@ func (p *prog) apiConfigReload() {
 
 		if resolverConfig.DeactivationPin != nil {
 			newDeactivationPin := *resolverConfig.DeactivationPin
+			curDeactivationPin := cdDeactivationPin.Load()
 			switch {
-			case deactivationPin != defaultDeactivationPin:
+			case curDeactivationPin != defaultDeactivationPin:
 				logger.Debug().Msg("saving deactivation pin")
-			case deactivationPin != newDeactivationPin:
+			case curDeactivationPin != newDeactivationPin:
 				logger.Debug().Msg("update deactivation pin")
 			}
-			cdDeactivationPin = *resolverConfig.DeactivationPin
+			cdDeactivationPin.Store(newDeactivationPin)
 		} else {
-			deactivationPin = defaultDeactivationPin
+			cdDeactivationPin.Store(defaultDeactivationPin)
 		}
 
 		if resolverConfig.Ctrld.CustomConfig == "" {

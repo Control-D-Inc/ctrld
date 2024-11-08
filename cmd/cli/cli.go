@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Masterminds/semver"
@@ -1552,11 +1553,15 @@ func processNoConfigFlags(noConfigStart bool) {
 const defaultDeactivationPin = -1
 
 // cdDeactivationPin is used in cd mode to decide whether stop and uninstall commands can be run.
-var cdDeactivationPin int64 = defaultDeactivationPin
+var cdDeactivationPin atomic.Int64
+
+func init() {
+	cdDeactivationPin.Store(defaultDeactivationPin)
+}
 
 // deactivationPinNotSet reports whether cdDeactivationPin was not set by processCDFlags.
 func deactivationPinNotSet() bool {
-	return cdDeactivationPin == defaultDeactivationPin
+	return cdDeactivationPin.Load() == defaultDeactivationPin
 }
 
 func processCDFlags(cfg *ctrld.Config) error {
@@ -1585,7 +1590,7 @@ func processCDFlags(cfg *ctrld.Config) error {
 
 	if resolverConfig.DeactivationPin != nil {
 		logger.Debug().Msg("saving deactivation pin")
-		cdDeactivationPin = *resolverConfig.DeactivationPin
+		cdDeactivationPin.Store(*resolverConfig.DeactivationPin)
 	}
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
