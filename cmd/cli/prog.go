@@ -273,6 +273,19 @@ func (p *prog) apiConfigReload() {
 			return
 		}
 
+		if resolverConfig.DeactivationPin != nil {
+			newDeactivationPin := *resolverConfig.DeactivationPin
+			switch {
+			case deactivationPin != defaultDeactivationPin:
+				logger.Debug().Msg("saving deactivation pin")
+			case deactivationPin != newDeactivationPin:
+				logger.Debug().Msg("update deactivation pin")
+			}
+			cdDeactivationPin = *resolverConfig.DeactivationPin
+		} else {
+			deactivationPin = defaultDeactivationPin
+		}
+
 		if resolverConfig.Ctrld.CustomConfig == "" {
 			return
 		}
