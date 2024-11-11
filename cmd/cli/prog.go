@@ -209,6 +209,7 @@ func (p *prog) runWait() {
 			continue
 		}
 
+		addExtraSplitDnsRule(newCfg)
 		if err := writeConfigFile(newCfg); err != nil {
 			logger.Err(err).Msg("could not write new config")
 		}

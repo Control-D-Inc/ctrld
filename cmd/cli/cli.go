@@ -1387,7 +1387,6 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 }
 
 func writeConfigFile(cfg *ctrld.Config) error {
-	addExtraSplitDnsRule(cfg)
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
 	} else if configPath != "" {
@@ -1440,6 +1439,7 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		}
 		nop := zerolog.Nop()
 		_, _ = tryUpdateListenerConfig(&cfg, &nop, true)
+		addExtraSplitDnsRule(&cfg)
 		if err := writeConfigFile(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
 		} else {
@@ -2092,6 +2092,9 @@ func mobileListenerIp() string {
 // than 127.0.0.1 with systemd-resolved.
 func updateListenerConfig(cfg *ctrld.Config) bool {
 	updated, _ := tryUpdateListenerConfig(cfg, nil, true)
+	if addExtraSplitDnsRule(cfg) {
+		updated = true
+	}
 	return updated
 }
 

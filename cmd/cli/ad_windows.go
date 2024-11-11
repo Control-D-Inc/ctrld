@@ -8,15 +8,15 @@ import (
 )
 
 // addExtraSplitDnsRule adds split DNS rule for domain if it's part of active directory.
-func addExtraSplitDnsRule(cfg *ctrld.Config) {
+func addExtraSplitDnsRule(cfg *ctrld.Config) bool {
 	domain, err := getActiveDirectoryDomain()
 	if err != nil {
 		mainLog.Load().Debug().Msgf("unable to get active directory domain: %v", err)
-		return
+		return false
 	}
 	if domain == "" {
 		mainLog.Load().Debug().Msg("no active directory domain found")
-		return
+		return false
 	}
 	for n, lc := range cfg.Listener {
 		if lc.Policy == nil {
@@ -26,12 +26,13 @@ func addExtraSplitDnsRule(cfg *ctrld.Config) {
 		for _, rule := range lc.Policy.Rules {
 			if _, ok := rule[domainRule]; ok {
 				mainLog.Load().Debug().Msgf("domain rule already exist for listener.%s", n)
-				return
+				return false
 			}
 		}
 		mainLog.Load().Debug().Msgf("adding active directory domain for listener.%s", n)
 		lc.Policy.Rules = append(lc.Policy.Rules, ctrld.Rule{domainRule: []string{}})
 	}
+	return true
 }
 
 // getActiveDirectoryDomain returns AD domain name of this computer.
