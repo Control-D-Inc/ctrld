@@ -630,14 +630,15 @@ func canonicalName(fqdn string) string {
 	return q
 }
 
-// wildcardMatches reports whether string str matches the wildcard pattern.
+// wildcardMatches reports whether string str matches the wildcard pattern in case-insensitive manner.
 func wildcardMatches(wildcard, str string) bool {
 	// Wildcard match.
-	wildCardParts := strings.Split(wildcard, "*")
+	wildCardParts := strings.Split(strings.ToLower(wildcard), "*")
 	if len(wildCardParts) != 2 {
 		return false
 	}
 
+	str = strings.ToLower(str)
 	switch {
 	case len(wildCardParts[0]) > 0 && len(wildCardParts[1]) > 0:
 		// Domain must match both prefix and suffix.
