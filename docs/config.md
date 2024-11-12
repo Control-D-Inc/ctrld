@@ -564,6 +564,12 @@ And within each policy, the rules are processed from top to bottom.
 - Required: no
 - Default: []
 
+---
+
+Note that the domain comparisons are done in case in-sensitive manner following [RFC 1034](https://datatracker.ietf.org/doc/html/rfc1034#section-3.1)
+
+---
+
 ### macs:
 `macs` is the list of mac rules within the policy. Mac address value is case-insensitive.
 

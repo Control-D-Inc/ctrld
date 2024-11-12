@@ -18,6 +18,9 @@ func addExtraSplitDnsRule(cfg *ctrld.Config) bool {
 		mainLog.Load().Debug().Msg("no active directory domain found")
 		return false
 	}
+	// Network rules are lowercase during toml config marshaling,
+	// lowercase the domain here too for consistency.
+	domain = strings.ToLower(domain)
 	for n, lc := range cfg.Listener {
 		if lc.Policy == nil {
 			lc.Policy = &ctrld.ListenerPolicyConfig{}
