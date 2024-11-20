@@ -30,6 +30,7 @@ func Test_wildcardMatches(t *testing.T) {
 		{"domain - suffix not match other", "suffix.*", "suffix1.windscribe.com", false},
 		{"domain - both", "suffix.*.windscribe.com", "suffix.anything.windscribe.com", true},
 		{"domain - both not match", "suffix.*.windscribe.com", "suffix1.suffix.windscribe.com", false},
+		{"domain - case-insensitive", "*.WINDSCRIBE.com", "anything.windscribe.com", true},
 		{"mac - prefix", "*:98:05:b4:2b", "d4:67:98:05:b4:2b", true},
 		{"mac - prefix not match other s", "*:98:05:b4:2b", "0d:ba:54:09:94:2c", false},
 		{"mac - prefix not match s in name", "*:98:05:b4:2b", "e4:67:97:05:b4:2b", false},

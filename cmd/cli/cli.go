@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Masterminds/semver"
@@ -685,13 +686,14 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				var files []string
 				// Config file.
 				files = append(files, v.ConfigFileUsed())
-				// Log file.
-				logFile := normalizeLogFilePath(cfg.Service.LogPath)
-				files = append(files, logFile)
-				// Backup log file.
-				oldLogFile := logFile + oldLogSuffix
-				if _, err := os.Stat(oldLogFile); err == nil {
-					files = append(files, oldLogFile)
+				// Log file and backup log file.
+				// For safety, only process if log file path is absolute.
+				if logFile := normalizeLogFilePath(cfg.Service.LogPath); filepath.IsAbs(logFile) {
+					files = append(files, logFile)
+					oldLogFile := logFile + oldLogSuffix
+					if _, err := os.Stat(oldLogFile); err == nil {
+						files = append(files, oldLogFile)
+					}
 				}
 				// Socket files.
 				if dir, _ := socketDir(); dir != "" {
@@ -1385,7 +1387,6 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 }
 
 func writeConfigFile(cfg *ctrld.Config) error {
-	addExtraSplitDnsRule(cfg)
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
 	} else if configPath != "" {
@@ -1438,6 +1439,7 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		}
 		nop := zerolog.Nop()
 		_, _ = tryUpdateListenerConfig(&cfg, &nop, true)
+		addExtraSplitDnsRule(&cfg)
 		if err := writeConfigFile(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
 		} else {
@@ -1551,11 +1553,15 @@ func processNoConfigFlags(noConfigStart bool) {
 const defaultDeactivationPin = -1
 
 // cdDeactivationPin is used in cd mode to decide whether stop and uninstall commands can be run.
-var cdDeactivationPin int64 = defaultDeactivationPin
+var cdDeactivationPin atomic.Int64
+
+func init() {
+	cdDeactivationPin.Store(defaultDeactivationPin)
+}
 
 // deactivationPinNotSet reports whether cdDeactivationPin was not set by processCDFlags.
 func deactivationPinNotSet() bool {
-	return cdDeactivationPin == defaultDeactivationPin
+	return cdDeactivationPin.Load() == defaultDeactivationPin
 }
 
 func processCDFlags(cfg *ctrld.Config) error {
@@ -1584,7 +1590,7 @@ func processCDFlags(cfg *ctrld.Config) error {
 
 	if resolverConfig.DeactivationPin != nil {
 		logger.Debug().Msg("saving deactivation pin")
-		cdDeactivationPin = *resolverConfig.DeactivationPin
+		cdDeactivationPin.Store(*resolverConfig.DeactivationPin)
 	}
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
@@ -2086,6 +2092,9 @@ func mobileListenerIp() string {
 // than 127.0.0.1 with systemd-resolved.
 func updateListenerConfig(cfg *ctrld.Config) bool {
 	updated, _ := tryUpdateListenerConfig(cfg, nil, true)
+	if addExtraSplitDnsRule(cfg) {
+		updated = true
+	}
 	return updated
 }
 

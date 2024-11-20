@@ -6,7 +6,8 @@ import (
 	"net"
 	"net/netip"
 
-	"tailscale.com/tsd"
+	"tailscale.com/control/controlknobs"
+	"tailscale.com/health"
 	"tailscale.com/util/dnsname"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
@@ -14,8 +15,7 @@ import (
 
 // setResolvConf sets the content of resolv.conf file using the given nameservers list.
 func setResolvConf(iface *net.Interface, ns []netip.Addr) error {
-	sys := new(tsd.System)
-	r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, sys.HealthTracker(), sys.ControlKnobs(), "lo") // interface name does not matter.
+	r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, &health.Tracker{}, &controlknobs.Knobs{}, "lo") // interface name does not matter.
 	if err != nil {
 		return err
 	}
@@ -29,8 +29,7 @@ func setResolvConf(iface *net.Interface, ns []netip.Addr) error {
 
 // shouldWatchResolvconf reports whether ctrld should watch changes to resolv.conf file with given OS configurator.
 func shouldWatchResolvconf() bool {
-	sys := new(tsd.System)
-	r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, sys.HealthTracker(), sys.ControlKnobs(), "lo") // interface name does not matter.
+	r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, &health.Tracker{}, &controlknobs.Knobs{}, "lo") // interface name does not matter.
 	if err != nil {
 		return false
 	}

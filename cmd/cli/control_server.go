@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/kardianos/service"
-
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
 
 const (
@@ -152,8 +152,25 @@ func (p *prog) registerControlServerHandler() {
 		w.WriteHeader(http.StatusOK)
 	}))
 	p.cs.register(deactivationPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		// Non-cd mode or pin code not set, always allowing deactivation.
-		if cdUID == "" || deactivationPinNotSet() {
+		// Non-cd mode always allowing deactivation.
+		if cdUID == "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Re-fetch pin code from API.
+		if rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev); rc != nil {
+			if rc.DeactivationPin != nil {
+				cdDeactivationPin.Store(*rc.DeactivationPin)
+			} else {
+				cdDeactivationPin.Store(defaultDeactivationPin)
+			}
+		} else {
+			mainLog.Load().Warn().Err(err).Msg("could not re-fetch deactivation pin code")
+		}
+
+		// If pin code not set, allowing deactivation.
+		if deactivationPinNotSet() {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -167,7 +184,7 @@ func (p *prog) registerControlServerHandler() {
 
 		code := http.StatusForbidden
 		switch req.Pin {
-		case cdDeactivationPin:
+		case cdDeactivationPin.Load():
 			code = http.StatusOK
 		case defaultDeactivationPin:
 			// If the pin code was set, but users do not provide --pin, return proper code to client.

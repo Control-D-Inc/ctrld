@@ -209,6 +209,7 @@ func (p *prog) runWait() {
 			continue
 		}
 
+		addExtraSplitDnsRule(newCfg)
 		if err := writeConfigFile(newCfg); err != nil {
 			logger.Err(err).Msg("could not write new config")
 		}
@@ -271,6 +272,20 @@ func (p *prog) apiConfigReload() {
 		if err != nil {
 			logger.Warn().Err(err).Msg("could not fetch resolver config")
 			return
+		}
+
+		if resolverConfig.DeactivationPin != nil {
+			newDeactivationPin := *resolverConfig.DeactivationPin
+			curDeactivationPin := cdDeactivationPin.Load()
+			switch {
+			case curDeactivationPin != defaultDeactivationPin:
+				logger.Debug().Msg("saving deactivation pin")
+			case curDeactivationPin != newDeactivationPin:
+				logger.Debug().Msg("update deactivation pin")
+			}
+			cdDeactivationPin.Store(newDeactivationPin)
+		} else {
+			cdDeactivationPin.Store(defaultDeactivationPin)
 		}
 
 		if resolverConfig.Ctrld.CustomConfig == "" {
