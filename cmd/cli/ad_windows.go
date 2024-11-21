@@ -1,8 +1,11 @@
 package cli
 
 import (
-	"fmt"
 	"strings"
+	"syscall"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -40,10 +43,15 @@ func addExtraSplitDnsRule(cfg *ctrld.Config) bool {
 
 // getActiveDirectoryDomain returns AD domain name of this computer.
 func getActiveDirectoryDomain() (string, error) {
-	cmd := "$obj = Get-WmiObject Win32_ComputerSystem; if ($obj.PartOfDomain) { $obj.Domain }"
-	output, err := powershell(cmd)
+	var domain *uint16
+	var status uint32
+	err := syscall.NetGetJoinInformation(nil, &domain, &status)
 	if err != nil {
-		return "", fmt.Errorf("failed to get domain name: %w, output:\n\n%s", err, string(output))
+		return "", err
 	}
-	return string(output), nil
+	defer syscall.NetApiBufferFree((*byte)(unsafe.Pointer(domain)))
+	if status == syscall.NetSetupDomainName {
+		return windows.UTF16PtrToString(domain), nil
+	}
+	return "", nil
 }
