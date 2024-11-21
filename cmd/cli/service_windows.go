@@ -2,7 +2,9 @@ package cli
 
 import (
 	"os"
+	"strings"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -78,4 +80,24 @@ func openLogFile(path string, mode int) (*os.File, error) {
 	}
 
 	return os.NewFile(uintptr(handle), path), nil
+}
+
+const processEntrySize = uint32(unsafe.Sizeof(windows.ProcessEntry32{}))
+
+// hasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.
+func hasLocalDnsServerRunning() bool {
+	h, e := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if e != nil {
+		return false
+	}
+	p := windows.ProcessEntry32{Size: processEntrySize}
+	for {
+		e := windows.Process32Next(h, &p)
+		if e != nil {
+			return false
+		}
+		if strings.ToLower(windows.UTF16ToString(p.ExeFile[:])) == "dns.exe" {
+			return true
+		}
+	}
 }

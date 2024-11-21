@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -39,7 +41,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	setDNSOnce.Do(func() {
 		// If there's a Dns server running, that means we are on AD with Dns feature enabled.
 		// Configuring the Dns server to forward queries to ctrld instead.
-		if windowsHasLocalDnsServerRunning() {
+		if hasLocalDnsServerRunning() {
 			file := absHomeDir(windowsForwardersFilename)
 			oldForwardersContent, _ := os.ReadFile(file)
 			hasLocalIPv6Listener := needLocalIPv6Listener()
@@ -101,7 +103,7 @@ func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
 func resetDNS(iface *net.Interface) error {
 	resetDNSOnce.Do(func() {
 		// See corresponding comment in setDNS.
-		if windowsHasLocalDnsServerRunning() {
+		if hasLocalDnsServerRunning() {
 			file := absHomeDir(windowsForwardersFilename)
 			content, err := os.ReadFile(file)
 			if err != nil {
@@ -240,4 +242,10 @@ func removeDnsServerForwarders(nameservers []string) error {
 		}
 	}
 	return nil
+}
+
+// powershell runs the given powershell command.
+func powershell(cmd string) ([]byte, error) {
+	out, err := exec.Command("powershell", "-Command", cmd).CombinedOutput()
+	return bytes.TrimSpace(out), err
 }

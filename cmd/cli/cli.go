@@ -709,7 +709,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					return nil
 				})
 				// Windows forwarders file.
-				if windowsHasLocalDnsServerRunning() {
+				if hasLocalDnsServerRunning() {
 					files = append(files, absHomeDir(windowsForwardersFilename))
 				}
 				// Binary itself.
@@ -2107,7 +2107,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 	cdMode := cdUID != ""
 	nextdnsMode := nextdns != ""
 	// For Windows server with local Dns server running, we can only try on random local IP.
-	hasLocalDnsServer := windowsHasLocalDnsServerRunning()
+	hasLocalDnsServer := hasLocalDnsServerRunning()
 	for n, listener := range cfg.Listener {
 		lcc[n] = &listenerConfigCheck{}
 		if listener.IP == "" {
@@ -2612,21 +2612,6 @@ func exchangeContextWithTimeout(c *dns.Client, timeout time.Duration, msg *dns.M
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return c.ExchangeContext(ctx, msg, addr)
-}
-
-// powershell runs the given powershell command.
-func powershell(cmd string) ([]byte, error) {
-	out, err := exec.Command("powershell", "-Command", cmd).CombinedOutput()
-	return bytes.TrimSpace(out), err
-}
-
-// windowsHasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.
-func windowsHasLocalDnsServerRunning() bool {
-	if runtime.GOOS == "windows" {
-		_, err := powershell("Get-Process -Name DNS")
-		return err == nil
-	}
-	return false
 }
 
 // absHomeDir returns the absolute path to given filename using home directory as root dir.
