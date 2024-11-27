@@ -24,19 +24,26 @@ func addExtraSplitDnsRule(cfg *ctrld.Config) bool {
 	// Network rules are lowercase during toml config marshaling,
 	// lowercase the domain here too for consistency.
 	domain = strings.ToLower(domain)
+	domainRuleAdded := addSplitDnsRule(cfg, domain)
+	wildcardDomainRuleRuleAdded := addSplitDnsRule(cfg, "*."+strings.TrimPrefix(domain, "."))
+	return domainRuleAdded || wildcardDomainRuleRuleAdded
+}
+
+// addSplitDnsRule adds split-rule for given domain if there's no existed rule.
+// The return value indicates whether the split-rule was added or not.
+func addSplitDnsRule(cfg *ctrld.Config, domain string) bool {
 	for n, lc := range cfg.Listener {
 		if lc.Policy == nil {
 			lc.Policy = &ctrld.ListenerPolicyConfig{}
 		}
-		domainRule := "*." + strings.TrimPrefix(domain, ".")
 		for _, rule := range lc.Policy.Rules {
-			if _, ok := rule[domainRule]; ok {
-				mainLog.Load().Debug().Msgf("domain rule already exist for listener.%s", n)
+			if _, ok := rule[domain]; ok {
+				mainLog.Load().Debug().Msgf("split-rule %q already existed for listener.%s", domain, n)
 				return false
 			}
 		}
-		mainLog.Load().Debug().Msgf("adding active directory domain for listener.%s", n)
-		lc.Policy.Rules = append(lc.Policy.Rules, ctrld.Rule{domainRule: []string{}})
+		mainLog.Load().Debug().Msgf("adding split-rule %q for listener.%s", domain, n)
+		lc.Policy.Rules = append(lc.Policy.Rules, ctrld.Rule{domain: []string{}})
 	}
 	return true
 }
