@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"io"
+	"log"
 	"net"
+	"os"
 
 	"github.com/microsoft/wmi/pkg/base/host"
 	"github.com/microsoft/wmi/pkg/base/instance"
@@ -32,6 +35,8 @@ func validInterfacesMap() map[string]struct{} {
 
 // validInterfaces returns a list of all physical interfaces.
 func validInterfaces() []string {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
 	whost := host.NewWmiLocalHost()
 	q := query.NewWmiQuery("MSFT_NetAdapter")
 	instances, err := instance.GetWmiInstancesFromHost(whost, string(constant.StadardCimV2), q)
