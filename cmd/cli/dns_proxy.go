@@ -456,7 +456,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				res.clientInfo = true
 				return res
 			}
-			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForPtr(upstreams, upstreamConfigs)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
 		case isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
@@ -465,7 +465,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				res.clientInfo = true
 				return res
 			}
-			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			upstreams = []string{upstreamOS}
+			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 			ctrld.Log(ctx, mainLog.Load().Debug(), "lan hostname lookup, using upstreams: %v", upstreams)
 		default:
 			ctrld.Log(ctx, mainLog.Load().Debug(), "no explicit policy matched, using default routing -> %v", upstreams)
@@ -605,7 +606,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	return res
 }
 
-func (p *prog) upstreamsAndUpstreamConfigForLanAndPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
+func (p *prog) upstreamsAndUpstreamConfigForPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
 	if len(p.localUpstreams) > 0 {
 		tmp := make([]string, 0, len(p.localUpstreams)+len(upstreams))
 		tmp = append(tmp, p.localUpstreams...)
@@ -1060,7 +1061,8 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	name := strings.TrimSuffix(q.Name, ".")
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
-		strings.HasSuffix(name, ".lan")
+		strings.HasSuffix(name, ".lan") ||
+		strings.HasSuffix(name, ".local")
 }
 
 // isSrvLookup reports whether DNS message is a SRV query.
