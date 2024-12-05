@@ -445,6 +445,10 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 	} else {
 		switch {
+		case isSrvLookup(req.msg):
+			upstreams = []string{upstreamOS}
+			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+			ctrld.Log(ctx, mainLog.Load().Debug(), "SRV record lookup, using upstreams: %v", upstreams)
 		case isPrivatePtrLookup(req.msg):
 			isLanOrPtrQuery = true
 			if answer := p.proxyPrivatePtrLookup(ctx, req.msg); answer != nil {
@@ -1057,6 +1061,14 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
 		strings.HasSuffix(name, ".lan")
+}
+
+// isSrvLookup reports whether DNS message is a SRV query.
+func isSrvLookup(m *dns.Msg) bool {
+	if m == nil || len(m.Question) == 0 {
+		return false
+	}
+	return m.Question[0].Qtype == dns.TypeSRV
 }
 
 // isWanClient reports whether the input is a WAN address.
