@@ -20,7 +20,7 @@ func Test_osResolver_Resolve(t *testing.T) {
 	go func() {
 		defer cancel()
 		resolver := &osResolver{}
-		resolver.publicServer.Store(&[]string{"127.0.0.127:5353"})
+		resolver.publicServers.Store(&[]string{"127.0.0.127:5353"})
 		m := new(dns.Msg)
 		m.SetQuestion("controld.com.", dns.TypeA)
 		m.RecursionDesired = true
@@ -74,7 +74,7 @@ func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 		}
 	}()
 	resolver := &osResolver{}
-	resolver.publicServer.Store(&ns)
+	resolver.publicServers.Store(&ns)
 	msg := new(dns.Msg)
 	msg.SetQuestion(".", dns.TypeNS)
 	answer, err := resolver.Resolve(context.Background(), msg)
@@ -156,38 +156,43 @@ func runLocalPacketConnTestServer(t *testing.T, pc net.PacketConn, handler dns.H
 func Test_initializeOsResolver(t *testing.T) {
 	lanServer1 := "192.168.1.1"
 	lanServer2 := "10.0.10.69"
+	lanServer3 := "192.168.40.1"
 	wanServer := "1.1.1.1"
+	lanServers := []string{net.JoinHostPort(lanServer1, "53"), net.JoinHostPort(lanServer2, "53")}
 	publicServers := []string{net.JoinHostPort(wanServer, "53")}
 
-	// First initialization.
+	or = newResolverWithNameserver(defaultNameservers())
+
+	// First initialization, initialized servers are saved.
+	initializeOsResolver([]string{lanServer1, lanServer2, wanServer})
+	p := or.initializedLanServers.Load()
+	assert.NotNil(t, p)
+	t.Logf("%v - %v", *p, lanServers)
+	assert.True(t, slices.Equal(*p, lanServers))
+	assert.True(t, slices.Equal(*or.lanServers.Load(), lanServers))
+	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
+
+	// No new LAN servers, but lanServer2 gone, initialized servers not changed.
 	initializeOsResolver([]string{lanServer1, wanServer})
-	p := or.currentLanServer.Load()
+	p = or.initializedLanServers.Load()
 	assert.NotNil(t, p)
-	assert.Equal(t, lanServer1, p.String())
-	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
+	assert.True(t, slices.Equal(*p, lanServers))
+	assert.True(t, slices.Equal(*or.lanServers.Load(), []string{net.JoinHostPort(lanServer1, "53")}))
+	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
 
-	// No new LAN server, current LAN server -> last LAN server.
-	initializeOsResolver([]string{lanServer1, wanServer})
-	p = or.currentLanServer.Load()
-	assert.Nil(t, p)
-	p = or.lastLanServer.Load()
+	// New LAN servers, they are used, initialized servers not changed.
+	initializeOsResolver([]string{lanServer3, wanServer})
+	p = or.initializedLanServers.Load()
 	assert.NotNil(t, p)
-	assert.Equal(t, lanServer1, p.String())
-	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
+	assert.True(t, slices.Equal(*p, lanServers))
+	assert.True(t, slices.Equal(*or.lanServers.Load(), []string{net.JoinHostPort(lanServer3, "53")}))
+	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
 
-	// New LAN server detected.
-	initializeOsResolver([]string{lanServer2, lanServer1, wanServer})
-	p = or.currentLanServer.Load()
-	assert.NotNil(t, p)
-	assert.Equal(t, lanServer2, p.String())
-	p = or.lastLanServer.Load()
-	assert.NotNil(t, p)
-	assert.Equal(t, lanServer1, p.String())
-	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
-
-	// No LAN server available.
+	// No LAN server available, initialized servers will be used.
 	initializeOsResolver([]string{wanServer})
-	assert.Nil(t, or.currentLanServer.Load())
-	assert.Nil(t, or.lastLanServer.Load())
-	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
+	p = or.initializedLanServers.Load()
+	assert.NotNil(t, p)
+	assert.True(t, slices.Equal(*p, lanServers))
+	assert.True(t, slices.Equal(*or.lanServers.Load(), lanServers))
+	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
 }
