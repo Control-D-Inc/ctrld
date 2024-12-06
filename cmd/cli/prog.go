@@ -1044,7 +1044,7 @@ func dnsChanged(iface *net.Interface, nameservers []string) bool {
 
 // selfUninstallCheck checks if the error dues to controld.InvalidConfigCode, perform self-uninstall then.
 func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
-	var uer *controld.UtilityErrorResponse
+	var uer *controld.ErrorResponse
 	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		p.stopDnsWatchers()
 

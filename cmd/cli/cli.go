@@ -1269,7 +1269,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 			cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
 			// Performs self-uninstallation if the ControlD device does not exist.
-			var uer *controld.UtilityErrorResponse
+			var uer *controld.ErrorResponse
 			if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 				_ = uninstallInvalidCdUID(p, cdLogger, false)
 			}
