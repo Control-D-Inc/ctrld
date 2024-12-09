@@ -1100,6 +1100,8 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		},
 	}
 	rootCmd.AddCommand(upgradeCmd)
+
+	initLogCmd()
 }
 
 // isMobile reports whether the current OS is a mobile platform.
@@ -1230,6 +1232,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// Log config do not have thing to validate, so it's safe to init log here,
 	// so it's able to log information in processCDFlags.
 	initLogging()
+
+	// Initializing internal logging after global logging.
+	p.initInternalLogging()
 
 	mainLog.Load().Info().Msgf("starting ctrld %s", curVersion())
 	mainLog.Load().Info().Msgf("os: %s", osVersion())

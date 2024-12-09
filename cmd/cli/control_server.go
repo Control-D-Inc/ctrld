@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -25,6 +26,8 @@ const (
 	deactivationPath = "/deactivation"
 	cdPath           = "/cd"
 	ifacePath        = "/iface"
+	viewLogsPath     = "/logs/view"
+	sendLogsPath     = "/logs/send"
 )
 
 type controlServer struct {
@@ -210,6 +213,49 @@ func (p *prog) registerControlServerHandler() {
 			}
 		}
 		w.WriteHeader(http.StatusBadRequest)
+	}))
+	p.cs.register(viewLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		data, err := p.logContent()
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(data) == 0 {
+			w.WriteHeader(http.StatusMovedPermanently)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(&logViewResponse{Data: string(data)}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}))
+	p.cs.register(sendLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if time.Since(p.internalLogSent) < logSentInterval {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		data, err := p.logContent()
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(data) == 0 {
+			w.WriteHeader(http.StatusMovedPermanently)
+			return
+		}
+		logFile := base64.StdEncoding.EncodeToString(data)
+		req := &controld.LogsRequest{
+			UID:     cdUID,
+			LogFile: logFile,
+		}
+		mainLog.Load().Debug().Msg("sending log file to ControlD server")
+		if err := controld.SendLogs(req, cdDev); err != nil {
+			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		} else {
+			mainLog.Load().Debug().Msg("sending log file successfully")
+		}
+		p.internalLogSent = time.Now()
 	}))
 }
 

@@ -85,20 +85,23 @@ type prog struct {
 	dnsWatcherClosedOnce sync.Once
 	dnsWatcherStopCh     chan struct{}
 
-	cfg                  *ctrld.Config
-	localUpstreams       []string
-	ptrNameservers       []string
-	appCallback          *AppCallback
-	cache                dnscache.Cacher
-	cacheFlushDomainsMap map[string]struct{}
-	sema                 semaphore
-	ciTable              *clientinfo.Table
-	um                   *upstreamMonitor
-	router               router.Router
-	ptrLoopGuard         *loopGuard
-	lanLoopGuard         *loopGuard
-	metricsQueryStats    atomic.Bool
-	queryFromSelfMap     sync.Map
+	cfg                       *ctrld.Config
+	localUpstreams            []string
+	ptrNameservers            []string
+	appCallback               *AppCallback
+	cache                     dnscache.Cacher
+	cacheFlushDomainsMap      map[string]struct{}
+	sema                      semaphore
+	ciTable                   *clientinfo.Table
+	um                        *upstreamMonitor
+	router                    router.Router
+	ptrLoopGuard              *loopGuard
+	lanLoopGuard              *loopGuard
+	metricsQueryStats         atomic.Bool
+	queryFromSelfMap          sync.Map
+	initInternalLogWriterOnce sync.Once
+	internalLogWriter         *logWriter
+	internalLogSent           time.Time
 
 	selfUninstallMu       sync.Mutex
 	refusedQueryCount     int
@@ -517,6 +520,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		}
 		go p.apiConfigReload()
 		p.postRun()
+		p.initInternalLogging()
 	}
 	wg.Wait()
 }
