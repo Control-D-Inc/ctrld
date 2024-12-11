@@ -118,6 +118,9 @@ func initializeOsResolver(servers []string) []string {
 	} else {
 		or.lanServers.Store(&lanNss)
 	}
+	if len(publicNss) == 0 {
+		publicNss = append(publicNss, controldPublicDnsWithPort)
+	}
 	or.publicServers.Store(&publicNss)
 	return slices.Concat(lanNss, publicNss)
 }

@@ -167,7 +167,6 @@ func Test_initializeOsResolver(t *testing.T) {
 	initializeOsResolver([]string{lanServer1, lanServer2, wanServer})
 	p := or.initializedLanServers.Load()
 	assert.NotNil(t, p)
-	t.Logf("%v - %v", *p, lanServers)
 	assert.True(t, slices.Equal(*p, lanServers))
 	assert.True(t, slices.Equal(*or.lanServers.Load(), lanServers))
 	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
@@ -195,4 +194,12 @@ func Test_initializeOsResolver(t *testing.T) {
 	assert.True(t, slices.Equal(*p, lanServers))
 	assert.True(t, slices.Equal(*or.lanServers.Load(), lanServers))
 	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
+
+	// No Public server, ControlD Public DNS will be used.
+	initializeOsResolver([]string{})
+	p = or.initializedLanServers.Load()
+	assert.NotNil(t, p)
+	assert.True(t, slices.Equal(*p, lanServers))
+	assert.True(t, slices.Equal(*or.lanServers.Load(), lanServers))
+	assert.True(t, slices.Equal(*or.publicServers.Load(), []string{controldPublicDnsWithPort}))
 }
