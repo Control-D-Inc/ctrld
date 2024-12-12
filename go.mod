@@ -36,8 +36,8 @@ require (
 	github.com/stretchr/testify v1.9.0
 	github.com/vishvananda/netlink v1.2.1-beta.2
 	golang.org/x/net v0.28.0
-	golang.org/x/sync v0.8.0
-	golang.org/x/sys v0.23.0
+	golang.org/x/sync v0.10.0
+	golang.org/x/sys v0.28.0
 	golang.zx2c4.com/wireguard/windows v0.5.3
 	tailscale.com v1.74.0
 )
@@ -90,10 +90,10 @@ require (
 	go.uber.org/mock v0.4.0 // indirect
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
-	golang.org/x/crypto v0.26.0 // indirect
+	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/mod v0.19.0 // indirect
-	golang.org/x/text v0.17.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 	golang.org/x/tools v0.23.0 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
