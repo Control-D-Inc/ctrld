@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -59,7 +60,7 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 }
 
 // initInternalLogging performs internal logging if there's no log enabled.
-func (p *prog) initInternalLogging() {
+func (p *prog) initInternalLogging(writers []io.Writer) {
 	if !p.needInternalLogging() {
 		return
 	}
@@ -72,13 +73,24 @@ func (p *prog) initInternalLogging() {
 	p.mu.Lock()
 	lw := p.internalLogWriter
 	p.mu.Unlock()
-	multi := zerolog.MultiLevelWriter(lw)
+	// If ctrld was run without explicit verbose level,
+	// run the internal logging at debug level, so we could
+	// have enough information for troubleshooting.
+	if verbose == 0 {
+		for i := range writers {
+			w := &zerolog.FilteredLevelWriter{
+				Writer: zerolog.LevelWriterAdapter{Writer: writers[i]},
+				Level:  zerolog.NoticeLevel,
+			}
+			writers[i] = w
+		}
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	}
+	writers = append(writers, lw)
+	multi := zerolog.MultiLevelWriter(writers...)
 	l := mainLog.Load().Output(multi).With().Logger()
 	mainLog.Store(&l)
 	ctrld.ProxyLogger.Store(&l)
-	if verbose == 0 {
-		zerolog.SetGlobalLevel(zerolog.DebugLevel)
-	}
 }
 
 // needInternalLogging reports whether prog needs to run internal logging.
