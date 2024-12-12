@@ -34,6 +34,44 @@ func Test_osResolver_Resolve(t *testing.T) {
 	}
 }
 
+func Test_osResolver_ResolveLanHostname(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reqId := "req-id"
+	ctx = context.WithValue(ctx, ReqIdCtxKey{}, reqId)
+	ctx = LanQueryCtx(ctx)
+
+	go func(ctx context.Context) {
+		defer cancel()
+		id, ok := ctx.Value(ReqIdCtxKey{}).(string)
+		if !ok || id != reqId {
+			t.Error("missing request id")
+			return
+		}
+		lan, ok := ctx.Value(LanQueryCtxKey{}).(bool)
+		if !ok || !lan {
+			t.Error("not a LAN query")
+			return
+		}
+		resolver := &osResolver{}
+		resolver.publicServers.Store(&[]string{"76.76.2.0:53"})
+		m := new(dns.Msg)
+		m.SetQuestion("controld.com.", dns.TypeA)
+		m.RecursionDesired = true
+		_, err := resolver.Resolve(ctx, m)
+		if err == nil {
+			t.Error("os resolver succeeded unexpectedly")
+			return
+		}
+	}(ctx)
+
+	select {
+	case <-time.After(10 * time.Second):
+		t.Error("os resolver hangs")
+	case <-ctx.Done():
+	}
+}
+
 func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 	ns := make([]string, 0, 2)
 	servers := make([]*dns.Server, 0, 2)

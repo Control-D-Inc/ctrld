@@ -47,6 +47,14 @@ var controldPublicDnsWithPort = net.JoinHostPort(controldPublicDns, "53")
 // or is the Resolver used for ResolverTypeOS.
 var or = newResolverWithNameserver(defaultNameservers())
 
+// LanQueryCtxKey is the context.Context key to indicate that the request is for LAN network.
+type LanQueryCtxKey struct{}
+
+// LanQueryCtx returns a context.Context with LanQueryCtxKey set.
+func LanQueryCtx(ctx context.Context) context.Context {
+	return context.WithValue(ctx, LanQueryCtxKey{}, true)
+}
+
 // defaultNameservers is like nameservers with each element formed "ip:53".
 func defaultNameservers() []string {
 	ns := nameservers()
@@ -191,6 +199,11 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		nss = append(nss, (*p)...)
 	}
 	numServers := len(nss) + len(publicServers)
+	// If this is a LAN query, skip public DNS.
+	lan, ok := ctx.Value(LanQueryCtxKey{}).(bool)
+	if ok && lan {
+		numServers -= len(publicServers)
+	}
 	if numServers == 0 {
 		return nil, errors.New("no nameservers available")
 	}
@@ -216,7 +229,9 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		}
 	}
 	do(nss, true)
-	do(publicServers, false)
+	if !lan {
+		do(publicServers, false)
+	}
 
 	logAnswer := func(server string) {
 		if before, _, found := strings.Cut(server, ":"); found {
