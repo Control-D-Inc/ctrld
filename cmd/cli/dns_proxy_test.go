@@ -75,6 +75,7 @@ func Test_canonicalName(t *testing.T) {
 
 func Test_prog_upstreamFor(t *testing.T) {
 	cfg := testhelper.SampleConfig(t)
+	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(false)
 	p := &prog{cfg: cfg}
 	p.um = newUpstreamMonitor(p.cfg)
 	p.lanLoopGuard = newLoopGuard()

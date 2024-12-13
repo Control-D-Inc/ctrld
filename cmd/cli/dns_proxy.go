@@ -595,7 +595,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		return res
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
-	if cdUID != "" && p.leakOnUpstreamFailure() {
+	if p.leakOnUpstreamFailure() {
 		p.leakingQueryMu.Lock()
 		if !p.leakingQueryWasRun {
 			p.leakingQueryWasRun = true
