@@ -122,7 +122,7 @@ func (p *prog) logContent() ([]byte, error) {
 		if p.cfg.Service.LogPath == "" {
 			return nil, nil
 		}
-		buf, err := os.ReadFile(p.cfg.Service.LogPath)
+		buf, err := os.ReadFile(normalizeLogFilePath(p.cfg.Service.LogPath))
 		if err != nil {
 			return nil, err
 		}
