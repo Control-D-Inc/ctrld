@@ -84,6 +84,7 @@ type prog struct {
 	dnsWg                sync.WaitGroup
 	dnsWatcherClosedOnce sync.Once
 	dnsWatcherStopCh     chan struct{}
+	rc                   *controld.ResolverConfig
 
 	cfg                       *ctrld.Config
 	localUpstreams            []string
@@ -165,11 +166,13 @@ func (p *prog) runWait() {
 
 		if newCfg == nil {
 			newCfg = &ctrld.Config{}
+			confFile := v.ConfigFileUsed()
 			v := viper.NewWithOptions(viper.KeyDelimiter("::"))
 			ctrld.InitConfig(v, "ctrld")
 			if configPath != "" {
-				v.SetConfigFile(configPath)
+				confFile = configPath
 			}
+			v.SetConfigFile(confFile)
 			if err := v.ReadInConfig(); err != nil {
 				logger.Err(err).Msg("could not read new config")
 				waitOldRunDone()
@@ -181,10 +184,14 @@ func (p *prog) runWait() {
 				continue
 			}
 			if cdUID != "" {
-				if err := processCDFlags(newCfg); err != nil {
+				if rc, err := processCDFlags(newCfg); err != nil {
 					logger.Err(err).Msg("could not fetch ControlD config")
 					waitOldRunDone()
 					continue
+				} else {
+					p.mu.Lock()
+					p.rc = rc
+					p.mu.Unlock()
 				}
 			}
 		}
@@ -291,7 +298,24 @@ func (p *prog) apiConfigReload() {
 			cdDeactivationPin.Store(defaultDeactivationPin)
 		}
 
-		if resolverConfig.Ctrld.CustomConfig == "" {
+		p.mu.Lock()
+		rc := p.rc
+		p.rc = resolverConfig
+		p.mu.Unlock()
+		noCustomConfig := resolverConfig.Ctrld.CustomConfig == ""
+		noExcludeListChanged := true
+		if rc != nil {
+			slices.Sort(rc.Exclude)
+			slices.Sort(resolverConfig.Exclude)
+			noExcludeListChanged = slices.Equal(rc.Exclude, resolverConfig.Exclude)
+		}
+		if noCustomConfig && noExcludeListChanged {
+			return
+		}
+
+		if noCustomConfig && !noExcludeListChanged {
+			logger.Debug().Msg("exclude list changes detected, reloading...")
+			p.apiReloadCh <- nil
 			return
 		}
 

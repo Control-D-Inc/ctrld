@@ -301,7 +301,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 	if cdUID != "" {
 		validateCdUpstreamProtocol()
-		if err := processCDFlags(&cfg); err != nil {
+		if rc, err := processCDFlags(&cfg); err != nil {
 			if isMobile() {
 				appCallback.Exit(err.Error())
 				return
@@ -315,6 +315,10 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			}
 			notifyExitToLogServer()
 			cdLogger.Fatal().Err(err).Msg("failed to fetch resolver config")
+		} else {
+			p.mu.Lock()
+			p.rc = rc
+			p.mu.Unlock()
 		}
 	}
 
@@ -604,7 +608,7 @@ func deactivationPinNotSet() bool {
 	return cdDeactivationPin.Load() == defaultDeactivationPin
 }
 
-func processCDFlags(cfg *ctrld.Config) error {
+func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	logger := mainLog.Load().With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
@@ -622,10 +626,10 @@ func processCDFlags(cfg *ctrld.Config) error {
 	}
 	if err != nil {
 		if isMobile() {
-			return err
+			return nil, err
 		}
 		logger.Warn().Err(err).Msg("could not fetch resolver config")
-		return err
+		return nil, err
 	}
 
 	if resolverConfig.DeactivationPin != nil {
@@ -641,7 +645,7 @@ func processCDFlags(cfg *ctrld.Config) error {
 		logger.Info().Msg("using defined custom config of Control-D resolver")
 		if err := validateCdRemoteConfig(resolverConfig, cfg); err == nil {
 			setListenerDefaultValue(cfg)
-			return nil
+			return resolverConfig, nil
 		}
 		mainLog.Load().Err(err).Msg("disregarding invalid custom config")
 	}
@@ -688,7 +692,7 @@ func processCDFlags(cfg *ctrld.Config) error {
 	// Set default value.
 	setListenerDefaultValue(cfg)
 
-	return nil
+	return resolverConfig, nil
 }
 
 // setListenerDefaultValue sets the default value for cfg.Listener if none existed.
