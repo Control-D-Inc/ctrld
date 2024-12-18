@@ -103,6 +103,8 @@ type prog struct {
 	initInternalLogWriterOnce sync.Once
 	internalLogWriter         *logWriter
 	internalLogSent           time.Time
+	runningIface              string
+	requiredMultiNICsConfig   bool
 
 	selfUninstallMu       sync.Mutex
 	refusedQueryCount     int
@@ -243,6 +245,11 @@ func (p *prog) runWait() {
 }
 
 func (p *prog) preRun() {
+	if iface == "auto" {
+		iface = defaultIfaceName()
+		p.requiredMultiNICsConfig = requiredMultiNICsConfig()
+	}
+	p.runningIface = iface
 	if runtime.GOOS == "darwin" {
 		p.onStopped = append(p.onStopped, func() {
 			if !service.Interactive() {
@@ -607,25 +614,18 @@ func (p *prog) setDNS() {
 	if cfg.Listener == nil {
 		return
 	}
-	if iface == "" {
+	if p.runningIface == "" {
 		return
 	}
-	runningIface := iface
+
 	// allIfaces tracks whether we should set DNS for all physical interfaces.
-	allIfaces := false
-	if runningIface == "auto" {
-		runningIface = defaultIfaceName()
-		// If runningIface is "auto", it means user does not specify "--iface" flag.
-		// In this case, ctrld has to set DNS for all physical interfaces, so
-		// thing will still work when user switch from one to the other.
-		allIfaces = requiredMultiNICsConfig()
-	}
+	allIfaces := p.requiredMultiNICsConfig
 	lc := cfg.FirstListener()
 	if lc == nil {
 		return
 	}
-	logger := mainLog.Load().With().Str("iface", runningIface).Logger()
-	netIface, err := netInterface(runningIface)
+	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
+	netIface, err := netInterface(p.runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
@@ -754,18 +754,13 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 }
 
 func (p *prog) resetDNS() {
-	if iface == "" {
+	if p.runningIface == "" {
 		return
 	}
-	runningIface := iface
-	allIfaces := false
-	if runningIface == "auto" {
-		runningIface = defaultIfaceName()
-		// See corresponding comments in (*prog).setDNS function.
-		allIfaces = requiredMultiNICsConfig()
-	}
-	logger := mainLog.Load().With().Str("iface", runningIface).Logger()
-	netIface, err := netInterface(runningIface)
+	// See corresponding comments in (*prog).setDNS function.
+	allIfaces := p.requiredMultiNICsConfig
+	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
+	netIface, err := netInterface(p.runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
