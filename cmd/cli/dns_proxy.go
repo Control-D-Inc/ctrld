@@ -445,6 +445,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 	} else {
 		switch {
+		case isSrvLookup(req.msg):
+			upstreams = []string{upstreamOS}
+			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+			ctx = ctrld.LanQueryCtx(ctx)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "SRV record lookup, using upstreams: %v", upstreams)
 		case isPrivatePtrLookup(req.msg):
 			isLanOrPtrQuery = true
 			if answer := p.proxyPrivatePtrLookup(ctx, req.msg); answer != nil {
@@ -452,7 +457,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				res.clientInfo = true
 				return res
 			}
-			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForPtr(upstreams, upstreamConfigs)
+			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
 		case isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
@@ -461,7 +467,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				res.clientInfo = true
 				return res
 			}
-			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			upstreams = []string{upstreamOS}
+			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "lan hostname lookup, using upstreams: %v", upstreams)
 		default:
 			ctrld.Log(ctx, mainLog.Load().Debug(), "no explicit policy matched, using default routing -> %v", upstreams)
@@ -587,7 +595,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		return res
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
-	if cdUID != "" && p.leakOnUpstreamFailure() {
+	if p.leakOnUpstreamFailure() {
 		p.leakingQueryMu.Lock()
 		if !p.leakingQueryWasRun {
 			p.leakingQueryWasRun = true
@@ -601,7 +609,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	return res
 }
 
-func (p *prog) upstreamsAndUpstreamConfigForLanAndPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
+func (p *prog) upstreamsAndUpstreamConfigForPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
 	if len(p.localUpstreams) > 0 {
 		tmp := make([]string, 0, len(p.localUpstreams)+len(upstreams))
 		tmp = append(tmp, p.localUpstreams...)
@@ -1056,7 +1064,16 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	name := strings.TrimSuffix(q.Name, ".")
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
-		strings.HasSuffix(name, ".lan")
+		strings.HasSuffix(name, ".lan") ||
+		strings.HasSuffix(name, ".local")
+}
+
+// isSrvLookup reports whether DNS message is a SRV query.
+func isSrvLookup(m *dns.Msg) bool {
+	if m == nil || len(m.Question) == 0 {
+		return false
+	}
+	return m.Question[0].Qtype == dns.TypeSRV
 }
 
 // isWanClient reports whether the input is a WAN address.

@@ -25,8 +25,12 @@ import (
 const (
 	apiDomainCom       = "api.controld.com"
 	apiDomainDev       = "api.controld.dev"
-	resolverDataURLCom = "https://api.controld.com/utility"
-	resolverDataURLDev = "https://api.controld.dev/utility"
+	apiURLCom          = "https://api.controld.com"
+	apiURLDev          = "https://api.controld.dev"
+	resolverDataURLCom = apiURLCom + "/utility"
+	resolverDataURLDev = apiURLDev + "/utility"
+	logURLCom          = apiURLCom + "/logs"
+	logURLDev          = apiURLDev + "/logs"
 	InvalidConfigCode  = 40402
 )
 
@@ -49,14 +53,14 @@ type utilityResponse struct {
 	} `json:"body"`
 }
 
-type UtilityErrorResponse struct {
+type ErrorResponse struct {
 	ErrorField struct {
 		Message string `json:"message"`
 		Code    int    `json:"code"`
 	} `json:"error"`
 }
 
-func (u UtilityErrorResponse) Error() string {
+func (u ErrorResponse) Error() string {
 	return u.ErrorField.Message
 }
 
@@ -69,6 +73,12 @@ type utilityRequest struct {
 type UtilityOrgRequest struct {
 	ProvToken string `json:"prov_token"`
 	Hostname  string `json:"hostname"`
+}
+
+// LogsRequest contains request data for sending runtime logs to API.
+type LogsRequest struct {
+	UID     string `json:"uid"`
+	LogFile string `json:"log_file"`
 }
 
 // FetchResolverConfig fetch Control D config for given uid.
@@ -123,6 +133,81 @@ func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reade
 	}
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/json")
+	transport := apiTransport(cdDev)
+	client := http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("postUtilityAPI client.Do: %w", err)
+	}
+	defer resp.Body.Close()
+	d := json.NewDecoder(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		errResp := &ErrorResponse{}
+		if err := d.Decode(errResp); err != nil {
+			return nil, err
+		}
+		return nil, errResp
+	}
+
+	ur := &utilityResponse{}
+	if err := d.Decode(ur); err != nil {
+		return nil, err
+	}
+	return &ur.Body.Resolver, nil
+}
+
+// SendLogs sends runtime log to ControlD API.
+func SendLogs(req *LogsRequest, cdDev bool) error {
+	body, _ := json.Marshal(req)
+	return postLogAPI(cdDev, bytes.NewReader(body))
+}
+
+func postLogAPI(cdDev bool, body io.Reader) error {
+	apiUrl := logURLCom
+	if cdDev {
+		apiUrl = logURLDev
+	}
+	req, err := http.NewRequest("POST", apiUrl, body)
+	if err != nil {
+		return fmt.Errorf("http.NewRequest: %w", err)
+	}
+	transport := apiTransport(cdDev)
+	client := http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("postLogAPI client.Do: %w", err)
+	}
+	defer resp.Body.Close()
+	d := json.NewDecoder(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		errResp := &ErrorResponse{}
+		if err := d.Decode(errResp); err != nil {
+			return err
+		}
+		return errResp
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+// ParseRawUID parse the input raw UID, returning real UID and ClientID.
+// The raw UID can have 2 forms:
+//
+// - <uid>
+// - <uid>/<client_id>
+func ParseRawUID(rawUID string) (string, string) {
+	uid, clientID, _ := strings.Cut(rawUID, "/")
+	return uid, clientID
+}
+
+// apiTransport returns an HTTP transport for connecting to ControlD API endpoint.
+func apiTransport(cdDev bool) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		apiDomain := apiDomainCom
@@ -143,41 +228,8 @@ func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reade
 		d := &ctrldnet.ParallelDialer{}
 		return d.DialContext(ctx, network, addrs)
 	}
-
 	if router.Name() == ddwrt.Name || runtime.GOOS == "android" {
 		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
 	}
-	client := http.Client{
-		Timeout:   10 * time.Second,
-		Transport: transport,
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("client.Do: %w", err)
-	}
-	defer resp.Body.Close()
-	d := json.NewDecoder(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		errResp := &UtilityErrorResponse{}
-		if err := d.Decode(errResp); err != nil {
-			return nil, err
-		}
-		return nil, errResp
-	}
-
-	ur := &utilityResponse{}
-	if err := d.Decode(ur); err != nil {
-		return nil, err
-	}
-	return &ur.Body.Resolver, nil
-}
-
-// ParseRawUID parse the input raw UID, returning real UID and ClientID.
-// The raw UID can have 2 forms:
-//
-// - <uid>
-// - <uid>/<client_id>
-func ParseRawUID(rawUID string) (string, string) {
-	uid, clientID, _ := strings.Cut(rawUID, "/")
-	return uid, clientID
+	return transport
 }
