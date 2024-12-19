@@ -64,7 +64,6 @@ func Test_addSplitDnsRule(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			added := addSplitDnsRule(tc.cfg, tc.domain)
 			assert.Equal(t, tc.added, added)
 		})
