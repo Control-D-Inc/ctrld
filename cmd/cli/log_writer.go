@@ -24,6 +24,11 @@ type logViewResponse struct {
 	Data string `json:"data"`
 }
 
+type logSentResponse struct {
+	Size  int    `json:"size"`
+	Error string `json:"error"`
+}
+
 // logWriter is an internal buffer to keep track of runtime log when no logging is enabled.
 type logWriter struct {
 	mu   sync.Mutex
@@ -118,6 +123,9 @@ func (p *prog) logContent() ([]byte, error) {
 		lw.mu.Lock()
 		data = lw.buf.Bytes()
 		lw.mu.Unlock()
+		if len(data) == 0 {
+			return nil, errors.New("internal log is empty")
+		}
 	} else {
 		if p.cfg.Service.LogPath == "" {
 			return nil, nil
@@ -127,6 +135,9 @@ func (p *prog) logContent() ([]byte, error) {
 			return nil, err
 		}
 		data = buf
+		if len(data) == 0 {
+			return nil, errors.New("log file is empty")
+		}
 	}
 	return data, nil
 }

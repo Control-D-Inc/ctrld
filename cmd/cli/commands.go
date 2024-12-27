@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/go-units"
 	"github.com/kardianos/service"
 	"github.com/minio/selfupdate"
 	"github.com/olekukonko/tablewriter"
@@ -48,17 +49,24 @@ func initLogCmd() *cobra.Command {
 			}
 			defer resp.Body.Close()
 			switch resp.StatusCode {
-			case http.StatusOK:
-				mainLog.Load().Notice().Msg("runtime logs sent successfully")
 			case http.StatusServiceUnavailable:
 				mainLog.Load().Warn().Msg("runtime logs could only be sent once per minute")
-			default:
-				buf, err := io.ReadAll(resp.Body)
-				if err != nil {
-					mainLog.Load().Fatal().Err(err).Msg("failed to read response body")
-				}
-				mainLog.Load().Error().Msg("failed to send logs")
-				mainLog.Load().Error().Msg(string(buf))
+				return
+			case http.StatusMovedPermanently:
+				mainLog.Load().Warn().Msg("runtime debugs log is not enabled")
+				mainLog.Load().Warn().Msg(`ctrld may be run without "--cd" flag or logging is already enabled`)
+				return
+			}
+			var logs logSentResponse
+			if err := json.NewDecoder(resp.Body).Decode(&logs); err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to decode sent logs result")
+			}
+			size := units.BytesSize(float64(logs.Size))
+			if logs.Error == "" {
+				mainLog.Load().Notice().Msgf("runtime logs sent successfully (%s)", size)
+			} else {
+				mainLog.Load().Error().Msgf("failed to send logs (%s)", size)
+				mainLog.Load().Error().Msg(logs.Error)
 			}
 		},
 	}
@@ -85,6 +93,11 @@ func initLogCmd() *cobra.Command {
 				return
 			case http.StatusBadRequest:
 				mainLog.Load().Warn().Msg("runtime debugs log is not available")
+				buf, err := io.ReadAll(resp.Body)
+				if err != nil {
+					mainLog.Load().Fatal().Err(err).Msg("failed to read response body")
+				}
+				mainLog.Load().Warn().Msgf("ctrld process response:\n\n%s\n", string(buf))
 				return
 			case http.StatusOK:
 			}

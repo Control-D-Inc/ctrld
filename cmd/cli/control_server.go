@@ -217,7 +217,7 @@ func (p *prog) registerControlServerHandler() {
 	p.cs.register(viewLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		data, err := p.logContent()
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if len(data) == 0 {
@@ -236,7 +236,7 @@ func (p *prog) registerControlServerHandler() {
 		}
 		data, err := p.logContent()
 		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if len(data) == 0 {
@@ -249,11 +249,17 @@ func (p *prog) registerControlServerHandler() {
 			LogFile: logFile,
 		}
 		mainLog.Load().Debug().Msg("sending log file to ControlD server")
+		resp := logSentResponse{Size: len(data)}
 		if err := controld.SendLogs(req, cdDev); err != nil {
 			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			resp.Error = err.Error()
+			w.WriteHeader(http.StatusInternalServerError)
 		} else {
 			mainLog.Load().Debug().Msg("sending log file successfully")
+			w.WriteHeader(http.StatusOK)
+		}
+		if err := json.NewEncoder(w).Encode(&resp); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 		p.internalLogSent = time.Now()
 	}))

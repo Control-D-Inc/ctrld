@@ -9,6 +9,7 @@ require (
 	github.com/ameshkov/dnsstamps v1.0.3
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/cuonglm/osinfo v0.0.0-20230921071424-e0e1b1e0bbbf
+	github.com/docker/go-units v0.5.0
 	github.com/frankban/quicktest v1.14.6
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/go-playground/validator/v10 v10.11.1
