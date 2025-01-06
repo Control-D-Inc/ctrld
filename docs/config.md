@@ -255,7 +255,7 @@ Specifying the `ip` and `port` of the Prometheus metrics server. The Prometheus 
 ### dns_watchdog_enabled
 Checking DNS changes to network interfaces and reverting to ctrld's own settings.
 
-The DNS watchdog process only runs on Windows and MacOS.
+The DNS watchdog process only runs on Windows and MacOS, while in `--cd` mode. 
 
 - Type: boolean
 - Required: no
