@@ -75,23 +75,10 @@ func Test_osResolver_ResolveLanHostname(t *testing.T) {
 func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 	ns := make([]string, 0, 2)
 	servers := make([]*dns.Server, 0, 2)
-	successHandler := dns.HandlerFunc(func(w dns.ResponseWriter, msg *dns.Msg) {
-		m := new(dns.Msg)
-		m.SetRcode(msg, dns.RcodeSuccess)
-		w.WriteMsg(m)
-	})
-	nonSuccessHandlerWithRcode := func(rcode int) dns.HandlerFunc {
-		return dns.HandlerFunc(func(w dns.ResponseWriter, msg *dns.Msg) {
-			m := new(dns.Msg)
-			m.SetRcode(msg, rcode)
-			w.WriteMsg(m)
-		})
-	}
-
 	handlers := []dns.Handler{
 		nonSuccessHandlerWithRcode(dns.RcodeRefused),
 		nonSuccessHandlerWithRcode(dns.RcodeNameError),
-		successHandler,
+		successHandler(),
 	}
 	for i := range handlers {
 		pc, err := net.ListenPacket("udp", ":0")
@@ -192,11 +179,15 @@ func runLocalPacketConnTestServer(t *testing.T, pc net.PacketConn, handler dns.H
 }
 
 func Test_initializeOsResolver(t *testing.T) {
+	testNameServerFn = testNameserverTest
 	lanServer1 := "192.168.1.1"
+	lanServer1WithPort := net.JoinHostPort("192.168.1.1", "53")
 	lanServer2 := "10.0.10.69"
+	lanServer2WithPort := net.JoinHostPort("10.0.10.69", "53")
 	lanServer3 := "192.168.40.1"
+	lanServer3WithPort := net.JoinHostPort("192.168.40.1", "53")
 	wanServer := "1.1.1.1"
-	lanServers := []string{net.JoinHostPort(lanServer1, "53"), net.JoinHostPort(lanServer2, "53")}
+	lanServers := []string{lanServer1WithPort, lanServer2WithPort}
 	publicServers := []string{net.JoinHostPort(wanServer, "53")}
 
 	or = newResolverWithNameserver(defaultNameservers())
@@ -214,7 +205,7 @@ func Test_initializeOsResolver(t *testing.T) {
 	p = or.initializedLanServers.Load()
 	assert.NotNil(t, p)
 	assert.True(t, slices.Equal(*p, lanServers))
-	assert.True(t, slices.Equal(*or.lanServers.Load(), []string{net.JoinHostPort(lanServer1, "53")}))
+	assert.True(t, slices.Equal(*or.lanServers.Load(), []string{lanServer1WithPort}))
 	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
 
 	// New LAN servers, they are used, initialized servers not changed.
@@ -222,7 +213,7 @@ func Test_initializeOsResolver(t *testing.T) {
 	p = or.initializedLanServers.Load()
 	assert.NotNil(t, p)
 	assert.True(t, slices.Equal(*p, lanServers))
-	assert.True(t, slices.Equal(*or.lanServers.Load(), []string{net.JoinHostPort(lanServer3, "53")}))
+	assert.True(t, slices.Equal(*or.lanServers.Load(), []string{lanServer3WithPort}))
 	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
 
 	// No LAN server available, initialized servers will be used.
@@ -240,4 +231,36 @@ func Test_initializeOsResolver(t *testing.T) {
 	assert.True(t, slices.Equal(*p, lanServers))
 	assert.True(t, slices.Equal(*or.lanServers.Load(), lanServers))
 	assert.True(t, slices.Equal(*or.publicServers.Load(), []string{controldPublicDnsWithPort}))
+
+	// No LAN server available, initialized servers is unavailable, nothing will be used.
+	nonSuccessTestServerMap[lanServer1WithPort] = true
+	nonSuccessTestServerMap[lanServer2WithPort] = true
+	initializeOsResolver([]string{wanServer})
+	p = or.initializedLanServers.Load()
+	assert.NotNil(t, p)
+	assert.True(t, slices.Equal(*p, lanServers))
+	assert.Empty(t, *or.lanServers.Load())
+	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
+}
+
+func successHandler() dns.HandlerFunc {
+	return func(w dns.ResponseWriter, msg *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(msg, dns.RcodeSuccess)
+		w.WriteMsg(m)
+	}
+}
+
+func nonSuccessHandlerWithRcode(rcode int) dns.HandlerFunc {
+	return func(w dns.ResponseWriter, msg *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(msg, rcode)
+		w.WriteMsg(m)
+	}
+}
+
+var nonSuccessTestServerMap = map[string]bool{}
+
+func testNameserverTest(addr string) bool {
+	return !nonSuccessTestServerMap[addr]
 }

@@ -78,7 +78,7 @@ func availableNameservers() []string {
 		if _, ok := machineIPsMap[ns]; ok {
 			continue
 		}
-		if testNameserver(ns) {
+		if testNameServerFn(ns) {
 			nss = append(nss, ns)
 		}
 	}
@@ -122,7 +122,16 @@ func initializeOsResolver(servers []string) []string {
 		or.initializedLanServers.CompareAndSwap(nil, &lanNss)
 	}
 	if len(lanNss) == 0 {
-		or.lanServers.Store(or.initializedLanServers.Load())
+		var nss []string
+		p := or.initializedLanServers.Load()
+		if p != nil {
+			for _, ns := range *p {
+				if testNameServerFn(ns) {
+					nss = append(nss, ns)
+				}
+			}
+		}
+		or.lanServers.Store(&nss)
 	} else {
 		or.lanServers.Store(&lanNss)
 	}
@@ -132,6 +141,9 @@ func initializeOsResolver(servers []string) []string {
 	or.publicServers.Store(&publicNss)
 	return slices.Concat(lanNss, publicNss)
 }
+
+// testNameserverFn sends a test query to DNS nameserver to check if the server is available.
+var testNameServerFn = testNameserver
 
 // testPlainDnsNameserver sends a test query to DNS nameserver to check if the server is available.
 func testNameserver(addr string) bool {
