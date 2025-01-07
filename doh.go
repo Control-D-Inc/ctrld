@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -94,6 +95,17 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	query.Add("dns", enc)
 
 	endpoint := *r.endpoint
+
+	if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
+		switch r.uc.ClientIdType {
+		case "subdomain":
+			endpoint.Host = subdomainFromClientInfo(r.uc, ci) + "." + endpoint.Host
+
+		case "path":
+			endpoint.Path = endpoint.Path + pathFromClientInfo(r.uc, ci)
+		}
+	}
+
 	endpoint.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
@@ -147,7 +159,7 @@ func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
 			printed = ci.Mac != "" || ci.IP != "" || ci.Hostname != ""
 			switch {
-			case uc.IsControlD():
+			case uc.IsControlD() || uc.ClientIdType == "header":
 				dohHeader = newControlDHeaders(ci)
 			case uc.isNextDNS():
 				dohHeader = newNextDNSHeaders(ci)
@@ -201,4 +213,40 @@ func newNextDNSHeaders(ci *ClientInfo) http.Header {
 		header.Set("X-Device-Name", ci.Hostname)
 	}
 	return header
+}
+
+func subdomainFromClientInfo(uc *UpstreamConfig, ci *ClientInfo) string {
+	switch uc.ClientId {
+	case "mac":
+		return strings.ReplaceAll(ci.Mac, ":", "")
+	case "host":
+		return subdomainFromHostname(ci.Hostname)
+	}
+	return "" // TODO; fix this
+}
+
+func pathFromClientInfo(uc *UpstreamConfig, ci *ClientInfo) string {
+	switch uc.ClientId {
+	case "mac":
+		return "/" + url.PathEscape(ci.Mac)
+	case "host":
+		return "/" + url.PathEscape(ci.Hostname)
+	}
+	return "" // TODO; fix this
+}
+
+func subdomainFromHostname(hostname string) string {
+	// Define a regular expression to match allowed characters
+	re := regexp.MustCompile(`[^a-zA-Z0-9-]`)
+
+	// Remove chars not allowed in subdomain
+	subdomain := re.ReplaceAllString(hostname, "")
+
+	// Replace spaces with --
+	subdomain = strings.ReplaceAll(subdomain, " ", "--")
+
+	// Trim leading and trailing hyphens
+	subdomain = strings.Trim(subdomain, "-")
+
+	return subdomain
 }

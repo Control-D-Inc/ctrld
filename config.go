@@ -243,6 +243,13 @@ type UpstreamConfig struct {
 	// The caller should not access this field directly.
 	// Use UpstreamSendClientInfo instead.
 	SendClientInfo *bool `mapstructure:"send_client_info" toml:"send_client_info,omitempty"`
+
+	// ClientId is the client info that will be sent to upstream.
+	ClientId string `mapstructure:"client_id" toml:"client_id,omitempty" validate:"omitempty, oneof=host mac"`
+
+	// How to transmit client info to upstream.
+	ClientIdType string `mapstructure:"client_info_type" toml:"client_info_type,omitempty" validate:"omitempty,oneof=subdomain path header"`
+
 	// The caller should not access this field directly.
 	// Use IsDiscoverable instead.
 	Discoverable *bool `mapstructure:"discoverable" toml:"discoverable"`
