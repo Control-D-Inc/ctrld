@@ -218,7 +218,7 @@ func newNextDNSHeaders(ci *ClientInfo) http.Header {
 func subdomainFromClientInfo(uc *UpstreamConfig, ci *ClientInfo) string {
 	switch uc.ClientId {
 	case "mac":
-		return strings.ReplaceAll(ci.Mac, ":", "")
+		return strings.ReplaceAll(ci.Mac, ":", "-")
 	case "host":
 		return subdomainFromHostname(ci.Hostname)
 	}
@@ -228,7 +228,7 @@ func subdomainFromClientInfo(uc *UpstreamConfig, ci *ClientInfo) string {
 func pathFromClientInfo(uc *UpstreamConfig, ci *ClientInfo) string {
 	switch uc.ClientId {
 	case "mac":
-		return "/" + url.PathEscape(ci.Mac)
+		return "/" + strings.ReplaceAll(ci.Mac, ":", "-")
 	case "host":
 		return "/" + url.PathEscape(ci.Hostname)
 	}
