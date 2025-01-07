@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -25,8 +26,13 @@ type logViewResponse struct {
 }
 
 type logSentResponse struct {
-	Size  int    `json:"size"`
+	Size  int64  `json:"size"`
 	Error string `json:"error"`
+}
+
+type logReader struct {
+	r    io.ReadCloser
+	size int64
 }
 
 // logWriter is an internal buffer to keep track of runtime log when no logging is enabled.
@@ -111,8 +117,7 @@ func (p *prog) needInternalLogging() bool {
 	return true
 }
 
-func (p *prog) logContent() ([]byte, error) {
-	var data []byte
+func (p *prog) logReader() (*logReader, error) {
 	if p.needInternalLogging() {
 		p.mu.Lock()
 		lw := p.internalLogWriter
@@ -121,23 +126,29 @@ func (p *prog) logContent() ([]byte, error) {
 			return nil, errors.New("nil internal log writer")
 		}
 		lw.mu.Lock()
-		data = lw.buf.Bytes()
+		lr := &logReader{r: io.NopCloser(bytes.NewReader(lw.buf.Bytes()))}
+		lr.size = int64(lw.buf.Len())
 		lw.mu.Unlock()
-		if len(data) == 0 {
+		if lr.size == 0 {
 			return nil, errors.New("internal log is empty")
 		}
-	} else {
-		if p.cfg.Service.LogPath == "" {
-			return nil, nil
-		}
-		buf, err := os.ReadFile(normalizeLogFilePath(p.cfg.Service.LogPath))
-		if err != nil {
-			return nil, err
-		}
-		data = buf
-		if len(data) == 0 {
-			return nil, errors.New("log file is empty")
-		}
+		return lr, nil
 	}
-	return data, nil
+	if p.cfg.Service.LogPath == "" {
+		return nil, nil
+	}
+	f, err := os.Open(normalizeLogFilePath(p.cfg.Service.LogPath))
+	if err != nil {
+		return nil, err
+	}
+	lr := &logReader{r: f}
+	if st, err := f.Stat(); err == nil {
+		lr.size = st.Size()
+	} else {
+		return nil, fmt.Errorf("f.Stat: %w", err)
+	}
+	if lr.size == 0 {
+		return nil, errors.New("log file is empty")
+	}
+	return lr, nil
 }

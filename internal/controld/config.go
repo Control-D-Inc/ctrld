@@ -77,8 +77,8 @@ type UtilityOrgRequest struct {
 
 // LogsRequest contains request data for sending runtime logs to API.
 type LogsRequest struct {
-	UID     string `json:"uid"`
-	LogFile string `json:"log_file"`
+	UID  string        `json:"uid"`
+	Data io.ReadCloser `json:"-"`
 }
 
 // FetchResolverConfig fetch Control D config for given uid.
@@ -160,20 +160,20 @@ func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reade
 }
 
 // SendLogs sends runtime log to ControlD API.
-func SendLogs(req *LogsRequest, cdDev bool) error {
-	body, _ := json.Marshal(req)
-	return postLogAPI(cdDev, bytes.NewReader(body))
-}
-
-func postLogAPI(cdDev bool, body io.Reader) error {
+func SendLogs(lr *LogsRequest, cdDev bool) error {
+	defer lr.Data.Close()
 	apiUrl := logURLCom
 	if cdDev {
 		apiUrl = logURLDev
 	}
-	req, err := http.NewRequest("POST", apiUrl, body)
+	req, err := http.NewRequest("POST", apiUrl, lr.Data)
 	if err != nil {
 		return fmt.Errorf("http.NewRequest: %w", err)
 	}
+	q := req.URL.Query()
+	q.Set("uid", lr.UID)
+	req.URL.RawQuery = q.Encode()
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	transport := apiTransport(cdDev)
 	client := http.Client{
 		Timeout:   10 * time.Second,
@@ -181,7 +181,7 @@ func postLogAPI(cdDev bool, body io.Reader) error {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("postLogAPI client.Do: %w", err)
+		return fmt.Errorf("SendLogs client.Do: %w", err)
 	}
 	defer resp.Body.Close()
 	d := json.NewDecoder(resp.Body)

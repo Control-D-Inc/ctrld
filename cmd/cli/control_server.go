@@ -2,8 +2,9 @@ package cli
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -215,17 +216,23 @@ func (p *prog) registerControlServerHandler() {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	p.cs.register(viewLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		data, err := p.logContent()
+		lr, err := p.logReader()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if len(data) == 0 {
+		if lr.size == 0 {
 			w.WriteHeader(http.StatusMovedPermanently)
+			return
+		}
+		data, err := io.ReadAll(lr.r)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("could not read log: %v", err), http.StatusInternalServerError)
 			return
 		}
 		if err := json.NewEncoder(w).Encode(&logViewResponse{Data: string(data)}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("could not marshal log data: %v", err), http.StatusInternalServerError)
 			return
 		}
 	}))
@@ -234,22 +241,21 @@ func (p *prog) registerControlServerHandler() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		data, err := p.logContent()
+		r, err := p.logReader()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if len(data) == 0 {
+		if r.size == 0 {
 			w.WriteHeader(http.StatusMovedPermanently)
 			return
 		}
-		logFile := base64.StdEncoding.EncodeToString(data)
 		req := &controld.LogsRequest{
-			UID:     cdUID,
-			LogFile: logFile,
+			UID:  cdUID,
+			Data: r.r,
 		}
 		mainLog.Load().Debug().Msg("sending log file to ControlD server")
-		resp := logSentResponse{Size: len(data)}
+		resp := logSentResponse{Size: r.size}
 		if err := controld.SendLogs(req, cdDev); err != nil {
 			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
 			resp.Error = err.Error()
