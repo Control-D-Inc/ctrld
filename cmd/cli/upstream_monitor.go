@@ -93,9 +93,12 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 	}
 	msg := new(dns.Msg)
 	msg.SetQuestion(".", dns.TypeNS)
-
+	timeout := 1000 * time.Millisecond
+	if uc.Timeout > 0 {
+		timeout = time.Duration(uc.Timeout) * time.Millisecond
+	}
 	check := func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		uc.ReBootstrap()
 		_, err := resolver.Resolve(ctx, msg)
@@ -112,6 +115,8 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 				mainLog.Load().Warn().Msg("stop leaking query")
 			}
 			return
+		} else {
+			mainLog.Load().Debug().Msgf("upstream %q is offline: %v", uc.Endpoint, err)
 		}
 		time.Sleep(checkUpstreamBackoffSleep)
 	}
