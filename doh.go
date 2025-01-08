@@ -2,7 +2,9 @@ package ctrld
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -99,10 +101,10 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
 		switch r.uc.ClientIdType {
 		case "subdomain":
-			endpoint.Host = subdomainFromClientInfo(r.uc, ci) + "." + endpoint.Host
+			endpoint.Host = clientIdFromClientInfo(r.uc, ci) + "." + endpoint.Host
 
 		case "path":
-			endpoint.Path = endpoint.Path + pathFromClientInfo(r.uc, ci)
+			endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/" + clientIdFromClientInfo(r.uc, ci)
 		}
 	}
 
@@ -159,7 +161,7 @@ func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
 			printed = ci.Mac != "" || ci.IP != "" || ci.Hostname != ""
 			switch {
-			case uc.IsControlD() || uc.ClientIdType == "header":
+			case uc.IsControlD() || uc.ClientIdType == "" || uc.ClientIdType == "headers":
 				dohHeader = newControlDHeaders(ci)
 			case uc.isNextDNS():
 				dohHeader = newNextDNSHeaders(ci)
@@ -215,27 +217,27 @@ func newNextDNSHeaders(ci *ClientInfo) http.Header {
 	return header
 }
 
-func subdomainFromClientInfo(uc *UpstreamConfig, ci *ClientInfo) string {
-	switch uc.ClientId {
+func clientIdFromClientInfo(uc *UpstreamConfig, ci *ClientInfo) string {
+	switch ci.ClientIDPref {
 	case "mac":
-		return strings.ReplaceAll(ci.Mac, ":", "-")
+		return clientIdFromMac(ci.Mac)
 	case "host":
-		return subdomainFromHostname(ci.Hostname)
+		return clientIdFromHostname(ci.Hostname)
 	}
-	return "" // TODO; fix this
+	return hashHostnameAndMac(ci.Hostname, ci.Mac)
 }
 
-func pathFromClientInfo(uc *UpstreamConfig, ci *ClientInfo) string {
-	switch uc.ClientId {
-	case "mac":
-		return "/" + strings.ReplaceAll(ci.Mac, ":", "-")
-	case "host":
-		return "/" + url.PathEscape(ci.Hostname)
-	}
-	return "" // TODO; fix this
+func hashHostnameAndMac(hostname, mac string) string {
+	h := sha256.New()
+	h.Write([]byte(hostname + mac))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
-func subdomainFromHostname(hostname string) string {
+func clientIdFromMac(mac string) string {
+	return strings.ReplaceAll(mac, ":", "-")
+}
+
+func clientIdFromHostname(hostname string) string {
 	// Define a regular expression to match allowed characters
 	re := regexp.MustCompile(`[^a-zA-Z0-9-]`)
 

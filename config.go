@@ -244,10 +244,7 @@ type UpstreamConfig struct {
 	// Use UpstreamSendClientInfo instead.
 	SendClientInfo *bool `mapstructure:"send_client_info" toml:"send_client_info,omitempty"`
 
-	// ClientId is the client info that will be sent to upstream.
-	ClientId string `mapstructure:"client_id" toml:"client_id,omitempty"`
-
-	// How to transmit client info to upstream.
+	// How to transmit client info to upstream. (e.g. default:Headers, Subdomain, Path)
 	ClientIdType string `mapstructure:"client_id_type" toml:"client_id_type,omitempty"`
 
 	// The caller should not access this field directly.
