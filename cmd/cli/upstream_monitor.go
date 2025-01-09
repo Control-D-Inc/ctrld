@@ -86,6 +86,10 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 		p.um.mu.Unlock()
 	}()
 
+	if uc.Type == ctrld.ResolverTypeOS {
+		ns := ctrld.InitializeOsResolver()
+		mainLog.Load().Debug().Msgf("re-initializing OS resolver with nameservers: %v", ns)
+	}
 	resolver, err := ctrld.NewResolver(uc)
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not check upstream")
