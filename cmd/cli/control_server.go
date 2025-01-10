@@ -221,6 +221,7 @@ func (p *prog) registerControlServerHandler() {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		defer lr.r.Close()
 		if lr.size == 0 {
 			w.WriteHeader(http.StatusMovedPermanently)
 			return
