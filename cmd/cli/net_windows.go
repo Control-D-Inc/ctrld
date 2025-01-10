@@ -44,6 +44,7 @@ func validInterfaces() []string {
 		mainLog.Load().Err(err).Msg("failed to get wmi network adapter")
 		return nil
 	}
+	defer instances.Close()
 	var adapters []string
 	for _, i := range instances {
 		adapter, err := netadapter.NewNetworkAdapter(i)
