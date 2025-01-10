@@ -16,7 +16,7 @@ import (
 
 const (
 	logWriterSize        = 1024 * 1024 * 5 // 5 MB
-	logWriterInitialSize = 32              // 32 B
+	logWriterInitialSize = 32 * 1024       // 32 KB
 	logSentInterval      = time.Minute
 	logTruncatedMarker   = "...\n"
 )

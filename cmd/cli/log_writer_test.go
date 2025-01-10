@@ -7,7 +7,7 @@ import (
 )
 
 func Test_logWriter_Write(t *testing.T) {
-	size := 64
+	size := 64 * 1024
 	lw := &logWriter{size: size}
 	lw.buf.Grow(lw.size)
 	data := strings.Repeat("A", size)
@@ -22,8 +22,8 @@ func Test_logWriter_Write(t *testing.T) {
 		t.Fatalf("unexpected new buf content: %v", lw.buf.String())
 	}
 
-	bigData := strings.Repeat("B", 256)
-	expected := halfData + strings.Repeat("B", 16)
+	bigData := strings.Repeat("B", 256*1024)
+	expected := halfData + strings.Repeat("B", 16*1024)
 	lw.Write([]byte(bigData))
 	if lw.buf.String() != expected {
 		t.Fatalf("unexpected big buf content: %v", lw.buf.String())
@@ -31,7 +31,7 @@ func Test_logWriter_Write(t *testing.T) {
 }
 
 func Test_logWriter_ConcurrentWrite(t *testing.T) {
-	size := 64
+	size := 64 * 1024
 	lw := &logWriter{size: size}
 	n := 10
 	var wg sync.WaitGroup
