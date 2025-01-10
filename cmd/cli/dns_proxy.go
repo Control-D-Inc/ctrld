@@ -106,11 +106,18 @@ func (p *prog) serveDNS(listenerNum string) error {
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
-		if domain == selfCheckInternalTestDomain {
+		switch {
+		case domain == "":
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeFormatError)
+			_ = w.WriteMsg(answer)
+			return
+		case domain == selfCheckInternalTestDomain:
 			answer := resolveInternalDomainTestQuery(ctx, domain, m)
 			_ = w.WriteMsg(answer)
 			return
 		}
+
 		if _, ok := p.cacheFlushDomainsMap[domain]; ok && p.cache != nil {
 			p.cache.Purge()
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received query %q, local cache is purged", domain)
