@@ -176,7 +176,7 @@ func SendLogs(lr *LogsRequest, cdDev bool) error {
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	transport := apiTransport(cdDev)
 	client := http.Client{
-		Timeout:   10 * time.Second,
+		Timeout:   300 * time.Second,
 		Transport: transport,
 	}
 	resp, err := client.Do(req)
