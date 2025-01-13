@@ -102,6 +102,7 @@ type prog struct {
 	queryFromSelfMap          sync.Map
 	initInternalLogWriterOnce sync.Once
 	internalLogWriter         *logWriter
+	internalWarnLogWriter     *logWriter
 	internalLogSent           time.Time
 	runningIface              string
 	requiredMultiNICsConfig   bool

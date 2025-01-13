@@ -16,9 +16,11 @@ import (
 
 const (
 	logWriterSize        = 1024 * 1024 * 5 // 5 MB
+	logWriterSmallSize   = 1024 * 1024 * 1 // 1 MB
 	logWriterInitialSize = 32 * 1024       // 32 KB
 	logSentInterval      = time.Minute
 	logTruncatedMarker   = "...\n"
+	logSeparator         = "\n===\n\n"
 )
 
 type logViewResponse struct {
@@ -42,9 +44,19 @@ type logWriter struct {
 	size int
 }
 
-// newLogWriter creates an internal log writer with a fixed buffer size.
+// newLogWriter creates an internal log writer.
 func newLogWriter() *logWriter {
-	lw := &logWriter{size: logWriterSize}
+	return newLogWriterWithSize(logWriterSize)
+}
+
+// newSmallLogWriter creates an internal log writer with small buffer size.
+func newSmallLogWriter() *logWriter {
+	return newLogWriterWithSize(logWriterSmallSize)
+}
+
+// newLogWriterWithSize creates an internal log writer with a given buffer size.
+func newLogWriterWithSize(size int) *logWriter {
+	lw := &logWriter{size: size}
 	return lw
 }
 
@@ -77,12 +89,13 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 	}
 	p.initInternalLogWriterOnce.Do(func() {
 		mainLog.Load().Notice().Msg("internal logging enabled")
-		lw := newLogWriter()
-		p.internalLogWriter = lw
+		p.internalLogWriter = newLogWriter()
 		p.internalLogSent = time.Now().Add(-logSentInterval)
+		p.internalWarnLogWriter = newSmallLogWriter()
 	})
 	p.mu.Lock()
 	lw := p.internalLogWriter
+	wlw := p.internalWarnLogWriter
 	p.mu.Unlock()
 	// If ctrld was run without explicit verbose level,
 	// run the internal logging at debug level, so we could
@@ -98,6 +111,10 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	}
 	writers = append(writers, lw)
+	writers = append(writers, &zerolog.FilteredLevelWriter{
+		Writer: zerolog.LevelWriterAdapter{Writer: wlw},
+		Level:  zerolog.WarnLevel,
+	})
 	multi := zerolog.MultiLevelWriter(writers...)
 	l := mainLog.Load().Output(multi).With().Logger()
 	mainLog.Store(&l)
@@ -121,14 +138,27 @@ func (p *prog) logReader() (*logReader, error) {
 	if p.needInternalLogging() {
 		p.mu.Lock()
 		lw := p.internalLogWriter
+		wlw := p.internalWarnLogWriter
 		p.mu.Unlock()
 		if lw == nil {
 			return nil, errors.New("nil internal log writer")
 		}
+		if wlw == nil {
+			return nil, errors.New("nil internal warn log writer")
+		}
+		// Normal log content.
 		lw.mu.Lock()
-		lr := &logReader{r: io.NopCloser(bytes.NewReader(lw.buf.Bytes()))}
-		lr.size = int64(lw.buf.Len())
+		lwReader := bytes.NewReader(lw.buf.Bytes())
+		lwSize := lw.buf.Len()
 		lw.mu.Unlock()
+		// Warn log content.
+		wlw.mu.Lock()
+		wlwReader := bytes.NewReader(wlw.buf.Bytes())
+		wlwSize := wlw.buf.Len()
+		wlw.mu.Unlock()
+		reader := io.MultiReader(lwReader, bytes.NewReader([]byte(logSeparator)), wlwReader)
+		lr := &logReader{r: io.NopCloser(reader)}
+		lr.size = int64(lwSize + wlwSize)
 		if lr.size == 0 {
 			return nil, errors.New("internal log is empty")
 		}
