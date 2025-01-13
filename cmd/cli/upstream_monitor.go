@@ -60,6 +60,14 @@ func (um *upstreamMonitor) isDown(upstream string) bool {
 	return um.down[upstream]
 }
 
+// isChecking reports whether the given upstream is being checked.
+func (um *upstreamMonitor) isChecking(upstream string) bool {
+	um.mu.Lock()
+	defer um.mu.Unlock()
+
+	return um.checking[upstream]
+}
+
 // reset marks an upstream as up and set failed queries counter to zero.
 func (um *upstreamMonitor) reset(upstream string) {
 	um.mu.Lock()
@@ -86,9 +94,10 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 		p.um.mu.Unlock()
 	}()
 
-	if uc.Type == ctrld.ResolverTypeOS {
-		ns := ctrld.InitializeOsResolver()
-		mainLog.Load().Debug().Msgf("re-initializing OS resolver with nameservers: %v", ns)
+	isOsResolver := uc.Type == ctrld.ResolverTypeOS
+	if isOsResolver {
+		p.resetDNS()
+		defer p.setDNS()
 	}
 	resolver, err := ctrld.NewResolver(uc)
 	if err != nil {
@@ -105,12 +114,16 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		uc.ReBootstrap()
+		if isOsResolver {
+			ctrld.InitializeOsResolver()
+		}
 		_, err := resolver.Resolve(ctx, msg)
 		return err
 	}
+	mainLog.Load().Warn().Msgf("upstream %q is offline", uc.Endpoint)
 	for {
 		if err := check(); err == nil {
-			mainLog.Load().Debug().Msgf("upstream %q is online", uc.Endpoint)
+			mainLog.Load().Warn().Msgf("upstream %q is online", uc.Endpoint)
 			p.um.reset(upstream)
 			if p.leakingQuery.CompareAndSwap(true, false) {
 				p.leakingQueryMu.Lock()
@@ -120,7 +133,7 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 			}
 			return
 		} else {
-			mainLog.Load().Debug().Msgf("upstream %q is offline: %v", uc.Endpoint, err)
+			mainLog.Load().Debug().Msgf("checked upstream %q failed: %v", uc.Endpoint, err)
 		}
 		time.Sleep(checkUpstreamBackoffSleep)
 	}

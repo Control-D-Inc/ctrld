@@ -552,7 +552,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			continue
 		}
 		if p.um.isDown(upstreams[n]) {
-			ctrld.Log(ctx, mainLog.Load().Warn(), "%s is down", upstreams[n])
+			ctrld.Log(ctx, mainLog.Load().Debug(), "%s is down", upstreams[n])
 			continue
 		}
 		answer := resolve(n, upstreamConfig, req.msg)
