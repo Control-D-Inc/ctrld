@@ -205,7 +205,7 @@ type ServiceConfig struct {
 	CacheFlushDomains       []string       `mapstructure:"cache_flush_domains" toml:"cache_flush_domains" validate:"max=256"`
 	MaxConcurrentRequests   *int           `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
 	DHCPLeaseFile           string         `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
-	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
+	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp kea-dhcp4"`
 	DiscoverMDNS            *bool          `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
 	DiscoverARP             *bool          `mapstructure:"discover_arp" toml:"discover_arp,omitempty"`
 	DiscoverDHCP            *bool          `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`

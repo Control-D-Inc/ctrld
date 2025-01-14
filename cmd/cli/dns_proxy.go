@@ -106,11 +106,18 @@ func (p *prog) serveDNS(listenerNum string) error {
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
-		if domain == selfCheckInternalTestDomain {
+		switch {
+		case domain == "":
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeFormatError)
+			_ = w.WriteMsg(answer)
+			return
+		case domain == selfCheckInternalTestDomain:
 			answer := resolveInternalDomainTestQuery(ctx, domain, m)
 			_ = w.WriteMsg(answer)
 			return
 		}
+
 		if _, ok := p.cacheFlushDomainsMap[domain]; ok && p.cache != nil {
 			p.cache.Purge()
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received query %q, local cache is purged", domain)
@@ -445,6 +452,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 	} else {
 		switch {
+		case isSrvLookup(req.msg):
+			upstreams = []string{upstreamOS}
+			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+			ctx = ctrld.LanQueryCtx(ctx)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "SRV record lookup, using upstreams: %v", upstreams)
 		case isPrivatePtrLookup(req.msg):
 			isLanOrPtrQuery = true
 			if answer := p.proxyPrivatePtrLookup(ctx, req.msg); answer != nil {
@@ -452,7 +464,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				res.clientInfo = true
 				return res
 			}
-			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForPtr(upstreams, upstreamConfigs)
+			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
 		case isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
@@ -461,7 +474,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				res.clientInfo = true
 				return res
 			}
-			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			upstreams = []string{upstreamOS}
+			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "lan hostname lookup, using upstreams: %v", upstreams)
 		default:
 			ctrld.Log(ctx, mainLog.Load().Debug(), "no explicit policy matched, using default routing -> %v", upstreams)
@@ -537,7 +552,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			continue
 		}
 		if p.um.isDown(upstreams[n]) {
-			ctrld.Log(ctx, mainLog.Load().Warn(), "%s is down", upstreams[n])
+			ctrld.Log(ctx, mainLog.Load().Debug(), "%s is down", upstreams[n])
 			continue
 		}
 		answer := resolve(n, upstreamConfig, req.msg)
@@ -587,7 +602,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		return res
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
-	if cdUID != "" && p.leakOnUpstreamFailure() {
+	if p.leakOnUpstreamFailure() {
 		p.leakingQueryMu.Lock()
 		if !p.leakingQueryWasRun {
 			p.leakingQueryWasRun = true
@@ -601,7 +616,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	return res
 }
 
-func (p *prog) upstreamsAndUpstreamConfigForLanAndPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
+func (p *prog) upstreamsAndUpstreamConfigForPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
 	if len(p.localUpstreams) > 0 {
 		tmp := make([]string, 0, len(p.localUpstreams)+len(upstreams))
 		tmp = append(tmp, p.localUpstreams...)
@@ -1056,7 +1071,16 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	name := strings.TrimSuffix(q.Name, ".")
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
-		strings.HasSuffix(name, ".lan")
+		strings.HasSuffix(name, ".lan") ||
+		strings.HasSuffix(name, ".local")
+}
+
+// isSrvLookup reports whether DNS message is a SRV query.
+func isSrvLookup(m *dns.Msg) bool {
+	if m == nil || len(m.Question) == 0 {
+		return false
+	}
+	return m.Question[0].Qtype == dns.TypeSRV
 }
 
 // isWanClient reports whether the input is a WAN address.

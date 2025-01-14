@@ -13,3 +13,6 @@ func hasElevatedPrivilege() (bool, error) {
 func openLogFile(path string, flags int) (*os.File, error) {
 	return os.OpenFile(path, flags, os.FileMode(0o600))
 }
+
+// hasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.
+func hasLocalDnsServerRunning() bool { return false }

@@ -84,21 +84,28 @@ type prog struct {
 	dnsWg                sync.WaitGroup
 	dnsWatcherClosedOnce sync.Once
 	dnsWatcherStopCh     chan struct{}
+	rc                   *controld.ResolverConfig
 
-	cfg                  *ctrld.Config
-	localUpstreams       []string
-	ptrNameservers       []string
-	appCallback          *AppCallback
-	cache                dnscache.Cacher
-	cacheFlushDomainsMap map[string]struct{}
-	sema                 semaphore
-	ciTable              *clientinfo.Table
-	um                   *upstreamMonitor
-	router               router.Router
-	ptrLoopGuard         *loopGuard
-	lanLoopGuard         *loopGuard
-	metricsQueryStats    atomic.Bool
-	queryFromSelfMap     sync.Map
+	cfg                       *ctrld.Config
+	localUpstreams            []string
+	ptrNameservers            []string
+	appCallback               *AppCallback
+	cache                     dnscache.Cacher
+	cacheFlushDomainsMap      map[string]struct{}
+	sema                      semaphore
+	ciTable                   *clientinfo.Table
+	um                        *upstreamMonitor
+	router                    router.Router
+	ptrLoopGuard              *loopGuard
+	lanLoopGuard              *loopGuard
+	metricsQueryStats         atomic.Bool
+	queryFromSelfMap          sync.Map
+	initInternalLogWriterOnce sync.Once
+	internalLogWriter         *logWriter
+	internalWarnLogWriter     *logWriter
+	internalLogSent           time.Time
+	runningIface              string
+	requiredMultiNICsConfig   bool
 
 	selfUninstallMu       sync.Mutex
 	refusedQueryCount     int
@@ -162,11 +169,13 @@ func (p *prog) runWait() {
 
 		if newCfg == nil {
 			newCfg = &ctrld.Config{}
+			confFile := v.ConfigFileUsed()
 			v := viper.NewWithOptions(viper.KeyDelimiter("::"))
 			ctrld.InitConfig(v, "ctrld")
 			if configPath != "" {
-				v.SetConfigFile(configPath)
+				confFile = configPath
 			}
+			v.SetConfigFile(confFile)
 			if err := v.ReadInConfig(); err != nil {
 				logger.Err(err).Msg("could not read new config")
 				waitOldRunDone()
@@ -178,10 +187,14 @@ func (p *prog) runWait() {
 				continue
 			}
 			if cdUID != "" {
-				if err := processCDFlags(newCfg); err != nil {
+				if rc, err := processCDFlags(newCfg); err != nil {
 					logger.Err(err).Msg("could not fetch ControlD config")
 					waitOldRunDone()
 					continue
+				} else {
+					p.mu.Lock()
+					p.rc = rc
+					p.mu.Unlock()
 				}
 			}
 		}
@@ -233,6 +246,11 @@ func (p *prog) runWait() {
 }
 
 func (p *prog) preRun() {
+	if iface == "auto" {
+		iface = defaultIfaceName()
+		p.requiredMultiNICsConfig = requiredMultiNICsConfig()
+	}
+	p.runningIface = iface
 	if runtime.GOOS == "darwin" {
 		p.onStopped = append(p.onStopped, func() {
 			if !service.Interactive() {
@@ -288,7 +306,24 @@ func (p *prog) apiConfigReload() {
 			cdDeactivationPin.Store(defaultDeactivationPin)
 		}
 
-		if resolverConfig.Ctrld.CustomConfig == "" {
+		p.mu.Lock()
+		rc := p.rc
+		p.rc = resolverConfig
+		p.mu.Unlock()
+		noCustomConfig := resolverConfig.Ctrld.CustomConfig == ""
+		noExcludeListChanged := true
+		if rc != nil {
+			slices.Sort(rc.Exclude)
+			slices.Sort(resolverConfig.Exclude)
+			noExcludeListChanged = slices.Equal(rc.Exclude, resolverConfig.Exclude)
+		}
+		if noCustomConfig && noExcludeListChanged {
+			return
+		}
+
+		if noCustomConfig && !noExcludeListChanged {
+			logger.Debug().Msg("exclude list changes detected, reloading...")
+			p.apiReloadCh <- nil
 			return
 		}
 
@@ -511,12 +546,13 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	if !reload {
 		// Stop writing log to unix socket.
 		consoleWriter.Out = os.Stdout
-		initLoggingWithBackup(false)
+		logWriters := initLoggingWithBackup(false)
 		if p.logConn != nil {
 			_ = p.logConn.Close()
 		}
 		go p.apiConfigReload()
 		p.postRun()
+		p.initInternalLogging(logWriters)
 	}
 	wg.Wait()
 }
@@ -579,25 +615,18 @@ func (p *prog) setDNS() {
 	if cfg.Listener == nil {
 		return
 	}
-	if iface == "" {
+	if p.runningIface == "" {
 		return
 	}
-	runningIface := iface
+
 	// allIfaces tracks whether we should set DNS for all physical interfaces.
-	allIfaces := false
-	if runningIface == "auto" {
-		runningIface = defaultIfaceName()
-		// If runningIface is "auto", it means user does not specify "--iface" flag.
-		// In this case, ctrld has to set DNS for all physical interfaces, so
-		// thing will still work when user switch from one to the other.
-		allIfaces = requiredMultiNICsConfig()
-	}
+	allIfaces := p.requiredMultiNICsConfig
 	lc := cfg.FirstListener()
 	if lc == nil {
 		return
 	}
-	logger := mainLog.Load().With().Str("iface", runningIface).Logger()
-	netIface, err := netInterface(runningIface)
+	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
+	netIface, err := netInterface(p.runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
@@ -700,7 +729,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 			mainLog.Load().Debug().Msg("stop dns watchdog")
 			return
 		case <-ticker.C:
-			if p.leakingQuery.Load() {
+			if p.leakingQuery.Load() || p.um.isChecking(upstreamOS) {
 				return
 			}
 			if dnsChanged(iface, ns) {
@@ -726,18 +755,13 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 }
 
 func (p *prog) resetDNS() {
-	if iface == "" {
+	if p.runningIface == "" {
 		return
 	}
-	runningIface := iface
-	allIfaces := false
-	if runningIface == "auto" {
-		runningIface = defaultIfaceName()
-		// See corresponding comments in (*prog).setDNS function.
-		allIfaces = requiredMultiNICsConfig()
-	}
-	logger := mainLog.Load().With().Str("iface", runningIface).Logger()
-	netIface, err := netInterface(runningIface)
+	// See corresponding comments in (*prog).setDNS function.
+	allIfaces := p.requiredMultiNICsConfig
+	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
+	netIface, err := netInterface(p.runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
@@ -1044,7 +1068,7 @@ func dnsChanged(iface *net.Interface, nameservers []string) bool {
 
 // selfUninstallCheck checks if the error dues to controld.InvalidConfigCode, perform self-uninstall then.
 func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
-	var uer *controld.UtilityErrorResponse
+	var uer *controld.ErrorResponse
 	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		p.stopDnsWatchers()
 

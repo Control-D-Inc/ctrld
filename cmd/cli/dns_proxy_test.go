@@ -75,6 +75,7 @@ func Test_canonicalName(t *testing.T) {
 
 func Test_prog_upstreamFor(t *testing.T) {
 	cfg := testhelper.SampleConfig(t)
+	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(false)
 	p := &prog{cfg: cfg}
 	p.um = newUpstreamMonitor(p.cfg)
 	p.lanLoopGuard = newLoopGuard()
@@ -365,6 +366,9 @@ func Test_isLanHostnameQuery(t *testing.T) {
 		{"A not LAN", newDnsMsgWithHostname("example.com", dns.TypeA), false},
 		{"AAAA not LAN", newDnsMsgWithHostname("example.com", dns.TypeAAAA), false},
 		{"Not A or AAAA", newDnsMsgWithHostname("foo", dns.TypeTXT), false},
+		{".domain", newDnsMsgWithHostname("foo.domain", dns.TypeA), true},
+		{".lan", newDnsMsgWithHostname("foo.lan", dns.TypeA), true},
+		{".local", newDnsMsgWithHostname("foo.local", dns.TypeA), true},
 	}
 	for _, tc := range tests {
 		tc := tc
@@ -409,6 +413,26 @@ func Test_isPrivatePtrLookup(t *testing.T) {
 			t.Parallel()
 			if got := isPrivatePtrLookup(tc.msg); tc.isPrivatePtrLookup != got {
 				t.Errorf("unexpected result, want: %v, got: %v", tc.isPrivatePtrLookup, got)
+			}
+		})
+	}
+}
+
+func Test_isSrvLookup(t *testing.T) {
+	tests := []struct {
+		name        string
+		msg         *dns.Msg
+		isSrvLookup bool
+	}{
+		{"SRV", newDnsMsgWithHostname("foo", dns.TypeSRV), true},
+		{"Not SRV", newDnsMsgWithHostname("foo", dns.TypeNone), false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSrvLookup(tc.msg); tc.isSrvLookup != got {
+				t.Errorf("unexpected result, want: %v, got: %v", tc.isSrvLookup, got)
 			}
 		})
 	}

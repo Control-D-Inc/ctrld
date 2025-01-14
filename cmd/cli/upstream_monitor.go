@@ -60,6 +60,14 @@ func (um *upstreamMonitor) isDown(upstream string) bool {
 	return um.down[upstream]
 }
 
+// isChecking reports whether the given upstream is being checked.
+func (um *upstreamMonitor) isChecking(upstream string) bool {
+	um.mu.Lock()
+	defer um.mu.Unlock()
+
+	return um.checking[upstream]
+}
+
 // reset marks an upstream as up and set failed queries counter to zero.
 func (um *upstreamMonitor) reset(upstream string) {
 	um.mu.Lock()
@@ -86,6 +94,11 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 		p.um.mu.Unlock()
 	}()
 
+	isOsResolver := uc.Type == ctrld.ResolverTypeOS
+	if isOsResolver {
+		p.resetDNS()
+		defer p.setDNS()
+	}
 	resolver, err := ctrld.NewResolver(uc)
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not check upstream")
@@ -93,17 +106,24 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 	}
 	msg := new(dns.Msg)
 	msg.SetQuestion(".", dns.TypeNS)
-
+	timeout := 1000 * time.Millisecond
+	if uc.Timeout > 0 {
+		timeout = time.Duration(uc.Timeout) * time.Millisecond
+	}
 	check := func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		uc.ReBootstrap()
+		if isOsResolver {
+			ctrld.InitializeOsResolver()
+		}
 		_, err := resolver.Resolve(ctx, msg)
 		return err
 	}
+	mainLog.Load().Warn().Msgf("upstream %q is offline", uc.Endpoint)
 	for {
 		if err := check(); err == nil {
-			mainLog.Load().Debug().Msgf("upstream %q is online", uc.Endpoint)
+			mainLog.Load().Warn().Msgf("upstream %q is online", uc.Endpoint)
 			p.um.reset(upstream)
 			if p.leakingQuery.CompareAndSwap(true, false) {
 				p.leakingQueryMu.Lock()
@@ -112,6 +132,8 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 				mainLog.Load().Warn().Msg("stop leaking query")
 			}
 			return
+		} else {
+			mainLog.Load().Debug().Msgf("checked upstream %q failed: %v", uc.Endpoint, err)
 		}
 		time.Sleep(checkUpstreamBackoffSleep)
 	}
