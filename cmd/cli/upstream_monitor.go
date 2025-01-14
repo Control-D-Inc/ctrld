@@ -120,10 +120,14 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 		_, err := resolver.Resolve(ctx, msg)
 		return err
 	}
-	mainLog.Load().Warn().Msgf("upstream %q is offline", uc.Endpoint)
+	endpoint := uc.Endpoint
+	if endpoint == "" {
+		endpoint = uc.Name
+	}
+	mainLog.Load().Warn().Msgf("upstream %q is offline", endpoint)
 	for {
 		if err := check(); err == nil {
-			mainLog.Load().Warn().Msgf("upstream %q is online", uc.Endpoint)
+			mainLog.Load().Warn().Msgf("upstream %q is online", endpoint)
 			p.um.reset(upstream)
 			if p.leakingQuery.CompareAndSwap(true, false) {
 				p.leakingQueryMu.Lock()
@@ -133,7 +137,7 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 			}
 			return
 		} else {
-			mainLog.Load().Debug().Msgf("checked upstream %q failed: %v", uc.Endpoint, err)
+			mainLog.Load().Debug().Msgf("checked upstream %q failed: %v", endpoint, err)
 		}
 		time.Sleep(checkUpstreamBackoffSleep)
 	}
