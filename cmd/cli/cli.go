@@ -1767,6 +1767,7 @@ func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, currentRunn
 		if currentRunningIface != "" {
 			iface = currentRunningIface
 		}
+		p.runningIface = iface
 		if isCtrldInstalled {
 			mainLog.Load().Debug().Msg("restore system DNS settings")
 			if status, _ := s.Status(); status == service.StatusRunning {

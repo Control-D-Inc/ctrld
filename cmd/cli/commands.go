@@ -522,6 +522,11 @@ func initStopCmd() *cobra.Command {
 				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
+			p.runningIface = iface
+			if ri := runningIface(s); ri != "" {
+				p.runningIface = ri
+			}
+
 			initLogging()
 			if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)
@@ -771,6 +776,10 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			}
 			if iface == "" {
 				iface = "auto"
+			}
+			p.runningIface = iface
+			if ri := runningIface(s); ri != "" {
+				p.runningIface = ri
 			}
 			if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)
