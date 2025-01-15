@@ -37,6 +37,9 @@ func initLogCmd() *cobra.Command {
 		Use:   "send",
 		Short: "Send runtime debug logs to ControlD",
 		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			checkHasElevatedPrivilege()
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			dir, err := socketDir()
 			if err != nil {
@@ -74,6 +77,9 @@ func initLogCmd() *cobra.Command {
 		Use:   "view",
 		Short: "View current runtime debug logs",
 		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			checkHasElevatedPrivilege()
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			dir, err := socketDir()
 			if err != nil {
