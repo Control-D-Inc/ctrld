@@ -197,7 +197,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			isCtrldInstalled := !errors.Is(err, service.ErrNotInstalled)
 
 			// Get current running iface, if any.
-			var currentIface string
+			var currentIface *ifaceResponse
 
 			// If pin code was set, do not allow running start command.
 			if isCtrldRunning {
@@ -522,9 +522,10 @@ func initStopCmd() *cobra.Command {
 				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
-			p.runningIface = iface
-			if ri := runningIface(s); ri != "" {
-				p.runningIface = ri
+			p.preRun()
+			if ir := runningIface(s); ir != nil {
+				p.runningIface = ir.Name
+				p.requiredMultiNICsConfig = ir.All
 			}
 
 			initLogging()
@@ -610,7 +611,9 @@ func initRestartCmd() *cobra.Command {
 				doValidateCdRemoteConfig(cdUID)
 			}
 
-			iface = runningIface(s)
+			if ir := runningIface(s); ir != nil {
+				iface = ir.Name
+			}
 			tasks := []task{
 				{s.Stop, false},
 				{s.Start, true},
@@ -777,9 +780,10 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			if iface == "" {
 				iface = "auto"
 			}
-			p.runningIface = iface
-			if ri := runningIface(s); ri != "" {
-				p.runningIface = ri
+			p.preRun()
+			if ir := runningIface(s); ir != nil {
+				p.runningIface = ir.Name
+				p.requiredMultiNICsConfig = ir.All
 			}
 			if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)

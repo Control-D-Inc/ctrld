@@ -31,6 +31,11 @@ const (
 	sendLogsPath     = "/logs/send"
 )
 
+type ifaceResponse struct {
+	Name string `json:"name"`
+	All  bool   `json:"all"`
+}
+
 type controlServer struct {
 	server *http.Server
 	mux    *http.ServeMux
@@ -205,15 +210,20 @@ func (p *prog) registerControlServerHandler() {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	p.cs.register(ifacePath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		res := &ifaceResponse{Name: iface}
 		// p.setDNS is only called when running as a service
 		if !service.Interactive() {
 			<-p.csSetDnsDone
 			if p.csSetDnsOk {
-				w.Write([]byte(iface))
-				return
+				res.Name = p.runningIface
+				res.All = p.requiredMultiNICsConfig
 			}
 		}
-		w.WriteHeader(http.StatusBadRequest)
+		if err := json.NewEncoder(w).Encode(res); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("could not marshal iface data: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}))
 	p.cs.register(viewLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		lr, err := p.logReader()

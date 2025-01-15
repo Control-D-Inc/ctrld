@@ -1723,20 +1723,22 @@ func upgradeUrl(baseUrl string) string {
 }
 
 // runningIface returns the value of the iface variable used by ctrld process which is running.
-func runningIface(s service.Service) string {
+func runningIface(s service.Service) *ifaceResponse {
 	if sockDir, err := socketDir(); err == nil {
 		if cc := newSocketControlClient(context.TODO(), s, sockDir); cc != nil {
 			resp, err := cc.post(ifacePath, nil)
 			if err != nil {
-				return ""
+				return nil
 			}
 			defer resp.Body.Close()
-			if buf, _ := io.ReadAll(resp.Body); len(buf) > 0 {
-				return string(buf)
+			res := &ifaceResponse{}
+			if err := json.NewDecoder(resp.Body).Decode(res); err != nil {
+				return nil
 			}
+			return res
 		}
 	}
-	return ""
+	return nil
 }
 
 // resetDnsNoLog performs resetting DNS with logging disable.
@@ -1754,7 +1756,7 @@ func resetDnsNoLog(p *prog) {
 }
 
 // resetDnsTask returns a task which perform reset DNS operation.
-func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, currentRunningIface string) task {
+func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, ir *ifaceResponse) task {
 	return task{func() error {
 		if iface == "" {
 			return nil
@@ -1764,8 +1766,10 @@ func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, currentRunn
 		// process to reset what setDNS has done properly.
 		oldIface := iface
 		iface = "auto"
-		if currentRunningIface != "" {
-			iface = currentRunningIface
+		p.requiredMultiNICsConfig = requiredMultiNICsConfig()
+		if ir != nil {
+			iface = ir.Name
+			p.requiredMultiNICsConfig = ir.All
 		}
 		p.runningIface = iface
 		if isCtrldInstalled {
