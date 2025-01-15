@@ -541,6 +541,16 @@ func initStopCmd() *cobra.Command {
 			if doTasks([]task{{s.Stop, true}}) {
 				p.router.Cleanup()
 				p.resetDNS()
+
+				// restore DNS settings
+				if netIface, err := netInterface(p.runningIface); err == nil {
+					if err := restoreDNS(netIface); err != nil {
+						mainLog.Load().Error().Err(err).Msg("could not restore DNS on interface")
+					} else {
+						mainLog.Load().Debug().Msg("Restored DNS on interface successfully")
+					}
+				}
+
 				if router.WaitProcessExited() {
 					ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 					defer cancel()

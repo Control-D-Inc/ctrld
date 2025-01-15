@@ -1029,6 +1029,16 @@ func uninstall(p *prog, s service.Service) {
 			return
 		}
 		p.resetDNS()
+
+		// if present restore the original DNS settings
+		if netIface, err := netInterface(p.runningIface); err == nil {
+			if err := restoreDNS(netIface); err != nil {
+				mainLog.Load().Error().Err(err).Msg("could not restore DNS on interface")
+			} else {
+				mainLog.Load().Debug().Msg("Restored DNS on interface successfully")
+			}
+		}
+
 		if router.Name() != "" {
 			mainLog.Load().Debug().Msg("Router cleanup")
 		}

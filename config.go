@@ -886,3 +886,12 @@ func upstreamUID() string {
 		return hex.EncodeToString(b)
 	}
 }
+
+// String returns a string representation of the UpstreamConfig for logging.
+func (uc *UpstreamConfig) String() string {
+	if uc == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("{name: %q, type: %q, endpoint: %q, bootstrap_ip: %q, domain: %q, ip_stack: %q}",
+		uc.Name, uc.Type, uc.Endpoint, uc.BootstrapIP, uc.Domain, uc.IPStack)
+}

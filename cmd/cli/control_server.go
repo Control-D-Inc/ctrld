@@ -27,8 +27,8 @@ const (
 	deactivationPath = "/deactivation"
 	cdPath           = "/cd"
 	ifacePath        = "/iface"
-	viewLogsPath     = "/logs/view"
-	sendLogsPath     = "/logs/send"
+	viewLogsPath     = "/log/view"
+	sendLogsPath     = "/log/send"
 )
 
 type ifaceResponse struct {

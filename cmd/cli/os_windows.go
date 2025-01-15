@@ -130,8 +130,12 @@ func resetDNS(iface *net.Interface) error {
 	if err := luid.SetDNS(windows.AF_INET6, nil, nil); err != nil {
 		return fmt.Errorf("could not reset DNS ipv6: %w", err)
 	}
+	return nil
+}
 
-	// If there's static DNS saved, restoring it.
+// restoreDNS restores the DNS settings of the given interface.
+// this should only be executed upon turning off the ctrld service.
+func restoreDNS(iface *net.Interface) (err error) {
 	if nss := savedStaticNameservers(iface); len(nss) > 0 {
 		v4ns := make([]string, 0, 2)
 		v6ns := make([]string, 0, 2)
@@ -148,12 +152,14 @@ func resetDNS(iface *net.Interface) error {
 				continue
 			}
 			mainLog.Load().Debug().Msgf("setting static DNS for interface %q", iface.Name)
-			if err := setDNS(iface, ns); err != nil {
+			err = setDNS(iface, ns)
+
+			if err != nil {
 				return err
 			}
 		}
 	}
-	return nil
+	return err
 }
 
 func currentDNS(iface *net.Interface) []string {

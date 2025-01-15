@@ -626,9 +626,31 @@ func (p *prog) setDNS() {
 		return
 	}
 	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
-	netIface, err := netInterface(p.runningIface)
-	if err != nil {
-		logger.Error().Err(err).Msg("could not get interface")
+
+	const maxDNSRetryAttempts = 3
+	const retryDelay = 1 * time.Second
+	var netIface *net.Interface
+	var err error
+	for attempt := 1; attempt <= maxDNSRetryAttempts; attempt++ {
+		netIface, err = netInterface(p.runningIface)
+		if err == nil {
+			break
+		}
+		if attempt < maxDNSRetryAttempts {
+			// Try to find a different working interface
+			newIface := findWorkingInterface(p.runningIface)
+			if newIface != p.runningIface {
+				p.runningIface = newIface
+				logger = mainLog.Load().With().Str("iface", p.runningIface).Logger()
+				logger.Info().Msg("switched to new interface")
+				continue
+			}
+
+			logger.Warn().Err(err).Int("attempt", attempt).Msg("could not get interface, retrying...")
+			time.Sleep(retryDelay)
+			continue
+		}
+		logger.Error().Err(err).Msg("could not get interface after all attempts")
 		return
 	}
 	if err := setupNetworkManager(); err != nil {
@@ -766,6 +788,7 @@ func (p *prog) resetDNS() {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
 	}
+
 	if err := restoreNetworkManager(); err != nil {
 		logger.Error().Err(err).Msg("could not restore NetworkManager")
 		return
@@ -779,6 +802,131 @@ func (p *prog) resetDNS() {
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDnsIgnoreUnusableInterface)
 	}
+}
+
+// findWorkingInterface looks for a network interface with a valid IP configuration
+func findWorkingInterface(currentIface string) string {
+	// Helper to check if IP is valid (not link-local)
+	isValidIP := func(ip net.IP) bool {
+		return ip != nil &&
+			!ip.IsLinkLocalUnicast() &&
+			!ip.IsLinkLocalMulticast() &&
+			!ip.IsLoopback() &&
+			!ip.IsUnspecified()
+	}
+
+	// Helper to check if interface has valid IP configuration
+	hasValidIPConfig := func(iface *net.Interface) bool {
+		if iface == nil || iface.Flags&net.FlagUp == 0 {
+			return false
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			mainLog.Load().Debug().
+				Str("interface", iface.Name).
+				Err(err).
+				Msg("failed to get interface addresses")
+			return false
+		}
+
+		for _, addr := range addrs {
+			// Check for IP network
+			if ipNet, ok := addr.(*net.IPNet); ok {
+				if isValidIP(ipNet.IP) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// Get default route interface
+	defaultRoute, err := netmon.DefaultRoute()
+	if err != nil {
+		mainLog.Load().Debug().
+			Err(err).
+			Msg("failed to get default route")
+	} else {
+		mainLog.Load().Debug().
+			Str("default_route_iface", defaultRoute.InterfaceName).
+			Msg("found default route")
+	}
+
+	// Get all interfaces
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		mainLog.Load().Error().Err(err).Msg("failed to list network interfaces")
+		return currentIface // Return current interface as fallback
+	}
+
+	var firstWorkingIface string
+	var currentIfaceValid bool
+
+	// Single pass through interfaces
+	for _, iface := range ifaces {
+		// Must be physical (has MAC address)
+		if len(iface.HardwareAddr) == 0 {
+			continue
+		}
+		// Skip interfaces that are:
+		// - Loopback
+		// - Not up
+		// - Point-to-point (like VPN tunnels)
+		if iface.Flags&net.FlagLoopback != 0 ||
+			iface.Flags&net.FlagUp == 0 ||
+			iface.Flags&net.FlagPointToPoint != 0 {
+			continue
+		}
+
+		if !hasValidIPConfig(&iface) {
+			continue
+		}
+
+		// Found working physical interface
+		if err == nil && defaultRoute.InterfaceName == iface.Name {
+			// Found interface with default route - use it immediately
+			mainLog.Load().Info().
+				Str("old_iface", currentIface).
+				Str("new_iface", iface.Name).
+				Msg("switching to interface with default route")
+			return iface.Name
+		}
+
+		// Keep track of first working interface as fallback
+		if firstWorkingIface == "" {
+			firstWorkingIface = iface.Name
+		}
+
+		// Check if this is our current interface
+		if iface.Name == currentIface {
+			currentIfaceValid = true
+		}
+	}
+
+	// Return interfaces in order of preference:
+	// 1. Current interface if it's still valid
+	if currentIfaceValid {
+		mainLog.Load().Debug().
+			Str("interface", currentIface).
+			Msg("keeping current interface")
+		return currentIface
+	}
+
+	// 2. First working interface found
+	if firstWorkingIface != "" {
+		mainLog.Load().Info().
+			Str("old_iface", currentIface).
+			Str("new_iface", firstWorkingIface).
+			Msg("switching to first working physical interface")
+		return firstWorkingIface
+	}
+
+	// 3. Fall back to current interface if nothing else works
+	mainLog.Load().Warn().
+		Str("current_iface", currentIface).
+		Msg("no working physical interface found, keeping current")
+	return currentIface
 }
 
 // leakOnUpstreamFailure reports whether ctrld should leak query to OS resolver when failed to connect all upstreams.
@@ -1049,7 +1197,16 @@ func savedStaticDnsSettingsFilePath(iface *net.Interface) string {
 func savedStaticNameservers(iface *net.Interface) []string {
 	file := savedStaticDnsSettingsFilePath(iface)
 	if data, _ := os.ReadFile(file); len(data) > 0 {
-		return strings.Split(string(data), ",")
+		saveValues := strings.Split(string(data), ",")
+		returnValues := []string{}
+		// check each one, if its in loopback range, remove it
+		for _, v := range saveValues {
+			if net.ParseIP(v).IsLoopback() {
+				continue
+			}
+			returnValues = append(returnValues, v)
+		}
+		return returnValues
 	}
 	return nil
 }

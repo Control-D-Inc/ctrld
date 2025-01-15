@@ -147,16 +147,82 @@ var testNameServerFn = testNameserver
 
 // testPlainDnsNameserver sends a test query to DNS nameserver to check if the server is available.
 func testNameserver(addr string) bool {
-	msg := new(dns.Msg)
-	msg.SetQuestion("controld.com.", dns.TypeNS)
-	client := new(dns.Client)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, _, err := client.ExchangeContext(ctx, msg, net.JoinHostPort(addr, "53"))
-	if err != nil {
-		ProxyLogger.Load().Debug().Err(err).Msgf("failed to connect to OS nameserver: %s", addr)
+	// Skip link-local addresses without scope IDs and deprecated site-local addresses
+	if ip, err := netip.ParseAddr(addr); err == nil {
+		if ip.Is6() {
+			if ip.IsLinkLocalUnicast() && !strings.Contains(addr, "%") {
+				ProxyLogger.Load().Debug().
+					Str("nameserver", addr).
+					Msg("skipping link-local IPv6 address without scope ID")
+				return false
+			}
+			// Skip deprecated site-local addresses (fec0::/10)
+			if strings.HasPrefix(ip.String(), "fec0:") {
+				ProxyLogger.Load().Debug().
+					Str("nameserver", addr).
+					Msg("skipping deprecated site-local IPv6 address")
+				return false
+			}
+		}
 	}
-	return err == nil
+
+	ProxyLogger.Load().Debug().
+		Str("input_addr", addr).
+		Msg("testing nameserver")
+
+	// Handle both IPv4 and IPv6 addresses
+	serverAddr := addr
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port in address, add default port 53
+		serverAddr = net.JoinHostPort(addr, "53")
+	} else if port == "" {
+		// Has split markers but empty port
+		serverAddr = net.JoinHostPort(host, "53")
+	}
+
+	ProxyLogger.Load().Debug().
+		Str("server_addr", serverAddr).
+		Msg("using server address")
+
+	// Test domains that are likely to exist and respond quickly
+	testDomains := []struct {
+		name  string
+		qtype uint16
+	}{
+		{".", dns.TypeNS},            // Root NS query - should always work
+		{"controld.com.", dns.TypeA}, // Fallback to a reliable domain
+		{"google.com.", dns.TypeA},   // Fallback to a reliable domain
+	}
+
+	client := &dns.Client{
+		Timeout: 2 * time.Second,
+		Net:     "udp",
+	}
+
+	// Try each test query until one succeeds
+	for _, test := range testDomains {
+		msg := new(dns.Msg)
+		msg.SetQuestion(test.name, test.qtype)
+		msg.RecursionDesired = true
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		resp, _, err := client.ExchangeContext(ctx, msg, serverAddr)
+		cancel()
+
+		if err == nil && resp != nil {
+			return true
+		}
+
+		ProxyLogger.Load().Error().
+			Err(err).
+			Str("nameserver", serverAddr).
+			Str("test_domain", test.name).
+			Str("query_type", dns.TypeToString[test.qtype]).
+			Msg("DNS availability test failed")
+	}
+
+	return false
 }
 
 // Resolver is the interface that wraps the basic DNS operations.
@@ -222,7 +288,7 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	dnsClient := &dns.Client{Net: "udp"}
+	dnsClient := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
 	ch := make(chan *osResolverResult, numServers)
 	wg := &sync.WaitGroup{}
 	wg.Add(numServers)
@@ -264,11 +330,14 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		case res.answer != nil && res.answer.Rcode == dns.RcodeSuccess:
 			switch {
 			case res.server == controldPublicDnsWithPort:
-				controldSuccessAnswer = res.answer // only use ControlD answer as last one.
+				Log(ctx, ProxyLogger.Load().Debug(), "got ControlD answer from: %s", res.server)
+				controldSuccessAnswer = res.answer
 			case !res.lan && publicServerAnswer == nil:
-				publicServerAnswer = res.answer // use public DNS answer after LAN server..
+				Log(ctx, ProxyLogger.Load().Debug(), "got public answer from: %s", res.server)
+				publicServerAnswer = res.answer
 				publicServer = res.server
 			default:
+				Log(ctx, ProxyLogger.Load().Debug(), "got LAN answer from: %s", res.server)
 				cancel()
 				logAnswer(res.server)
 				return res.answer, nil
@@ -276,6 +345,8 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		case res.answer != nil:
 			nonSuccessAnswer = res.answer
 			nonSuccessServer = res.server
+			Log(ctx, ProxyLogger.Load().Debug(), "got non-success answer from: %s with code: %d",
+				res.server, res.answer.Rcode)
 		}
 		errs = append(errs, res.err)
 	}

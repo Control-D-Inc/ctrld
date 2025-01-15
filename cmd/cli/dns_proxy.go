@@ -542,8 +542,10 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		if upstreamConfig == nil {
 			continue
 		}
+		ctrld.Log(ctx, mainLog.Load().Debug(), "attempting upstream [ %s ] at index: %d, upstream at index: %s", upstreamConfig.String(), n, upstreams[n])
+
 		if p.isLoop(upstreamConfig) {
-			mainLog.Load().Warn().Msgf("dns loop detected, upstream: %q, endpoint: %q", upstreamConfig.Name, upstreamConfig.Endpoint)
+			mainLog.Load().Warn().Msgf("dns loop detected, upstream: %s", upstreamConfig.String())
 			continue
 		}
 		if p.um.isDown(upstreams[n]) {
@@ -929,6 +931,11 @@ func (p *prog) selfUninstallCoolOfPeriod() {
 // performLeakingQuery performs necessary works to leak queries to OS resolver.
 func (p *prog) performLeakingQuery() {
 	mainLog.Load().Warn().Msg("leaking query to OS resolver")
+
+	// Create a context with timeout for the entire operation
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	// Signal dns watchers to stop, so changes made below won't be reverted.
 	p.leakingQuery.Store(true)
 	defer func() {
@@ -936,20 +943,81 @@ func (p *prog) performLeakingQuery() {
 		p.leakingQueryMu.Lock()
 		p.leakingQueryWasRun = false
 		p.leakingQueryMu.Unlock()
+		mainLog.Load().Warn().Msg("stop leaking query")
 	}()
-	// Reset DNS, so queries are forwarded to OS resolver normally.
-	p.resetDNS()
-	// Check remote upstream in background, so ctrld could be back to normal
-	// operation as long as the network is back online.
-	for name, uc := range p.cfg.Upstream {
-		p.checkUpstream(name, uc)
+
+	// Create channels to coordinate operations
+	resetDone := make(chan struct{})
+	checkDone := make(chan struct{})
+
+	// Reset DNS with timeout
+	go func() {
+		defer close(resetDone)
+		mainLog.Load().Debug().Msg("attempting to reset DNS")
+		p.resetDNS()
+		mainLog.Load().Debug().Msg("DNS reset completed")
+	}()
+
+	// Wait for reset with timeout
+	select {
+	case <-resetDone:
+		mainLog.Load().Debug().Msg("DNS reset successful")
+	case <-ctx.Done():
+		mainLog.Load().Error().Msg("DNS reset timed out")
+		return
 	}
-	// After all upstream back, re-initializing OS resolver.
+
+	// Check upstream in background with progress tracking
+	go func() {
+		defer close(checkDone)
+		mainLog.Load().Debug().Msg("starting upstream checks")
+		for name, uc := range p.cfg.Upstream {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				mainLog.Load().Debug().
+					Str("upstream", name).
+					Msg("checking upstream")
+				p.checkUpstream(name, uc)
+			}
+		}
+		mainLog.Load().Debug().Msg("upstream checks completed")
+	}()
+
+	// Wait for upstream checks
+	select {
+	case <-checkDone:
+		mainLog.Load().Debug().Msg("upstream checks successful")
+	case <-ctx.Done():
+		mainLog.Load().Error().Msg("upstream checks timed out")
+		return
+	}
+
+	// Initialize OS resolver with timeout
+	mainLog.Load().Debug().Msg("initializing OS resolver")
 	ns := ctrld.InitializeOsResolver()
 	mainLog.Load().Debug().Msgf("re-initialized OS resolver with nameservers: %v", ns)
-	p.dnsWg.Wait()
+
+	// Wait for DNS operations to complete
+	waitCh := make(chan struct{})
+	go func() {
+		p.dnsWg.Wait()
+		close(waitCh)
+	}()
+
+	select {
+	case <-waitCh:
+		mainLog.Load().Debug().Msg("DNS operations completed")
+	case <-ctx.Done():
+		mainLog.Load().Error().Msg("DNS operations timed out")
+		return
+	}
+
+	// Set DNS with timeout
+	mainLog.Load().Debug().Msg("setting DNS configuration")
 	p.setDNS()
-	mainLog.Load().Warn().Msg("stop leaking query")
+	mainLog.Load().Debug().Msg("DNS configuration set successfully")
 }
 
 // forceFetchingAPI sends signal to force syncing API config if run in cd mode,
