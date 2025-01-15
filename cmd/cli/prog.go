@@ -729,7 +729,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 			mainLog.Load().Debug().Msg("stop dns watchdog")
 			return
 		case <-ticker.C:
-			if p.leakingQuery.Load() || p.um.isChecking(upstreamOS) {
+			if p.leakingQuery.Load() {
 				return
 			}
 			if dnsChanged(iface, ns) {

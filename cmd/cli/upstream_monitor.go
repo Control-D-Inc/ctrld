@@ -44,6 +44,10 @@ func newUpstreamMonitor(cfg *ctrld.Config) *upstreamMonitor {
 
 // increaseFailureCount increase failed queries count for an upstream by 1.
 func (um *upstreamMonitor) increaseFailureCount(upstream string) {
+	// Do not count "upstream.os", since it must not be down for leaking queries.
+	if upstream == upstreamOS {
+		return
+	}
 	um.mu.Lock()
 	defer um.mu.Unlock()
 
@@ -58,14 +62,6 @@ func (um *upstreamMonitor) isDown(upstream string) bool {
 	defer um.mu.Unlock()
 
 	return um.down[upstream]
-}
-
-// isChecking reports whether the given upstream is being checked.
-func (um *upstreamMonitor) isChecking(upstream string) bool {
-	um.mu.Lock()
-	defer um.mu.Unlock()
-
-	return um.checking[upstream]
 }
 
 // reset marks an upstream as up and set failed queries counter to zero.
@@ -94,11 +90,6 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 		p.um.mu.Unlock()
 	}()
 
-	isOsResolver := uc.Type == ctrld.ResolverTypeOS
-	if isOsResolver {
-		p.resetDNS()
-		defer p.setDNS()
-	}
 	resolver, err := ctrld.NewResolver(uc)
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not check upstream")
@@ -114,9 +105,6 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		uc.ReBootstrap()
-		if isOsResolver {
-			ctrld.InitializeOsResolver()
-		}
 		_, err := resolver.Resolve(ctx, msg)
 		return err
 	}
@@ -129,12 +117,6 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 		if err := check(); err == nil {
 			mainLog.Load().Warn().Msgf("upstream %q is online", endpoint)
 			p.um.reset(upstream)
-			if p.leakingQuery.CompareAndSwap(true, false) {
-				p.leakingQueryMu.Lock()
-				p.leakingQueryWasRun = false
-				p.leakingQueryMu.Unlock()
-				mainLog.Load().Warn().Msg("stop leaking query")
-			}
 			return
 		} else {
 			mainLog.Load().Debug().Msgf("checked upstream %q failed: %v", endpoint, err)

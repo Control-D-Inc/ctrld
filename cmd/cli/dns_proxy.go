@@ -419,12 +419,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
 
 	leaked := false
-	// If ctrld is going to leak query to OS resolver, check remote upstream in background,
-	// so ctrld could be back to normal operation as long as the network is back online.
 	if len(upstreamConfigs) > 0 && p.leakingQuery.Load() {
-		for n, uc := range upstreamConfigs {
-			go p.checkUpstream(upstreams[n], uc)
-		}
 		upstreamConfigs = nil
 		leaked = true
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%v is down, leaking query to OS resolver", upstreams)
@@ -936,11 +931,25 @@ func (p *prog) performLeakingQuery() {
 	mainLog.Load().Warn().Msg("leaking query to OS resolver")
 	// Signal dns watchers to stop, so changes made below won't be reverted.
 	p.leakingQuery.Store(true)
+	defer func() {
+		p.leakingQuery.Store(false)
+		p.leakingQueryMu.Lock()
+		p.leakingQueryWasRun = false
+		p.leakingQueryMu.Unlock()
+	}()
+	// Reset DNS, so queries are forwarded to OS resolver normally.
 	p.resetDNS()
+	// Check remote upstream in background, so ctrld could be back to normal
+	// operation as long as the network is back online.
+	for name, uc := range p.cfg.Upstream {
+		p.checkUpstream(name, uc)
+	}
+	// After all upstream back, re-initializing OS resolver.
 	ns := ctrld.InitializeOsResolver()
 	mainLog.Load().Debug().Msgf("re-initialized OS resolver with nameservers: %v", ns)
 	p.dnsWg.Wait()
 	p.setDNS()
+	mainLog.Load().Warn().Msg("stop leaking query")
 }
 
 // forceFetchingAPI sends signal to force syncing API config if run in cd mode,
