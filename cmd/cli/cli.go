@@ -764,7 +764,7 @@ func netInterface(ifaceName string) (*net.Interface, error) {
 	if iface == nil {
 		return nil, errors.New("interface not found")
 	}
-	if err := patchNetIfaceName(iface); err != nil {
+	if _, err := patchNetIfaceName(iface); err != nil {
 		return nil, err
 	}
 	return iface, err

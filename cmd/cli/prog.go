@@ -1119,7 +1119,7 @@ func canBeLocalUpstream(addr string) bool {
 func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.Interface) error) {
 	validIfacesMap := validInterfacesMap()
 	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
-		// Skip loopback/virtual interface.
+		// Skip loopback/virtual/down interface.
 		if i.IsLoopback() || len(i.HardwareAddr) == 0 {
 			return
 		}
@@ -1128,8 +1128,11 @@ func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.
 			return
 		}
 		netIface := i.Interface
-		if err := patchNetIfaceName(netIface); err != nil {
+		if patched, err := patchNetIfaceName(netIface); err != nil {
 			mainLog.Load().Debug().Err(err).Msg("failed to patch net interface name")
+			return
+		} else if !patched {
+			// The interface is not functional, skipping.
 			return
 		}
 		// Skip excluded interface.

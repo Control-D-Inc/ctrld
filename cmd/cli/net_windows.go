@@ -13,8 +13,8 @@ import (
 	"github.com/microsoft/wmi/pkg/hardware/network/netadapter"
 )
 
-func patchNetIfaceName(iface *net.Interface) error {
-	return nil
+func patchNetIfaceName(iface *net.Interface) (bool, error) {
+	return true, nil
 }
 
 // validInterface reports whether the *net.Interface is a valid one.

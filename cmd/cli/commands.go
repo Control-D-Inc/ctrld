@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,7 +24,6 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"tailscale.com/net/netmon"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
@@ -903,7 +901,7 @@ func initInterfacesCmd() *cobra.Command {
 		Short: "List network interfaces of the host",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			err := netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
+			withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
 				fmt.Printf("Index : %d\n", i.Index)
 				fmt.Printf("Name  : %s\n", i.Name)
 				addrs, _ := i.Addrs()
@@ -914,7 +912,14 @@ func initInterfacesCmd() *cobra.Command {
 					}
 					fmt.Printf("        %v\n", ipaddr)
 				}
-				for i, dns := range currentDNS(i.Interface) {
+				nss, err := currentStaticDNS(i)
+				if err != nil {
+					mainLog.Load().Warn().Err(err).Msg("failed to get DNS")
+				}
+				if len(nss) == 0 {
+					nss = currentDNS(i)
+				}
+				for i, dns := range nss {
 					if i == 0 {
 						fmt.Printf("DNS   : %s\n", dns)
 						continue
@@ -922,10 +927,8 @@ func initInterfacesCmd() *cobra.Command {
 					fmt.Printf("      : %s\n", dns)
 				}
 				println()
+				return nil
 			})
-			if err != nil {
-				mainLog.Load().Error().Msg(err.Error())
-			}
 		},
 	}
 	interfacesCmd := &cobra.Command{
