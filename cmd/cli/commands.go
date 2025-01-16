@@ -220,8 +220,28 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 						if iface == "auto" {
 							iface = defaultIfaceName()
 						}
-						logger := mainLog.Load().With().Str("iface", iface).Logger()
-						logger.Debug().Msg("setting DNS successfully")
+						res := &ifaceResponse{}
+						if err := json.NewDecoder(resp.Body).Decode(res); err != nil {
+							mainLog.Load().Warn().Err(err).Msg("failed to get iface info")
+							return
+						}
+						if res.OK {
+							name := res.Name
+							if iff, err := net.InterfaceByName(name); err == nil {
+								_, _ = patchNetIfaceName(iff)
+								name = iff.Name
+							}
+							logger := mainLog.Load().With().Str("iface", name).Logger()
+							logger.Debug().Msg("setting DNS successfully")
+							if res.All {
+								// Log that DNS is set for other interfaces.
+								withEachPhysicalInterfaces(
+									name,
+									"set DNS",
+									func(i *net.Interface) error { return nil },
+								)
+							}
+						}
 					}
 				}
 			}

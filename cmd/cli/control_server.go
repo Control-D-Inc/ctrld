@@ -34,6 +34,7 @@ const (
 type ifaceResponse struct {
 	Name string `json:"name"`
 	All  bool   `json:"all"`
+	OK   bool   `json:"ok"`
 }
 
 type controlServer struct {
@@ -217,6 +218,7 @@ func (p *prog) registerControlServerHandler() {
 			if p.csSetDnsOk {
 				res.Name = p.runningIface
 				res.All = p.requiredMultiNICsConfig
+				res.OK = true
 			}
 		}
 		if err := json.NewEncoder(w).Encode(res); err != nil {
