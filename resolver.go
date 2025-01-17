@@ -78,9 +78,7 @@ func availableNameservers() []string {
 		if _, ok := machineIPsMap[ns]; ok {
 			continue
 		}
-		if testNameServerFn(ns) {
-			nss = append(nss, ns)
-		}
+		nss = append(nss, ns)
 	}
 	return nss
 }
@@ -100,11 +98,9 @@ func InitializeOsResolver() []string {
 // - First available LAN servers are saved and store.
 // - Later calls, if no LAN servers available, the saved servers above will be used.
 func initializeOsResolver(servers []string) []string {
-	var (
-		lanNss    []string
-		publicNss []string
-	)
+	var lanNss, publicNss []string
 
+	// First categorize servers
 	for _, ns := range servers {
 		addr, err := netip.ParseAddr(ns)
 		if err != nil {
@@ -117,28 +113,84 @@ func initializeOsResolver(servers []string) []string {
 			publicNss = append(publicNss, server)
 		}
 	}
+
+	// Store initial servers immediately
 	if len(lanNss) > 0 {
-		// Saved first initialized LAN servers.
 		or.initializedLanServers.CompareAndSwap(nil, &lanNss)
-	}
-	if len(lanNss) == 0 {
-		var nss []string
-		p := or.initializedLanServers.Load()
-		if p != nil {
-			for _, ns := range *p {
-				if testNameServerFn(ns) {
-					nss = append(nss, ns)
-				}
-			}
-		}
-		or.lanServers.Store(&nss)
-	} else {
 		or.lanServers.Store(&lanNss)
 	}
+
 	if len(publicNss) == 0 {
-		publicNss = append(publicNss, controldPublicDnsWithPort)
+		publicNss = []string{controldPublicDnsWithPort}
 	}
 	or.publicServers.Store(&publicNss)
+
+	// Test servers in background and remove failures
+	go func() {
+		// Test servers in parallel but maintain order
+		type result struct {
+			index  int
+			server string
+			valid  bool
+		}
+
+		testServers := func(servers []string) []string {
+			if len(servers) == 0 {
+				return nil
+			}
+
+			results := make(chan result, len(servers))
+			var wg sync.WaitGroup
+
+			for i, server := range servers {
+				wg.Add(1)
+				go func(idx int, s string) {
+					defer wg.Done()
+					results <- result{
+						index:  idx,
+						server: s,
+						valid:  testNameServerFn(s),
+					}
+				}(i, server)
+			}
+
+			go func() {
+				wg.Wait()
+				close(results)
+			}()
+
+			// Collect results maintaining original order
+			validServers := make([]string, 0, len(servers))
+			ordered := make([]result, 0, len(servers))
+			for r := range results {
+				ordered = append(ordered, r)
+			}
+			slices.SortFunc(ordered, func(a, b result) int {
+				return a.index - b.index
+			})
+			for _, r := range ordered {
+				if r.valid {
+					validServers = append(validServers, r.server)
+				} else {
+					ProxyLogger.Load().Debug().Str("nameserver", r.server).Msg("nameserver failed validation testing")
+				}
+			}
+			return validServers
+		}
+
+		// Test and update LAN servers
+		if validLanNss := testServers(lanNss); len(validLanNss) > 0 {
+			or.lanServers.Store(&validLanNss)
+		}
+
+		// Test and update public servers
+		validPublicNss := testServers(publicNss)
+		if len(validPublicNss) == 0 {
+			validPublicNss = []string{controldPublicDnsWithPort}
+		}
+		or.publicServers.Store(&validPublicNss)
+	}()
+
 	return slices.Concat(lanNss, publicNss)
 }
 
@@ -192,7 +244,6 @@ func testNameserver(addr string) bool {
 	}{
 		{".", dns.TypeNS},            // Root NS query - should always work
 		{"controld.com.", dns.TypeA}, // Fallback to a reliable domain
-		{"google.com.", dns.TypeA},   // Fallback to a reliable domain
 	}
 
 	client := &dns.Client{
@@ -330,10 +381,8 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		case res.answer != nil && res.answer.Rcode == dns.RcodeSuccess:
 			switch {
 			case res.server == controldPublicDnsWithPort:
-				Log(ctx, ProxyLogger.Load().Debug(), "got ControlD answer from: %s", res.server)
 				controldSuccessAnswer = res.answer
 			case !res.lan && publicServerAnswer == nil:
-				Log(ctx, ProxyLogger.Load().Debug(), "got public answer from: %s", res.server)
 				publicServerAnswer = res.answer
 				publicServer = res.server
 			default:
@@ -351,14 +400,17 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		errs = append(errs, res.err)
 	}
 	if publicServerAnswer != nil {
+		Log(ctx, ProxyLogger.Load().Debug(), "got public answer from: %s", publicServer)
 		logAnswer(publicServer)
 		return publicServerAnswer, nil
 	}
 	if controldSuccessAnswer != nil {
+		Log(ctx, ProxyLogger.Load().Debug(), "got ControlD answer from: %s", controldPublicDnsWithPort)
 		logAnswer(controldPublicDnsWithPort)
 		return controldSuccessAnswer, nil
 	}
 	if nonSuccessAnswer != nil {
+		Log(ctx, ProxyLogger.Load().Debug(), "got non-success answer from: %s", nonSuccessServer)
 		logAnswer(nonSuccessServer)
 		return nonSuccessAnswer, nil
 	}

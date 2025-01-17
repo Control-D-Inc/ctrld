@@ -17,9 +17,8 @@ func patchNetIfaceName(iface *net.Interface) (bool, error) {
 
 	patched := false
 	if name := networkServiceName(iface.Name, bytes.NewReader(b)); name != "" {
-		iface.Name = name
-		mainLog.Load().Debug().Str("network_service", name).Msg("found network service name for interface")
 		patched = true
+		iface.Name = name
 	}
 	return patched, nil
 }

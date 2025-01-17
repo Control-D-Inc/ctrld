@@ -44,10 +44,6 @@ func newUpstreamMonitor(cfg *ctrld.Config) *upstreamMonitor {
 
 // increaseFailureCount increase failed queries count for an upstream by 1.
 func (um *upstreamMonitor) increaseFailureCount(upstream string) {
-	// Do not count "upstream.os", since it must not be down for leaking queries.
-	if upstream == upstreamOS {
-		return
-	}
 	um.mu.Lock()
 	defer um.mu.Unlock()
 

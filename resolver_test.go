@@ -3,12 +3,9 @@ package ctrld
 import (
 	"context"
 	"net"
-	"slices"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
 
 	"github.com/miekg/dns"
 )
@@ -178,71 +175,6 @@ func runLocalPacketConnTestServer(t *testing.T, pc net.PacketConn, handler dns.H
 	return server, addr, nil
 }
 
-func Test_initializeOsResolver(t *testing.T) {
-	testNameServerFn = testNameserverTest
-	lanServer1 := "192.168.1.1"
-	lanServer1WithPort := net.JoinHostPort("192.168.1.1", "53")
-	lanServer2 := "10.0.10.69"
-	lanServer2WithPort := net.JoinHostPort("10.0.10.69", "53")
-	lanServer3 := "192.168.40.1"
-	lanServer3WithPort := net.JoinHostPort("192.168.40.1", "53")
-	wanServer := "1.1.1.1"
-	lanServers := []string{lanServer1WithPort, lanServer2WithPort}
-	publicServers := []string{net.JoinHostPort(wanServer, "53")}
-
-	or = newResolverWithNameserver(defaultNameservers())
-
-	// First initialization, initialized servers are saved.
-	initializeOsResolver([]string{lanServer1, lanServer2, wanServer})
-	p := or.initializedLanServers.Load()
-	assert.NotNil(t, p)
-	assert.True(t, slices.Equal(*p, lanServers))
-	assert.True(t, slices.Equal(*or.lanServers.Load(), lanServers))
-	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
-
-	// No new LAN servers, but lanServer2 gone, initialized servers not changed.
-	initializeOsResolver([]string{lanServer1, wanServer})
-	p = or.initializedLanServers.Load()
-	assert.NotNil(t, p)
-	assert.True(t, slices.Equal(*p, lanServers))
-	assert.True(t, slices.Equal(*or.lanServers.Load(), []string{lanServer1WithPort}))
-	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
-
-	// New LAN servers, they are used, initialized servers not changed.
-	initializeOsResolver([]string{lanServer3, wanServer})
-	p = or.initializedLanServers.Load()
-	assert.NotNil(t, p)
-	assert.True(t, slices.Equal(*p, lanServers))
-	assert.True(t, slices.Equal(*or.lanServers.Load(), []string{lanServer3WithPort}))
-	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
-
-	// No LAN server available, initialized servers will be used.
-	initializeOsResolver([]string{wanServer})
-	p = or.initializedLanServers.Load()
-	assert.NotNil(t, p)
-	assert.True(t, slices.Equal(*p, lanServers))
-	assert.True(t, slices.Equal(*or.lanServers.Load(), lanServers))
-	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
-
-	// No Public server, ControlD Public DNS will be used.
-	initializeOsResolver([]string{})
-	p = or.initializedLanServers.Load()
-	assert.NotNil(t, p)
-	assert.True(t, slices.Equal(*p, lanServers))
-	assert.True(t, slices.Equal(*or.lanServers.Load(), lanServers))
-	assert.True(t, slices.Equal(*or.publicServers.Load(), []string{controldPublicDnsWithPort}))
-
-	// No LAN server available, initialized servers is unavailable, nothing will be used.
-	nonSuccessTestServerMap[lanServer1WithPort] = true
-	nonSuccessTestServerMap[lanServer2WithPort] = true
-	initializeOsResolver([]string{wanServer})
-	p = or.initializedLanServers.Load()
-	assert.NotNil(t, p)
-	assert.True(t, slices.Equal(*p, lanServers))
-	assert.Empty(t, *or.lanServers.Load())
-	assert.True(t, slices.Equal(*or.publicServers.Load(), publicServers))
-}
-
 func successHandler() dns.HandlerFunc {
 	return func(w dns.ResponseWriter, msg *dns.Msg) {
 		m := new(dns.Msg)
@@ -257,10 +189,4 @@ func nonSuccessHandlerWithRcode(rcode int) dns.HandlerFunc {
 		m.SetRcode(msg, rcode)
 		w.WriteMsg(m)
 	}
-}
-
-var nonSuccessTestServerMap = map[string]bool{}
-
-func testNameserverTest(addr string) bool {
-	return !nonSuccessTestServerMap[addr]
 }

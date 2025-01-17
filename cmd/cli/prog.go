@@ -115,9 +115,13 @@ type prog struct {
 	loopMu sync.Mutex
 	loop   map[string]bool
 
-	leakingQueryMu     sync.Mutex
-	leakingQueryWasRun bool
-	leakingQuery       atomic.Bool
+	leakingQueryMu      sync.Mutex
+	leakingQueryRunning map[string]bool
+	leakingQueryReset   atomic.Bool
+
+	resetCtx    context.Context
+	resetCancel context.CancelFunc
+	resetCtxMu  sync.Mutex
 
 	started       chan struct{}
 	onStartedDone chan struct{}
@@ -420,6 +424,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	}
 	p.onStartedDone = make(chan struct{})
 	p.loop = make(map[string]bool)
+	p.leakingQueryRunning = make(map[string]bool)
 	p.lanLoopGuard = newLoopGuard()
 	p.ptrLoopGuard = newLoopGuard()
 	p.cacheFlushDomainsMap = nil
@@ -737,12 +742,13 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 	if !requiredMultiNICsConfig() {
 		return
 	}
+	logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
+	logger.Debug().Msg("start DNS settings watchdog")
 
-	mainLog.Load().Debug().Msg("start DNS settings watchdog")
 	ns := nameservers
 	slices.Sort(ns)
 	ticker := time.NewTicker(p.dnsWatchdogDuration())
-	logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
+
 	for {
 		select {
 		case <-p.dnsWatcherStopCh:
@@ -751,7 +757,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 			mainLog.Load().Debug().Msg("stop dns watchdog")
 			return
 		case <-ticker.C:
-			if p.leakingQuery.Load() {
+			if p.leakingQueryReset.Load() {
 				return
 			}
 			if dnsChanged(iface, ns) {
