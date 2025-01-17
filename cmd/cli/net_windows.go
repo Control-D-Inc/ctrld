@@ -41,7 +41,7 @@ func validInterfaces() []string {
 	q := query.NewWmiQuery("MSFT_NetAdapter")
 	instances, err := instance.GetWmiInstancesFromHost(whost, string(constant.StadardCimV2), q)
 	if err != nil {
-		mainLog.Load().Err(err).Msg("failed to get wmi network adapter")
+		mainLog.Load().Warn().Err(err).Msg("failed to get wmi network adapter")
 		return nil
 	}
 	defer instances.Close()
@@ -49,7 +49,7 @@ func validInterfaces() []string {
 	for _, i := range instances {
 		adapter, err := netadapter.NewNetworkAdapter(i)
 		if err != nil {
-			mainLog.Load().Err(err).Msg("failed to get network adapter")
+			mainLog.Load().Warn().Err(err).Msg("failed to get network adapter")
 			continue
 		}
 		// From: https://learn.microsoft.com/en-us/previous-versions/windows/desktop/legacy/hh968170(v=vs.85)
@@ -58,23 +58,18 @@ func validInterfaces() []string {
 		// if this is a physical adapter or FALSE if this is not a physical adapter."
 		physical, err := adapter.GetPropertyConnectorPresent()
 		if err != nil {
-			mainLog.Load().Err(err).Msg("failed to get network adapter connector present property")
+			mainLog.Load().Warn().Err(err).Msg("failed to get network adapter connector present property")
 			continue
 		}
 		if !physical {
 			continue
 		}
-		ifaceIdx, err := adapter.GetInterfaceIndex()
+		name, err := adapter.GetPropertyName()
 		if err != nil {
-			mainLog.Load().Err(err).Msg("failed to get interface index")
+			mainLog.Load().Warn().Err(err).Msg("failed to get interface name")
 			continue
 		}
-		iff, err := net.InterfaceByIndex(int(ifaceIdx))
-		if err != nil {
-			mainLog.Load().Err(err).Msg("failed to get interface")
-			continue
-		}
-		adapters = append(adapters, iff.Name)
+		adapters = append(adapters, name)
 	}
 	return adapters
 }
