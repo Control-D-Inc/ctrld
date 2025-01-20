@@ -47,6 +47,14 @@ var controldPublicDnsWithPort = net.JoinHostPort(controldPublicDns, "53")
 // or is the Resolver used for ResolverTypeOS.
 var or = newResolverWithNameserver(defaultNameservers())
 
+// LanQueryCtxKey is the context.Context key to indicate that the request is for LAN network.
+type LanQueryCtxKey struct{}
+
+// LanQueryCtx returns a context.Context with LanQueryCtxKey set.
+func LanQueryCtx(ctx context.Context) context.Context {
+	return context.WithValue(ctx, LanQueryCtxKey{}, true)
+}
+
 // defaultNameservers is like nameservers with each element formed "ip:53".
 func defaultNameservers() []string {
 	ns := nameservers()
@@ -70,9 +78,7 @@ func availableNameservers() []string {
 		if _, ok := machineIPsMap[ns]; ok {
 			continue
 		}
-		if testNameserver(ns) {
-			nss = append(nss, ns)
-		}
+		nss = append(nss, ns)
 	}
 	return nss
 }
@@ -85,74 +91,189 @@ func availableNameservers() []string {
 func InitializeOsResolver() []string {
 	return initializeOsResolver(availableNameservers())
 }
+
+// initializeOsResolver performs logic for choosing OS resolver nameserver.
+// The logic:
+//
+// - First available LAN servers are saved and store.
+// - Later calls, if no LAN servers available, the saved servers above will be used.
 func initializeOsResolver(servers []string) []string {
-	var (
-		nss       []string
-		publicNss []string
-	)
-	var (
-		lastLanServer         netip.Addr
-		curLanServer          netip.Addr
-		curLanServerAvailable bool
-	)
-	if p := or.currentLanServer.Load(); p != nil {
-		curLanServer = *p
-		or.currentLanServer.Store(nil)
-	}
-	if p := or.lastLanServer.Load(); p != nil {
-		lastLanServer = *p
-		or.lastLanServer.Store(nil)
-	}
+	var lanNss, publicNss []string
+
+	// First categorize servers
 	for _, ns := range servers {
 		addr, err := netip.ParseAddr(ns)
 		if err != nil {
 			continue
 		}
 		server := net.JoinHostPort(ns, "53")
-		// Always use new public nameserver.
-		if !isLanAddr(addr) {
-			publicNss = append(publicNss, server)
-			nss = append(nss, server)
-			continue
-		}
-		// For LAN server, storing only current and last LAN server if any.
-		if addr.Compare(curLanServer) == 0 {
-			curLanServerAvailable = true
+		if isLanAddr(addr) {
+			lanNss = append(lanNss, server)
 		} else {
-			if addr.Compare(lastLanServer) == 0 {
-				or.lastLanServer.Store(&addr)
-			} else {
-				if or.currentLanServer.CompareAndSwap(nil, &addr) {
-					nss = append(nss, server)
+			publicNss = append(publicNss, server)
+		}
+	}
+
+	// Store initial servers immediately
+	if len(lanNss) > 0 {
+		or.initializedLanServers.CompareAndSwap(nil, &lanNss)
+		or.lanServers.Store(&lanNss)
+	}
+
+	if len(publicNss) == 0 {
+		publicNss = []string{controldPublicDnsWithPort}
+	}
+	or.publicServers.Store(&publicNss)
+
+	// Test servers in background and remove failures
+	go func() {
+		// Test servers in parallel but maintain order
+		type result struct {
+			index  int
+			server string
+			valid  bool
+		}
+
+		testServers := func(servers []string) []string {
+			if len(servers) == 0 {
+				return nil
+			}
+
+			results := make(chan result, len(servers))
+			var wg sync.WaitGroup
+
+			for i, server := range servers {
+				wg.Add(1)
+				go func(idx int, s string) {
+					defer wg.Done()
+					results <- result{
+						index:  idx,
+						server: s,
+						valid:  testNameServerFn(s),
+					}
+				}(i, server)
+			}
+
+			go func() {
+				wg.Wait()
+				close(results)
+			}()
+
+			// Collect results maintaining original order
+			validServers := make([]string, 0, len(servers))
+			ordered := make([]result, 0, len(servers))
+			for r := range results {
+				ordered = append(ordered, r)
+			}
+			slices.SortFunc(ordered, func(a, b result) int {
+				return a.index - b.index
+			})
+			for _, r := range ordered {
+				if r.valid {
+					validServers = append(validServers, r.server)
+				} else {
+					ProxyLogger.Load().Debug().Str("nameserver", r.server).Msg("nameserver failed validation testing")
 				}
 			}
+			return validServers
 		}
-	}
-	// Store current LAN server as last one only if it's still available.
-	if curLanServerAvailable && curLanServer.IsValid() {
-		or.lastLanServer.Store(&curLanServer)
-		nss = append(nss, net.JoinHostPort(curLanServer.String(), "53"))
-	}
-	if len(publicNss) == 0 {
-		publicNss = append(publicNss, controldPublicDnsWithPort)
-		nss = append(nss, controldPublicDnsWithPort)
-	}
-	or.publicServer.Store(&publicNss)
-	return nss
+
+		// Test and update LAN servers
+		if validLanNss := testServers(lanNss); len(validLanNss) > 0 {
+			or.lanServers.Store(&validLanNss)
+		}
+
+		// Test and update public servers
+		validPublicNss := testServers(publicNss)
+		if len(validPublicNss) == 0 {
+			validPublicNss = []string{controldPublicDnsWithPort}
+		}
+		or.publicServers.Store(&validPublicNss)
+	}()
+
+	return slices.Concat(lanNss, publicNss)
 }
+
+// testNameserverFn sends a test query to DNS nameserver to check if the server is available.
+var testNameServerFn = testNameserver
 
 // testPlainDnsNameserver sends a test query to DNS nameserver to check if the server is available.
 func testNameserver(addr string) bool {
-	msg := new(dns.Msg)
-	msg.SetQuestion("controld.com.", dns.TypeNS)
-	client := new(dns.Client)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, _, err := client.ExchangeContext(ctx, msg, net.JoinHostPort(addr, "53"))
-	if err != nil {
-		ProxyLogger.Load().Debug().Err(err).Msgf("failed to connect to OS nameserver: %s", addr)
+	// Skip link-local addresses without scope IDs and deprecated site-local addresses
+	if ip, err := netip.ParseAddr(addr); err == nil {
+		if ip.Is6() {
+			if ip.IsLinkLocalUnicast() && !strings.Contains(addr, "%") {
+				ProxyLogger.Load().Debug().
+					Str("nameserver", addr).
+					Msg("skipping link-local IPv6 address without scope ID")
+				return false
+			}
+			// Skip deprecated site-local addresses (fec0::/10)
+			if strings.HasPrefix(ip.String(), "fec0:") {
+				ProxyLogger.Load().Debug().
+					Str("nameserver", addr).
+					Msg("skipping deprecated site-local IPv6 address")
+				return false
+			}
+		}
 	}
-	return err == nil
+
+	ProxyLogger.Load().Debug().
+		Str("input_addr", addr).
+		Msg("testing nameserver")
+
+	// Handle both IPv4 and IPv6 addresses
+	serverAddr := addr
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port in address, add default port 53
+		serverAddr = net.JoinHostPort(addr, "53")
+	} else if port == "" {
+		// Has split markers but empty port
+		serverAddr = net.JoinHostPort(host, "53")
+	}
+
+	ProxyLogger.Load().Debug().
+		Str("server_addr", serverAddr).
+		Msg("using server address")
+
+	// Test domains that are likely to exist and respond quickly
+	testDomains := []struct {
+		name  string
+		qtype uint16
+	}{
+		{".", dns.TypeNS},            // Root NS query - should always work
+		{"controld.com.", dns.TypeA}, // Fallback to a reliable domain
+	}
+
+	client := &dns.Client{
+		Timeout: 2 * time.Second,
+		Net:     "udp",
+	}
+
+	// Try each test query until one succeeds
+	for _, test := range testDomains {
+		msg := new(dns.Msg)
+		msg.SetQuestion(test.name, test.qtype)
+		msg.RecursionDesired = true
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		resp, _, err := client.ExchangeContext(ctx, msg, serverAddr)
+		cancel()
+
+		if err == nil && resp != nil {
+			return true
+		}
+
+		ProxyLogger.Load().Error().
+			Err(err).
+			Str("nameserver", serverAddr).
+			Str("test_domain", test.name).
+			Str("query_type", dns.TypeToString[test.qtype]).
+			Msg("DNS availability test failed")
+	}
+
+	return false
 }
 
 // Resolver is the interface that wraps the basic DNS operations.
@@ -185,9 +306,9 @@ func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 }
 
 type osResolver struct {
-	currentLanServer atomic.Pointer[netip.Addr]
-	lastLanServer    atomic.Pointer[netip.Addr]
-	publicServer     atomic.Pointer[[]string]
+	initializedLanServers atomic.Pointer[[]string]
+	lanServers            atomic.Pointer[[]string]
+	publicServers         atomic.Pointer[[]string]
 }
 
 type osResolverResult struct {
@@ -201,22 +322,24 @@ type osResolverResult struct {
 // Query is sent to all nameservers concurrently, and the first
 // success response will be returned.
 func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	publicServers := *o.publicServer.Load()
-	nss := make([]string, 0, 2)
-	if p := o.currentLanServer.Load(); p != nil {
-		nss = append(nss, net.JoinHostPort(p.String(), "53"))
-	}
-	if p := o.lastLanServer.Load(); p != nil {
-		nss = append(nss, net.JoinHostPort(p.String(), "53"))
+	publicServers := *o.publicServers.Load()
+	var nss []string
+	if p := o.lanServers.Load(); p != nil {
+		nss = append(nss, (*p)...)
 	}
 	numServers := len(nss) + len(publicServers)
+	// If this is a LAN query, skip public DNS.
+	lan, ok := ctx.Value(LanQueryCtxKey{}).(bool)
+	if ok && lan {
+		numServers -= len(publicServers)
+	}
 	if numServers == 0 {
 		return nil, errors.New("no nameservers available")
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	dnsClient := &dns.Client{Net: "udp"}
+	dnsClient := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
 	ch := make(chan *osResolverResult, numServers)
 	wg := &sync.WaitGroup{}
 	wg.Add(numServers)
@@ -235,7 +358,9 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		}
 	}
 	do(nss, true)
-	do(publicServers, false)
+	if !lan {
+		do(publicServers, false)
+	}
 
 	logAnswer := func(server string) {
 		if before, _, found := strings.Cut(server, ":"); found {
@@ -256,11 +381,12 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		case res.answer != nil && res.answer.Rcode == dns.RcodeSuccess:
 			switch {
 			case res.server == controldPublicDnsWithPort:
-				controldSuccessAnswer = res.answer // only use ControlD answer as last one.
+				controldSuccessAnswer = res.answer
 			case !res.lan && publicServerAnswer == nil:
-				publicServerAnswer = res.answer // use public DNS answer after LAN server..
+				publicServerAnswer = res.answer
 				publicServer = res.server
 			default:
+				Log(ctx, ProxyLogger.Load().Debug(), "got LAN answer from: %s", res.server)
 				cancel()
 				logAnswer(res.server)
 				return res.answer, nil
@@ -268,18 +394,23 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		case res.answer != nil:
 			nonSuccessAnswer = res.answer
 			nonSuccessServer = res.server
+			Log(ctx, ProxyLogger.Load().Debug(), "got non-success answer from: %s with code: %d",
+				res.server, res.answer.Rcode)
 		}
 		errs = append(errs, res.err)
 	}
 	if publicServerAnswer != nil {
+		Log(ctx, ProxyLogger.Load().Debug(), "got public answer from: %s", publicServer)
 		logAnswer(publicServer)
 		return publicServerAnswer, nil
 	}
 	if controldSuccessAnswer != nil {
+		Log(ctx, ProxyLogger.Load().Debug(), "got ControlD answer from: %s", controldPublicDnsWithPort)
 		logAnswer(controldPublicDnsWithPort)
 		return controldSuccessAnswer, nil
 	}
 	if nonSuccessAnswer != nil {
+		Log(ctx, ProxyLogger.Load().Debug(), "got non-success answer from: %s", nonSuccessServer)
 		logAnswer(nonSuccessServer)
 		return nonSuccessAnswer, nil
 	}
@@ -467,17 +598,19 @@ func NewResolverWithNameserver(nameservers []string) Resolver {
 // The caller must ensure each server in list is formed "ip:53".
 func newResolverWithNameserver(nameservers []string) *osResolver {
 	r := &osResolver{}
-	nss := slices.Sorted(slices.Values(nameservers))
-	for i, ns := range nss {
+	var publicNss []string
+	var lanNss []string
+	for _, ns := range slices.Sorted(slices.Values(nameservers)) {
 		ip, _, _ := net.SplitHostPort(ns)
 		addr, _ := netip.ParseAddr(ip)
 		if isLanAddr(addr) {
-			r.currentLanServer.Store(&addr)
-			nss = slices.Delete(nss, i, i+1)
-			break
+			lanNss = append(lanNss, ns)
+		} else {
+			publicNss = append(publicNss, ns)
 		}
 	}
-	r.publicServer.Store(&nss)
+	r.lanServers.Store(&lanNss)
+	r.publicServers.Store(&publicNss)
 	return r
 }
 

@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
+	"tailscale.com/types/logger"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
@@ -77,6 +78,12 @@ type upstreamForResult struct {
 }
 
 func (p *prog) serveDNS(listenerNum string) error {
+	// Start network monitoring
+	if err := p.monitorNetworkChanges(); err != nil {
+		mainLog.Load().Error().Err(err).Msg("Failed to start network monitoring")
+		// Don't return here as we still want DNS service to run
+	}
+
 	listenerConfig := p.cfg.Listener[listenerNum]
 	// make sure ip is allocated
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
@@ -106,11 +113,18 @@ func (p *prog) serveDNS(listenerNum string) error {
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
-		if domain == selfCheckInternalTestDomain {
+		switch {
+		case domain == "":
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeFormatError)
+			_ = w.WriteMsg(answer)
+			return
+		case domain == selfCheckInternalTestDomain:
 			answer := resolveInternalDomainTestQuery(ctx, domain, m)
 			_ = w.WriteMsg(answer)
 			return
 		}
+
 		if _, ok := p.cacheFlushDomainsMap[domain]; ok && p.cache != nil {
 			p.cache.Purge()
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received query %q, local cache is purged", domain)
@@ -411,16 +425,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
 
+	upstreamMapKey := strings.Join(upstreams, "_")
+
 	leaked := false
-	// If ctrld is going to leak query to OS resolver, check remote upstream in background,
-	// so ctrld could be back to normal operation as long as the network is back online.
-	if len(upstreamConfigs) > 0 && p.leakingQuery.Load() {
-		for n, uc := range upstreamConfigs {
-			go p.checkUpstream(upstreams[n], uc)
+	if len(upstreamConfigs) > 0 {
+		p.leakingQueryMu.Lock()
+		if p.leakingQueryRunning[upstreamMapKey] {
+			upstreamConfigs = nil
+			leaked = true
+			ctrld.Log(ctx, mainLog.Load().Debug(), "%v is down, leaking query to OS resolver", upstreams)
 		}
-		upstreamConfigs = nil
-		leaked = true
-		ctrld.Log(ctx, mainLog.Load().Debug(), "%v is down, leaking query to OS resolver", upstreams)
+		p.leakingQueryMu.Unlock()
 	}
 
 	if len(upstreamConfigs) == 0 {
@@ -445,6 +460,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 	} else {
 		switch {
+		case isSrvLookup(req.msg):
+			upstreams = []string{upstreamOS}
+			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+			ctx = ctrld.LanQueryCtx(ctx)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "SRV record lookup, using upstreams: %v", upstreams)
 		case isPrivatePtrLookup(req.msg):
 			isLanOrPtrQuery = true
 			if answer := p.proxyPrivatePtrLookup(ctx, req.msg); answer != nil {
@@ -452,7 +472,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				res.clientInfo = true
 				return res
 			}
-			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForPtr(upstreams, upstreamConfigs)
+			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
 		case isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
@@ -461,7 +482,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				res.clientInfo = true
 				return res
 			}
-			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			upstreams = []string{upstreamOS}
+			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "lan hostname lookup, using upstreams: %v", upstreams)
 		default:
 			ctrld.Log(ctx, mainLog.Load().Debug(), "no explicit policy matched, using default routing -> %v", upstreams)
@@ -532,12 +555,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		if upstreamConfig == nil {
 			continue
 		}
+		ctrld.Log(ctx, mainLog.Load().Debug(), "attempting upstream [ %s ] at index: %d, upstream at index: %s", upstreamConfig.String(), n, upstreams[n])
+
 		if p.isLoop(upstreamConfig) {
-			mainLog.Load().Warn().Msgf("dns loop detected, upstream: %q, endpoint: %q", upstreamConfig.Name, upstreamConfig.Endpoint)
+			mainLog.Load().Warn().Msgf("dns loop detected, upstream: %s", upstreamConfig.String())
 			continue
 		}
 		if p.um.isDown(upstreams[n]) {
-			ctrld.Log(ctx, mainLog.Load().Warn(), "%s is down", upstreams[n])
+			ctrld.Log(ctx, mainLog.Load().Debug(), "%s is down", upstreams[n])
 			continue
 		}
 		answer := resolve(n, upstreamConfig, req.msg)
@@ -587,11 +612,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		return res
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
-	if cdUID != "" && p.leakOnUpstreamFailure() {
+	if p.leakOnUpstreamFailure() {
 		p.leakingQueryMu.Lock()
-		if !p.leakingQueryWasRun {
-			p.leakingQueryWasRun = true
-			go p.performLeakingQuery()
+		// get the map key as concact of upstreams
+		if !p.leakingQueryRunning[upstreamMapKey] {
+			p.leakingQueryRunning[upstreamMapKey] = true
+			// get a map of the failed upstreams
+			failedUpstreams := make(map[string]*ctrld.UpstreamConfig)
+			for n, upstream := range upstreamConfigs {
+				failedUpstreams[upstreams[n]] = upstream
+			}
+			go p.performLeakingQuery(failedUpstreams, upstreamMapKey)
 		}
 		p.leakingQueryMu.Unlock()
 	}
@@ -601,7 +632,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	return res
 }
 
-func (p *prog) upstreamsAndUpstreamConfigForLanAndPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
+func (p *prog) upstreamsAndUpstreamConfigForPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
 	if len(p.localUpstreams) > 0 {
 		tmp := make([]string, 0, len(p.localUpstreams)+len(upstreams))
 		tmp = append(tmp, p.localUpstreams...)
@@ -917,15 +948,66 @@ func (p *prog) selfUninstallCoolOfPeriod() {
 }
 
 // performLeakingQuery performs necessary works to leak queries to OS resolver.
-func (p *prog) performLeakingQuery() {
-	mainLog.Load().Warn().Msg("leaking query to OS resolver")
+// once we store the leakingQuery flag, we are leaking queries to OS resolver
+// we then start testing all the upstreams forever, waiting for success, but in parallel
+func (p *prog) performLeakingQuery(failedUpstreams map[string]*ctrld.UpstreamConfig, upstreamMapKey string) {
+
+	mainLog.Load().Warn().Msgf("leaking queries for failed upstreams [%v] to OS resolver", failedUpstreams)
+
 	// Signal dns watchers to stop, so changes made below won't be reverted.
-	p.leakingQuery.Store(true)
-	p.resetDNS()
-	ns := ctrld.InitializeOsResolver()
-	mainLog.Load().Debug().Msgf("re-initialized OS resolver with nameservers: %v", ns)
-	p.dnsWg.Wait()
-	p.setDNS()
+	p.leakingQueryMu.Lock()
+	p.leakingQueryRunning[upstreamMapKey] = true
+	p.leakingQueryMu.Unlock()
+	defer func() {
+		p.leakingQueryMu.Lock()
+		p.leakingQueryRunning[upstreamMapKey] = false
+		p.leakingQueryMu.Unlock()
+		mainLog.Load().Warn().Msg("stop leaking query")
+	}()
+
+	// we only want to reset DNS when our resolver is broken
+	// this allows us to find the new OS resolver nameservers
+	if p.um.isDown(upstreamOS) {
+
+		mainLog.Load().Debug().Msg("OS resolver is down, reinitializing")
+		p.reinitializeOSResolver()
+
+	}
+
+	// Test all failed upstreams in parallel
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	upstreamCh := make(chan string, len(failedUpstreams))
+	for name, uc := range failedUpstreams {
+		go func(name string, uc *ctrld.UpstreamConfig) {
+			mainLog.Load().Debug().
+				Str("upstream", name).
+				Msg("checking upstream")
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					p.checkUpstream(name, uc)
+					mainLog.Load().Debug().
+						Str("upstream", name).
+						Msg("upstream recovered")
+					upstreamCh <- name
+					return
+				}
+			}
+		}(name, uc)
+	}
+
+	// Wait for any upstream to recover
+	name := <-upstreamCh
+
+	mainLog.Load().Info().
+		Str("upstream", name).
+		Msg("stopping leak as upstream recovered")
+
 }
 
 // forceFetchingAPI sends signal to force syncing API config if run in cd mode,
@@ -1056,7 +1138,16 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	name := strings.TrimSuffix(q.Name, ".")
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
-		strings.HasSuffix(name, ".lan")
+		strings.HasSuffix(name, ".lan") ||
+		strings.HasSuffix(name, ".local")
+}
+
+// isSrvLookup reports whether DNS message is a SRV query.
+func isSrvLookup(m *dns.Msg) bool {
+	if m == nil || len(m.Question) == 0 {
+		return false
+	}
+	return m.Question[0].Qtype == dns.TypeSRV
 }
 
 // isWanClient reports whether the input is a WAN address.
@@ -1088,4 +1179,158 @@ func resolveInternalDomainTestQuery(ctx context.Context, domain string, m *dns.M
 	}
 	answer.SetReply(m)
 	return answer
+}
+
+// reinitializeOSResolver reinitializes the OS resolver
+// by removing ctrld listenr from the interface, collecting the network nameservers
+// and re-initializing the OS resolver with the nameservers
+// applying listener back to the interface
+func (p *prog) reinitializeOSResolver() {
+	// Cancel any existing operations
+	p.resetCtxMu.Lock()
+	if p.resetCancel != nil {
+		p.resetCancel()
+	}
+
+	// Create new context for this operation
+	ctx, cancel := context.WithCancel(context.Background())
+	p.resetCtx = ctx
+	p.resetCancel = cancel
+	p.resetCtxMu.Unlock()
+
+	// Ensure cleanup
+	defer cancel()
+
+	p.leakingQueryReset.Store(true)
+	defer p.leakingQueryReset.Store(false)
+
+	select {
+	case <-ctx.Done():
+		mainLog.Load().Debug().Msg("DNS reset cancelled by new network change")
+		return
+	default:
+		mainLog.Load().Debug().Msg("attempting to reset DNS")
+		p.resetDNS()
+		mainLog.Load().Debug().Msg("DNS reset completed")
+	}
+
+	select {
+	case <-ctx.Done():
+		mainLog.Load().Debug().Msg("DNS reset cancelled by new network change")
+		return
+	default:
+		mainLog.Load().Debug().Msg("initializing OS resolver")
+		ns := ctrld.InitializeOsResolver()
+		mainLog.Load().Debug().Msgf("re-initialized OS resolver with nameservers: %v", ns)
+	}
+
+	select {
+	case <-ctx.Done():
+		mainLog.Load().Debug().Msg("DNS reset cancelled by new network change")
+		return
+	default:
+		mainLog.Load().Debug().Msg("setting DNS configuration")
+		p.setDNS()
+		mainLog.Load().Debug().Msg("DNS configuration set successfully")
+	}
+}
+
+// monitorNetworkChanges starts monitoring for network interface changes
+func (p *prog) monitorNetworkChanges() error {
+	// Create network monitor
+	mon, err := netmon.New(logger.WithPrefix(mainLog.Load().Printf, "netmon: "))
+	if err != nil {
+		return fmt.Errorf("creating network monitor: %w", err)
+	}
+
+	mon.RegisterChangeCallback(func(delta *netmon.ChangeDelta) {
+		// Get map of valid interfaces
+		validIfaces := validInterfacesMap()
+
+		// Parse old and new interface states
+		oldIfs := parseInterfaceState(delta.Old)
+		newIfs := parseInterfaceState(delta.New)
+
+		// Check for changes in valid interfaces
+		changed := false
+		activeInterfaceExists := false
+
+		for ifaceName := range validIfaces {
+
+			oldState, oldExists := oldIfs[strings.ToLower(ifaceName)]
+			newState, newExists := newIfs[strings.ToLower(ifaceName)]
+
+			if newState != "" && newState != "down" {
+				activeInterfaceExists = true
+			}
+
+			if oldExists != newExists || oldState != newState {
+				changed = true
+				mainLog.Load().Debug().
+					Str("interface", ifaceName).
+					Str("old_state", oldState).
+					Str("new_state", newState).
+					Msg("Valid interface changed state")
+				break
+			} else {
+				mainLog.Load().Debug().
+					Str("interface", ifaceName).
+					Str("old_state", oldState).
+					Str("new_state", newState).
+					Msg("Valid interface unchanged")
+			}
+		}
+
+		if !changed {
+			mainLog.Load().Debug().Msgf("Ignoring interface change - no valid interfaces affected")
+			return
+		}
+
+		mainLog.Load().Debug().Msgf("Network change detected: from %v to %v", delta.Old, delta.New)
+		if activeInterfaceExists {
+			p.reinitializeOSResolver()
+		} else {
+			mainLog.Load().Debug().Msg("No active interfaces found, skipping reinitialization")
+		}
+	})
+
+	mon.Start()
+	mainLog.Load().Debug().Msg("Network monitor started")
+	return nil
+}
+
+// parseInterfaceState parses the interface state string into a map of interface name -> state
+func parseInterfaceState(state *netmon.State) map[string]string {
+	if state == nil {
+		return nil
+	}
+
+	result := make(map[string]string)
+
+	// Extract ifs={...} section
+	stateStr := state.String()
+	ifsStart := strings.Index(stateStr, "ifs={")
+	if ifsStart == -1 {
+		return result
+	}
+
+	ifsStr := stateStr[ifsStart+5:]
+	ifsEnd := strings.Index(ifsStr, "}")
+	if ifsEnd == -1 {
+		return result
+	}
+
+	// Parse each interface entry
+	ifaces := strings.Split(ifsStr[:ifsEnd], " ")
+	for _, iface := range ifaces {
+		parts := strings.Split(iface, ":")
+		if len(parts) != 2 {
+			continue
+		}
+		name := strings.ToLower(parts[0])
+		state := parts[1]
+		result[name] = state
+	}
+
+	return result
 }

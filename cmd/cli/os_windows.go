@@ -1,23 +1,27 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
+	"os/exec"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 const (
-	v4InterfaceKeyPathFormat = `HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\`
-	v6InterfaceKeyPathFormat = `HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\`
+	v4InterfaceKeyPathFormat = `SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\`
+	v6InterfaceKeyPathFormat = `SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\`
 )
 
 var (
@@ -30,14 +34,6 @@ func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) e
 	return setDNS(iface, nameservers)
 }
 
-func setDnsPowershellCmd(iface *net.Interface, nameservers []string) string {
-	nss := make([]string, 0, len(nameservers))
-	for _, ns := range nameservers {
-		nss = append(nss, strconv.Quote(ns))
-	}
-	return fmt.Sprintf("Set-DnsClientServerAddress -InterfaceIndex %d -ServerAddresses (%s)", iface.Index, strings.Join(nss, ","))
-}
-
 // setDNS sets the dns server for the provided network interface
 func setDNS(iface *net.Interface, nameservers []string) error {
 	if len(nameservers) == 0 {
@@ -46,7 +42,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	setDNSOnce.Do(func() {
 		// If there's a Dns server running, that means we are on AD with Dns feature enabled.
 		// Configuring the Dns server to forward queries to ctrld instead.
-		if windowsHasLocalDnsServerRunning() {
+		if hasLocalDnsServerRunning() {
 			file := absHomeDir(windowsForwardersFilename)
 			oldForwardersContent, _ := os.ReadFile(file)
 			hasLocalIPv6Listener := needLocalIPv6Listener()
@@ -65,9 +61,36 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 			}
 		}
 	})
-	out, err := powershell(setDnsPowershellCmd(iface, nameservers))
+	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {
-		return fmt.Errorf("%w: %s", err, string(out))
+		return fmt.Errorf("setDNS: %w", err)
+	}
+	var (
+		serversV4 []netip.Addr
+		serversV6 []netip.Addr
+	)
+	for _, ns := range nameservers {
+		if addr, err := netip.ParseAddr(ns); err == nil {
+			if addr.Is4() {
+				serversV4 = append(serversV4, addr)
+			} else {
+				serversV6 = append(serversV6, addr)
+			}
+		}
+	}
+
+	if len(serversV4) == 0 && len(serversV6) == 0 {
+		return errors.New("invalid DNS nameservers")
+	}
+	if len(serversV4) > 0 {
+		if err := luid.SetDNS(windows.AF_INET, serversV4, nil); err != nil {
+			return fmt.Errorf("could not set DNS ipv4: %w", err)
+		}
+	}
+	if len(serversV6) > 0 {
+		if err := luid.SetDNS(windows.AF_INET6, serversV6, nil); err != nil {
+			return fmt.Errorf("could not set DNS ipv6: %w", err)
+		}
 	}
 	return nil
 }
@@ -81,7 +104,7 @@ func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
 func resetDNS(iface *net.Interface) error {
 	resetDNSOnce.Do(func() {
 		// See corresponding comment in setDNS.
-		if windowsHasLocalDnsServerRunning() {
+		if hasLocalDnsServerRunning() {
 			file := absHomeDir(windowsForwardersFilename)
 			content, err := os.ReadFile(file)
 			if err != nil {
@@ -96,14 +119,23 @@ func resetDNS(iface *net.Interface) error {
 		}
 	})
 
-	// Restoring DHCP settings.
-	cmd := fmt.Sprintf("Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses", iface.Index)
-	out, err := powershell(cmd)
+	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {
-		return fmt.Errorf("%w: %s", err, string(out))
+		return fmt.Errorf("resetDNS: %w", err)
 	}
+	// Restoring DHCP settings.
+	if err := luid.SetDNS(windows.AF_INET, nil, nil); err != nil {
+		return fmt.Errorf("could not reset DNS ipv4: %w", err)
+	}
+	if err := luid.SetDNS(windows.AF_INET6, nil, nil); err != nil {
+		return fmt.Errorf("could not reset DNS ipv6: %w", err)
+	}
+	return nil
+}
 
-	// If there's static DNS saved, restoring it.
+// restoreDNS restores the DNS settings of the given interface.
+// this should only be executed upon turning off the ctrld service.
+func restoreDNS(iface *net.Interface) (err error) {
 	if nss := savedStaticNameservers(iface); len(nss) > 0 {
 		v4ns := make([]string, 0, 2)
 		v6ns := make([]string, 0, 2)
@@ -120,12 +152,14 @@ func resetDNS(iface *net.Interface) error {
 				continue
 			}
 			mainLog.Load().Debug().Msgf("setting static DNS for interface %q", iface.Name)
-			if err := setDNS(iface, ns); err != nil {
+			err = setDNS(iface, ns)
+
+			if err != nil {
 				return err
 			}
 		}
 	}
-	return nil
+	return err
 }
 
 func currentDNS(iface *net.Interface) []string {
@@ -150,25 +184,31 @@ func currentDNS(iface *net.Interface) []string {
 func currentStaticDNS(iface *net.Interface) ([]string, error) {
 	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("winipcfg.LUIDFromIndex: %w", err)
 	}
 	guid, err := luid.GUID()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("luid.GUID: %w", err)
 	}
 	var ns []string
 	for _, path := range []string{v4InterfaceKeyPathFormat, v6InterfaceKeyPathFormat} {
-		interfaceKeyPath := path + guid.String()
 		found := false
+		interfaceKeyPath := path + guid.String()
+		k, err := registry.OpenKey(registry.LOCAL_MACHINE, interfaceKeyPath, registry.QUERY_VALUE)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", interfaceKeyPath, err)
+		}
 		for _, key := range []string{"NameServer", "ProfileNameServer"} {
 			if found {
 				continue
 			}
-			cmd := fmt.Sprintf(`Get-ItemPropertyValue -Path "%s" -Name "%s"`, interfaceKeyPath, key)
-			out, err := powershell(cmd)
-			if err == nil && len(out) > 0 {
+			value, _, err := k.GetStringValue(key)
+			if err != nil && !errors.Is(err, registry.ErrNotExist) {
+				return nil, fmt.Errorf("%s: %w", key, err)
+			}
+			if len(value) > 0 {
 				found = true
-				for _, e := range strings.Split(string(out), ",") {
+				for _, e := range strings.Split(value, ",") {
 					ns = append(ns, strings.TrimRight(e, "\x00"))
 				}
 			}
@@ -215,4 +255,10 @@ func removeDnsServerForwarders(nameservers []string) error {
 		}
 	}
 	return nil
+}
+
+// powershell runs the given powershell command.
+func powershell(cmd string) ([]byte, error) {
+	out, err := exec.Command("powershell", "-Command", cmd).CombinedOutput()
+	return bytes.TrimSpace(out), err
 }

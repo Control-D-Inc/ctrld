@@ -195,6 +195,12 @@ func resetDNS(iface *net.Interface) (err error) {
 	})
 }
 
+// restoreDNS restores the DNS settings of the given interface.
+// this should only be executed upon turning off the ctrld service.
+func restoreDNS(iface *net.Interface) (err error) {
+	return err
+}
+
 func currentDNS(iface *net.Interface) []string {
 	for _, fn := range []getDNS{getDNSByResolvectl, getDNSBySystemdResolved, getDNSByNmcli, resolvconffile.NameServers} {
 		if ns := fn(iface.Name); len(ns) > 0 {

@@ -25,6 +25,10 @@ func newControlClient(addr string) *controlClient {
 }
 
 func (c *controlClient) post(path string, data io.Reader) (*http.Response, error) {
+	// for log/send, set the timeout to 5 minutes
+	if path == sendLogsPath {
+		c.c.Timeout = time.Minute * 5
+	}
 	return c.c.Post("http://unix"+path, contentTypeJson, data)
 }
 
