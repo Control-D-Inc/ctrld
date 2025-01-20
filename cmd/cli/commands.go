@@ -31,6 +31,10 @@ import (
 )
 
 func initLogCmd() *cobra.Command {
+	warnRuntimeLoggingNotEnabled := func() {
+		mainLog.Load().Warn().Msg("runtime debug logging is not enabled")
+		mainLog.Load().Warn().Msg(`ctrld may be running without "--cd" flag or logging is already enabled`)
+	}
 	logSendCmd := &cobra.Command{
 		Use:   "send",
 		Short: "Send runtime debug logs to ControlD",
@@ -54,8 +58,7 @@ func initLogCmd() *cobra.Command {
 				mainLog.Load().Warn().Msg("runtime logs could only be sent once per minute")
 				return
 			case http.StatusMovedPermanently:
-				mainLog.Load().Warn().Msg("runtime debugs log is not enabled")
-				mainLog.Load().Warn().Msg(`ctrld may be run without "--cd" flag or logging is already enabled`)
+				warnRuntimeLoggingNotEnabled()
 				return
 			}
 			var logs logSentResponse
@@ -92,8 +95,7 @@ func initLogCmd() *cobra.Command {
 
 			switch resp.StatusCode {
 			case http.StatusMovedPermanently:
-				mainLog.Load().Warn().Msg("runtime debugs log is not enabled")
-				mainLog.Load().Warn().Msg(`ctrld may be run without "--cd" flag or logging is already enabled`)
+				warnRuntimeLoggingNotEnabled()
 				return
 			case http.StatusBadRequest:
 				mainLog.Load().Warn().Msg("runtime debugs log is not available")

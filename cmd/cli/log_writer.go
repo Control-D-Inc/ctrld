@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -165,7 +166,7 @@ func (p *prog) logReader() (*logReader, error) {
 		return lr, nil
 	}
 	if p.cfg.Service.LogPath == "" {
-		return nil, nil
+		return &logReader{r: io.NopCloser(strings.NewReader(""))}, nil
 	}
 	f, err := os.Open(normalizeLogFilePath(p.cfg.Service.LogPath))
 	if err != nil {
