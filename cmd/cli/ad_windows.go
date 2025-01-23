@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"io"
+	"log"
+	"os"
 	"strings"
-	"syscall"
-	"unsafe"
 
-	"golang.org/x/sys/windows"
+	"github.com/microsoft/wmi/pkg/base/host"
+	hh "github.com/microsoft/wmi/pkg/hardware/host"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -50,15 +52,20 @@ func addSplitDnsRule(cfg *ctrld.Config, domain string) bool {
 
 // getActiveDirectoryDomain returns AD domain name of this computer.
 func getActiveDirectoryDomain() (string, error) {
-	var domain *uint16
-	var status uint32
-	err := syscall.NetGetJoinInformation(nil, &domain, &status)
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	whost := host.NewWmiLocalHost()
+	cs, err := hh.GetComputerSystem(whost)
 	if err != nil {
 		return "", err
 	}
-	defer syscall.NetApiBufferFree((*byte)(unsafe.Pointer(domain)))
-	if status == syscall.NetSetupDomainName {
-		return windows.UTF16PtrToString(domain), nil
+	defer cs.Close()
+	pod, err := cs.GetPropertyPartOfDomain()
+	if err != nil {
+		return "", err
+	}
+	if pod {
+		return cs.GetPropertyDomain()
 	}
 	return "", nil
 }
