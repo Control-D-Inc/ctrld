@@ -51,6 +51,12 @@ var privateUpstreamConfig = &ctrld.UpstreamConfig{
 	Timeout: 2000,
 }
 
+var localUpstreamConfig = &ctrld.UpstreamConfig{
+	Name:    "Local resolver",
+	Type:    ctrld.ResolverTypeLocal,
+	Timeout: 2000,
+}
+
 // proxyRequest contains data for proxying a DNS query to upstream.
 type proxyRequest struct {
 	msg            *dns.Msg
@@ -443,6 +449,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		upstreams = []string{upstreamOS}
 	}
 
+	if p.isAdDomainQuery(req.msg) {
+		upstreamConfigs = []*ctrld.UpstreamConfig{localUpstreamConfig}
+		upstreams = []string{upstreamOS}
+	}
+
 	res := &proxyResponse{}
 
 	// LAN/PTR lookup flow:
@@ -649,6 +660,14 @@ func (p *prog) upstreamConfigsFromUpstreamNumbers(upstreams []string) []*ctrld.U
 		upstreamConfigs = append(upstreamConfigs, p.cfg.Upstream[upstreamNum])
 	}
 	return upstreamConfigs
+}
+
+func (p *prog) isAdDomainQuery(msg *dns.Msg) bool {
+	if p.adDomain == "" {
+		return false
+	}
+	cDomainName := canonicalName(msg.Question[0].Name)
+	return dns.IsSubDomain(p.adDomain, cDomainName)
 }
 
 // canonicalName returns canonical name from FQDN with "." trimmed.

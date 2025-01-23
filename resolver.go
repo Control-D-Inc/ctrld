@@ -30,8 +30,10 @@ const (
 	ResolverTypeOS = "os"
 	// ResolverTypeLegacy specifies legacy resolver.
 	ResolverTypeLegacy = "legacy"
-	// ResolverTypePrivate is like ResolverTypeOS, but use for local resolver only.
+	// ResolverTypePrivate is like ResolverTypeOS, but use for private resolver only.
 	ResolverTypePrivate = "private"
+	// ResolverTypeLocal is like ResolverTypeOS, but use for local resolver only.
+	ResolverTypeLocal = "local"
 	// ResolverTypeSDNS specifies resolver with information encoded using DNS Stamps.
 	// See: https://dnscrypt.info/stamps-specifications/
 	ResolverTypeSDNS = "sdns"
@@ -46,6 +48,16 @@ var controldPublicDnsWithPort = net.JoinHostPort(controldPublicDns, "53")
 
 // or is the Resolver used for ResolverTypeOS.
 var or = newResolverWithNameserver(defaultNameservers())
+
+var localResolver = newLocalResolver()
+
+func newLocalResolver() Resolver {
+	var nss []string
+	for _, addr := range Rfc1918Addresses() {
+		nss = append(nss, net.JoinHostPort(addr, "53"))
+	}
+	return NewResolverWithNameserver(nss)
+}
 
 // LanQueryCtxKey is the context.Context key to indicate that the request is for LAN network.
 type LanQueryCtxKey struct{}
@@ -89,7 +101,8 @@ func availableNameservers() []string {
 // It's the caller's responsibility to ensure the system DNS is in a clean state before
 // calling this function.
 func InitializeOsResolver() []string {
-	return initializeOsResolver(availableNameservers())
+	ns := initializeOsResolver(availableNameservers())
+	return ns
 }
 
 // initializeOsResolver performs logic for choosing OS resolver nameserver.
@@ -301,6 +314,8 @@ func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 		return &legacyResolver{uc: uc}, nil
 	case ResolverTypePrivate:
 		return NewPrivateResolver(), nil
+	case ResolverTypeLocal:
+		return localResolver, nil
 	}
 	return nil, fmt.Errorf("%w: %s", errUnknownResolver, typ)
 }

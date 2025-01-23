@@ -106,6 +106,7 @@ type prog struct {
 	internalLogSent           time.Time
 	runningIface              string
 	requiredMultiNICsConfig   bool
+	adDomain                  string
 
 	selfUninstallMu       sync.Mutex
 	refusedQueryCount     int
@@ -440,6 +441,10 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				p.cacheFlushDomainsMap[canonicalName(domain)] = struct{}{}
 			}
 		}
+	}
+	if domain, err := getActiveDirectoryDomain(); err == nil && domain != "" && hasLocalDnsServerRunning() {
+		mainLog.Load().Debug().Msgf("active directory domain: %s", domain)
+		p.adDomain = domain
 	}
 
 	var wg sync.WaitGroup

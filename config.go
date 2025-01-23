@@ -384,7 +384,7 @@ func (uc *UpstreamConfig) IsDiscoverable() bool {
 		return *uc.Discoverable
 	}
 	switch uc.Type {
-	case ResolverTypeOS, ResolverTypeLegacy, ResolverTypePrivate:
+	case ResolverTypeOS, ResolverTypeLegacy, ResolverTypePrivate, ResolverTypeLocal:
 		if ip, err := netip.ParseAddr(uc.Domain); err == nil {
 			return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || tsaddr.CGNATRange().Contains(ip)
 		}
