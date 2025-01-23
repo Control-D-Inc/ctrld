@@ -1251,6 +1251,7 @@ func (p *prog) reinitializeOSResolver() {
 		mainLog.Load().Debug().Msg("setting DNS configuration")
 		p.setDNS()
 		mainLog.Load().Debug().Msg("DNS configuration set successfully")
+		p.logInterfacesState()
 	}
 }
 

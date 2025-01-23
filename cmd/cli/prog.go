@@ -273,6 +273,7 @@ func (p *prog) postRun() {
 		p.setDNS()
 		p.csSetDnsDone <- struct{}{}
 		close(p.csSetDnsDone)
+		p.logInterfacesState()
 	}
 }
 
@@ -813,6 +814,28 @@ func (p *prog) resetDNS() {
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDnsIgnoreUnusableInterface)
 	}
+}
+
+func (p *prog) logInterfacesState() {
+	withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+		addrs, err := i.Addrs()
+		if err != nil {
+			mainLog.Load().Warn().Str("interface", i.Name).Err(err).Msg("failed to get addresses")
+		}
+		nss, err := currentStaticDNS(i)
+		if err != nil {
+			mainLog.Load().Warn().Str("interface", i.Name).Err(err).Msg("failed to get DNS")
+		}
+		if len(nss) == 0 {
+			nss = currentDNS(i)
+		}
+		mainLog.Load().Debug().
+			Any("addrs", addrs).
+			Strs("nameservers", nss).
+			Int("index", i.Index).
+			Msgf("interface state: %s", i.Name)
+		return nil
+	})
 }
 
 // findWorkingInterface looks for a network interface with a valid IP configuration
