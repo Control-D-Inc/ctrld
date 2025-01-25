@@ -450,6 +450,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	}
 
 	if p.isAdDomainQuery(req.msg) {
+		ctrld.Log(ctx, mainLog.Load().Debug(),
+			"AD domain query detected for %s in domain %s",
+			req.msg.Question[0].Name, p.adDomain)
 		upstreamConfigs = []*ctrld.UpstreamConfig{localUpstreamConfig}
 		upstreams = []string{upstreamOS}
 	}
@@ -566,14 +569,20 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		if upstreamConfig == nil {
 			continue
 		}
-		ctrld.Log(ctx, mainLog.Load().Debug(), "attempting upstream [ %s ] at index: %d, upstream at index: %s", upstreamConfig.String(), n, upstreams[n])
+		logger := mainLog.Load().Debug().
+			Str("upstream", upstreamConfig.String()).
+			Str("query", req.msg.Question[0].Name).
+			Bool("is_ad_query", p.isAdDomainQuery(req.msg)).
+			Bool("is_lan_query", isLanOrPtrQuery)
 
 		if p.isLoop(upstreamConfig) {
-			mainLog.Load().Warn().Msgf("dns loop detected, upstream: %s", upstreamConfig.String())
+			logger.Msg("DNS loop detected")
 			continue
 		}
 		if p.um.isDown(upstreams[n]) {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "%s is down", upstreams[n])
+			logger.
+				Bool("is_os_resolver", upstreams[n] == upstreamOS).
+				Msg("Upstream is down")
 			continue
 		}
 		answer := resolve(n, upstreamConfig, req.msg)
@@ -1257,7 +1266,6 @@ func (p *prog) reinitializeOSResolver() {
 
 // monitorNetworkChanges starts monitoring for network interface changes
 func (p *prog) monitorNetworkChanges() error {
-	// Create network monitor
 	mon, err := netmon.New(logger.WithPrefix(mainLog.Load().Printf, "netmon: "))
 	if err != nil {
 		return fmt.Errorf("creating network monitor: %w", err)
@@ -1266,6 +1274,12 @@ func (p *prog) monitorNetworkChanges() error {
 	mon.RegisterChangeCallback(func(delta *netmon.ChangeDelta) {
 		// Get map of valid interfaces
 		validIfaces := validInterfacesMap()
+
+		// log the delta for debugging
+		mainLog.Load().Debug().
+			Interface("old_state", delta.Old).
+			Interface("new_state", delta.New).
+			Msg("Network change detected")
 
 		// Parse old and new interface states
 		oldIfs := parseInterfaceState(delta.Old)
@@ -1276,14 +1290,14 @@ func (p *prog) monitorNetworkChanges() error {
 		activeInterfaceExists := false
 
 		for ifaceName := range validIfaces {
-
 			oldState, oldExists := oldIfs[strings.ToLower(ifaceName)]
 			newState, newExists := newIfs[strings.ToLower(ifaceName)]
 
-			if newState != "" && newState != "down" {
+			if newState != "" && !strings.Contains(newState, "down") {
 				activeInterfaceExists = true
 			}
 
+			// Compare states directly
 			if oldExists != newExists || oldState != newState {
 				changed = true
 				mainLog.Load().Debug().
@@ -1302,11 +1316,10 @@ func (p *prog) monitorNetworkChanges() error {
 		}
 
 		if !changed {
-			mainLog.Load().Debug().Msgf("Ignoring interface change - no valid interfaces affected")
+			mainLog.Load().Debug().Msg("Ignoring interface change - no valid interfaces affected")
 			return
 		}
 
-		mainLog.Load().Debug().Msgf("Network change detected: from %v to %v", delta.Old, delta.New)
 		if activeInterfaceExists {
 			p.reinitializeOSResolver()
 		} else {
@@ -1326,9 +1339,10 @@ func parseInterfaceState(state *netmon.State) map[string]string {
 	}
 
 	result := make(map[string]string)
-
-	// Extract ifs={...} section
+	
 	stateStr := state.String()
+	
+	// Extract interface information
 	ifsStart := strings.Index(stateStr, "ifs={")
 	if ifsStart == -1 {
 		return result
@@ -1340,16 +1354,27 @@ func parseInterfaceState(state *netmon.State) map[string]string {
 		return result
 	}
 
-	// Parse each interface entry
-	ifaces := strings.Split(ifsStr[:ifsEnd], " ")
-	for _, iface := range ifaces {
-		parts := strings.Split(iface, ":")
+	// Get the content between ifs={ }
+	ifsContent := strings.TrimSpace(ifsStr[:ifsEnd])
+	
+	// Split on "] " to get each interface entry
+	entries := strings.Split(ifsContent, "] ")
+	
+	for _, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		
+		// Split on ":["
+		parts := strings.Split(entry, ":[")
 		if len(parts) != 2 {
 			continue
 		}
-		name := strings.ToLower(parts[0])
-		state := parts[1]
-		result[name] = state
+		
+		name := strings.TrimSpace(parts[0])
+		state := "[" + strings.TrimSuffix(parts[1], "]") + "]"
+		
+		result[strings.ToLower(name)] = state
 	}
 
 	return result

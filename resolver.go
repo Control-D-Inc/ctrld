@@ -11,7 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"io"
 
+	"github.com/rs/zerolog"
 	"github.com/miekg/dns"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
@@ -83,15 +85,40 @@ func availableNameservers() []string {
 	// Ignore local addresses to prevent loop.
 	regularIPs, loopbackIPs, _ := netmon.LocalAddresses()
 	machineIPsMap := make(map[string]struct{}, len(regularIPs))
-	for _, v := range slices.Concat(regularIPs, loopbackIPs) {
-		machineIPsMap[v.String()] = struct{}{}
+
+
+	//load the logger
+	logger := zerolog.New(io.Discard)
+	if ProxyLogger.Load() != nil {
+		logger = *ProxyLogger.Load()
 	}
-	for _, ns := range nameservers() {
+	Log(context.Background(), logger.Debug(),
+		"Got local addresses - regular IPs: %v, loopback IPs: %v", regularIPs, loopbackIPs)
+
+	for _, v := range slices.Concat(regularIPs, loopbackIPs) {
+		ipStr := v.String()
+		machineIPsMap[ipStr] = struct{}{}
+		Log(context.Background(), logger.Debug(),
+			"Added local IP to OS resolverexclusion map: %s", ipStr)
+	}
+
+	systemNameservers := nameservers()
+	Log(context.Background(), logger.Debug(),
+		"Got system nameservers: %v", systemNameservers)
+
+	for _, ns := range systemNameservers {
 		if _, ok := machineIPsMap[ns]; ok {
+			Log(context.Background(), logger.Debug(),
+				"Skipping local nameserver: %s", ns)
 			continue
 		}
 		nss = append(nss, ns)
+		Log(context.Background(), logger.Debug(),
+			"Added non-local nameserver: %s", ns)
 	}
+
+	Log(context.Background(), logger.Debug(),
+		"Final available nameservers: %v", nss)
 	return nss
 }
 
@@ -138,156 +165,159 @@ func initializeOsResolver(servers []string) []string {
 	}
 	or.publicServers.Store(&publicNss)
 
-	// Test servers in background and remove failures
-	go func() {
-		// Test servers in parallel but maintain order
-		type result struct {
-			index  int
-			server string
-			valid  bool
-		}
+	// no longer testing servers in the background
+	// if DCHP nameservers are not working, this is outside of our control
 
-		testServers := func(servers []string) []string {
-			if len(servers) == 0 {
-				return nil
-			}
+	// // Test servers in background and remove failures
+	// go func() {
+	// 	// Test servers in parallel but maintain order
+	// 	type result struct {
+	// 		index  int
+	// 		server string
+	// 		valid  bool
+	// 	}
 
-			results := make(chan result, len(servers))
-			var wg sync.WaitGroup
+	// 	testServers := func(servers []string) []string {
+	// 		if len(servers) == 0 {
+	// 			return nil
+	// 		}
 
-			for i, server := range servers {
-				wg.Add(1)
-				go func(idx int, s string) {
-					defer wg.Done()
-					results <- result{
-						index:  idx,
-						server: s,
-						valid:  testNameServerFn(s),
-					}
-				}(i, server)
-			}
+	// 		results := make(chan result, len(servers))
+	// 		var wg sync.WaitGroup
 
-			go func() {
-				wg.Wait()
-				close(results)
-			}()
+	// 		for i, server := range servers {
+	// 			wg.Add(1)
+	// 			go func(idx int, s string) {
+	// 				defer wg.Done()
+	// 				results <- result{
+	// 					index:  idx,
+	// 					server: s,
+	// 					valid:  testNameServerFn(s),
+	// 				}
+	// 			}(i, server)
+	// 		}
 
-			// Collect results maintaining original order
-			validServers := make([]string, 0, len(servers))
-			ordered := make([]result, 0, len(servers))
-			for r := range results {
-				ordered = append(ordered, r)
-			}
-			slices.SortFunc(ordered, func(a, b result) int {
-				return a.index - b.index
-			})
-			for _, r := range ordered {
-				if r.valid {
-					validServers = append(validServers, r.server)
-				} else {
-					ProxyLogger.Load().Debug().Str("nameserver", r.server).Msg("nameserver failed validation testing")
-				}
-			}
-			return validServers
-		}
+	// 		go func() {
+	// 			wg.Wait()
+	// 			close(results)
+	// 		}()
 
-		// Test and update LAN servers
-		if validLanNss := testServers(lanNss); len(validLanNss) > 0 {
-			or.lanServers.Store(&validLanNss)
-		}
+	// 		// Collect results maintaining original order
+	// 		validServers := make([]string, 0, len(servers))
+	// 		ordered := make([]result, 0, len(servers))
+	// 		for r := range results {
+	// 			ordered = append(ordered, r)
+	// 		}
+	// 		slices.SortFunc(ordered, func(a, b result) int {
+	// 			return a.index - b.index
+	// 		})
+	// 		for _, r := range ordered {
+	// 			if r.valid {
+	// 				validServers = append(validServers, r.server)
+	// 			} else {
+	// 				ProxyLogger.Load().Debug().Str("nameserver", r.server).Msg("nameserver failed validation testing")
+	// 			}
+	// 		}
+	// 		return validServers
+	// 	}
 
-		// Test and update public servers
-		validPublicNss := testServers(publicNss)
-		if len(validPublicNss) == 0 {
-			validPublicNss = []string{controldPublicDnsWithPort}
-		}
-		or.publicServers.Store(&validPublicNss)
-	}()
+	// 	// Test and update LAN servers
+	// 	if validLanNss := testServers(lanNss); len(validLanNss) > 0 {
+	// 		or.lanServers.Store(&validLanNss)
+	// 	}
+
+	// 	// Test and update public servers
+	// 	validPublicNss := testServers(publicNss)
+	// 	if len(validPublicNss) == 0 {
+	// 		validPublicNss = []string{controldPublicDnsWithPort}
+	// 	}
+	// 	or.publicServers.Store(&validPublicNss)
+	// }()
 
 	return slices.Concat(lanNss, publicNss)
 }
 
-// testNameserverFn sends a test query to DNS nameserver to check if the server is available.
-var testNameServerFn = testNameserver
+// // testNameserverFn sends a test query to DNS nameserver to check if the server is available.
+// var testNameServerFn = testNameserver
 
-// testPlainDnsNameserver sends a test query to DNS nameserver to check if the server is available.
-func testNameserver(addr string) bool {
-	// Skip link-local addresses without scope IDs and deprecated site-local addresses
-	if ip, err := netip.ParseAddr(addr); err == nil {
-		if ip.Is6() {
-			if ip.IsLinkLocalUnicast() && !strings.Contains(addr, "%") {
-				ProxyLogger.Load().Debug().
-					Str("nameserver", addr).
-					Msg("skipping link-local IPv6 address without scope ID")
-				return false
-			}
-			// Skip deprecated site-local addresses (fec0::/10)
-			if strings.HasPrefix(ip.String(), "fec0:") {
-				ProxyLogger.Load().Debug().
-					Str("nameserver", addr).
-					Msg("skipping deprecated site-local IPv6 address")
-				return false
-			}
-		}
-	}
+// // testPlainDnsNameserver sends a test query to DNS nameserver to check if the server is available.
+// func testNameserver(addr string) bool {
+// 	// Skip link-local addresses without scope IDs and deprecated site-local addresses
+// 	if ip, err := netip.ParseAddr(addr); err == nil {
+// 		if ip.Is6() {
+// 			if ip.IsLinkLocalUnicast() && !strings.Contains(addr, "%") {
+// 				ProxyLogger.Load().Debug().
+// 					Str("nameserver", addr).
+// 					Msg("skipping link-local IPv6 address without scope ID")
+// 				return false
+// 			}
+// 			// Skip deprecated site-local addresses (fec0::/10)
+// 			if strings.HasPrefix(ip.String(), "fec0:") {
+// 				ProxyLogger.Load().Debug().
+// 					Str("nameserver", addr).
+// 					Msg("skipping deprecated site-local IPv6 address")
+// 				return false
+// 			}
+// 		}
+// 	}
 
-	ProxyLogger.Load().Debug().
-		Str("input_addr", addr).
-		Msg("testing nameserver")
+// 	ProxyLogger.Load().Debug().
+// 		Str("input_addr", addr).
+// 		Msg("testing nameserver")
 
-	// Handle both IPv4 and IPv6 addresses
-	serverAddr := addr
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		// No port in address, add default port 53
-		serverAddr = net.JoinHostPort(addr, "53")
-	} else if port == "" {
-		// Has split markers but empty port
-		serverAddr = net.JoinHostPort(host, "53")
-	}
+// 	// Handle both IPv4 and IPv6 addresses
+// 	serverAddr := addr
+// 	host, port, err := net.SplitHostPort(addr)
+// 	if err != nil {
+// 		// No port in address, add default port 53
+// 		serverAddr = net.JoinHostPort(addr, "53")
+// 	} else if port == "" {
+// 		// Has split markers but empty port
+// 		serverAddr = net.JoinHostPort(host, "53")
+// 	}
 
-	ProxyLogger.Load().Debug().
-		Str("server_addr", serverAddr).
-		Msg("using server address")
+// 	ProxyLogger.Load().Debug().
+// 		Str("server_addr", serverAddr).
+// 		Msg("using server address")
 
-	// Test domains that are likely to exist and respond quickly
-	testDomains := []struct {
-		name  string
-		qtype uint16
-	}{
-		{".", dns.TypeNS},            // Root NS query - should always work
-		{"controld.com.", dns.TypeA}, // Fallback to a reliable domain
-	}
+// 	// Test domains that are likely to exist and respond quickly
+// 	testDomains := []struct {
+// 		name  string
+// 		qtype uint16
+// 	}{
+// 		{".", dns.TypeNS},            // Root NS query - should always work
+// 		{"controld.com.", dns.TypeA}, // Fallback to a reliable domain
+// 	}
 
-	client := &dns.Client{
-		Timeout: 2 * time.Second,
-		Net:     "udp",
-	}
+// 	client := &dns.Client{
+// 		Timeout: 2 * time.Second,
+// 		Net:     "udp",
+// 	}
 
-	// Try each test query until one succeeds
-	for _, test := range testDomains {
-		msg := new(dns.Msg)
-		msg.SetQuestion(test.name, test.qtype)
-		msg.RecursionDesired = true
+// 	// Try each test query until one succeeds
+// 	for _, test := range testDomains {
+// 		msg := new(dns.Msg)
+// 		msg.SetQuestion(test.name, test.qtype)
+// 		msg.RecursionDesired = true
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		resp, _, err := client.ExchangeContext(ctx, msg, serverAddr)
-		cancel()
+// 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+// 		resp, _, err := client.ExchangeContext(ctx, msg, serverAddr)
+// 		cancel()
 
-		if err == nil && resp != nil {
-			return true
-		}
+// 		if err == nil && resp != nil {
+// 			return true
+// 		}
 
-		ProxyLogger.Load().Error().
-			Err(err).
-			Str("nameserver", serverAddr).
-			Str("test_domain", test.name).
-			Str("query_type", dns.TypeToString[test.qtype]).
-			Msg("DNS availability test failed")
-	}
+// 		ProxyLogger.Load().Error().
+// 			Err(err).
+// 			Str("nameserver", serverAddr).
+// 			Str("test_domain", test.name).
+// 			Str("query_type", dns.TypeToString[test.qtype]).
+// 			Msg("DNS availability test failed")
+// 	}
 
-	return false
-}
+// 	return false
+// }
 
 // Resolver is the interface that wraps the basic DNS operations.
 //
