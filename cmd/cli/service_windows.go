@@ -2,11 +2,14 @@ package cli
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc/mgr"
 )
 
 func hasElevatedPrivilege() (bool, error) {
@@ -28,6 +31,53 @@ func hasElevatedPrivilege() (bool, error) {
 	}
 	token := windows.Token(0)
 	return token.IsMember(sid)
+}
+
+// ConfigureWindowsServiceFailureActions checks if the given service
+// has the correct failure actions configured, and updates them if not.
+func ConfigureWindowsServiceFailureActions(serviceName string) error {
+	if runtime.GOOS != "windows" {
+		return nil // no-op on non-Windows
+	}
+
+	m, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+
+	// restart 3 times with a delay of 2 seconds
+	actions := []mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: time.Second * 2}, // 2 seconds
+		{Type: mgr.ServiceRestart, Delay: time.Second * 2}, // 2 seconds
+		{Type: mgr.ServiceRestart, Delay: time.Second * 2}, // 2 seconds
+	}
+
+	// Set the recovery actions (3 restarts, reset period = 120).
+	err = s.SetRecoveryActions(actions, 120)
+	if err != nil {
+		return err
+	}
+
+	// Ensure that failure actions are NOT triggered on user-initiated stops.
+	var failureActionsFlag windows.SERVICE_FAILURE_ACTIONS_FLAG
+	failureActionsFlag.FailureActionsOnNonCrashFailures = 0
+
+	if err := windows.ChangeServiceConfig2(
+		s.Handle,
+		windows.SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
+		(*byte)(unsafe.Pointer(&failureActionsFlag)),
+	); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func openLogFile(path string, mode int) (*os.File, error) {

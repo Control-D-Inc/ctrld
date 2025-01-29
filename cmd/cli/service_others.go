@@ -16,3 +16,5 @@ func openLogFile(path string, flags int) (*os.File, error) {
 
 // hasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.
 func hasLocalDnsServerRunning() bool { return false }
+
+func ConfigureWindowsServiceFailureActions(serviceName string) error { return nil }

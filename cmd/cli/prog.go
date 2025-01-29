@@ -45,6 +45,7 @@ const (
 	upstreamOS                 = upstreamPrefix + "os"
 	upstreamPrivate            = upstreamPrefix + "private"
 	dnsWatchdogDefaultInterval = 20 * time.Second
+	ctrldServiceName           = "ctrld"
 )
 
 // ControlSocketName returns name for control unix socket.
@@ -61,8 +62,9 @@ var logf = func(format string, args ...any) {
 }
 
 var svcConfig = &service.Config{
-	Name:        "ctrld",
+	Name:        ctrldServiceName,
 	DisplayName: "Control-D Helper Service",
+	Description: "A highly configurable, multi-protocol DNS forwarding proxy",
 	Option:      service.KeyValue{},
 }
 

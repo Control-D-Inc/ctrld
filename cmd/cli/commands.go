@@ -164,7 +164,7 @@ func initRunCmd() *cobra.Command {
 	return runCmd
 }
 
-func initStartCmd() *cobra.Command {
+func initStartCmd() (*cobra.Command, *cobra.Command) {
 	startCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
 			checkHasElevatedPrivilege()
@@ -310,7 +310,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 
 				initLogging()
 				tasks := []task{
-					{s.Stop, false},
+					{s.Stop, false, "Stop"},
 					resetDnsTask(p, s, isCtrldInstalled, currentIface),
 					{func() error {
 						// Save current DNS so we can restore later.
@@ -321,9 +321,12 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 							return nil
 						})
 						return nil
-					}, false},
-					{s.Start, true},
-					{noticeWritingControlDConfig, false},
+					}, false, "Save current DNS"},
+					{func() error {
+						return ConfigureWindowsServiceFailureActions(ctrldServiceName)
+					}, false, "Configure Windows service failure actions"},
+					{s.Start, true, "Start"},
+					{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 				}
 				mainLog.Load().Notice().Msg("Starting existing ctrld service")
 				if doTasks(tasks) {
@@ -387,9 +390,9 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			}
 
 			tasks := []task{
-				{s.Stop, false},
-				{func() error { return doGenerateNextDNSConfig(nextdns) }, true},
-				{func() error { return ensureUninstall(s) }, false},
+				{s.Stop, false, "Stop"},
+				{func() error { return doGenerateNextDNSConfig(nextdns) }, true, "Generate NextDNS config"},
+				{func() error { return ensureUninstall(s) }, false, "Ensure uninstall"},
 				resetDnsTask(p, s, isCtrldInstalled, currentIface),
 				{func() error {
 					// Save current DNS so we can restore later.
@@ -400,12 +403,15 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 						return nil
 					})
 					return nil
-				}, false},
-				{s.Install, false},
-				{s.Start, true},
+				}, false, "Save current DNS"},
+				{s.Install, false, "Install"},
+				{func() error {
+					return ConfigureWindowsServiceFailureActions(ctrldServiceName)
+				}, false, "Configure Windows service failure actions"},
+				{s.Start, true, "Start"},
 				// Note that startCmd do not actually write ControlD config, but the config file was
 				// generated after s.Start, so we notice users here for consistent with nextdns mode.
-				{noticeWritingControlDConfig, false},
+				{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 			}
 			mainLog.Load().Notice().Msg("Starting service")
 			if doTasks(tasks) {
@@ -528,7 +534,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmdAlias.Flags().AddFlagSet(startCmd.Flags())
 	rootCmd.AddCommand(startCmdAlias)
 
-	return startCmd
+	return startCmd, startCmdAlias
 }
 
 func initStopCmd() *cobra.Command {
@@ -558,7 +564,7 @@ func initStopCmd() *cobra.Command {
 			if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)
 			}
-			if doTasks([]task{{s.Stop, true}}) {
+			if doTasks([]task{{s.Stop, true, "Stop"}}) {
 				p.router.Cleanup()
 				p.resetDNS()
 
@@ -651,8 +657,8 @@ func initRestartCmd() *cobra.Command {
 				iface = ir.Name
 			}
 			tasks := []task{
-				{s.Stop, false},
-				{s.Start, true},
+				{s.Stop, false, "Stop"},
+				{s.Start, true, "Start"},
 			}
 			if doTasks(tasks) {
 				dir, err := socketDir()
@@ -1043,7 +1049,7 @@ func initClientsCmd() *cobra.Command {
 	return clientsCmd
 }
 
-func initUpgradeCmd() *cobra.Command {
+func initUpgradeCmd(startCmd *cobra.Command) *cobra.Command {
 	const (
 		upgradeChannelDev     = "dev"
 		upgradeChannelProd    = "prod"
@@ -1115,23 +1121,23 @@ func initUpgradeCmd() *cobra.Command {
 				mainLog.Load().Fatal().Err(err).Msg("failed to update current binary")
 			}
 
+			// we run the actual commands to make sure all the logic we want is executed
 			doRestart := func() bool {
-				if !svcInstalled {
-					return true
+
+				// run the start command so that we reinit the service
+				// this is to fix the non restarting options on windows for existing clients
+				// we have to reset os.Args, since other commands use it.
+				curCdUID := curCdUID()
+				startArgs := []string{}
+				os.Args = []string{"ctrld", "start"}
+				if curCdUID != "" {
+					startArgs = append(startArgs, fmt.Sprintf("--cd=%s", curCdUID))
+					os.Args = append(os.Args, fmt.Sprintf("--cd=%s", curCdUID))
 				}
-				tasks := []task{
-					{s.Stop, false},
-					{s.Start, false},
-				}
-				if doTasks(tasks) {
-					if dir, err := socketDir(); err == nil {
-						if cc := newSocketControlClient(context.TODO(), s, dir); cc != nil {
-							_, _ = cc.post(ifacePath, nil)
-							return true
-						}
-					}
-				}
-				return false
+				startCmd.Run(startCmd, startArgs)
+
+				return true
+
 			}
 			if svcInstalled {
 				mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")

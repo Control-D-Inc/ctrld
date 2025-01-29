@@ -126,7 +126,7 @@ func initCLI() {
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true
 
 	initRunCmd()
-	startCmd := initStartCmd()
+	startCmd, startCmdAlias := initStartCmd()
 	stopCmd := initStopCmd()
 	restartCmd := initRestartCmd()
 	reloadCmd := initReloadCmd(restartCmd)
@@ -135,7 +135,7 @@ func initCLI() {
 	interfacesCmd := initInterfacesCmd()
 	initServicesCmd(startCmd, stopCmd, restartCmd, reloadCmd, statusCmd, uninstallCmd, interfacesCmd)
 	initClientsCmd()
-	initUpgradeCmd()
+	initUpgradeCmd(startCmdAlias)
 	initLogCmd()
 }
 
@@ -242,6 +242,10 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			}
 			if err := s.Run(); err != nil {
 				mainLog.Load().Error().Err(err).Msg("failed to start service")
+			}
+			// Configure Windows service failure actions
+			if err := ConfigureWindowsServiceFailureActions(ctrldServiceName); err != nil {
+				mainLog.Load().Error().Err(err).Msgf("failed to configure Windows service %s failure actions", ctrldServiceName)
 			}
 		}()
 	}
@@ -1016,8 +1020,8 @@ func uninstall(p *prog, s service.Service) {
 		return
 	}
 	tasks := []task{
-		{s.Stop, false},
-		{s.Uninstall, true},
+		{s.Stop, false, "Stop"},
+		{s.Uninstall, true, "Uninstall"},
 	}
 	initLogging()
 	if doTasks(tasks) {
@@ -1688,6 +1692,10 @@ func runInCdMode() bool {
 // curCdUID returns the current ControlD UID used by running ctrld process.
 func curCdUID() string {
 	if s, _ := newService(&prog{}, svcConfig); s != nil {
+		// Configure Windows service failure actions
+		if err := ConfigureWindowsServiceFailureActions(ctrldServiceName); err != nil {
+			mainLog.Load().Error().Err(err).Msgf("failed to configure Windows service %s failure actions", ctrldServiceName)
+		}
 		if dir, _ := socketDir(); dir != "" {
 			cc := newSocketControlClient(context.TODO(), s, dir)
 			if cc != nil {
@@ -1791,7 +1799,7 @@ func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, ir *ifaceRe
 		}
 		iface = oldIface
 		return nil
-	}, false}
+	}, false, "Reset DNS"}
 }
 
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
@@ -1840,7 +1848,7 @@ func uninstallInvalidCdUID(p *prog, logger zerolog.Logger, doStop bool) bool {
 
 	p.resetDNS()
 
-	tasks := []task{{s.Uninstall, true}}
+	tasks := []task{{s.Uninstall, true, "Uninstall"}}
 	if doTasks(tasks) {
 		logger.Info().Msg("uninstalled service")
 		if doStop {

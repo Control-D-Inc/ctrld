@@ -1339,9 +1339,9 @@ func parseInterfaceState(state *netmon.State) map[string]string {
 	}
 
 	result := make(map[string]string)
-	
+
 	stateStr := state.String()
-	
+
 	// Extract interface information
 	ifsStart := strings.Index(stateStr, "ifs={")
 	if ifsStart == -1 {
@@ -1356,24 +1356,24 @@ func parseInterfaceState(state *netmon.State) map[string]string {
 
 	// Get the content between ifs={ }
 	ifsContent := strings.TrimSpace(ifsStr[:ifsEnd])
-	
+
 	// Split on "] " to get each interface entry
 	entries := strings.Split(ifsContent, "] ")
-	
+
 	for _, entry := range entries {
 		if entry == "" {
 			continue
 		}
-		
+
 		// Split on ":["
 		parts := strings.Split(entry, ":[")
 		if len(parts) != 2 {
 			continue
 		}
-		
+
 		name := strings.TrimSpace(parts[0])
 		state := "[" + strings.TrimSuffix(parts[1], "]") + "]"
-		
+
 		result[strings.ToLower(name)] = state
 	}
 

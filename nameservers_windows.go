@@ -3,35 +3,41 @@ package ctrld
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"net"
+	"os"
 	"strings"
 	"syscall"
 	"time"
 	"unsafe"
-	"io"
-	"os"
 
+	"github.com/StackExchange/wmi"
+	"github.com/microsoft/wmi/pkg/base/host"
+	"github.com/microsoft/wmi/pkg/base/instance"
+	"github.com/microsoft/wmi/pkg/base/query"
+	"github.com/microsoft/wmi/pkg/constant"
+	"github.com/microsoft/wmi/pkg/hardware/network/netadapter"
 	"github.com/rs/zerolog"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
-	"github.com/StackExchange/wmi"
 )
 
 const (
-	maxRetries                = 3
-	retryDelay                = 500 * time.Millisecond
-	defaultTimeout            = 5 * time.Second
-	minDNSServers             = 1 // Minimum number of DNS servers we want to find
-	NetSetupUnknown      uint32 = 0
-	NetSetupWorkgroup    uint32 = 1
-	NetSetupDomain       uint32 = 2
-	NetSetupCloudDomain  uint32 = 3
-	DS_FORCE_REDISCOVERY          = 0x00000001
-    DS_DIRECTORY_SERVICE_REQUIRED = 0x00000010
-    DS_BACKGROUND_ONLY            = 0x00000100
-    DS_IP_REQUIRED                = 0x00000200
-    DS_IS_DNS_NAME                = 0x00020000
-    DS_RETURN_DNS_NAME            = 0x40000000
+	maxRetries                           = 5
+	retryDelay                           = 1 * time.Second
+	defaultTimeout                       = 5 * time.Second
+	minDNSServers                        = 1 // Minimum number of DNS servers we want to find
+	NetSetupUnknown               uint32 = 0
+	NetSetupWorkgroup             uint32 = 1
+	NetSetupDomain                uint32 = 2
+	NetSetupCloudDomain           uint32 = 3
+	DS_FORCE_REDISCOVERY                 = 0x00000001
+	DS_DIRECTORY_SERVICE_REQUIRED        = 0x00000010
+	DS_BACKGROUND_ONLY                   = 0x00000100
+	DS_IP_REQUIRED                       = 0x00000200
+	DS_IS_DNS_NAME                       = 0x00020000
+	DS_RETURN_DNS_NAME                   = 0x40000000
 )
 
 type DomainControllerInfo struct {
@@ -132,7 +138,7 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 		if err != nil {
 			Log(context.Background(), logger.Debug(),
 				"Failed to get local AD domain: %v", err)
-		
+
 		} else {
 
 			// Load netapi32.dll
@@ -141,9 +147,9 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 
 			var info *DomainControllerInfo
 
-			flags := uint32(DS_RETURN_DNS_NAME | 
-						DS_IP_REQUIRED | 
-						DS_IS_DNS_NAME)
+			flags := uint32(DS_RETURN_DNS_NAME |
+				DS_IP_REQUIRED |
+				DS_IS_DNS_NAME)
 
 			// Convert domain name to UTF16 pointer
 			domainUTF16, err := windows.UTF16PtrFromString(domainName)
@@ -221,6 +227,14 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 			continue
 		}
 
+		// Skip if software loopback or other non-physical types
+		// This is to avoid the "Loopback Pseudo-Interface 1" issue we see on windows
+		if aa.IfType == winipcfg.IfTypeSoftwareLoopback {
+			Log(context.Background(), logger.Debug(),
+				"Skipping %s (software loopback)", aa.FriendlyName())
+			continue
+		}
+
 		Log(context.Background(), logger.Debug(),
 			"Processing adapter %s", aa.FriendlyName())
 
@@ -232,9 +246,26 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	validInterfacesMap := validInterfaces()
+
 	// Collect DNS servers
 	for _, aa := range aas {
 		if aa.OperStatus != winipcfg.IfOperStatusUp {
+			continue
+		}
+
+		// Skip if software loopback or other non-physical types
+		// This is to avoid the "Loopback Pseudo-Interface 1" issue we see on windows
+		if aa.IfType == winipcfg.IfTypeSoftwareLoopback {
+			Log(context.Background(), logger.Debug(),
+				"Skipping %s (software loopback)", aa.FriendlyName())
+			continue
+		}
+
+		// if not in the validInterfacesMap, skip
+		if _, ok := validInterfacesMap[aa.FriendlyName()]; !ok {
+			Log(context.Background(), logger.Debug(),
+				"Skipping %s (not in validInterfacesMap)", aa.FriendlyName())
 			continue
 		}
 
@@ -322,8 +353,8 @@ func checkDomainJoined() bool {
 	// Consider both traditional and cloud domains as valid domain joins
 	isDomain := status == NetSetupDomain || status == NetSetupCloudDomain
 	Log(context.Background(), logger.Debug(),
-		"Is domain joined? status=%d, traditional=%v, cloud=%v, result=%v", 
-		status, 
+		"Is domain joined? status=%d, traditional=%v, cloud=%v, result=%v",
+		status,
 		status == NetSetupDomain,
 		status == NetSetupCloudDomain,
 		isDomain)
@@ -333,32 +364,111 @@ func checkDomainJoined() bool {
 
 // Win32_ComputerSystem is the minimal struct for WMI query
 type Win32_ComputerSystem struct {
-    Domain string
+	Domain string
 }
 
 // getLocalADDomain tries to detect the AD domain in two ways:
-//  1) USERDNSDOMAIN env var (often set in AD logon sessions)
-//  2) WMI Win32_ComputerSystem.Domain
+//  1. USERDNSDOMAIN env var (often set in AD logon sessions)
+//  2. WMI Win32_ComputerSystem.Domain
 func getLocalADDomain() (string, error) {
-    // 1) Check environment variable
-    envDomain := os.Getenv("USERDNSDOMAIN")
-    if envDomain != "" {
-        return strings.TrimSpace(envDomain), nil
-    }
+	// 1) Check environment variable
+	envDomain := os.Getenv("USERDNSDOMAIN")
+	if envDomain != "" {
+		return strings.TrimSpace(envDomain), nil
+	}
 
-    // 2) Check WMI (requires Windows + admin privileges or sufficient access)
-    var result []Win32_ComputerSystem
-    err := wmi.Query("SELECT Domain FROM Win32_ComputerSystem", &result)
-    if err != nil {
-        return "", fmt.Errorf("WMI query failed: %v", err)
-    }
-    if len(result) == 0 {
-        return "", fmt.Errorf("no rows returned from Win32_ComputerSystem")
-    }
+	// 2) Check WMI (requires Windows + admin privileges or sufficient access)
+	var result []Win32_ComputerSystem
+	err := wmi.Query("SELECT Domain FROM Win32_ComputerSystem", &result)
+	if err != nil {
+		return "", fmt.Errorf("WMI query failed: %v", err)
+	}
+	if len(result) == 0 {
+		return "", fmt.Errorf("no rows returned from Win32_ComputerSystem")
+	}
 
-    domain := strings.TrimSpace(result[0].Domain)
-    if domain == "" {
-        return "", fmt.Errorf("machine does not appear to have a domain set")
-    }
-    return domain, nil
+	domain := strings.TrimSpace(result[0].Domain)
+	if domain == "" {
+		return "", fmt.Errorf("machine does not appear to have a domain set")
+	}
+	return domain, nil
+}
+
+// validInterfaces returns a list of all physical interfaces.
+// this is a duplicate of what is in net_windows.go, we should
+// clean this up so there is only one version
+func validInterfaces() map[string]struct{} {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+
+	//load the logger
+	logger := zerolog.New(io.Discard)
+	if ProxyLogger.Load() != nil {
+		logger = *ProxyLogger.Load()
+	}
+
+	whost := host.NewWmiLocalHost()
+	q := query.NewWmiQuery("MSFT_NetAdapter")
+	instances, err := instance.GetWmiInstancesFromHost(whost, string(constant.StadardCimV2), q)
+	if err != nil {
+		Log(context.Background(), logger.Warn(),
+			"failed to get wmi network adapter: %v", err)
+		return nil
+	}
+	defer instances.Close()
+	var adapters []string
+	for _, i := range instances {
+		adapter, err := netadapter.NewNetworkAdapter(i)
+		if err != nil {
+			Log(context.Background(), logger.Warn(),
+				"failed to get network adapter: %v", err)
+			continue
+		}
+
+		name, err := adapter.GetPropertyName()
+		if err != nil {
+			Log(context.Background(), logger.Warn(),
+				"failed to get interface name: %v", err)
+			continue
+		}
+
+		// From: https://learn.microsoft.com/en-us/previous-versions/windows/desktop/legacy/hh968170(v=vs.85)
+		//
+		// "Indicates if a connector is present on the network adapter. This value is set to TRUE
+		// if this is a physical adapter or FALSE if this is not a physical adapter."
+		physical, err := adapter.GetPropertyConnectorPresent()
+		if err != nil {
+			Log(context.Background(), logger.Debug(),
+				"failed to get network adapter connector present property: %v", err)
+			continue
+		}
+		if !physical {
+			Log(context.Background(), logger.Debug(),
+				"skipping non-physical adapter: %s", name)
+			continue
+		}
+
+		// Check if it's a hardware interface. Checking only for connector present is not enough
+		// because some interfaces are not physical but have a connector.
+		hardware, err := adapter.GetPropertyHardwareInterface()
+		if err != nil {
+			Log(context.Background(), logger.Debug(),
+				"failed to get network adapter hardware interface property: %v", err)
+			continue
+		}
+		if !hardware {
+			Log(context.Background(), logger.Debug(),
+				"skipping non-hardware interface: %s", name)
+			continue
+		}
+
+		adapters = append(adapters, name)
+	}
+
+	m := make(map[string]struct{})
+	for _, ifaceName := range adapters {
+		m[ifaceName] = struct{}{}
+	}
+	return m
+
 }
