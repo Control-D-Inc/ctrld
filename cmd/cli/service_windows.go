@@ -52,7 +52,21 @@ func ConfigureWindowsServiceFailureActions(serviceName string) error {
 	}
 	defer s.Close()
 
-	// restart 3 times with a delay of 2 seconds
+	// 1. Retrieve the current config
+	cfg, err := s.Config()
+	if err != nil {
+		return err
+	}
+
+	// 2. Update the Description
+	cfg.Description = "A highly configurable, multi-protocol DNS forwarding proxy"
+
+	// 3. Apply the updated config
+	if err := s.UpdateConfig(cfg); err != nil {
+		return err
+	}
+
+	// Then proceed with existing actions, e.g. setting failure actions
 	actions := []mgr.RecoveryAction{
 		{Type: mgr.ServiceRestart, Delay: time.Second * 2}, // 2 seconds
 		{Type: mgr.ServiceRestart, Delay: time.Second * 2}, // 2 seconds

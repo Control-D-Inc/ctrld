@@ -40,11 +40,13 @@ func validInterfaces() []string {
 	whost := host.NewWmiLocalHost()
 	q := query.NewWmiQuery("MSFT_NetAdapter")
 	instances, err := instance.GetWmiInstancesFromHost(whost, string(constant.StadardCimV2), q)
+	if instances != nil {
+		defer instances.Close()
+	}
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("failed to get wmi network adapter")
 		return nil
 	}
-	defer instances.Close()
 	var adapters []string
 	for _, i := range instances {
 		adapter, err := netadapter.NewNetworkAdapter(i)

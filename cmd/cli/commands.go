@@ -164,7 +164,7 @@ func initRunCmd() *cobra.Command {
 	return runCmd
 }
 
-func initStartCmd() (*cobra.Command, *cobra.Command) {
+func initStartCmd() *cobra.Command {
 	startCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
 			checkHasElevatedPrivilege()
@@ -391,7 +391,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 
 			tasks := []task{
 				{s.Stop, false, "Stop"},
-				{func() error { return doGenerateNextDNSConfig(nextdns) }, true, "Generate NextDNS config"},
+				{func() error { return doGenerateNextDNSConfig(nextdns) }, true, "Checking config"},
 				{func() error { return ensureUninstall(s) }, false, "Ensure uninstall"},
 				resetDnsTask(p, s, isCtrldInstalled, currentIface),
 				{func() error {
@@ -534,7 +534,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmdAlias.Flags().AddFlagSet(startCmd.Flags())
 	rootCmd.AddCommand(startCmdAlias)
 
-	return startCmd, startCmdAlias
+	return startCmd
 }
 
 func initStopCmd() *cobra.Command {
@@ -647,6 +647,15 @@ func initRestartCmd() *cobra.Command {
 				mainLog.Load().Warn().Msg("service not installed")
 				return
 			}
+			if iface == "" {
+				iface = "auto"
+			}
+			p.preRun()
+			if ir := runningIface(s); ir != nil {
+				p.runningIface = ir.Name
+				p.requiredMultiNICsConfig = ir.All
+			}
+
 			initLogging()
 
 			if cdMode {
@@ -656,11 +665,53 @@ func initRestartCmd() *cobra.Command {
 			if ir := runningIface(s); ir != nil {
 				iface = ir.Name
 			}
-			tasks := []task{
-				{s.Stop, false, "Stop"},
-				{s.Start, true, "Start"},
+
+			doRestart := func() bool {
+				tasks := []task{
+					{s.Stop, true, "Stop"},
+					{func() error {
+						p.router.Cleanup()
+						p.resetDNS()
+						return nil
+					}, false, "Cleanup"},
+					{func() error {
+						time.Sleep(time.Second * 1)
+						return nil
+					}, false, "Waiting for service to stop"},
+				}
+				if doTasks(tasks) {
+
+					if router.WaitProcessExited() {
+						ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+						defer cancel()
+
+					loop:
+						for {
+							select {
+							case <-ctx.Done():
+								mainLog.Load().Error().Msg("timeout while waiting for service to stop")
+								break loop
+							default:
+							}
+							time.Sleep(time.Second)
+							if status, _ := s.Status(); status == service.StatusStopped {
+								break
+							}
+						}
+					}
+				} else {
+					return false
+				}
+
+				tasks = []task{
+					{s.Start, true, "Start"},
+				}
+
+				return doTasks(tasks)
+
 			}
-			if doTasks(tasks) {
+
+			if doRestart() {
 				dir, err := socketDir()
 				if err != nil {
 					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
@@ -668,11 +719,13 @@ func initRestartCmd() *cobra.Command {
 				}
 				cc := newSocketControlClient(context.TODO(), s, dir)
 				if cc == nil {
-					mainLog.Load().Notice().Msg("Service was not restarted")
+					mainLog.Load().Error().Msg("Could not complete service restart")
 					os.Exit(1)
 				}
 				_, _ = cc.post(ifacePath, nil)
 				mainLog.Load().Notice().Msg("Service restarted")
+			} else {
+				mainLog.Load().Error().Msg("Service restart failed")
 			}
 		},
 	}
@@ -1049,7 +1102,7 @@ func initClientsCmd() *cobra.Command {
 	return clientsCmd
 }
 
-func initUpgradeCmd(startCmd *cobra.Command) *cobra.Command {
+func initUpgradeCmd() *cobra.Command {
 	const (
 		upgradeChannelDev     = "dev"
 		upgradeChannelProd    = "prod"
@@ -1087,6 +1140,14 @@ func initUpgradeCmd(startCmd *cobra.Command) *cobra.Command {
 				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
+			if iface == "" {
+				iface = "auto"
+			}
+			p.preRun()
+			if ir := runningIface(s); ir != nil {
+				p.runningIface = ir.Name
+				p.requiredMultiNICsConfig = ir.All
+			}
 
 			svcInstalled := true
 			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
@@ -1121,23 +1182,56 @@ func initUpgradeCmd(startCmd *cobra.Command) *cobra.Command {
 				mainLog.Load().Fatal().Err(err).Msg("failed to update current binary")
 			}
 
-			// we run the actual commands to make sure all the logic we want is executed
 			doRestart := func() bool {
-
-				// run the start command so that we reinit the service
-				// this is to fix the non restarting options on windows for existing clients
-				// we have to reset os.Args, since other commands use it.
-				curCdUID := curCdUID()
-				startArgs := []string{}
-				os.Args = []string{"ctrld", "start"}
-				if curCdUID != "" {
-					startArgs = append(startArgs, fmt.Sprintf("--cd=%s", curCdUID))
-					os.Args = append(os.Args, fmt.Sprintf("--cd=%s", curCdUID))
+				if !svcInstalled {
+					return true
 				}
-				startCmd.Run(startCmd, startArgs)
+				tasks := []task{
+					{s.Stop, true, "Stop"},
+					{func() error {
+						p.router.Cleanup()
+						p.resetDNS()
+						return nil
+					}, false, "Cleanup"},
+					{func() error {
+						time.Sleep(time.Second * 1)
+						return nil
+					}, false, "Waiting for service to stop"},
+				}
+				if doTasks(tasks) {
 
-				return true
+					if router.WaitProcessExited() {
+						ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+						defer cancel()
 
+					loop:
+						for {
+							select {
+							case <-ctx.Done():
+								mainLog.Load().Error().Msg("timeout while waiting for service to stop")
+								break loop
+							default:
+							}
+							time.Sleep(time.Second)
+							if status, _ := s.Status(); status == service.StatusStopped {
+								break
+							}
+						}
+					}
+				}
+
+				tasks = []task{
+					{s.Start, true, "Start"},
+				}
+				if doTasks(tasks) {
+					if dir, err := socketDir(); err == nil {
+						if cc := newSocketControlClient(context.TODO(), s, dir); cc != nil {
+							_, _ = cc.post(ifacePath, nil)
+							return true
+						}
+					}
+				}
+				return false
 			}
 			if svcInstalled {
 				mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")

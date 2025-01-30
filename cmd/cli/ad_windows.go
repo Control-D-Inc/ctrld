@@ -56,10 +56,12 @@ func getActiveDirectoryDomain() (string, error) {
 	defer log.SetOutput(os.Stderr)
 	whost := host.NewWmiLocalHost()
 	cs, err := hh.GetComputerSystem(whost)
+	if cs != nil {
+		defer cs.Close()
+	}
 	if err != nil {
 		return "", err
 	}
-	defer cs.Close()
 	pod, err := cs.GetPropertyPartOfDomain()
 	if err != nil {
 		return "", err

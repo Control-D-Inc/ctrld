@@ -792,6 +792,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 
 func (p *prog) resetDNS() {
 	if p.runningIface == "" {
+		mainLog.Load().Debug().Msg("no running interface, skipping resetDNS")
 		return
 	}
 	// See corresponding comments in (*prog).setDNS function.

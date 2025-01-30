@@ -12,7 +12,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/StackExchange/wmi"
 	"github.com/microsoft/wmi/pkg/base/host"
 	"github.com/microsoft/wmi/pkg/base/instance"
 	"github.com/microsoft/wmi/pkg/base/query"
@@ -24,9 +23,9 @@ import (
 )
 
 const (
-	maxRetries                           = 5
-	retryDelay                           = 1 * time.Second
-	defaultTimeout                       = 5 * time.Second
+	maxDNSAdapterRetries                 = 5
+	retryDelayDNSAdapter                 = 1 * time.Second
+	defaultDNSAdapterTimeout             = 10 * time.Second
 	minDNSServers                        = 1 // Minimum number of DNS servers we want to find
 	NetSetupUnknown               uint32 = 0
 	NetSetupWorkgroup             uint32 = 1
@@ -57,19 +56,18 @@ func dnsFns() []dnsFn {
 }
 
 func dnsFromAdapter() []string {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultDNSAdapterTimeout)
 	defer cancel()
 
 	var ns []string
 	var err error
 
-	//load the logger
 	logger := zerolog.New(io.Discard)
 	if ProxyLogger.Load() != nil {
 		logger = *ProxyLogger.Load()
 	}
 
-	for i := 0; i < maxRetries; i++ {
+	for i := 0; i < maxDNSAdapterRetries; i++ {
 		if ctx.Err() != nil {
 			Log(context.Background(), logger.Debug(),
 				"dnsFromAdapter lookup cancelled or timed out, attempt %d", i)
@@ -80,12 +78,18 @@ func dnsFromAdapter() []string {
 		if err == nil && len(ns) >= minDNSServers {
 			if i > 0 {
 				Log(context.Background(), logger.Debug(),
-					"Successfully got DNS servers after %d attempts, found %d servers", i+1, len(ns))
+					"Successfully got DNS servers after %d attempts, found %d servers",
+					i+1, len(ns))
 			}
 			return ns
 		}
 
-		// Log the specific failure reason
+		// if osResolver is not initialized, this is likely a command line run
+		// and ctrld is already on the interface, abort retries
+		if or == nil {
+			return ns
+		}
+
 		if err != nil {
 			Log(context.Background(), logger.Debug(),
 				"Failed to get DNS servers, attempt %d: %v", i+1, err)
@@ -97,17 +101,16 @@ func dnsFromAdapter() []string {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(retryDelay):
+		case <-time.After(retryDelayDNSAdapter):
 		}
 	}
 
 	Log(context.Background(), logger.Debug(),
-		"Failed to get sufficient DNS servers after all attempts, max_retries=%d", maxRetries)
-	return ns // Return whatever we got, even if insufficient
+		"Failed to get sufficient DNS servers after all attempts, max_retries=%d", maxDNSAdapterRetries)
+	return ns
 }
 
 func getDNSServers(ctx context.Context) ([]string, error) {
-	//load the logger
 	logger := zerolog.New(io.Discard)
 	if ProxyLogger.Load() != nil {
 		logger = *ProxyLogger.Load()
@@ -133,25 +136,18 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 	var dcServers []string
 	isDomain := checkDomainJoined()
 	if isDomain {
-
 		domainName, err := getLocalADDomain()
 		if err != nil {
 			Log(context.Background(), logger.Debug(),
 				"Failed to get local AD domain: %v", err)
-
 		} else {
-
 			// Load netapi32.dll
 			netapi32 := windows.NewLazySystemDLL("netapi32.dll")
 			dsDcName := netapi32.NewProc("DsGetDcNameW")
 
 			var info *DomainControllerInfo
+			flags := uint32(DS_RETURN_DNS_NAME | DS_IP_REQUIRED | DS_IS_DNS_NAME)
 
-			flags := uint32(DS_RETURN_DNS_NAME |
-				DS_IP_REQUIRED |
-				DS_IS_DNS_NAME)
-
-			// Convert domain name to UTF16 pointer
 			domainUTF16, err := windows.UTF16PtrFromString(domainName)
 			if err != nil {
 				Log(context.Background(), logger.Debug(),
@@ -190,15 +186,12 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 				} else if info != nil {
 					defer windows.NetApiBufferFree((*byte)(unsafe.Pointer(info)))
 
-					// Get DC address
 					if info.DomainControllerAddress != nil {
 						dcAddr := windows.UTF16PtrToString(info.DomainControllerAddress)
 						dcAddr = strings.TrimPrefix(dcAddr, "\\\\")
-
 						Log(context.Background(), logger.Debug(),
 							"Found domain controller address: %s", dcAddr)
 
-						// Try to resolve DC
 						if ip := net.ParseIP(dcAddr); ip != nil {
 							dcServers = append(dcServers, ip.String())
 							Log(context.Background(), logger.Debug(),
@@ -210,7 +203,6 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 					}
 				}
 			}
-
 		}
 	}
 
@@ -278,28 +270,26 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 			}
 
 			ipStr := ip.String()
-			logger := logger.Debug().
+			l := logger.Debug().
 				Str("ip", ipStr).
 				Str("adapter", aa.FriendlyName())
 
 			if ip.IsLoopback() {
-				logger.Msg("Skipping loopback IP")
+				l.Msg("Skipping loopback IP")
 				continue
 			}
-
 			if seen[ipStr] {
-				logger.Msg("Skipping duplicate IP")
+				l.Msg("Skipping duplicate IP")
 				continue
 			}
-
 			if _, ok := addressMap[ipStr]; ok {
-				logger.Msg("Skipping local interface IP")
+				l.Msg("Skipping local interface IP")
 				continue
 			}
 
 			seen[ipStr] = true
 			ns = append(ns, ipStr)
-			logger.Msg("Added DNS server")
+			l.Msg("Added DNS server")
 		}
 	}
 
@@ -330,7 +320,6 @@ func nameserversFromResolvconf() []string {
 // checkDomainJoined checks if the machine is joined to an Active Directory domain
 // Returns whether it's domain joined and the domain name if available
 func checkDomainJoined() bool {
-	//load the logger
 	logger := zerolog.New(io.Discard)
 	if ProxyLogger.Load() != nil {
 		logger = *ProxyLogger.Load()
@@ -348,9 +337,10 @@ func checkDomainJoined() bool {
 
 	domainName := windows.UTF16PtrToString(domain)
 	Log(context.Background(), logger.Debug(),
-		"Domain join status: domain=%s status=%d (Unknown=0, Workgroup=1, Domain=2, CloudDomain=3)", domainName, status)
+		"Domain join status: domain=%s status=%d (Unknown=0, Workgroup=1, Domain=2, CloudDomain=3)",
+		domainName, status)
 
-	// Consider both traditional and cloud domains as valid domain joins
+	// Consider domain or cloud domain as domain-joined
 	isDomain := status == NetSetupDomain || status == NetSetupCloudDomain
 	Log(context.Background(), logger.Debug(),
 		"Is domain joined? status=%d, traditional=%v, cloud=%v, result=%v",
@@ -362,36 +352,44 @@ func checkDomainJoined() bool {
 	return isDomain
 }
 
-// Win32_ComputerSystem is the minimal struct for WMI query
-type Win32_ComputerSystem struct {
-	Domain string
-}
-
-// getLocalADDomain tries to detect the AD domain in two ways:
-//  1. USERDNSDOMAIN env var (often set in AD logon sessions)
-//  2. WMI Win32_ComputerSystem.Domain
+// getLocalADDomain uses Microsoft's WMI wrappers (github.com/microsoft/wmi/pkg/*)
+// to query the Domain field from Win32_ComputerSystem instead of a direct go-ole call.
 func getLocalADDomain() (string, error) {
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
 	// 1) Check environment variable
 	envDomain := os.Getenv("USERDNSDOMAIN")
 	if envDomain != "" {
 		return strings.TrimSpace(envDomain), nil
 	}
 
-	// 2) Check WMI (requires Windows + admin privileges or sufficient access)
-	var result []Win32_ComputerSystem
-	err := wmi.Query("SELECT Domain FROM Win32_ComputerSystem", &result)
+	// 2) Query WMI via the microsoft/wmi library
+	whost := host.NewWmiLocalHost()
+	q := query.NewWmiQuery("Win32_ComputerSystem")
+	instances, err := instance.GetWmiInstancesFromHost(whost, string(constant.CimV2), q)
+	if instances != nil {
+		defer instances.Close()
+	}
 	if err != nil {
 		return "", fmt.Errorf("WMI query failed: %v", err)
 	}
-	if len(result) == 0 {
+
+	// If no results, return an error
+	if len(instances) == 0 {
 		return "", fmt.Errorf("no rows returned from Win32_ComputerSystem")
 	}
 
-	domain := strings.TrimSpace(result[0].Domain)
-	if domain == "" {
+	// We only care about the first row
+	domainVal, err := instances[0].GetProperty("Domain")
+	if err != nil {
+		return "", fmt.Errorf("machine does not appear to have a domain set: %v", err)
+	}
+
+	domainName := strings.TrimSpace(fmt.Sprintf("%v", domainVal))
+	if domainName == "" {
 		return "", fmt.Errorf("machine does not appear to have a domain set")
 	}
-	return domain, nil
+	return domainName, nil
 }
 
 // validInterfaces returns a list of all physical interfaces.
@@ -410,12 +408,14 @@ func validInterfaces() map[string]struct{} {
 	whost := host.NewWmiLocalHost()
 	q := query.NewWmiQuery("MSFT_NetAdapter")
 	instances, err := instance.GetWmiInstancesFromHost(whost, string(constant.StadardCimV2), q)
+	if instances != nil {
+		defer instances.Close()
+	}
 	if err != nil {
 		Log(context.Background(), logger.Warn(),
 			"failed to get wmi network adapter: %v", err)
 		return nil
 	}
-	defer instances.Close()
 	var adapters []string
 	for _, i := range instances {
 		adapter, err := netadapter.NewNetworkAdapter(i)
@@ -470,5 +470,4 @@ func validInterfaces() map[string]struct{} {
 		m[ifaceName] = struct{}{}
 	}
 	return m
-
 }

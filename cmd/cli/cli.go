@@ -126,7 +126,7 @@ func initCLI() {
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true
 
 	initRunCmd()
-	startCmd, startCmdAlias := initStartCmd()
+	startCmd := initStartCmd()
 	stopCmd := initStopCmd()
 	restartCmd := initRestartCmd()
 	reloadCmd := initReloadCmd(restartCmd)
@@ -135,7 +135,7 @@ func initCLI() {
 	interfacesCmd := initInterfacesCmd()
 	initServicesCmd(startCmd, stopCmd, restartCmd, reloadCmd, statusCmd, uninstallCmd, interfacesCmd)
 	initClientsCmd()
-	initUpgradeCmd(startCmdAlias)
+	initUpgradeCmd()
 	initLogCmd()
 }
 
@@ -242,10 +242,6 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			}
 			if err := s.Run(); err != nil {
 				mainLog.Load().Error().Err(err).Msg("failed to start service")
-			}
-			// Configure Windows service failure actions
-			if err := ConfigureWindowsServiceFailureActions(ctrldServiceName); err != nil {
-				mainLog.Load().Error().Err(err).Msgf("failed to configure Windows service %s failure actions", ctrldServiceName)
 			}
 		}()
 	}
@@ -394,6 +390,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				}
 			}
 		}
+		// Configure Windows service failure actions
+		_ = ConfigureWindowsServiceFailureActions(ctrldServiceName)
 	})
 	p.onStopped = append(p.onStopped, func() {
 		for _, lc := range p.cfg.Listener {
@@ -1615,22 +1613,27 @@ var errRequiredDeactivationPin = errors.New("deactivation pin is required to sto
 
 // checkDeactivationPin validates if the deactivation pin matches one in ControlD config.
 func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
+	mainLog.Load().Debug().Msg("Checking deactivation pin")
 	dir, err := socketDir()
 	if err != nil {
 		mainLog.Load().Err(err).Msg("could not check deactivation pin")
 		return err
 	}
+	mainLog.Load().Debug().Msg("Creating control client")
 	var cc *controlClient
 	if s == nil {
 		cc = newSocketControlClientMobile(dir, stopCh)
 	} else {
 		cc = newSocketControlClient(context.TODO(), s, dir)
 	}
+	mainLog.Load().Debug().Msg("Control client done")
 	if cc == nil {
 		return nil // ctrld is not running.
 	}
 	data, _ := json.Marshal(&deactivationRequest{Pin: deactivationPin})
-	resp, _ := cc.post(deactivationPath, bytes.NewReader(data))
+	mainLog.Load().Debug().Msg("Posting deactivation request")
+	resp, err := cc.post(deactivationPath, bytes.NewReader(data))
+	mainLog.Load().Debug().Msg("Posting deactivation request done")
 	if resp != nil {
 		switch resp.StatusCode {
 		case http.StatusBadRequest:
@@ -1694,7 +1697,7 @@ func curCdUID() string {
 	if s, _ := newService(&prog{}, svcConfig); s != nil {
 		// Configure Windows service failure actions
 		if err := ConfigureWindowsServiceFailureActions(ctrldServiceName); err != nil {
-			mainLog.Load().Error().Err(err).Msgf("failed to configure Windows service %s failure actions", ctrldServiceName)
+			mainLog.Load().Debug().Err(err).Msgf("failed to configure Windows service %s failure actions", ctrldServiceName)
 		}
 		if dir, _ := socketDir(); dir != "" {
 			cc := newSocketControlClient(context.TODO(), s, dir)
@@ -1777,6 +1780,7 @@ func resetDnsNoLog(p *prog) {
 func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, ir *ifaceResponse) task {
 	return task{func() error {
 		if iface == "" {
+			mainLog.Load().Debug().Msg("no iface, skipping resetDnsTask")
 			return nil
 		}
 		// Always reset DNS first, ensuring DNS setting is in a good state.
