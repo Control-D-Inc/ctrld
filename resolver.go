@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -212,6 +211,11 @@ type osResolverResult struct {
 	lan    bool
 }
 
+type publicResponse struct {
+	answer *dns.Msg
+	server string
+}
+
 // Resolve resolves DNS queries using pre-configured nameservers.
 // Query is sent to all nameservers concurrently, and the first
 // success response will be returned.
@@ -257,33 +261,37 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	}
 
 	logAnswer := func(server string) {
-		if before, _, found := strings.Cut(server, ":"); found {
-			server = before
+		host, _, err := net.SplitHostPort(server)
+		if err != nil {
+			// If splitting fails, fallback to the original server string
+			host = server
 		}
-		Log(ctx, ProxyLogger.Load().Debug(), "got answer from nameserver: %s", server)
+		Log(ctx, ProxyLogger.Load().Debug(), "got answer from nameserver: %s", host)
 	}
 	var (
 		nonSuccessAnswer      *dns.Msg
 		nonSuccessServer      string
 		controldSuccessAnswer *dns.Msg
-		publicServerAnswer    *dns.Msg
-		publicServer          string
+		publicResponses       []publicResponse
 	)
 	errs := make([]error, 0, numServers)
 	for res := range ch {
 		switch {
 		case res.answer != nil && res.answer.Rcode == dns.RcodeSuccess:
 			switch {
-			case res.server == controldPublicDnsWithPort:
-				controldSuccessAnswer = res.answer
-			case !res.lan && publicServerAnswer == nil:
-				publicServerAnswer = res.answer
-				publicServer = res.server
-			default:
-				Log(ctx, ProxyLogger.Load().Debug(), "got LAN answer from: %s", res.server)
+			case res.lan:
+				// Always prefer LAN responses immediately
+				Log(ctx, ProxyLogger.Load().Debug(), "using LAN answer from: %s", res.server)
 				cancel()
 				logAnswer(res.server)
 				return res.answer, nil
+			case res.server == controldPublicDnsWithPort:
+				controldSuccessAnswer = res.answer
+			case !res.lan:
+				publicResponses = append(publicResponses, publicResponse{
+					answer: res.answer,
+					server: res.server,
+				})
 			}
 		case res.answer != nil:
 			nonSuccessAnswer = res.answer
@@ -293,10 +301,12 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		}
 		errs = append(errs, res.err)
 	}
-	if publicServerAnswer != nil {
-		Log(ctx, ProxyLogger.Load().Debug(), "got public answer from: %s", publicServer)
-		logAnswer(publicServer)
-		return publicServerAnswer, nil
+
+	if len(publicResponses) > 0 {
+		resp := publicResponses[0]
+		Log(ctx, ProxyLogger.Load().Debug(), "got public answer from: %s", resp.server)
+		logAnswer(resp.server)
+		return resp.answer, nil
 	}
 	if controldSuccessAnswer != nil {
 		Log(ctx, ProxyLogger.Load().Debug(), "got ControlD answer from: %s", controldPublicDnsWithPort)

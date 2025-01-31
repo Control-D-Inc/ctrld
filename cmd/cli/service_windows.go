@@ -68,9 +68,9 @@ func ConfigureWindowsServiceFailureActions(serviceName string) error {
 
 	// Then proceed with existing actions, e.g. setting failure actions
 	actions := []mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: time.Second * 2}, // 2 seconds
-		{Type: mgr.ServiceRestart, Delay: time.Second * 2}, // 2 seconds
-		{Type: mgr.ServiceRestart, Delay: time.Second * 2}, // 2 seconds
+		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
+		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
+		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
 	}
 
 	// Set the recovery actions (3 restarts, reset period = 120).

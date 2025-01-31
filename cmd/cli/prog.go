@@ -578,7 +578,9 @@ func (p *prog) metricsEnabled() bool {
 func (p *prog) Stop(s service.Service) error {
 	p.stopDnsWatchers()
 	mainLog.Load().Debug().Msg("dns watchers stopped")
-	mainLog.Load().Info().Msg("Service stopped")
+	defer func() {
+		mainLog.Load().Info().Msg("Service stopped")
+	}()
 	close(p.stopCh)
 	if err := p.deAllocateIP(); err != nil {
 		mainLog.Load().Error().Err(err).Msg("de-allocate ip failed")

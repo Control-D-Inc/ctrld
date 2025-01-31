@@ -561,6 +561,17 @@ func initStopCmd() *cobra.Command {
 			}
 
 			initLogging()
+
+			status, err := s.Status()
+			if errors.Is(err, service.ErrNotInstalled) {
+				mainLog.Load().Warn().Msg("service not installed")
+				return
+			}
+			if status == service.StatusStopped {
+				mainLog.Load().Warn().Msg("service is already stopped")
+				return
+			}
+
 			if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
 				os.Exit(deactivationPinInvalidExitCode)
 			}
