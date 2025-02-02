@@ -2,12 +2,16 @@ package ctrld
 
 import (
 	"net/url"
+	"os"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestUpstreamConfig_SetupBootstrapIP(t *testing.T) {
+	l := zerolog.New(os.Stdout)
+	ProxyLogger.Store(&l)
 	uc := &UpstreamConfig{
 		Name:     "test",
 		Type:     ResolverTypeDOH,

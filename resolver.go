@@ -367,6 +367,7 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 		or = newResolverWithNameserver(defaultNameservers())
 	}
 	nss := *or.lanServers.Load()
+	nss = append(nss, *or.publicServers.Load()...)
 	if withBootstrapDNS {
 		nss = append([]string{net.JoinHostPort(controldBootstrapDns, "53")}, nss...)
 	}
