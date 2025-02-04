@@ -16,7 +16,7 @@ func Test_logWriter_Write(t *testing.T) {
 		t.Fatalf("unexpected buf content: %v", lw.buf.String())
 	}
 	newData := "B"
-	halfData := strings.Repeat("A", len(data)/2) + logTruncatedMarker
+	halfData := strings.Repeat("A", len(data)/2) + logStartEndMarker
 	lw.Write([]byte(newData))
 	if lw.buf.String() != halfData+newData {
 		t.Fatalf("unexpected new buf content: %v", lw.buf.String())

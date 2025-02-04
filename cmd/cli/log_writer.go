@@ -20,8 +20,9 @@ const (
 	logWriterSmallSize   = 1024 * 1024 * 1 // 1 MB
 	logWriterInitialSize = 32 * 1024       // 32 KB
 	logSentInterval      = time.Minute
-	logTruncatedMarker   = "...\n"
-	logSeparator         = "\n===\n\n"
+	logStartEndMarker    = "\n\n=== START_END ===\n\n"
+	logLogEndMarker      = "\n\n=== LOG_END ===\n\n"
+	logWarnEndMarker     = "\n\n=== WARN END ===\n\n"
 )
 
 type logViewResponse struct {
@@ -74,7 +75,7 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 		}
 		lw.buf.Reset()
 		lw.buf.Write(buf)
-		lw.buf.WriteString(logTruncatedMarker) // indicate that the log was truncated.
+		lw.buf.WriteString(logStartEndMarker) // indicate that the log was truncated.
 	}
 	// If p is bigger than buffer size, truncate p by half until its size is smaller.
 	for len(p)+lw.buf.Len() > lw.size {
@@ -157,7 +158,7 @@ func (p *prog) logReader() (*logReader, error) {
 		wlwReader := bytes.NewReader(wlw.buf.Bytes())
 		wlwSize := wlw.buf.Len()
 		wlw.mu.Unlock()
-		reader := io.MultiReader(lwReader, bytes.NewReader([]byte(logSeparator)), wlwReader)
+		reader := io.MultiReader(lwReader, bytes.NewReader([]byte(logLogEndMarker)), wlwReader)
 		lr := &logReader{r: io.NopCloser(reader)}
 		lr.size = int64(lwSize + wlwSize)
 		if lr.size == 0 {
