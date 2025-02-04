@@ -72,6 +72,7 @@ var useSystemdResolved = false
 
 type prog struct {
 	mu                   sync.Mutex
+	wg                   sync.WaitGroup
 	waitCh               chan struct{}
 	stopCh               chan struct{}
 	reloadCh             chan struct{} // For Windows.
@@ -451,7 +452,8 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(len(p.cfg.Listener))
+	p.wg = wg
+	p.wg.Add(len(p.cfg.Listener))
 
 	for _, nc := range p.cfg.Network {
 		for _, cidr := range nc.Cidrs {
@@ -477,12 +479,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			}
 		}
 		p.setupUpstream(p.cfg)
-		p.ciTable = clientinfo.NewTable(&cfg, defaultRouteIP(), cdUID, p.ptrNameservers)
-		if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
-			mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
-			format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
-			p.ciTable.AddLeaseFile(leaseFile, format)
-		}
+		p.setupClientInfoDiscover(defaultRouteIP())
 	}
 
 	// context for managing spawn goroutines.
@@ -491,12 +488,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	// Newer versions of android and iOS denies permission which breaks connectivity.
 	if !isMobile() && !reload {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			p.ciTable.Init()
-			p.ciTable.RefreshLoop(ctx)
-		}()
+		p.runClientInfoDiscover(ctx)
 		go p.watchLinkState(ctx)
 	}
 
@@ -511,7 +503,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				}
 				addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 				mainLog.Load().Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
-				if err := p.serveDNS(listenerNum); err != nil {
+				if err := p.serveDNS(ctx, listenerNum); err != nil {
 					mainLog.Load().Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
 				}
 			}(listenerNum)
@@ -519,7 +511,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		go func() {
 			defer func() {
 				cancelFunc()
-				wg.Done()
+				p.wg.Done()
 			}()
 			select {
 			case <-p.stopCh:
@@ -540,19 +532,19 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	close(p.onStartedDone)
 
-	wg.Add(1)
+	p.wg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer p.wg.Done()
 		// Check for possible DNS loop.
 		p.checkDnsLoop()
 		// Start check DNS loop ticker.
 		p.checkDnsLoopTicker(ctx)
 	}()
 
-	wg.Add(1)
+	p.wg.Add(1)
 	// Prometheus exporter goroutine.
 	go func() {
-		defer wg.Done()
+		defer p.wg.Done()
 		p.runMetricsServer(ctx, reloadCh)
 	}()
 
@@ -567,7 +559,34 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		p.postRun()
 		p.initInternalLogging(logWriters)
 	}
-	wg.Wait()
+	p.wg.Wait()
+}
+
+// setupClientInfoDiscover performs necessary works for running client info discover.
+func (p *prog) setupClientInfoDiscover(selfIP string) {
+	p.ciTable = clientinfo.NewTable(&cfg, selfIP, cdUID, p.ptrNameservers)
+	if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
+		mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
+		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
+		p.ciTable.AddLeaseFile(leaseFile, format)
+	}
+}
+
+// runClientInfoDiscover runs the client info discover in background.
+func (p *prog) runClientInfoDiscover(ctx context.Context) {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.ciTable.Init()
+		p.ciTable.RefreshLoop(ctx)
+	}()
+}
+
+// stopClientInfoDiscover stops the current client info discover goroutine.
+// It blocks until the goroutine terminated.
+func (p *prog) stopClientInfoDiscover() {
+	p.ciTable.Stop()
+	mainLog.Load().Debug().Msg("stopped client info discover")
 }
 
 // metricsEnabled reports whether prometheus exporter is enabled/disabled.

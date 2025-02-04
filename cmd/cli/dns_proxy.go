@@ -84,9 +84,9 @@ type upstreamForResult struct {
 	srcAddr        string
 }
 
-func (p *prog) serveDNS(listenerNum string) error {
+func (p *prog) serveDNS(mainCtx context.Context, listenerNum string) error {
 	// Start network monitoring
-	if err := p.monitorNetworkChanges(); err != nil {
+	if err := p.monitorNetworkChanges(mainCtx); err != nil {
 		mainLog.Load().Error().Err(err).Msg("Failed to start network monitoring")
 		// Don't return here as we still want DNS service to run
 	}
@@ -1316,7 +1316,7 @@ func FlushDNSCache() error {
 }
 
 // monitorNetworkChanges starts monitoring for network interface changes
-func (p *prog) monitorNetworkChanges() error {
+func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 	mon, err := netmon.New(logger.WithPrefix(mainLog.Load().Printf, "netmon: "))
 	if err != nil {
 		return fmt.Errorf("creating network monitor: %w", err)
@@ -1335,6 +1335,19 @@ func (p *prog) monitorNetworkChanges() error {
 		// Parse old and new interface states
 		oldIfs := parseInterfaceState(delta.Old)
 		newIfs := parseInterfaceState(delta.New)
+
+		// Client info discover only run on non-mobile platforms.
+		if !isMobile() {
+			// If this is major change, re-init client info table if its self IP changes.
+			if delta.Monitor.IsMajorChangeFrom(delta.Old, delta.New) {
+				selfIP := defaultRouteIP()
+				if currentSelfIP := p.ciTable.SelfIP(); currentSelfIP != selfIP && selfIP != "" {
+					p.stopClientInfoDiscover()
+					p.setupClientInfoDiscover(selfIP)
+					p.runClientInfoDiscover(ctx)
+				}
+			}
+		}
 
 		// Check for changes in valid interfaces
 		changed := false
