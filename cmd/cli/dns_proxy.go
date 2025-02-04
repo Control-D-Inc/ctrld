@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"net/netip"
 	"os/exec"
 	"runtime"
@@ -1295,46 +1294,22 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 	}
 }
 
-func triggerCaptiveCheck() {
-	// Wait for a short period to ensure DNS reinitialization is complete.
-	time.Sleep(2 * time.Second)
-
-	// if not Mac OS, return
-	if runtime.GOOS != "darwin" {
-		return
-	}
-
-	// Trigger a lookup for captive.apple.com.
-	// This can be done either via a DNS query or an HTTP GET.
-	// Here we use a simple HTTP GET which is what macOS CaptiveNetworkAssistant uses.
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
-	resp, err := client.Get("http://captive.apple.com/generate_204")
-	if err != nil {
-		mainLog.Load().Debug().Msg("failed to trigger captive portal check")
-		return
-	}
-	resp.Body.Close()
-	mainLog.Load().Debug().Msg("triggered captive portal check by querying captive.apple.com")
-}
-
 // FlushDNSCache flushes the DNS cache on macOS.
 func FlushDNSCache() error {
-	// if not Mac OS, return
+	// if not macOS, return
 	if runtime.GOOS != "darwin" {
 		return nil
 	}
 
 	// Flush the DNS cache via mDNSResponder.
 	// This is typically needed on modern macOS systems.
-	if err := exec.Command("sudo", "killall", "-HUP", "mDNSResponder").Run(); err != nil {
-		return fmt.Errorf("failed to flush mDNSResponder: %w", err)
+	if out, err := exec.Command("killall", "-HUP", "mDNSResponder").CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to flush mDNSResponder: %w, output: %s", err, string(out))
 	}
 
 	// Optionally, flush the directory services cache.
-	if err := exec.Command("sudo", "dscacheutil", "-flushcache").Run(); err != nil {
-		return fmt.Errorf("failed to flush dscacheutil: %w", err)
+	if out, err := exec.Command("dscacheutil", "-flushcache").CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to flush dscacheutil: %w, output: %s", err, string(out))
 	}
 
 	return nil
