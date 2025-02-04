@@ -43,6 +43,20 @@ func initLogCmd() *cobra.Command {
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
+
+			p := &prog{router: router.New(&cfg, false)}
+			s, _ := newService(p, svcConfig)
+
+			status, err := s.Status()
+			if errors.Is(err, service.ErrNotInstalled) {
+				mainLog.Load().Warn().Msg("service not installed")
+				return
+			}
+			if status == service.StatusStopped {
+				mainLog.Load().Warn().Msg("service is not running")
+				return
+			}
+
 			dir, err := socketDir()
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
@@ -82,6 +96,20 @@ func initLogCmd() *cobra.Command {
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
+
+			p := &prog{router: router.New(&cfg, false)}
+			s, _ := newService(p, svcConfig)
+
+			status, err := s.Status()
+			if errors.Is(err, service.ErrNotInstalled) {
+				mainLog.Load().Warn().Msg("service not installed")
+				return
+			}
+			if status == service.StatusStopped {
+				mainLog.Load().Warn().Msg("service is not running")
+				return
+			}
+
 			dir, err := socketDir()
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
@@ -765,6 +793,20 @@ func initReloadCmd(restartCmd *cobra.Command) *cobra.Command {
 		Short: "Reload the ctrld service",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+
+			p := &prog{router: router.New(&cfg, false)}
+			s, _ := newService(p, svcConfig)
+
+			status, err := s.Status()
+			if errors.Is(err, service.ErrNotInstalled) {
+				mainLog.Load().Warn().Msg("service not installed")
+				return
+			}
+			if status == service.StatusStopped {
+				mainLog.Load().Warn().Msg("service is not running")
+				return
+			}
+
 			dir, err := socketDir()
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
@@ -1045,6 +1087,20 @@ func initClientsCmd() *cobra.Command {
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
+
+			p := &prog{router: router.New(&cfg, false)}
+			s, _ := newService(p, svcConfig)
+
+			status, err := s.Status()
+			if errors.Is(err, service.ErrNotInstalled) {
+				mainLog.Load().Warn().Msg("service not installed")
+				return
+			}
+			if status == service.StatusStopped {
+				mainLog.Load().Warn().Msg("service is not running")
+				return
+			}
+
 			dir, err := socketDir()
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")

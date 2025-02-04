@@ -20,9 +20,9 @@ const (
 	logWriterSmallSize   = 1024 * 1024 * 1 // 1 MB
 	logWriterInitialSize = 32 * 1024       // 32 KB
 	logSentInterval      = time.Minute
-	logStartEndMarker    = "\n\n=== START_END ===\n\n"
+	logStartEndMarker    = "\n\n=== INIT_END ===\n\n"
 	logLogEndMarker      = "\n\n=== LOG_END ===\n\n"
-	logWarnEndMarker     = "\n\n=== WARN END ===\n\n"
+	logWarnEndMarker     = "\n\n=== WARN_END ===\n\n"
 )
 
 type logViewResponse struct {

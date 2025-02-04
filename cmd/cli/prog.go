@@ -123,9 +123,7 @@ type prog struct {
 	leakingQueryRunning map[string]bool
 	leakingQueryReset   atomic.Bool
 
-	resetCtx    context.Context
-	resetCancel context.CancelFunc
-	resetCtxMu  sync.Mutex
+	resetCtxMu sync.Mutex
 
 	started       chan struct{}
 	onStartedDone chan struct{}

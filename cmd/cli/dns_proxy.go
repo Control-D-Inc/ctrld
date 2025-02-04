@@ -585,10 +585,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			continue
 		}
 		if p.um.isDown(upstreams[n]) {
-			logger.
-				Bool("is_os_resolver", upstreams[n] == upstreamOS)
-			ctrld.Log(ctx, logger, "Upstream is down")
-			continue
+			// never skip the OS resolver, since we usually query this resolver when we
+			// have no other upstreams to query
+			if upstreams[n] != upstreamOS {
+				logger.
+					Bool("is_os_resolver", upstreams[n] == upstreamOS)
+				ctrld.Log(ctx, logger, "Upstream is down")
+				continue
+			}
 		}
 		answer := resolve(n, upstreamConfig, req.msg)
 		if answer == nil {
@@ -1231,67 +1235,43 @@ func resolveInternalDomainTestQuery(ctx context.Context, domain string, m *dns.M
 func (p *prog) reinitializeOSResolver(networkChange bool) {
 	// Cancel any existing operations
 	p.resetCtxMu.Lock()
-	if p.resetCancel != nil {
-		p.resetCancel()
-	}
-
-	// Create new context for this operation
-	ctx, cancel := context.WithCancel(context.Background())
-	p.resetCtx = ctx
-	p.resetCancel = cancel
-	p.resetCtxMu.Unlock()
-
-	// Ensure cleanup
-	defer cancel()
+	defer p.resetCtxMu.Unlock()
 
 	p.leakingQueryReset.Store(true)
 	defer p.leakingQueryReset.Store(false)
 
-	defer func() {
-		// start leaking queries immediately
-		if networkChange {
-			// set all upstreams to failed and provide to performLeakingQuery
-			failedUpstreams := make(map[string]*ctrld.UpstreamConfig)
-			for _, upstream := range p.cfg.Upstream {
-				failedUpstreams[upstream.Name] = upstream
-			}
-			go p.performLeakingQuery(failedUpstreams, "all")
+	mainLog.Load().Debug().Msg("attempting to reset DNS")
+	p.resetDNS()
+	mainLog.Load().Debug().Msg("DNS reset completed")
+
+	mainLog.Load().Debug().Msg("initializing OS resolver")
+	ns := ctrld.InitializeOsResolver()
+	mainLog.Load().Warn().Msgf("re-initialized OS resolver with nameservers: %v", ns)
+
+	// start leaking queries immediately// start leaking queries immediately
+	if networkChange {
+		// set all upstreams to failed and provide to performLeakingQuery
+		failedUpstreams := make(map[string]*ctrld.UpstreamConfig)
+		for _, upstream := range p.cfg.Upstream {
+			failedUpstreams[upstream.Name] = upstream
 		}
+		go p.performLeakingQuery(failedUpstreams, "all")
+
 		if err := FlushDNSCache(); err != nil {
 			mainLog.Load().Warn().Err(err).Msg("failed to flush DNS cache")
 		}
-	}()
 
-	select {
-	case <-ctx.Done():
-		mainLog.Load().Debug().Msg("DNS reset cancelled by new network change")
-		return
-	default:
-		mainLog.Load().Debug().Msg("attempting to reset DNS")
-		p.resetDNS()
-		mainLog.Load().Debug().Msg("DNS reset completed")
+		if runtime.GOOS == "darwin" {
+			// delay putting back the ctrld listener to allow for captive portal to trigger
+			time.Sleep(5 * time.Second)
+		}
 	}
 
-	select {
-	case <-ctx.Done():
-		mainLog.Load().Debug().Msg("DNS reset cancelled by new network change")
-		return
-	default:
-		mainLog.Load().Debug().Msg("initializing OS resolver")
-		ns := ctrld.InitializeOsResolver()
-		mainLog.Load().Warn().Msgf("re-initialized OS resolver with nameservers: %v", ns)
-	}
+	mainLog.Load().Debug().Msg("setting DNS configuration")
+	p.setDNS()
+	mainLog.Load().Debug().Msg("DNS configuration set successfully")
+	p.logInterfacesState()
 
-	select {
-	case <-ctx.Done():
-		mainLog.Load().Debug().Msg("DNS reset cancelled by new network change")
-		return
-	default:
-		mainLog.Load().Debug().Msg("setting DNS configuration")
-		p.setDNS()
-		mainLog.Load().Debug().Msg("DNS configuration set successfully")
-		p.logInterfacesState()
-	}
 }
 
 // FlushDNSCache flushes the DNS cache on macOS.
