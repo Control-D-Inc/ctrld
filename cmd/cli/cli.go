@@ -267,6 +267,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// Log config do not have thing to validate, so it's safe to init log here,
 	// so it's able to log information in processCDFlags.
 	logWriters := initLogging()
+	// TODO: find a better way.
+	ctrld.ProxyLogger.Store(mainLog.Load())
 
 	// Initializing internal logging after global logging.
 	p.initInternalLogging(logWriters)

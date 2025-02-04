@@ -1251,7 +1251,7 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 	defer func() {
 		// start leaking queries immediately
 		if networkChange {
-			// set all upstreams to fialed and provide to performLeakingQuery
+			// set all upstreams to failed and provide to performLeakingQuery
 			failedUpstreams := make(map[string]*ctrld.UpstreamConfig)
 			for _, upstream := range p.cfg.Upstream {
 				failedUpstreams[upstream.Name] = upstream
@@ -1280,7 +1280,7 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 	default:
 		mainLog.Load().Debug().Msg("initializing OS resolver")
 		ns := ctrld.InitializeOsResolver()
-		mainLog.Load().Debug().Msgf("re-initialized OS resolver with nameservers: %v", ns)
+		mainLog.Load().Warn().Msgf("re-initialized OS resolver with nameservers: %v", ns)
 	}
 
 	select {
@@ -1352,7 +1352,7 @@ func (p *prog) monitorNetworkChanges() error {
 		validIfaces := validInterfacesMap()
 
 		// log the delta for debugging
-		mainLog.Load().Debug().
+		mainLog.Load().Warn().
 			Interface("old_state", delta.Old).
 			Interface("new_state", delta.New).
 			Msg("Network change detected")
@@ -1376,14 +1376,14 @@ func (p *prog) monitorNetworkChanges() error {
 			// Compare states directly
 			if oldExists != newExists || oldState != newState {
 				changed = true
-				mainLog.Load().Debug().
+				mainLog.Load().Warn().
 					Str("interface", ifaceName).
 					Str("old_state", oldState).
 					Str("new_state", newState).
 					Msg("Valid interface changed state")
 				break
 			} else {
-				mainLog.Load().Debug().
+				mainLog.Load().Warn().
 					Str("interface", ifaceName).
 					Str("old_state", oldState).
 					Str("new_state", newState).
@@ -1392,14 +1392,14 @@ func (p *prog) monitorNetworkChanges() error {
 		}
 
 		if !changed {
-			mainLog.Load().Debug().Msg("Ignoring interface change - no valid interfaces affected")
+			mainLog.Load().Warn().Msg("Ignoring interface change - no valid interfaces affected")
 			return
 		}
 
 		if activeInterfaceExists {
 			p.reinitializeOSResolver(true)
 		} else {
-			mainLog.Load().Debug().Msg("No active interfaces found, skipping reinitialization")
+			mainLog.Load().Warn().Msg("No active interfaces found, skipping reinitialization")
 		}
 	})
 

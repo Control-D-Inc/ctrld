@@ -143,8 +143,6 @@ func initLoggingWithBackup(doBackup bool) []io.Writer {
 	multi := zerolog.MultiLevelWriter(writers...)
 	l := mainLog.Load().Output(multi).With().Logger()
 	mainLog.Store(&l)
-	// TODO: find a better way.
-	ctrld.ProxyLogger.Store(&l)
 
 	zerolog.SetGlobalLevel(zerolog.NoticeLevel)
 	logLevel := cfg.Service.LogLevel
