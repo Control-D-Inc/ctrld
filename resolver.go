@@ -237,7 +237,7 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	dnsClient := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+	dnsClient := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
 	ch := make(chan *osResolverResult, numServers)
 	wg := &sync.WaitGroup{}
 	wg.Add(numServers)
