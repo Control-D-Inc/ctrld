@@ -99,6 +99,7 @@ func (p *prog) serveDNS(mainCtx context.Context, listenerNum string) error {
 	}
 
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
+		mainLog.Load().Debug().Msgf("serveDNS handler called")
 		p.sema.acquire()
 		defer p.sema.release()
 		if len(m.Question) == 0 {
@@ -1238,7 +1239,10 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 	defer p.resetCtxMu.Unlock()
 
 	p.leakingQueryReset.Store(true)
-	defer p.leakingQueryReset.Store(false)
+	defer func() {
+		time.Sleep(time.Second)
+		p.leakingQueryReset.Store(false)
+	}()
 
 	mainLog.Load().Debug().Msg("attempting to reset DNS")
 	p.resetDNS()
@@ -1260,7 +1264,6 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 		if err := FlushDNSCache(); err != nil {
 			mainLog.Load().Warn().Err(err).Msg("failed to flush DNS cache")
 		}
-
 		if runtime.GOOS == "darwin" {
 			// delay putting back the ctrld listener to allow for captive portal to trigger
 			time.Sleep(5 * time.Second)
@@ -1316,21 +1319,9 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		oldIfs := parseInterfaceState(delta.Old)
 		newIfs := parseInterfaceState(delta.New)
 
-		// Client info discover only run on non-mobile platforms.
-		if !isMobile() {
-			// If this is major change, re-init client info table if its self IP changes.
-			if delta.Monitor.IsMajorChangeFrom(delta.Old, delta.New) {
-				selfIP := defaultRouteIP()
-				if currentSelfIP := p.ciTable.SelfIP(); currentSelfIP != selfIP && selfIP != "" {
-					p.stopClientInfoDiscover()
-					p.setupClientInfoDiscover(selfIP)
-					p.runClientInfoDiscover(ctx)
-				}
-			}
-		}
-
 		// Check for changes in valid interfaces
 		changed := false
+		var changedIface, changedIfaceState string
 		activeInterfaceExists := false
 
 		for ifaceName := range validIfaces {
@@ -1343,7 +1334,14 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 
 			// Compare states directly
 			if oldExists != newExists || oldState != newState {
-				changed = true
+
+				// If the interface is up, we need to reinitialize the OS resolver
+				if newState != "" && !strings.Contains(newState, "down") {
+					changed = true
+					changedIface = ifaceName
+					changedIfaceState = newState
+				}
+
 				mainLog.Load().Warn().
 					Str("interface", ifaceName).
 					Str("old_state", oldState).
@@ -1364,11 +1362,33 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			return
 		}
 
-		if activeInterfaceExists {
-			p.reinitializeOSResolver(true)
-		} else {
+		if !activeInterfaceExists {
 			mainLog.Load().Warn().Msg("No active interfaces found, skipping reinitialization")
+			return
 		}
+
+		// Use the defaultRouteIP() result or fallback to the changed interface's IP from the delta.
+		selfIP := defaultRouteIP()
+		if selfIP == "" && changedIface != "" {
+			selfIP = extractIPv4FromState(changedIfaceState)
+			mainLog.Load().Info().Msgf("defaultRouteIP returned empty, using changed iface '%s' IP: %s", changedIface, selfIP)
+		}
+
+		// Extract IPv6 from the changed interface state.
+		ipv6 := extractIPv6FromState(changedIfaceState)
+
+		if ip := net.ParseIP(selfIP); ip != nil {
+			ctrld.SetDefaultLocalIPv4(ip)
+			// if we have a new IP, set the client info to the new IP
+			if !isMobile() && p.ciTable != nil {
+				p.ciTable.SetSelfIP(selfIP)
+			}
+		}
+		if ip := net.ParseIP(ipv6); ip != nil {
+			ctrld.SetDefaultLocalIPv6(ip)
+		}
+		mainLog.Load().Debug().Msgf("Set default local IPv4: %s, IPv6: %s", selfIP, ipv6)
+		p.reinitializeOSResolver(true)
 	})
 
 	mon.Start()
@@ -1422,4 +1442,34 @@ func parseInterfaceState(state *netmon.State) map[string]string {
 	}
 
 	return result
+}
+
+// extractIPv4FromState extracts an IPv4 address from an interface state string.
+// For example, given "[172.16.226.239/22 llu6]", it returns "172.16.226.239".
+// If no valid IP can be found, it returns an empty string.
+func extractIPv4FromState(state string) string {
+	trimmed := strings.Trim(state, "[]")
+	parts := strings.Fields(trimmed)
+	for _, part := range parts {
+		ipPart := strings.Split(part, "/")[0]
+		if ip := net.ParseIP(ipPart); ip != nil && ip.To4() != nil {
+			return ipPart
+		}
+	}
+	return ""
+}
+
+// extractIPv6FromState extracts an IPv6 address from an interface state string.
+// For example, given "[172.16.226.239/22 llu6]", it returns "172.16.226.239".
+// If no valid IP can be found, it returns an empty string.
+func extractIPv6FromState(state string) string {
+	trimmed := strings.Trim(state, "[]")
+	parts := strings.Fields(trimmed)
+	for _, part := range parts {
+		ipPart := strings.Split(part, "/")[0]
+		if ip := net.ParseIP(ipPart); ip != nil && ip.To4() == nil {
+			return ipPart
+		}
+	}
+	return ""
 }

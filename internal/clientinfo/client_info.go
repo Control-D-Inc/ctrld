@@ -93,6 +93,7 @@ type Table struct {
 	quitCh         chan struct{}
 	stopCh         chan struct{}
 	selfIP         string
+	selfIPLock     sync.RWMutex
 	cdUID          string
 	ptrNameservers []string
 }
@@ -160,8 +161,18 @@ func (t *Table) Stop() {
 	<-t.quitCh
 }
 
+// SelfIP returns the selfIP value of the Table in a thread-safe manner.
 func (t *Table) SelfIP() string {
+	t.selfIPLock.RLock()
+	defer t.selfIPLock.RUnlock()
 	return t.selfIP
+}
+
+// SetSelfIP sets the selfIP value of the Table in a thread-safe manner.
+func (t *Table) SetSelfIP(ip string) {
+	t.selfIPLock.Lock()
+	defer t.selfIPLock.Unlock()
+	t.selfIP = ip
 }
 
 func (t *Table) init() {

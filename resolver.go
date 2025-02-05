@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -50,8 +51,10 @@ var controldPublicDnsWithPort = net.JoinHostPort(controldPublicDns, "53")
 var localResolver = newLocalResolver()
 
 var (
-	resolverMutex sync.Mutex
-	or            *osResolver
+	resolverMutex    sync.Mutex
+	or               *osResolver
+	defaultLocalIPv4 atomic.Value // holds net.IP (IPv4)
+	defaultLocalIPv6 atomic.Value // holds net.IP (IPv6)
 )
 
 func newLocalResolver() Resolver {
@@ -216,6 +219,108 @@ type publicResponse struct {
 	server string
 }
 
+// SetDefaultLocalIPv4 updates the stored local IPv4.
+func SetDefaultLocalIPv4(ip net.IP) {
+	Log(context.Background(), ProxyLogger.Load().Debug(), "SetDefaultLocalIPv4: %s", ip)
+	defaultLocalIPv4.Store(ip)
+}
+
+// SetDefaultLocalIPv6 updates the stored local IPv6.
+func SetDefaultLocalIPv6(ip net.IP) {
+	Log(context.Background(), ProxyLogger.Load().Debug(), "SetDefaultLocalIPv6: %s", ip)
+	defaultLocalIPv6.Store(ip)
+}
+
+// GetDefaultLocalIPv4 returns the stored local IPv4 or nil if none.
+func GetDefaultLocalIPv4() net.IP {
+	if v := defaultLocalIPv4.Load(); v != nil {
+		return v.(net.IP)
+	}
+	return nil
+}
+
+// GetDefaultLocalIPv6 returns the stored local IPv6 or nil if none.
+func GetDefaultLocalIPv6() net.IP {
+	if v := defaultLocalIPv6.Load(); v != nil {
+		return v.(net.IP)
+	}
+	return nil
+}
+
+// debugDialer is a helper type that wraps a net.Dialer and logs
+// the local IP address used when dialing out.
+type debugDialer struct {
+	*net.Dialer
+}
+
+// DialContext wraps the underlying DialContext and logs the local address of the connection.
+func (d *debugDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := d.Dialer.DialContext(ctx, network, addr)
+	if err != nil {
+		// Log the error even before a connection is established.
+		if d.Dialer.LocalAddr != nil {
+			Log(ctx, ProxyLogger.Load().Debug(), "debugDialer: dial to %s failed: %v (local addr: %v)", addr, err, d.Dialer.LocalAddr)
+		} else {
+			Log(ctx, ProxyLogger.Load().Debug(), "debugDialer: dial to %s failed: %v", addr, err)
+		}
+		return nil, err
+	}
+	// Log the local address (source IP) used for this connection.
+	Log(ctx, ProxyLogger.Load().Debug(), "debugDialer: dial to %s succeeded; local address: %s",
+		addr, conn.LocalAddr().String())
+	return conn, nil
+}
+
+// customDNSExchange wraps the DNS exchange to use our debug dialer.
+// It uses dns.ExchangeWithConn so that our custom dialer is used directly.
+func customDNSExchange(ctx context.Context, msg *dns.Msg, server string, desiredLocalIP net.IP) (*dns.Msg, error) {
+	baseDialer := &net.Dialer{
+		Timeout:  3 * time.Second,
+		Resolver: &net.Resolver{PreferGo: true},
+	}
+	if desiredLocalIP != nil {
+		baseDialer.LocalAddr = &net.UDPAddr{IP: desiredLocalIP, Port: 0}
+	}
+	dd := &debugDialer{Dialer: baseDialer}
+
+	// Attempt UDP first.
+	udpConn, err := dd.DialContext(ctx, "udp", server)
+	if err != nil {
+		return nil, err
+	}
+	defer udpConn.Close()
+	udpDnsConn := &dns.Conn{Conn: udpConn}
+	if err = udpDnsConn.WriteMsg(msg); err != nil {
+		return nil, err
+	}
+	reply, err := udpDnsConn.ReadMsg()
+	if err != nil {
+		return nil, err
+	}
+
+	// If the UDP reply is not truncated, return it.
+	if !reply.Truncated {
+		return reply, nil
+	}
+
+	// If truncated, retry over TCP once.
+	Log(ctx, ProxyLogger.Load().Debug(), "UDP response truncated, switching to TCP (1 retry)")
+	tcpConn, err := dd.DialContext(ctx, "tcp", server)
+	if err != nil {
+		return reply, nil // fallback to UDP reply if TCP dial fails.
+	}
+	defer tcpConn.Close()
+	tcpDnsConn := &dns.Conn{Conn: tcpConn}
+	if err = tcpDnsConn.WriteMsg(msg); err != nil {
+		return reply, nil // fallback if TCP write fails.
+	}
+	tcpReply, err := tcpDnsConn.ReadMsg()
+	if err != nil {
+		return reply, nil // fallback if TCP read fails.
+	}
+	return tcpReply, nil
+}
+
 // Resolve resolves DNS queries using pre-configured nameservers.
 // Query is sent to all nameservers concurrently, and the first
 // success response will be returned.
@@ -237,7 +342,6 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	dnsClient := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
 	ch := make(chan *osResolverResult, numServers)
 	wg := &sync.WaitGroup{}
 	wg.Add(numServers)
@@ -250,7 +354,22 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		for _, server := range servers {
 			go func(server string) {
 				defer wg.Done()
-				answer, _, err := dnsClient.ExchangeContext(ctx, msg.Copy(), server)
+				var answer *dns.Msg
+				var err error
+				var localOSResolverIP net.IP
+				if runtime.GOOS == "darwin" {
+					host, _, err := net.SplitHostPort(server)
+					if err == nil {
+						ip := net.ParseIP(host)
+						if ip != nil && ip.To4() == nil {
+							// IPv6 nameserver; use default IPv6 address (if set)
+							localOSResolverIP = GetDefaultLocalIPv6()
+						} else {
+							localOSResolverIP = GetDefaultLocalIPv4()
+						}
+					}
+				}
+				answer, err = customDNSExchange(ctx, msg.Copy(), server, localOSResolverIP)
 				ch <- &osResolverResult{answer: answer, err: err, server: server, lan: isLan}
 			}(server)
 		}

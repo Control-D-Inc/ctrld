@@ -504,6 +504,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				if err := p.serveDNS(ctx, listenerNum); err != nil {
 					mainLog.Load().Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
 				}
+				mainLog.Load().Debug().Msgf("end of serveDNS listener.%s: %s", listenerNum, addr)
 			}(listenerNum)
 		}
 		go func() {

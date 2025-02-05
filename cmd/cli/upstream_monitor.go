@@ -42,14 +42,24 @@ func newUpstreamMonitor(cfg *ctrld.Config) *upstreamMonitor {
 	return um
 }
 
-// increaseFailureCount increase failed queries count for an upstream by 1.
+// increaseFailureCount increases failed queries count for an upstream by 1 and logs debug information.
 func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 	um.mu.Lock()
 	defer um.mu.Unlock()
 
 	um.failureReq[upstream] += 1
 	failedCount := um.failureReq[upstream]
-	um.down[upstream] = failedCount >= maxFailureRequest
+
+	// Log the updated failure count
+	mainLog.Load().Debug().Msgf("upstream %q failure count updated to %d", upstream, failedCount)
+
+	// Check if the failure count has reached the threshold to mark the upstream as down.
+	if failedCount >= maxFailureRequest {
+		um.down[upstream] = true
+		mainLog.Load().Warn().Msgf("upstream %q marked as down (failure count: %d)", upstream, failedCount)
+	} else {
+		um.down[upstream] = false
+	}
 }
 
 // isDown reports whether the given upstream is being marked as down.
