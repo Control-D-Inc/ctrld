@@ -7,17 +7,16 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net"
-	"os"
 	"os/exec"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog"
 	"tailscale.com/net/netmon"
+
+	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
 func dnsFns() []dnsFn {
@@ -26,11 +25,6 @@ func dnsFns() []dnsFn {
 
 // dnsFromResolvConf reads nameservers from /etc/resolv.conf
 func dnsFromResolvConf() []string {
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
-
 	const (
 		maxRetries    = 10
 		retryInterval = 100 * time.Millisecond
@@ -44,24 +38,12 @@ func dnsFromResolvConf() []string {
 			time.Sleep(retryInterval)
 		}
 
-		file, err := os.Open("/etc/resolv.conf")
-		if err != nil {
-			Log(context.Background(), logger.Error(), "failed to open /etc/resolv.conf (attempt %d/%d)", attempt+1, maxRetries)
-			continue
-		}
-		defer file.Close()
-
+		nss := resolvconffile.NameServers("")
 		var localDNS []string
 		seen := make(map[string]bool)
 
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			line := scanner.Text()
-			fields := strings.Fields(line)
-			if len(fields) < 2 || fields[0] != "nameserver" {
-				continue
-			}
-			if ip := net.ParseIP(fields[1]); ip != nil {
+		for _, ns := range nss {
+			if ip := net.ParseIP(ns); ip != nil {
 				// skip loopback IPs
 				for _, v := range slices.Concat(regularIPs, loopbackIPs) {
 					ipStr := v.String()
@@ -76,11 +58,6 @@ func dnsFromResolvConf() []string {
 			}
 		}
 
-		if err := scanner.Err(); err != nil {
-			Log(context.Background(), logger.Error(), "error reading /etc/resolv.conf (attempt %d/%d): %v", attempt+1, maxRetries, err)
-			continue
-		}
-
 		// If we successfully read the file and found nameservers, return them
 		if len(localDNS) > 0 {
 			return localDNS
@@ -91,10 +68,7 @@ func dnsFromResolvConf() []string {
 }
 
 func getDNSFromScutil() []string {
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
 
 	const (
 		maxRetries    = 10
