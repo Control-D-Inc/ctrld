@@ -106,6 +106,14 @@ func initLogging() []io.Writer {
 	return initLoggingWithBackup(true)
 }
 
+// initInteractiveLogging is like initLogging, but the ProxyLogger is discarded
+// to be used for all interactive commands.
+func initInteractiveLogging() {
+	initLogging()
+	l := zerolog.New(io.Discard)
+	ctrld.ProxyLogger.Store(&l)
+}
+
 // initLoggingWithBackup initializes log setup base on current config.
 // If doBackup is true, backup old log file with ".1" suffix.
 //
@@ -143,6 +151,8 @@ func initLoggingWithBackup(doBackup bool) []io.Writer {
 	multi := zerolog.MultiLevelWriter(writers...)
 	l := mainLog.Load().Output(multi).With().Logger()
 	mainLog.Store(&l)
+	// TODO: find a better way.
+	ctrld.ProxyLogger.Store(&l)
 
 	zerolog.SetGlobalLevel(zerolog.NoticeLevel)
 	logLevel := cfg.Service.LogLevel

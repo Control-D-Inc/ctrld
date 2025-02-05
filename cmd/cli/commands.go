@@ -336,7 +336,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 				}
 
-				initLogging()
+				initInteractiveLogging()
 				tasks := []task{
 					{s.Stop, false, "Stop"},
 					resetDnsTask(p, s, isCtrldInstalled, currentIface),
@@ -399,7 +399,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 			}
 
-			initLogging()
+			initInteractiveLogging()
 
 			if nextdns != "" {
 				removeNextDNSFromArgs(sc)
@@ -588,7 +588,7 @@ func initStopCmd() *cobra.Command {
 				p.requiredMultiNICsConfig = ir.All
 			}
 
-			initLogging()
+			initInteractiveLogging()
 
 			status, err := s.Status()
 			if errors.Is(err, service.ErrNotInstalled) {
@@ -695,7 +695,7 @@ func initRestartCmd() *cobra.Command {
 				p.requiredMultiNICsConfig = ir.All
 			}
 
-			initLogging()
+			initInteractiveLogging()
 
 			if cdMode {
 				doValidateCdRemoteConfig(cdUID)

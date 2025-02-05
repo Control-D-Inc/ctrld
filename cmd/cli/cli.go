@@ -267,8 +267,6 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// Log config do not have thing to validate, so it's safe to init log here,
 	// so it's able to log information in processCDFlags.
 	logWriters := initLogging()
-	// TODO: find a better way.
-	ctrld.ProxyLogger.Store(mainLog.Load())
 
 	// Initializing internal logging after global logging.
 	p.initInternalLogging(logWriters)
@@ -1023,7 +1021,7 @@ func uninstall(p *prog, s service.Service) {
 		{s.Stop, false, "Stop"},
 		{s.Uninstall, true, "Uninstall"},
 	}
-	initLogging()
+	initInteractiveLogging()
 	if doTasks(tasks) {
 		if err := p.router.ConfigureService(svcConfig); err != nil {
 			mainLog.Load().Fatal().Err(err).Msg("could not configure service")
