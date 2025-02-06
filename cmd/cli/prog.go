@@ -72,7 +72,6 @@ var useSystemdResolved = false
 
 type prog struct {
 	mu                   sync.Mutex
-	wg                   sync.WaitGroup
 	waitCh               chan struct{}
 	stopCh               chan struct{}
 	reloadCh             chan struct{} // For Windows.
@@ -450,8 +449,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	}
 
 	var wg sync.WaitGroup
-	p.wg = wg
-	p.wg.Add(len(p.cfg.Listener))
+	wg.Add(len(p.cfg.Listener))
 
 	for _, nc := range p.cfg.Network {
 		for _, cidr := range nc.Cidrs {
@@ -486,7 +484,10 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	// Newer versions of android and iOS denies permission which breaks connectivity.
 	if !isMobile() && !reload {
-		p.runClientInfoDiscover(ctx)
+		wg.Add(1)
+		go func() {
+			p.runClientInfoDiscover(ctx)
+		}()
 		go p.watchLinkState(ctx)
 	}
 
@@ -510,7 +511,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		go func() {
 			defer func() {
 				cancelFunc()
-				p.wg.Done()
+				wg.Done()
 			}()
 			select {
 			case <-p.stopCh:
@@ -531,19 +532,19 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	close(p.onStartedDone)
 
-	p.wg.Add(1)
+	wg.Add(1)
 	go func() {
-		defer p.wg.Done()
+		defer wg.Done()
 		// Check for possible DNS loop.
 		p.checkDnsLoop()
 		// Start check DNS loop ticker.
 		p.checkDnsLoopTicker(ctx)
 	}()
 
-	p.wg.Add(1)
+	wg.Add(1)
 	// Prometheus exporter goroutine.
 	go func() {
-		defer p.wg.Done()
+		defer wg.Done()
 		p.runMetricsServer(ctx, reloadCh)
 	}()
 
@@ -558,7 +559,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		p.postRun()
 		p.initInternalLogging(logWriters)
 	}
-	p.wg.Wait()
+	wg.Wait()
 }
 
 // setupClientInfoDiscover performs necessary works for running client info discover.
@@ -571,14 +572,10 @@ func (p *prog) setupClientInfoDiscover(selfIP string) {
 	}
 }
 
-// runClientInfoDiscover runs the client info discover in background.
+// runClientInfoDiscover runs the client info discover.
 func (p *prog) runClientInfoDiscover(ctx context.Context) {
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
-		p.ciTable.Init()
-		p.ciTable.RefreshLoop(ctx)
-	}()
+	p.ciTable.Init()
+	p.ciTable.RefreshLoop(ctx)
 }
 
 // metricsEnabled reports whether prometheus exporter is enabled/disabled.
