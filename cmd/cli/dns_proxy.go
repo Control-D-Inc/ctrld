@@ -1316,7 +1316,7 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 
 		changed := false
 		activeInterfaceExists := false
-
+		changeIPs := []netip.Prefix{}
 		// Check each valid interface for changes
 		for ifaceName := range validIfaces {
 			oldIface := delta.Old.Interface[ifaceName]
@@ -1336,6 +1336,7 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			if !interfaceStatesEqual(&oldIface, &newIface) || !interfaceIPsEqual(oldIPs, newIPs) {
 				if newIface.IsUp() && len(newIPs) > 0 {
 					changed = true
+					changeIPs = newIPs
 					mainLog.Load().Debug().
 						Str("interface", ifaceName).
 						Interface("old_ips", oldIPs).
@@ -1363,6 +1364,18 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		if delta.New.DefaultRouteInterface != "" {
 			for _, ip := range delta.New.InterfaceIPs[delta.New.DefaultRouteInterface] {
 				// Parse the CIDR notation to get just the IP
+				ipAddr, _ := netip.ParsePrefix(ip.String())
+				addr := ipAddr.Addr()
+				if addr.Is4() && selfIP == "" && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+					selfIP = addr.String()
+				}
+				if addr.Is6() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+					ipv6 = addr.String()
+				}
+			}
+		} else {
+			// If no default route interface is set yet, use the changed IPs
+			for _, ip := range changeIPs {
 				ipAddr, _ := netip.ParsePrefix(ip.String())
 				addr := ipAddr.Addr()
 				if addr.Is4() && selfIP == "" && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
