@@ -1313,9 +1313,12 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		// Get map of valid interfaces
 		validIfaces := validInterfacesMap()
 
+		isMajorChange := mon.IsMajorChangeFrom(delta.Old, delta.New)
+
 		mainLog.Load().Debug().
 			Interface("old_state", delta.Old).
 			Interface("new_state", delta.New).
+			Bool("is_major_change", isMajorChange).
 			Msg("Network change detected")
 
 		changed := false
@@ -1331,20 +1334,23 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			oldIPs := delta.Old.InterfaceIPs[ifaceName]
 			newIPs := delta.New.InterfaceIPs[ifaceName]
 
-			// Check if interface is up and has IPs
-			if newIface.IsUp() && len(newIPs) > 0 {
+			// Filter new IPs to only those that are usable.
+			usableNewIPs := filterUsableIPs(newIPs)
+
+			// Check if interface is up and has usable IPs.
+			if newIface.IsUp() && len(usableNewIPs) > 0 {
 				activeInterfaceExists = true
 			}
 
-			// Compare interface states and IPs
+			// Compare interface states and IPs (interfaceIPsEqual will itself filter the IPs).
 			if !interfaceStatesEqual(&oldIface, &newIface) || !interfaceIPsEqual(oldIPs, newIPs) {
-				if newIface.IsUp() && len(newIPs) > 0 {
+				if newIface.IsUp() && len(usableNewIPs) > 0 {
 					changed = true
-					changeIPs = newIPs
+					changeIPs = usableNewIPs
 					mainLog.Load().Debug().
 						Str("interface", ifaceName).
 						Interface("old_ips", oldIPs).
-						Interface("new_ips", newIPs).
+						Interface("new_ips", usableNewIPs).
 						Msg("Interface state or IPs changed")
 					break
 				}
@@ -1424,45 +1430,40 @@ func interfaceStatesEqual(a, b *netmon.Interface) bool {
 	return a.IsUp() == b.IsUp()
 }
 
-// interfaceIPsEqual compares two slices of IP prefixes
+// filterUsableIPs is a helper that returns only "usable" IP prefixes,
+// filtering out link-local, loopback, multicast, unspecified, broadcast, or CGNAT addresses.
+func filterUsableIPs(prefixes []netip.Prefix) []netip.Prefix {
+	var usable []netip.Prefix
+	for _, p := range prefixes {
+		addr := p.Addr()
+		if addr.IsLinkLocalUnicast() ||
+			addr.IsLoopback() ||
+			addr.IsMulticast() ||
+			addr.IsUnspecified() ||
+			addr.IsLinkLocalMulticast() ||
+			(addr.Is4() && addr.String() == "255.255.255.255") ||
+			tsaddr.CGNATRange().Contains(addr) {
+			continue
+		}
+		usable = append(usable, p)
+	}
+	return usable
+}
+
+// Modified interfaceIPsEqual compares only the usable (non-link local, non-loopback, etc.) IP addresses.
 func interfaceIPsEqual(a, b []netip.Prefix) bool {
-	if len(a) != len(b) {
+	aUsable := filterUsableIPs(a)
+	bUsable := filterUsableIPs(b)
+	if len(aUsable) != len(bUsable) {
 		return false
 	}
 
-	isUsableIP := func(ip netip.Prefix) bool {
-		addr := ip.Addr()
-		return !addr.IsLinkLocalUnicast() && // fe80::/10
-			!addr.IsLoopback() && // 127.0.0.1/8, ::1
-			!addr.IsMulticast() && // 224.0.0.0/4, ff00::/8
-			!addr.IsUnspecified() && // 0.0.0.0, ::
-			!addr.IsLinkLocalMulticast() && // 224.0.0.0/24
-			!(addr.Is4() && addr.String() == "255.255.255.255") && // broadcast
-			!tsaddr.CGNATRange().Contains(addr) // 100.64.0.0/10 CGNAT
+	aMap := make(map[string]bool)
+	for _, ip := range aUsable {
+		aMap[ip.String()] = true
 	}
-
-	// Filter and create maps for comparison
-	aMap := make(map[netip.Prefix]bool)
-	for _, ip := range a {
-		if isUsableIP(ip) {
-			aMap[ip] = true
-		}
-	}
-
-	bMap := make(map[netip.Prefix]bool)
-	for _, ip := range b {
-		if isUsableIP(ip) {
-			bMap[ip] = true
-		}
-	}
-
-	// Compare the filtered IP sets
-	if len(aMap) != len(bMap) {
-		return false
-	}
-
-	for ip := range aMap {
-		if !bMap[ip] {
+	for _, ip := range bUsable {
+		if !aMap[ip.String()] {
 			return false
 		}
 	}
