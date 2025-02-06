@@ -247,33 +247,9 @@ func GetDefaultLocalIPv6() net.IP {
 	return nil
 }
 
-// debugDialer is a helper type that wraps a net.Dialer and logs
-// the local IP address used when dialing out.
-type debugDialer struct {
-	*net.Dialer
-}
-
-// DialContext wraps the underlying DialContext and logs the local address of the connection.
-func (d *debugDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	conn, err := d.Dialer.DialContext(ctx, network, addr)
-	if err != nil {
-		// Log the error even before a connection is established.
-		if d.Dialer.LocalAddr != nil {
-			Log(ctx, ProxyLogger.Load().Debug(), "debugDialer: dial to %s failed: %v (local addr: %v)", addr, err, d.Dialer.LocalAddr)
-		} else {
-			Log(ctx, ProxyLogger.Load().Debug(), "debugDialer: dial to %s failed: %v", addr, err)
-		}
-		return nil, err
-	}
-	// Log the local address (source IP) used for this connection.
-	Log(ctx, ProxyLogger.Load().Debug(), "debugDialer: dial to %s succeeded; local address: %s",
-		addr, conn.LocalAddr().String())
-	return conn, nil
-}
-
 // customDNSExchange wraps the DNS exchange to use our debug dialer.
 // It uses dns.ExchangeWithConn so that our custom dialer is used directly.
-func customDNSExchange(ctx context.Context, msg *dns.Msg, server string, desiredLocalIP net.IP) (*dns.Msg, error) {
+func customDNSExchange(ctx context.Context, msg *dns.Msg, server string, desiredLocalIP net.IP) (*dns.Msg, time.Duration, error) {
 	baseDialer := &net.Dialer{
 		Timeout:  3 * time.Second,
 		Resolver: &net.Resolver{PreferGo: true},
@@ -281,46 +257,9 @@ func customDNSExchange(ctx context.Context, msg *dns.Msg, server string, desired
 	if desiredLocalIP != nil {
 		baseDialer.LocalAddr = &net.UDPAddr{IP: desiredLocalIP, Port: 0}
 	}
-	dd := &debugDialer{Dialer: baseDialer}
-
-	// Attempt UDP first.
-	udpConn, err := dd.DialContext(ctx, "udp", server)
-	if err != nil {
-		return nil, err
-	}
-	defer udpConn.Close()
-	udpConn.SetDeadline(time.Now().Add(3 * time.Second))
-	udpDnsConn := &dns.Conn{Conn: udpConn}
-	if err = udpDnsConn.WriteMsg(msg); err != nil {
-		return nil, err
-	}
-	reply, err := udpDnsConn.ReadMsg()
-	if err != nil {
-		return nil, err
-	}
-
-	// If the UDP reply is not truncated, return it.
-	if !reply.Truncated {
-		return reply, nil
-	}
-
-	// If truncated, retry over TCP once.
-	Log(ctx, ProxyLogger.Load().Debug(), "UDP response truncated, switching to TCP (1 retry)")
-	tcpConn, err := dd.DialContext(ctx, "tcp", server)
-	if err != nil {
-		return reply, nil // fallback to UDP reply if TCP dial fails.
-	}
-	defer tcpConn.Close()
-	tcpConn.SetDeadline(time.Now().Add(3 * time.Second))
-	tcpDnsConn := &dns.Conn{Conn: tcpConn}
-	if err = tcpDnsConn.WriteMsg(msg); err != nil {
-		return reply, nil // fallback if TCP write fails.
-	}
-	tcpReply, err := tcpDnsConn.ReadMsg()
-	if err != nil {
-		return reply, nil // fallback if TCP read fails.
-	}
-	return tcpReply, nil
+	dnsClient := &dns.Client{Net: "udp"}
+	dnsClient.Dialer = baseDialer
+	return dnsClient.ExchangeContext(ctx, msg, server)
 }
 
 // Resolve resolves DNS queries using pre-configured nameservers.
@@ -371,7 +310,7 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 						}
 					}
 				}
-				answer, err = customDNSExchange(ctx, msg.Copy(), server, localOSResolverIP)
+				answer, _, err = customDNSExchange(ctx, msg.Copy(), server, localOSResolverIP)
 				ch <- &osResolverResult{answer: answer, err: err, server: server, lan: isLan}
 			}(server)
 		}
