@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -12,7 +11,6 @@ import (
 	"os/exec"
 	"runtime"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1311,101 +1309,76 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		// Get map of valid interfaces
 		validIfaces := validInterfacesMap()
 
-		// Log the delta for debugging
-		mainLog.Load().Warn().
+		mainLog.Load().Debug().
 			Interface("old_state", delta.Old).
 			Interface("new_state", delta.New).
 			Msg("Network change detected")
 
-		// Parse old and new interface states, and extract IPs as well.
-		oldIfs, oldIPs := parseInterfaceState(delta.Old)
-		newIfs, newIPs := parseInterfaceState(delta.New)
-
 		changed := false
-		var changedIface, changedIfaceState string
 		activeInterfaceExists := false
 
-		// Iterate over valid interfaces.
+		// Check each valid interface for changes
 		for ifaceName := range validIfaces {
-			lname := strings.ToLower(ifaceName)
-			oldState, oldExists := oldIfs[lname]
-			newState, newExists := newIfs[lname]
+			oldIface := delta.Old.Interface[ifaceName]
+			newIface, exists := delta.New.Interface[ifaceName]
+			if !exists {
+				continue
+			}
+			oldIPs := delta.Old.InterfaceIPs[ifaceName]
+			newIPs := delta.New.InterfaceIPs[ifaceName]
 
-			// Check if the interface appears active in the new state.
-			if newState != "" && !strings.Contains(newState, "down") {
+			// Check if interface is up and has IPs
+			if newIface.IsUp() && len(newIPs) > 0 {
 				activeInterfaceExists = true
 			}
 
-			// Compare raw state strings...
-			stateChanged := (oldExists != newExists || oldState != newState)
-
-			// ... and also compare the parsed IP slices.
-			ipChanged := false
-			oldIPSlice, okOld := oldIPs[lname]
-			newIPSlice, okNew := newIPs[lname]
-			if okOld && okNew {
-				// Create copies and sort them so that order does not matter.
-				sortedOld := append([]string(nil), oldIPSlice...)
-				sortedNew := append([]string(nil), newIPSlice...)
-				sort.Strings(sortedOld)
-				sort.Strings(sortedNew)
-				if !slices.Equal(sortedOld, sortedNew) {
-					ipChanged = true
-				}
-			} else if okOld != okNew {
-				ipChanged = true
-			}
-
-			// If either the state string or the IPs have changed...
-			if stateChanged || ipChanged {
-				if newState != "" && !strings.Contains(newState, "down") {
+			// Compare interface states and IPs
+			if !interfaceStatesEqual(&oldIface, &newIface) || !interfaceIPsEqual(oldIPs, newIPs) {
+				if newIface.IsUp() && len(newIPs) > 0 {
 					changed = true
-					changedIface = ifaceName
-					// Prefer newState if present; if not, generate one from the IP slice.
-					if newState == "" && okNew {
-						changedIfaceState = "[" + strings.Join(newIPSlice, " ") + "]"
-					} else {
-						changedIfaceState = newState
-					}
+					mainLog.Load().Debug().
+						Str("interface", ifaceName).
+						Interface("old_ips", oldIPs).
+						Interface("new_ips", newIPs).
+						Msg("Interface state or IPs changed")
+					break
 				}
-				mainLog.Load().Warn().
-					Str("interface", ifaceName).
-					Str("old_state", oldState).
-					Str("new_state", newState).
-					Msg("Valid interface changed state (IP change detected: " + strconv.FormatBool(ipChanged) + ")")
-				break
-			} else {
-				mainLog.Load().Warn().
-					Str("interface", ifaceName).
-					Str("old_state", oldState).
-					Str("new_state", newState).
-					Msg("Valid interface unchanged")
 			}
 		}
 
 		if !changed {
-			mainLog.Load().Warn().Msg("Ignoring interface change - no valid interfaces affected")
+			mainLog.Load().Debug().Msg("Ignoring interface change - no valid interfaces affected")
 			return
 		}
 
 		if !activeInterfaceExists {
-			mainLog.Load().Warn().Msg("No active interfaces found, skipping reinitialization")
+			mainLog.Load().Debug().Msg("No active interfaces found, skipping reinitialization")
 			return
 		}
 
-		// Use the defaultRouteIP() result, or fall back to the changed interface's IPv4 from the new state.
+		// Get IPs from default route interface in new state
 		selfIP := defaultRouteIP()
-		if selfIP == "" && changedIface != "" {
-			selfIP = extractIPv4FromState(changedIfaceState)
-			mainLog.Load().Info().Msgf("defaultRouteIP returned empty, using changed iface '%s' IPv4: %s", changedIface, selfIP)
+		var ipv6 string
+
+		if delta.New.DefaultRouteInterface != "" {
+			for _, ip := range delta.New.InterfaceIPs[delta.New.DefaultRouteInterface] {
+				addr := ip.Addr()
+				if addr.Is4() && selfIP == "" && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+					selfIP = addr.String()
+				}
+				if addr.Is6() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+					ipv6 = addr.String()
+				}
+			}
 		}
 
-		// Extract IPv6 from the changed state.
-		ipv6 := extractIPv6FromState(changedIfaceState)
+		if selfIP == "" {
+			mainLog.Load().Debug().Msg("No valid IPv4 found on default route interface")
+			return
+		}
 
 		if ip := net.ParseIP(selfIP); ip != nil {
 			ctrld.SetDefaultLocalIPv4(ip)
-			// If we have a new IP, update the client info.
 			if !isMobile() && p.ciTable != nil {
 				p.ciTable.SetSelfIP(selfIP)
 			}
@@ -1422,115 +1395,30 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 	return nil
 }
 
-// parseInterfaceState parses the netmon state into two maps:
-//  1. stateMap: a mapping from interfaces (lowercase) to their original state string,
-//     formatted in square brackets (e.g. "[192.168.1.200/24 fe80::69f6:e16e:8bdb:0000/64]").
-//  2. ipMap: a mapping from interfaces (lowercase) to a slice of IP addresses extracted from that state.
-//
-// It first attempts JSON parsing to pull out both the "Interface" and "InterfaceIPs" fields.
-// If JSON parsing fails, it falls back to the legacy parsing logic.
-func parseInterfaceState(state *netmon.State) (map[string]string, map[string][]string) {
-	result := make(map[string]string)  // Interface name -> state string.
-	ipMap := make(map[string][]string) // Interface name -> slice of IP addresses.
-
-	if state == nil {
-		return result, ipMap
+// interfaceStatesEqual compares two interface states
+func interfaceStatesEqual(a, b *netmon.Interface) bool {
+	if a == nil || b == nil {
+		return a == b
 	}
-	stateStr := state.String()
-
-	// Attempt to parse the state string as JSON so we can extract both "Interface" and "InterfaceIPs".
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(stateStr), &raw); err == nil {
-		var interfaces map[string]interface{}
-		var interfaceIPs map[string][]string
-
-		if v, ok := raw["Interface"]; ok {
-			_ = json.Unmarshal(v, &interfaces)
-		}
-		if v, ok := raw["InterfaceIPs"]; ok {
-			_ = json.Unmarshal(v, &interfaceIPs)
-		}
-		// For every interface in the "Interface" section, check for its IPs.
-		for name := range interfaces {
-			lowerName := strings.ToLower(name)
-			if ips, ok := interfaceIPs[name]; ok && len(ips) > 0 {
-				result[lowerName] = "[" + strings.Join(ips, " ") + "]"
-				ipMap[lowerName] = ips
-			} else {
-				result[lowerName] = "[]"
-				ipMap[lowerName] = []string{}
-			}
-		}
-		return result, ipMap
-	}
-
-	// Fallback: try parsing the legacy "ifs={...}" section from the state string.
-	ifsStart := strings.Index(stateStr, "ifs={")
-	if ifsStart == -1 {
-		return result, ipMap
-	}
-	ifsStr := stateStr[ifsStart+5:]
-	ifsEnd := strings.Index(ifsStr, "}")
-	if ifsEnd == -1 {
-		return result, ipMap
-	}
-	ifsContent := strings.TrimSpace(ifsStr[:ifsEnd])
-	entries := strings.Split(ifsContent, "] ")
-	for _, entry := range entries {
-		if entry == "" {
-			continue
-		}
-		parts := strings.Split(entry, ":[")
-		if len(parts) != 2 {
-			continue
-		}
-		name := strings.TrimSpace(parts[0])
-		stateEntry := "[" + strings.TrimSuffix(parts[1], "]") + "]"
-		lowerName := strings.ToLower(name)
-		result[lowerName] = stateEntry
-
-		// Attempt to extract IP addresses from stateEntry.
-		ipList := []string{}
-		trimmed := strings.Trim(stateEntry, "[]")
-		fields := strings.Fields(trimmed)
-		for _, f := range fields {
-			// We assume the IP is the part before the "/", if present.
-			candidate := strings.Split(f, "/")[0]
-			if ip := net.ParseIP(candidate); ip != nil {
-				ipList = append(ipList, candidate)
-			}
-		}
-		ipMap[lowerName] = ipList
-	}
-	return result, ipMap
+	return a.IsUp() == b.IsUp()
 }
 
-// extractIPv4FromState extracts an IPv4 address from an interface state string.
-// For example, given "[172.16.226.239/22 llu6]", it returns "172.16.226.239".
-// If no valid IP can be found, it returns an empty string.
-func extractIPv4FromState(state string) string {
-	trimmed := strings.Trim(state, "[]")
-	parts := strings.Fields(trimmed)
-	for _, part := range parts {
-		ipPart := strings.Split(part, "/")[0]
-		if ip := net.ParseIP(ipPart); ip != nil && ip.To4() != nil {
-			return ipPart
-		}
+// interfaceIPsEqual compares two slices of IP prefixes
+func interfaceIPsEqual(a, b []netip.Prefix) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	return ""
-}
 
-// extractIPv6FromState extracts an IPv6 address from an interface state string.
-// For example, given "[172.16.226.239/22 llu6]", it returns "172.16.226.239".
-// If no valid IP can be found, it returns an empty string.
-func extractIPv6FromState(state string) string {
-	trimmed := strings.Trim(state, "[]")
-	parts := strings.Fields(trimmed)
-	for _, part := range parts {
-		ipPart := strings.Split(part, "/")[0]
-		if ip := net.ParseIP(ipPart); ip != nil && ip.To4() == nil {
-			return ipPart
+	// Create maps for easier comparison
+	aMap := make(map[netip.Prefix]bool)
+	for _, ip := range a {
+		aMap[ip] = true
+	}
+
+	for _, ip := range b {
+		if !aMap[ip] {
+			return false
 		}
 	}
-	return ""
+	return true
 }
