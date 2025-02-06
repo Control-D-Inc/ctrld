@@ -1362,7 +1362,9 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 
 		if delta.New.DefaultRouteInterface != "" {
 			for _, ip := range delta.New.InterfaceIPs[delta.New.DefaultRouteInterface] {
-				addr := ip.Addr()
+				// Parse the CIDR notation to get just the IP
+				ipAddr, _ := netip.ParsePrefix(ip.String())
+				addr := ipAddr.Addr()
 				if addr.Is4() && selfIP == "" && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
 					selfIP = addr.String()
 				}
