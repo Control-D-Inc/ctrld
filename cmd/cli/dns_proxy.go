@@ -1372,11 +1372,6 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			}
 		}
 
-		if selfIP == "" {
-			mainLog.Load().Debug().Msg("No valid IPv4 found on default route interface")
-			return
-		}
-
 		if ip := net.ParseIP(selfIP); ip != nil {
 			ctrld.SetDefaultLocalIPv4(ip)
 			if !isMobile() && p.ciTable != nil {
