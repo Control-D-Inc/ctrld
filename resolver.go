@@ -130,8 +130,13 @@ func availableNameservers() []string {
 //
 // It's the caller's responsibility to ensure the system DNS is in a clean state before
 // calling this function.
-func InitializeOsResolver() []string {
-	ns := initializeOsResolver(availableNameservers())
+func InitializeOsResolver(guardAgainstNoNameservers bool) []string {
+	nameservers := availableNameservers()
+	// if no nameservers, return empty slice so we dont remove all nameservers
+	if len(nameservers) == 0 && guardAgainstNoNameservers {
+		return []string{}
+	}
+	ns := initializeOsResolver(nameservers)
 	resolverMutex.Lock()
 	defer resolverMutex.Unlock()
 	or = newResolverWithNameserver(ns)

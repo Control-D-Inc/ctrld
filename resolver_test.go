@@ -115,7 +115,7 @@ func Test_osResolver_InitializationRace(t *testing.T) {
 	for range n {
 		go func() {
 			defer wg.Done()
-			InitializeOsResolver()
+			InitializeOsResolver(false)
 		}()
 	}
 	wg.Wait()

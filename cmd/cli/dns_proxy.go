@@ -1249,8 +1249,12 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 	mainLog.Load().Debug().Msg("DNS reset completed")
 
 	mainLog.Load().Debug().Msg("initializing OS resolver")
-	ns := ctrld.InitializeOsResolver()
-	mainLog.Load().Warn().Msgf("re-initialized OS resolver with nameservers: %v", ns)
+	ns := ctrld.InitializeOsResolver(true)
+	if len(ns) == 0 {
+		mainLog.Load().Warn().Msgf("no nameservers found, using existing OS resolver values")
+	} else {
+		mainLog.Load().Warn().Msgf("re-initialized OS resolver with nameservers: %v", ns)
+	}
 
 	// start leaking queries immediately// start leaking queries immediately
 	if networkChange {

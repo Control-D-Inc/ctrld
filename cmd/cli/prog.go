@@ -268,7 +268,7 @@ func (p *prog) preRun() {
 func (p *prog) postRun() {
 	if !service.Interactive() {
 		p.resetDNS()
-		ns := ctrld.InitializeOsResolver()
+		ns := ctrld.InitializeOsResolver(false)
 		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
 		p.setDNS()
 		p.csSetDnsDone <- struct{}{}
