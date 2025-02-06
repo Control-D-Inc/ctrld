@@ -289,6 +289,7 @@ func customDNSExchange(ctx context.Context, msg *dns.Msg, server string, desired
 		return nil, err
 	}
 	defer udpConn.Close()
+	udpConn.SetDeadline(time.Now().Add(3 * time.Second))
 	udpDnsConn := &dns.Conn{Conn: udpConn}
 	if err = udpDnsConn.WriteMsg(msg); err != nil {
 		return nil, err
@@ -310,6 +311,7 @@ func customDNSExchange(ctx context.Context, msg *dns.Msg, server string, desired
 		return reply, nil // fallback to UDP reply if TCP dial fails.
 	}
 	defer tcpConn.Close()
+	tcpConn.SetDeadline(time.Now().Add(3 * time.Second))
 	tcpDnsConn := &dns.Conn{Conn: tcpConn}
 	if err = tcpDnsConn.WriteMsg(msg); err != nil {
 		return reply, nil // fallback if TCP write fails.

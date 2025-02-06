@@ -581,13 +581,6 @@ func (p *prog) runClientInfoDiscover(ctx context.Context) {
 	}()
 }
 
-// stopClientInfoDiscover stops the current client info discover goroutine.
-// It blocks until the goroutine terminated.
-func (p *prog) stopClientInfoDiscover() {
-	p.ciTable.Stop()
-	mainLog.Load().Debug().Msg("stopped client info discover")
-}
-
 // metricsEnabled reports whether prometheus exporter is enabled/disabled.
 func (p *prog) metricsEnabled() bool {
 	return p.cfg.Service.MetricsQueryStats || p.cfg.Service.MetricsListener != ""
