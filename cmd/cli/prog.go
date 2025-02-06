@@ -486,6 +486,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	if !isMobile() && !reload {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			p.runClientInfoDiscover(ctx)
 		}()
 		go p.watchLinkState(ctx)
