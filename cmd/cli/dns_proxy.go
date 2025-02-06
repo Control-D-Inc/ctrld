@@ -1366,12 +1366,15 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		var ipv6 string
 
 		if delta.New.DefaultRouteInterface != "" {
+			mainLog.Load().Debug().Msgf("default route interface: %s, IPs: %v", delta.New.DefaultRouteInterface, delta.New.InterfaceIPs[delta.New.DefaultRouteInterface])
 			for _, ip := range delta.New.InterfaceIPs[delta.New.DefaultRouteInterface] {
-				// Parse the CIDR notation to get just the IP
 				ipAddr, _ := netip.ParsePrefix(ip.String())
 				addr := ipAddr.Addr()
-				if addr.Is4() && selfIP == "" && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
-					selfIP = addr.String()
+				if selfIP == "" && addr.Is4() {
+					mainLog.Load().Debug().Msgf("checking IP: %s", addr.String())
+					if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+						selfIP = addr.String()
+					}
 				}
 				if addr.Is6() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
 					ipv6 = addr.String()
@@ -1379,11 +1382,15 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			}
 		} else {
 			// If no default route interface is set yet, use the changed IPs
+			mainLog.Load().Debug().Msgf("no default route interface found, using changed IPs: %v", changeIPs)
 			for _, ip := range changeIPs {
 				ipAddr, _ := netip.ParsePrefix(ip.String())
 				addr := ipAddr.Addr()
-				if addr.Is4() && selfIP == "" && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
-					selfIP = addr.String()
+				if selfIP == "" && addr.Is4() {
+					mainLog.Load().Debug().Msgf("checking IP: %s", addr.String())
+					if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+						selfIP = addr.String()
+					}
 				}
 				if addr.Is6() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
 					ipv6 = addr.String()
