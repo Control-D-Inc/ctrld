@@ -48,6 +48,17 @@ const (
 	ctrldServiceName           = "ctrld"
 )
 
+// RecoveryReason provides context for why we are waiting for recovery.
+// recovery involves removing the listener IP from the interface and
+// waiting for the upstreams to work before returning
+type RecoveryReason int
+
+const (
+	RecoveryReasonNetworkChange RecoveryReason = iota
+	RecoveryReasonRegularFailure
+	RecoveryReasonOSFailure
+)
+
 // ControlSocketName returns name for control unix socket.
 func ControlSocketName() string {
 	if isMobile() {
@@ -118,14 +129,9 @@ type prog struct {
 	loopMu sync.Mutex
 	loop   map[string]bool
 
-	leakingQueryMu      sync.Mutex
-	leakingQueryRunning map[string]bool
-	leakingQueryReset   atomic.Bool
-
-	resetCtxMu sync.Mutex
-
 	recoveryCancelMu sync.Mutex
 	recoveryCancel   context.CancelFunc
+	recoveryRunning  atomic.Bool
 
 	started       chan struct{}
 	onStartedDone chan struct{}
@@ -429,7 +435,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	}
 	p.onStartedDone = make(chan struct{})
 	p.loop = make(map[string]bool)
-	p.leakingQueryRunning = make(map[string]bool)
 	p.lanLoopGuard = newLoopGuard()
 	p.ptrLoopGuard = newLoopGuard()
 	p.cacheFlushDomainsMap = nil
@@ -779,7 +784,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 			mainLog.Load().Debug().Msg("stop dns watchdog")
 			return
 		case <-ticker.C:
-			if p.leakingQueryReset.Load() {
+			if p.recoveryRunning.Load() {
 				return
 			}
 			if dnsChanged(iface, ns) {
@@ -980,16 +985,10 @@ func findWorkingInterface(currentIface string) string {
 	return currentIface
 }
 
-// leakOnUpstreamFailure reports whether ctrld should leak query to OS resolver when failed to connect all upstreams.
-func (p *prog) leakOnUpstreamFailure() bool {
-	if ptr := p.cfg.Service.LeakOnUpstreamFailure; ptr != nil {
-		return *ptr
-	}
-	// Default is false on routers, since this leaking is only useful for devices that move between networks.
-	if router.Name() != "" {
-		return false
-	}
-	return true
+// recoverOnUpstreamFailure reports whether ctrld should recover from upstream failure.
+func (p *prog) recoverOnUpstreamFailure() bool {
+	// Default is false on routers, since this recovery flow is only useful for devices that move between networks.
+	return router.Name() == ""
 }
 
 func randomLocalIP() string {

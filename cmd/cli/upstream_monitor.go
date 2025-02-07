@@ -145,3 +145,16 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 		time.Sleep(checkUpstreamBackoffSleep)
 	}
 }
+
+// countHealthy returns the number of upstreams in the provided map that are considered healthy.
+func (um *upstreamMonitor) countHealthy(upstreams []string) int {
+	var count int
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+	for _, upstream := range upstreams {
+		if !um.isDown(upstream) {
+			count++
+		}
+	}
+	return count
+}

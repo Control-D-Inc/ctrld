@@ -67,7 +67,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 			mainLog.Load().Debug().Msgf("stopping watcher for %s", resolvConfPath)
 			return
 		case event, ok := <-watcher.Events:
-			if p.leakingQueryReset.Load() {
+			if p.recoveryRunning.Load() {
 				return
 			}
 			if !ok {
