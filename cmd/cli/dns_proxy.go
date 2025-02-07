@@ -1429,6 +1429,9 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 	}
 	mainLog.Load().Info().Msgf("Upstream %q recovered; re-applying DNS settings", recovered)
 
+	// reset the upstream failure count and down state
+	p.um.reset(recovered)
+
 	// For network changes we also reinitialize the OS resolver.
 	if reason == RecoveryReasonNetworkChange {
 		ns := ctrld.InitializeOsResolver(true)
