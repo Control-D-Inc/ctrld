@@ -124,6 +124,9 @@ type prog struct {
 
 	resetCtxMu sync.Mutex
 
+	recoveryCancelMu sync.Mutex
+	recoveryCancel   context.CancelFunc
+
 	started       chan struct{}
 	onStartedDone chan struct{}
 	onStarted     []func()
