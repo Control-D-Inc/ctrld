@@ -99,7 +99,6 @@ func (p *prog) serveDNS(mainCtx context.Context, listenerNum string) error {
 	}
 
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
-		mainLog.Load().Debug().Msgf("serveDNS handler called")
 		p.sema.acquire()
 		defer p.sema.release()
 		if len(m.Question) == 0 {
