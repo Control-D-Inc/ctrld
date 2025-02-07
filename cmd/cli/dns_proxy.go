@@ -1255,10 +1255,6 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 	defer p.resetCtxMu.Unlock()
 
 	p.leakingQueryReset.Store(true)
-	defer func() {
-		time.Sleep(time.Second)
-		p.leakingQueryReset.Store(false)
-	}()
 
 	mainLog.Load().Debug().Msg("attempting to reset DNS")
 	// Remove the listener immediately.
@@ -1281,9 +1277,6 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 
 		// Launch a goroutine that monitors the non-OS upstreams.
 		go func() {
-			p.leakingQueryReset.Store(true)
-			defer p.leakingQueryReset.Store(false)
-
 			recoveredUpstream, err := p.waitForNonOSResolverRecovery(ctx)
 			if err != nil {
 				mainLog.Load().Warn().Err(err).Msg("No non-OS upstream recovered within the timeout; not re-enabling the listener")
@@ -1304,6 +1297,9 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 			p.setDNS()
 			p.logInterfacesState()
 
+			// allow watchers to reset changes
+			p.leakingQueryReset.Store(false)
+
 			// Clear the recovery cancel func as recovery has been achieved.
 			p.recoveryCancelMu.Lock()
 			p.recoveryCancel = nil
@@ -1322,6 +1318,9 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 		// For non-network-change cases, immediately re-enable the listener.
 		p.setDNS()
 		p.logInterfacesState()
+
+		// allow watchers to reset changes
+		p.leakingQueryReset.Store(false)
 	}
 }
 
