@@ -21,10 +21,11 @@ const (
 type upstreamMonitor struct {
 	cfg *ctrld.Config
 
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	checking   map[string]bool
 	down       map[string]bool
 	failureReq map[string]uint64
+	recovered  map[string]bool
 }
 
 func newUpstreamMonitor(cfg *ctrld.Config) *upstreamMonitor {
@@ -33,6 +34,7 @@ func newUpstreamMonitor(cfg *ctrld.Config) *upstreamMonitor {
 		checking:   make(map[string]bool),
 		down:       make(map[string]bool),
 		failureReq: make(map[string]uint64),
+		recovered:  make(map[string]bool),
 	}
 	for n := range cfg.Upstream {
 		upstream := upstreamPrefix + n
@@ -46,6 +48,11 @@ func newUpstreamMonitor(cfg *ctrld.Config) *upstreamMonitor {
 func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 	um.mu.Lock()
 	defer um.mu.Unlock()
+
+	if um.recovered[upstream] {
+		mainLog.Load().Debug().Msgf("upstream %q is recovered, skipping failure count increase", upstream)
+		return
+	}
 
 	um.failureReq[upstream] += 1
 	failedCount := um.failureReq[upstream]
@@ -77,6 +84,14 @@ func (um *upstreamMonitor) reset(upstream string) {
 
 	um.failureReq[upstream] = 0
 	um.down[upstream] = false
+	um.recovered[upstream] = true
+	go func() {
+		// debounce the recovery to avoid incrementing failure counts already in flight
+		time.Sleep(1 * time.Second)
+		um.mu.Lock()
+		um.recovered[upstream] = false
+		um.mu.Unlock()
+	}()
 }
 
 // checkUpstream checks the given upstream status, periodically sending query to upstream

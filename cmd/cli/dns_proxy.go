@@ -559,7 +559,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			if isNetworkErr {
 				p.um.increaseFailureCount(upstreams[n])
 				if p.um.isDown(upstreams[n]) {
-					go p.checkUpstream(upstreams[n], upstreamConfig)
+					p.um.mu.RLock()
+					if !p.um.checking[upstreams[n]] {
+						go p.checkUpstream(upstreams[n], upstreamConfig)
+					}
+					p.um.mu.RUnlock()
 				}
 			}
 			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
@@ -568,6 +572,12 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				upstreamConfig.ReBootstrap()
 			}
 			return nil
+		}
+		// if we have an answer, we should reset the failure count
+		if answer != nil {
+			p.um.mu.Lock()
+			p.um.failureReq[upstreams[n]] = 0
+			p.um.mu.Unlock()
 		}
 		return answer
 	}
@@ -1029,15 +1039,21 @@ func (p *prog) performLeakingQuery(failedUpstreams map[string]*ctrld.UpstreamCon
 	upstreamCh := make(chan string, len(failedUpstreams))
 	for name, uc := range failedUpstreams {
 		go func(name string, uc *ctrld.UpstreamConfig) {
-			mainLog.Load().Debug().
-				Str("upstream", name).
-				Msg("checking upstream")
-
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				default:
+					// make sure this upstream is not already being checked
+					p.um.mu.RLock()
+					if p.um.checking[name] {
+						p.um.mu.RUnlock()
+						continue
+					}
+					mainLog.Load().Debug().
+						Str("upstream", name).
+						Msg("checking upstream")
+
 					p.checkUpstream(name, uc)
 					mainLog.Load().Debug().
 						Str("upstream", name).
@@ -1256,12 +1272,15 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 		mainLog.Load().Warn().Msgf("re-initialized OS resolver with nameservers: %v", ns)
 	}
 
-	// start leaking queries immediately// start leaking queries immediately
+	// start leaking queries immediately
 	if networkChange {
 		// set all upstreams to failed and provide to performLeakingQuery
 		failedUpstreams := make(map[string]*ctrld.UpstreamConfig)
-		for _, upstream := range p.cfg.Upstream {
-			failedUpstreams[upstream.Name] = upstream
+		// Iterate over both key and upstream to ensure that we have a fallback key
+		for key, upstream := range p.cfg.Upstream {
+			mainLog.Load().Debug().Msgf("network change upstream checking: %v, key: %q", upstream, key)
+			mapKey := upstreamPrefix + key
+			failedUpstreams[mapKey] = upstream
 		}
 		go p.performLeakingQuery(failedUpstreams, "all")
 
