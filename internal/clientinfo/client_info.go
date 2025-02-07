@@ -173,6 +173,8 @@ func (t *Table) SetSelfIP(ip string) {
 	t.selfIPLock.Lock()
 	defer t.selfIPLock.Unlock()
 	t.selfIP = ip
+	t.dhcp.selfIP = t.selfIP
+	t.dhcp.addSelf()
 }
 
 func (t *Table) init() {
