@@ -1281,6 +1281,9 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 
 		// Launch a goroutine that monitors the non-OS upstreams.
 		go func() {
+			p.leakingQueryReset.Store(true)
+			defer p.leakingQueryReset.Store(false)
+
 			recoveredUpstream, err := p.waitForNonOSResolverRecovery(ctx)
 			if err != nil {
 				mainLog.Load().Warn().Err(err).Msg("No non-OS upstream recovered within the timeout; not re-enabling the listener")
