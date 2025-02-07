@@ -1274,8 +1274,8 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 			p.recoveryCancel()
 			p.recoveryCancel = nil
 		}
-		// Create a new context (with a timeout) for this recovery wait.
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+
+		ctx, cancel := context.WithCancel(context.Background())
 		p.recoveryCancel = cancel
 		p.recoveryCancelMu.Unlock()
 
