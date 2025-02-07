@@ -1049,6 +1049,7 @@ func (p *prog) performLeakingQuery(failedUpstreams map[string]*ctrld.UpstreamCon
 						p.um.mu.RUnlock()
 						continue
 					}
+					p.um.mu.RUnlock()
 					mainLog.Load().Debug().
 						Str("upstream", name).
 						Msg("checking upstream")
