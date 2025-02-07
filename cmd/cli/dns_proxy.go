@@ -1265,15 +1265,6 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 	p.resetDNS()
 	mainLog.Load().Debug().Msg("DNS reset completed")
 
-	// Initialize OS resolver regardless of upstream recovery.
-	mainLog.Load().Debug().Msg("initializing OS resolver")
-	ns := ctrld.InitializeOsResolver(true)
-	if len(ns) == 0 {
-		mainLog.Load().Warn().Msgf("no nameservers found, using existing OS resolver values")
-	} else {
-		mainLog.Load().Warn().Msgf("re-initialized OS resolver with nameservers: %v", ns)
-	}
-
 	if networkChange {
 		// If we're already waiting on a recovery from a previous network change,
 		// cancel that wait to avoid stale recovery.
@@ -1295,7 +1286,18 @@ func (p *prog) reinitializeOSResolver(networkChange bool) {
 				mainLog.Load().Warn().Err(err).Msg("No non-OS upstream recovered within the timeout; not re-enabling the listener")
 				return
 			}
-			mainLog.Load().Info().Msgf("Non-OS upstream %q recovered; reattaching DNS", recoveredUpstream)
+
+			mainLog.Load().Info().Msgf("Non-OS upstream %q recovered; initializing OS resolver and attaching DNS listener", recoveredUpstream)
+
+			// Initialize OS resolver regardless of upstream recovery.
+			mainLog.Load().Debug().Msg("initializing OS resolver")
+			ns := ctrld.InitializeOsResolver(true)
+			if len(ns) == 0 {
+				mainLog.Load().Warn().Msgf("no nameservers found, using existing OS resolver values")
+			} else {
+				mainLog.Load().Warn().Msgf("re-initialized OS resolver with nameservers: %v", ns)
+			}
+
 			p.setDNS()
 			p.logInterfacesState()
 
