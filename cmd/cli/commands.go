@@ -373,7 +373,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			}
 
 			if cdUID != "" {
-				doValidateCdRemoteConfig(cdUID)
+				doValidateCdRemoteConfig(cdUID, true)
 			} else if uid := cdUIDFromProvToken(); uid != "" {
 				cdUID = uid
 				mainLog.Load().Debug().Msg("using uid from provision token")
@@ -698,7 +698,7 @@ func initRestartCmd() *cobra.Command {
 			initInteractiveLogging()
 
 			if cdMode {
-				doValidateCdRemoteConfig(cdUID)
+				doValidateCdRemoteConfig(cdUID, false)
 			}
 
 			if ir := runningIface(s); ir != nil {
@@ -751,17 +751,16 @@ func initRestartCmd() *cobra.Command {
 			}
 
 			if doRestart() {
-				dir, err := socketDir()
-				if err != nil {
+				if dir, err := socketDir(); err == nil {
+					cc := newSocketControlClient(context.TODO(), s, dir)
+					if cc == nil {
+						mainLog.Load().Error().Msg("Could not complete service restart")
+						os.Exit(1)
+					}
+					_, _ = cc.post(ifacePath, nil)
+				} else {
 					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
-					return
 				}
-				cc := newSocketControlClient(context.TODO(), s, dir)
-				if cc == nil {
-					mainLog.Load().Error().Msg("Could not complete service restart")
-					os.Exit(1)
-				}
-				_, _ = cc.post(ifacePath, nil)
 				mainLog.Load().Notice().Msg("Service restarted")
 			} else {
 				mainLog.Load().Error().Msg("Service restart failed")

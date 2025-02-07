@@ -1807,10 +1807,17 @@ func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, ir *ifaceRe
 }
 
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
-func doValidateCdRemoteConfig(cdUID string) {
+func doValidateCdRemoteConfig(cdUID string, fatal bool) {
 	rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
 	if err != nil {
-		mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid: %s", cdUID)
+		logger := mainLog.Load().Fatal()
+		if !fatal {
+			logger = mainLog.Load().Warn()
+		}
+		logger.Err(err).Err(err).Msgf("failed to fetch resolver uid: %s", cdUID)
+		if !fatal {
+			return
+		}
 	}
 	// validateCdRemoteConfig clobbers v, saving it here to restore later.
 	oldV := v
