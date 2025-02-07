@@ -1366,7 +1366,7 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 
 		changed := false
 		activeInterfaceExists := false
-		changeIPs := []netip.Prefix{}
+		var changeIPs []netip.Prefix
 		// Check each valid interface for changes
 		for ifaceName := range validIfaces {
 			oldIface := delta.Old.Interface[ifaceName]
