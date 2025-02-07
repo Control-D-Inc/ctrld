@@ -150,11 +150,11 @@ func (p *prog) checkUpstream(upstream string, uc *ctrld.UpstreamConfig) {
 func (um *upstreamMonitor) countHealthy(upstreams []string) int {
 	var count int
 	um.mu.RLock()
-	defer um.mu.RUnlock()
 	for _, upstream := range upstreams {
-		if !um.isDown(upstream) {
+		if !um.down[upstream] {
 			count++
 		}
 	}
+	um.mu.RUnlock()
 	return count
 }
