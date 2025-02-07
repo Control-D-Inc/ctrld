@@ -108,8 +108,14 @@ func initLogging() []io.Writer {
 
 // initInteractiveLogging is like initLogging, but the ProxyLogger is discarded
 // to be used for all interactive commands.
+//
+// Current log file config will also be ignored.
 func initInteractiveLogging() {
-	initLogging()
+	old := cfg.Service.LogPath
+	cfg.Service.LogPath = ""
+	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
+	initLoggingWithBackup(false)
+	cfg.Service.LogPath = old
 	l := zerolog.New(io.Discard)
 	ctrld.ProxyLogger.Store(&l)
 }
