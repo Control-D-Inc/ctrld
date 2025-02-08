@@ -30,6 +30,9 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
+// dialSocketControlServerTimeout is the default timeout to wait when ping control server.
+const dialSocketControlServerTimeout = 30 * time.Second
+
 func initLogCmd() *cobra.Command {
 	warnRuntimeLoggingNotEnabled := func() {
 		mainLog.Load().Warn().Msg("runtime debug logging is not enabled")
@@ -373,7 +376,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			}
 
 			if cdUID != "" {
-				doValidateCdRemoteConfig(cdUID, true)
+				_ = doValidateCdRemoteConfig(cdUID, true)
 			} else if uid := cdUIDFromProvToken(); uid != "" {
 				cdUID = uid
 				mainLog.Load().Debug().Msg("using uid from provision token")
@@ -697,8 +700,9 @@ func initRestartCmd() *cobra.Command {
 
 			initInteractiveLogging()
 
+			var validateConfigErr error
 			if cdMode {
-				doValidateCdRemoteConfig(cdUID, false)
+				validateConfigErr = doValidateCdRemoteConfig(cdUID, false)
 			}
 
 			if ir := runningIface(s); ir != nil {
@@ -752,12 +756,18 @@ func initRestartCmd() *cobra.Command {
 
 			if doRestart() {
 				if dir, err := socketDir(); err == nil {
-					cc := newSocketControlClient(context.TODO(), s, dir)
-					if cc == nil {
-						mainLog.Load().Error().Msg("Could not complete service restart")
-						os.Exit(1)
+					timeout := dialSocketControlServerTimeout
+					// If we failed to validate remote config above, it's likely that
+					// we are having problem with network connection. So using a shorter
+					// timeout than default one for better UX.
+					if validateConfigErr != nil {
+						timeout = 5 * time.Second
 					}
-					_, _ = cc.post(ifacePath, nil)
+					if cc := newSocketControlClientWithTimeout(context.TODO(), s, dir, timeout); cc != nil {
+						_, _ = cc.post(ifacePath, nil)
+					} else {
+						mainLog.Load().Warn().Err(err).Msg("Service was restarted, but ctrld process may not be ready yet")
+					}
 				} else {
 					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
 				}

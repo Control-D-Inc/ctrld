@@ -1478,6 +1478,12 @@ func removeOrgFlagsFromArgs(sc *service.Config) {
 
 // newSocketControlClient returns new control client after control server was started.
 func newSocketControlClient(ctx context.Context, s service.Service, dir string) *controlClient {
+	return newSocketControlClientWithTimeout(ctx, s, dir, dialSocketControlServerTimeout)
+}
+
+// newSocketControlClientWithTimeout returns new control client after control server was started.
+// The timeoutDuration controls how long to wait for the server.
+func newSocketControlClientWithTimeout(ctx context.Context, s service.Service, dir string, timeoutDuration time.Duration) *controlClient {
 	// Return early if service is not running.
 	if status, err := s.Status(); err != nil || status != service.StatusRunning {
 		return nil
@@ -1486,7 +1492,7 @@ func newSocketControlClient(ctx context.Context, s service.Service, dir string) 
 	bo.LogLongerThan = 10 * time.Second
 
 	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
-	timeout := time.NewTimer(30 * time.Second)
+	timeout := time.NewTimer(timeoutDuration)
 	defer timeout.Stop()
 
 	// The socket control server may not start yet, so attempt to ping
@@ -1807,7 +1813,7 @@ func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, ir *ifaceRe
 }
 
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
-func doValidateCdRemoteConfig(cdUID string, fatal bool) {
+func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
 	if err != nil {
 		logger := mainLog.Load().Fatal()
@@ -1816,7 +1822,7 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) {
 		}
 		logger.Err(err).Err(err).Msgf("failed to fetch resolver uid: %s", cdUID)
 		if !fatal {
-			return
+			return err
 		}
 	}
 	// validateCdRemoteConfig clobbers v, saving it here to restore later.
@@ -1847,6 +1853,7 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) {
 		mainLog.Load().Warn().Msg("disregarding invalid custom config")
 	}
 	v = oldV
+	return nil
 }
 
 // uninstallInvalidCdUID performs self-uninstallation because the ControlD device does not exist.
