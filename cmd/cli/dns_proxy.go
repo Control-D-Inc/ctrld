@@ -545,9 +545,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			return nil
 		}
 		// if we have an answer, we should reset the failure count
+		// we dont use reset here since we dont want to prevent failure counts from being incremented
 		if answer != nil {
 			p.um.mu.Lock()
 			p.um.failureReq[upstreams[n]] = 0
+			p.um.down[upstreams[n]] = false
 			p.um.mu.Unlock()
 		}
 		return answer

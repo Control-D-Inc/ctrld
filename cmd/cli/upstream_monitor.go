@@ -85,8 +85,6 @@ func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 	if failedCount >= maxFailureRequest {
 		um.down[upstream] = true
 		mainLog.Load().Warn().Msgf("upstream %q marked as down immediately (failure count: %d)", upstream, failedCount)
-	} else {
-		um.down[upstream] = false
 	}
 }
 
