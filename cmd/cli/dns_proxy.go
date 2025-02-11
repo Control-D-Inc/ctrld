@@ -1183,13 +1183,31 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		var changeIPs []netip.Prefix
 		// Check each valid interface for changes
 		for ifaceName := range validIfaces {
-			oldIface := delta.Old.Interface[ifaceName]
-			newIface, exists := delta.New.Interface[ifaceName]
-			if !exists {
+			oldIface, oldExists := delta.Old.Interface[ifaceName]
+			newIface, newExists := delta.New.Interface[ifaceName]
+			if !newExists {
 				continue
 			}
+
 			oldIPs := delta.Old.InterfaceIPs[ifaceName]
 			newIPs := delta.New.InterfaceIPs[ifaceName]
+
+			// if a valid interface did not exist in old
+			// check that its up and has usable IPs
+			if !oldExists {
+				// The interface is new (was not present in the old state).
+				usableNewIPs := filterUsableIPs(newIPs)
+				if newIface.IsUp() && len(usableNewIPs) > 0 {
+					changed = true
+					changeIPs = usableNewIPs
+					mainLog.Load().Debug().
+						Str("interface", ifaceName).
+						Interface("new_ips", usableNewIPs).
+						Msg("Interface newly appeared (was not present in old state)")
+					break
+				}
+				continue
+			}
 
 			// Filter new IPs to only those that are usable.
 			usableNewIPs := filterUsableIPs(newIPs)
