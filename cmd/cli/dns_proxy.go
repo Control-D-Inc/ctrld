@@ -638,6 +638,19 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 	}
 
+	// attempt query to OS resolver while as a retry catch all
+	if upstreams[0] != upstreamOS {
+		ctrld.Log(ctx, mainLog.Load().Debug(), "attempting query to OS resolver as a retry catch all")
+		answer := resolve(0, osUpstreamConfig, req.msg)
+		if answer != nil {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query successful")
+			res.answer = answer
+			res.upstream = osUpstreamConfig.Endpoint
+			return res
+		}
+		ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query failed")
+	}
+
 	answer := new(dns.Msg)
 	answer.SetRcode(req.msg, dns.RcodeServerFailure)
 	res.answer = answer
