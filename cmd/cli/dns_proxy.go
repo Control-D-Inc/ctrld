@@ -531,19 +531,6 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, req.ci)
 		}
 		answer, err := resolve1(upstream, upstreamConfig, msg)
-		if err != nil {
-			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
-			isNetworkErr := errNetworkError(err)
-			if isNetworkErr {
-				p.um.increaseFailureCount(upstream)
-			}
-			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
-			var e net.Error
-			if errors.As(err, &e) && e.Timeout() {
-				upstreamConfig.ReBootstrap()
-			}
-			return nil
-		}
 		// if we have an answer, we should reset the failure count
 		// we dont use reset here since we dont want to prevent failure counts from being incremented
 		if answer != nil {
@@ -551,8 +538,24 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			p.um.failureReq[upstream] = 0
 			p.um.down[upstream] = false
 			p.um.mu.Unlock()
+			return answer
 		}
-		return answer
+
+		ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
+
+		// increase failure count when there is no answer
+		// rehardless of what kind of error we get
+		p.um.increaseFailureCount(upstream)
+
+		if err != nil {
+			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
+			var e net.Error
+			if errors.As(err, &e) && e.Timeout() {
+				upstreamConfig.ReBootstrap()
+			}
+		}
+
+		return nil
 	}
 	for n, upstreamConfig := range upstreamConfigs {
 		if upstreamConfig == nil {
