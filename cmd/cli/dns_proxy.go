@@ -509,8 +509,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			staleAnswer = answer
 		}
 	}
-	resolve1 := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
-		ctrld.Log(ctx, mainLog.Load().Debug(), "sending query to %s: %s", upstreams[n], upstreamConfig.Name)
+	resolve1 := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
+		ctrld.Log(ctx, mainLog.Load().Debug(), "sending query to %s: %s", upstream, upstreamConfig.Name)
 		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
@@ -525,17 +525,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 		return dnsResolver.Resolve(resolveCtx, msg)
 	}
-	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
+	resolve := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "including client info with the request")
 			ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, req.ci)
 		}
-		answer, err := resolve1(n, upstreamConfig, msg)
+		answer, err := resolve1(upstream, upstreamConfig, msg)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
 			isNetworkErr := errNetworkError(err)
 			if isNetworkErr {
-				p.um.increaseFailureCount(upstreams[n])
+				p.um.increaseFailureCount(upstream)
 			}
 			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
 			var e net.Error
@@ -548,8 +548,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		// we dont use reset here since we dont want to prevent failure counts from being incremented
 		if answer != nil {
 			p.um.mu.Lock()
-			p.um.failureReq[upstreams[n]] = 0
-			p.um.down[upstreams[n]] = false
+			p.um.failureReq[upstream] = 0
+			p.um.down[upstream] = false
 			p.um.mu.Unlock()
 		}
 		return answer
@@ -568,7 +568,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			ctrld.Log(ctx, logger, "DNS loop detected")
 			continue
 		}
-		answer := resolve(n, upstreamConfig, req.msg)
+		answer := resolve(upstreams[n], upstreamConfig, req.msg)
 		if answer == nil {
 			if serveStaleCache && staleAnswer != nil {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
@@ -641,7 +641,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// attempt query to OS resolver while as a retry catch all
 	if upstreams[0] != upstreamOS {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "attempting query to OS resolver as a retry catch all")
-		answer := resolve(0, osUpstreamConfig, req.msg)
+		answer := resolve(upstreamOS, osUpstreamConfig, req.msg)
 		if answer != nil {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query successful")
 			res.answer = answer
