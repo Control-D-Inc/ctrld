@@ -26,6 +26,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 const (
@@ -620,7 +621,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
 
 	// if we have no healthy upstreams, trigger recovery flow
-	if p.recoverOnUpstreamFailure() {
+	if p.leakOnUpstreamFailure() {
 		if p.um.countHealthy(upstreams) == 0 {
 			p.recoveryCancelMu.Lock()
 			if p.recoveryCancel == nil {
@@ -1306,7 +1307,8 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		}
 		mainLog.Load().Debug().Msgf("Set default local IPv4: %s, IPv6: %s", selfIP, ipv6)
 
-		if p.recoverOnUpstreamFailure() {
+		// we only trigger recovery flow for network changes on non router devices
+		if router.Name() == "" {
 			p.handleRecovery(RecoveryReasonNetworkChange)
 		}
 	})

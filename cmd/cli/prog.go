@@ -985,12 +985,6 @@ func findWorkingInterface(currentIface string) string {
 	return currentIface
 }
 
-// recoverOnUpstreamFailure reports whether ctrld should recover from upstream failure.
-func (p *prog) recoverOnUpstreamFailure() bool {
-	// Default is false on routers, since this recovery flow is only useful for devices that move between networks.
-	return router.Name() == ""
-}
-
 func randomLocalIP() string {
 	n := rand.Intn(254-2) + 2
 	return fmt.Sprintf("127.0.0.%d", n)
@@ -1285,4 +1279,17 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 		// Perform self-uninstall now.
 		selfUninstall(p, logger)
 	}
+}
+
+// leakOnUpstreamFailure reports whether ctrld should initiate a recovery flow
+// when upstream failures occur.
+func (p *prog) leakOnUpstreamFailure() bool {
+	if ptr := p.cfg.Service.LeakOnUpstreamFailure; ptr != nil {
+		return *ptr
+	}
+	// Default is false on routers, since this leaking is only useful for devices that move between networks.
+	if router.Name() != "" {
+		return false
+	}
+	return true
 }
