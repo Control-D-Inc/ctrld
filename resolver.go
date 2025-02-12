@@ -290,7 +290,7 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		}
 	}
 
-	Log(ctx, ProxyLogger.Load().Debug(), "os resolver query with nameservers: %v", nss)
+	Log(ctx, ProxyLogger.Load().Debug(), "os resolver query with nameservers: %v public: %v", nss, publicServers)
 
 	// New check: If no resolvers are available, return an error.
 	if numServers == 0 {
@@ -343,11 +343,15 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	}
 
 	// try local nameservers
-	do(nss, true)
+	if len(nss) > 0 {
+		do(nss, true)
+	}
 
 	// we must always try the public servers too, since DCHP may have only public servers
 	// this is okay to do since we always prefer LAN nameserver responses
-	do(publicServers, false)
+	if len(publicServers) > 0 {
+		do(publicServers, false)
+	}
 
 	var (
 		nonSuccessAnswer      *dns.Msg
@@ -369,33 +373,49 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 			case res.server == controldPublicDnsWithPort:
 				controldSuccessAnswer = res.answer
 			case !res.lan:
+				// if there are no LAN nameservers, we should not wait
+				// just use the first response
+				if len(nss) == 0 {
+					Log(ctx, ProxyLogger.Load().Debug(), "using public answer from: %s", res.server)
+					cancel()
+					logAnswer(res.server)
+					return res.answer, nil
+				}
 				publicResponses = append(publicResponses, publicResponse{
 					answer: res.answer,
 					server: res.server,
 				})
 			}
 		case res.answer != nil:
-			nonSuccessAnswer = res.answer
-			nonSuccessServer = res.server
 			Log(ctx, ProxyLogger.Load().Debug(), "got non-success answer from: %s with code: %d",
 				res.server, res.answer.Rcode)
+			// When there are no LAN nameservers, we should not wait
+			// for other nameservers to respond.
+			if len(nss) == 0 {
+				Log(ctx, ProxyLogger.Load().Debug(), "no lan nameservers using public non success answer")
+				cancel()
+				logAnswer(res.server)
+				return res.answer, nil
+			}
+			nonSuccessAnswer = res.answer
+			nonSuccessServer = res.server
 		}
 		errs = append(errs, res.err)
 	}
 
 	if len(publicResponses) > 0 {
 		resp := publicResponses[0]
-		Log(ctx, ProxyLogger.Load().Debug(), "got public answer from: %s", resp.server)
+		Log(ctx, ProxyLogger.Load().Debug(), "using public answer from: %s", resp.server)
 		logAnswer(resp.server)
 		return resp.answer, nil
 	}
 	if controldSuccessAnswer != nil {
-		Log(ctx, ProxyLogger.Load().Debug(), "got ControlD answer from: %s", controldPublicDnsWithPort)
+		Log(ctx, ProxyLogger.Load().Debug(), "using ControlD answer from: %s", controldPublicDnsWithPort)
 		logAnswer(controldPublicDnsWithPort)
 		return controldSuccessAnswer, nil
 	}
 	if nonSuccessAnswer != nil {
-		Log(ctx, ProxyLogger.Load().Debug(), "got non-success answer from: %s", nonSuccessServer)
+		Log(ctx, ProxyLogger.Load().Debug(), "using non-success answer from: %s", nonSuccessServer)
 		logAnswer(nonSuccessServer)
 		return nonSuccessAnswer, nil
 	}
