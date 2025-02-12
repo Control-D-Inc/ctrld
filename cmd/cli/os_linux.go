@@ -72,34 +72,25 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		SearchDomains: []dnsname.FQDN{},
 	}
 	trySystemdResolve := false
-	for i := 0; i < maxSetDNSAttempts; i++ {
-		if err := r.SetDNS(osConfig); err != nil {
-			if strings.Contains(err.Error(), "Rejected send message") &&
-				strings.Contains(err.Error(), "org.freedesktop.network1.Manager") {
-				mainLog.Load().Warn().Msg("Interfaces are managed by systemd-networkd, switch to systemd-resolve for setting DNS")
-				trySystemdResolve = true
-				break
-			}
-			// This error happens on read-only file system, which causes ctrld failed to create backup
-			// for /etc/resolv.conf file. It is ok, because the DNS is still set anyway, and restore
-			// DNS will fallback to use DHCP if there's no backup /etc/resolv.conf file.
-			// The error format is controlled by us, so checking for error string is fine.
-			// See: ../../internal/dns/direct.go:L278
-			if r.Mode() == "direct" && strings.Contains(err.Error(), resolvConfBackupFailedMsg) {
-				return nil
-			}
-			return err
+	if err := r.SetDNS(osConfig); err != nil {
+		if strings.Contains(err.Error(), "Rejected send message") &&
+			strings.Contains(err.Error(), "org.freedesktop.network1.Manager") {
+			mainLog.Load().Warn().Msg("Interfaces are managed by systemd-networkd, switch to systemd-resolve for setting DNS")
+			trySystemdResolve = true
+			goto systemdResolve
 		}
-		if useSystemdResolved {
-			if out, err := exec.Command("systemctl", "restart", "systemd-resolved").CombinedOutput(); err != nil {
-				mainLog.Load().Warn().Err(err).Msgf("could not restart systemd-resolved: %s", string(out))
-			}
-		}
-		currentNS := currentDNS(iface)
-		if isSubSet(nameservers, currentNS) {
+		// This error happens on read-only file system, which causes ctrld failed to create backup
+		// for /etc/resolv.conf file. It is ok, because the DNS is still set anyway, and restore
+		// DNS will fallback to use DHCP if there's no backup /etc/resolv.conf file.
+		// The error format is controlled by us, so checking for error string is fine.
+		// See: ../../internal/dns/direct.go:L278
+		if r.Mode() == "direct" && strings.Contains(err.Error(), resolvConfBackupFailedMsg) {
 			return nil
 		}
+		return err
 	}
+
+systemdResolve:
 	if trySystemdResolve {
 		// Stop systemd-networkd and retry setting DNS.
 		if out, err := exec.Command("systemctl", "stop", "systemd-networkd").CombinedOutput(); err != nil {
