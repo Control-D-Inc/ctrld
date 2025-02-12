@@ -156,17 +156,18 @@ func (l *launchd) Status() (service.Status, error) {
 type task struct {
 	f            func() error
 	abortOnError bool
+	Name         string
 }
 
 func doTasks(tasks []task) bool {
-	var prevErr error
 	for _, task := range tasks {
+		mainLog.Load().Debug().Msgf("Running task %s", task.Name)
 		if err := task.f(); err != nil {
 			if task.abortOnError {
-				mainLog.Load().Error().Msg(errors.Join(prevErr, err).Error())
+				mainLog.Load().Error().Msgf("error running task %s: %v", task.Name, err)
 				return false
 			}
-			prevErr = err
+			mainLog.Load().Debug().Msgf("error running task %s: %v", task.Name, err)
 		}
 	}
 	return true

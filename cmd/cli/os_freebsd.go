@@ -76,6 +76,12 @@ func resetDNS(iface *net.Interface) error {
 	return nil
 }
 
+// restoreDNS restores the DNS settings of the given interface.
+// this should only be executed upon turning off the ctrld service.
+func restoreDNS(iface *net.Interface) (err error) {
+	return err
+}
+
 func currentDNS(_ *net.Interface) []string {
 	return resolvconffile.NameServers("")
 }

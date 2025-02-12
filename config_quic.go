@@ -34,7 +34,7 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 }
 
 func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
-	rt := &http3.RoundTripper{}
+	rt := &http3.Transport{}
 	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 		_, port, _ := net.SplitHostPort(addr)
@@ -64,7 +64,7 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 		ProxyLogger.Load().Debug().Msgf("sending doh3 request to: %s", conn.RemoteAddr())
 		return conn, err
 	}
-	runtime.SetFinalizer(rt, func(rt *http3.RoundTripper) {
+	runtime.SetFinalizer(rt, func(rt *http3.Transport) {
 		rt.CloseIdleConnections()
 	})
 	return rt

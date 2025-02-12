@@ -111,6 +111,7 @@ func TestConfigValidation(t *testing.T) {
 		{"doh3 endpoint without type", doh3UpstreamEndpointWithoutType(t), false},
 		{"sdns endpoint without type", sdnsUpstreamEndpointWithoutType(t), false},
 		{"maximum number of flush cache domains", configWithInvalidFlushCacheDomain(t), true},
+		{"kea dhcp4 format", configWithDhcp4KeaFormat(t), false},
 	}
 
 	for _, tc := range tests {
@@ -304,6 +305,12 @@ func configWithExistedLeaseFile(t *testing.T) *ctrld.Config {
 func configWithInvalidLeaseFileFormat(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Service.DHCPLeaseFileFormat = "invalid"
+	return cfg
+}
+
+func configWithDhcp4KeaFormat(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Service.DHCPLeaseFileFormat = "kea-dhcp4"
 	return cfg
 }
 

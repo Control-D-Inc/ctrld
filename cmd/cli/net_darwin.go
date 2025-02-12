@@ -9,17 +9,18 @@ import (
 	"strings"
 )
 
-func patchNetIfaceName(iface *net.Interface) error {
+func patchNetIfaceName(iface *net.Interface) (bool, error) {
 	b, err := exec.Command("networksetup", "-listnetworkserviceorder").Output()
 	if err != nil {
-		return err
+		return false, err
 	}
 
+	patched := false
 	if name := networkServiceName(iface.Name, bytes.NewReader(b)); name != "" {
+		patched = true
 		iface.Name = name
-		mainLog.Load().Debug().Str("network_service", name).Msg("found network service name for interface")
 	}
-	return nil
+	return patched, nil
 }
 
 func networkServiceName(ifaceName string, r io.Reader) string {

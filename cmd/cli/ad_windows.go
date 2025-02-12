@@ -1,8 +1,13 @@
 package cli
 
 import (
-	"fmt"
+	"io"
+	"log"
+	"os"
 	"strings"
+
+	"github.com/microsoft/wmi/pkg/base/host"
+	hh "github.com/microsoft/wmi/pkg/hardware/host"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -21,29 +26,48 @@ func addExtraSplitDnsRule(cfg *ctrld.Config) bool {
 	// Network rules are lowercase during toml config marshaling,
 	// lowercase the domain here too for consistency.
 	domain = strings.ToLower(domain)
+	domainRuleAdded := addSplitDnsRule(cfg, domain)
+	wildcardDomainRuleRuleAdded := addSplitDnsRule(cfg, "*."+strings.TrimPrefix(domain, "."))
+	return domainRuleAdded || wildcardDomainRuleRuleAdded
+}
+
+// addSplitDnsRule adds split-rule for given domain if there's no existed rule.
+// The return value indicates whether the split-rule was added or not.
+func addSplitDnsRule(cfg *ctrld.Config, domain string) bool {
 	for n, lc := range cfg.Listener {
 		if lc.Policy == nil {
 			lc.Policy = &ctrld.ListenerPolicyConfig{}
 		}
-		domainRule := "*." + strings.TrimPrefix(domain, ".")
 		for _, rule := range lc.Policy.Rules {
-			if _, ok := rule[domainRule]; ok {
-				mainLog.Load().Debug().Msgf("domain rule already exist for listener.%s", n)
+			if _, ok := rule[domain]; ok {
+				mainLog.Load().Debug().Msgf("split-rule %q already existed for listener.%s", domain, n)
 				return false
 			}
 		}
-		mainLog.Load().Debug().Msgf("adding active directory domain for listener.%s", n)
-		lc.Policy.Rules = append(lc.Policy.Rules, ctrld.Rule{domainRule: []string{}})
+		mainLog.Load().Debug().Msgf("adding split-rule %q for listener.%s", domain, n)
+		lc.Policy.Rules = append(lc.Policy.Rules, ctrld.Rule{domain: []string{}})
 	}
 	return true
 }
 
 // getActiveDirectoryDomain returns AD domain name of this computer.
 func getActiveDirectoryDomain() (string, error) {
-	cmd := "$obj = Get-WmiObject Win32_ComputerSystem; if ($obj.PartOfDomain) { $obj.Domain }"
-	output, err := powershell(cmd)
-	if err != nil {
-		return "", fmt.Errorf("failed to get domain name: %w, output:\n\n%s", err, string(output))
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	whost := host.NewWmiLocalHost()
+	cs, err := hh.GetComputerSystem(whost)
+	if cs != nil {
+		defer cs.Close()
 	}
-	return string(output), nil
+	if err != nil {
+		return "", err
+	}
+	pod, err := cs.GetPropertyPartOfDomain()
+	if err != nil {
+		return "", err
+	}
+	if pod {
+		return cs.GetPropertyDomain()
+	}
+	return "", nil
 }

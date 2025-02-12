@@ -2,9 +2,14 @@ package cli
 
 import (
 	"os"
+	"runtime"
+	"strings"
 	"syscall"
+	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc/mgr"
 )
 
 func hasElevatedPrivilege() (bool, error) {
@@ -26,6 +31,67 @@ func hasElevatedPrivilege() (bool, error) {
 	}
 	token := windows.Token(0)
 	return token.IsMember(sid)
+}
+
+// ConfigureWindowsServiceFailureActions checks if the given service
+// has the correct failure actions configured, and updates them if not.
+func ConfigureWindowsServiceFailureActions(serviceName string) error {
+	if runtime.GOOS != "windows" {
+		return nil // no-op on non-Windows
+	}
+
+	m, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+
+	// 1. Retrieve the current config
+	cfg, err := s.Config()
+	if err != nil {
+		return err
+	}
+
+	// 2. Update the Description
+	cfg.Description = "A highly configurable, multi-protocol DNS forwarding proxy"
+
+	// 3. Apply the updated config
+	if err := s.UpdateConfig(cfg); err != nil {
+		return err
+	}
+
+	// Then proceed with existing actions, e.g. setting failure actions
+	actions := []mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
+		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
+		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
+	}
+
+	// Set the recovery actions (3 restarts, reset period = 120).
+	err = s.SetRecoveryActions(actions, 120)
+	if err != nil {
+		return err
+	}
+
+	// Ensure that failure actions are NOT triggered on user-initiated stops.
+	var failureActionsFlag windows.SERVICE_FAILURE_ACTIONS_FLAG
+	failureActionsFlag.FailureActionsOnNonCrashFailures = 0
+
+	if err := windows.ChangeServiceConfig2(
+		s.Handle,
+		windows.SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
+		(*byte)(unsafe.Pointer(&failureActionsFlag)),
+	); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func openLogFile(path string, mode int) (*os.File, error) {
@@ -78,4 +144,24 @@ func openLogFile(path string, mode int) (*os.File, error) {
 	}
 
 	return os.NewFile(uintptr(handle), path), nil
+}
+
+const processEntrySize = uint32(unsafe.Sizeof(windows.ProcessEntry32{}))
+
+// hasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.
+func hasLocalDnsServerRunning() bool {
+	h, e := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if e != nil {
+		return false
+	}
+	p := windows.ProcessEntry32{Size: processEntrySize}
+	for {
+		e := windows.Process32Next(h, &p)
+		if e != nil {
+			return false
+		}
+		if strings.ToLower(windows.UTF16ToString(p.ExeFile[:])) == "dns.exe" {
+			return true
+		}
+	}
 }

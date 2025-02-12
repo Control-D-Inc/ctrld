@@ -205,7 +205,7 @@ type ServiceConfig struct {
 	CacheFlushDomains       []string       `mapstructure:"cache_flush_domains" toml:"cache_flush_domains" validate:"max=256"`
 	MaxConcurrentRequests   *int           `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
 	DHCPLeaseFile           string         `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
-	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp"`
+	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp kea-dhcp4"`
 	DiscoverMDNS            *bool          `mapstructure:"discover_mdns" toml:"discover_mdns,omitempty"`
 	DiscoverARP             *bool          `mapstructure:"discover_arp" toml:"discover_arp,omitempty"`
 	DiscoverDHCP            *bool          `mapstructure:"discover_dhcp" toml:"discover_dhcp,omitempty"`
@@ -384,7 +384,7 @@ func (uc *UpstreamConfig) IsDiscoverable() bool {
 		return *uc.Discoverable
 	}
 	switch uc.Type {
-	case ResolverTypeOS, ResolverTypeLegacy, ResolverTypePrivate:
+	case ResolverTypeOS, ResolverTypeLegacy, ResolverTypePrivate, ResolverTypeLocal:
 		if ip, err := netip.ParseAddr(uc.Domain); err == nil {
 			return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || tsaddr.CGNATRange().Contains(ip)
 		}
@@ -458,7 +458,7 @@ func (uc *UpstreamConfig) ReBootstrap() {
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
 		if uc.rebootstrap.CompareAndSwap(false, true) {
-			ProxyLogger.Load().Debug().Msg("re-bootstrapping upstream ip")
+			ProxyLogger.Load().Debug().Msgf("re-bootstrapping upstream ip for %v", uc)
 		}
 		return true, nil
 	})
@@ -885,4 +885,13 @@ func upstreamUID() string {
 		}
 		return hex.EncodeToString(b)
 	}
+}
+
+// String returns a string representation of the UpstreamConfig for logging.
+func (uc *UpstreamConfig) String() string {
+	if uc == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("{name: %q, type: %q, endpoint: %q, bootstrap_ip: %q, domain: %q, ip_stack: %q}",
+		uc.Name, uc.Type, uc.Endpoint, uc.BootstrapIP, uc.Domain, uc.IPStack)
 }
