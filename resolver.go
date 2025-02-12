@@ -277,14 +277,26 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		nss = append(nss, (*p)...)
 	}
 	numServers := len(nss) + len(publicServers)
+
 	// If this is a LAN query, skip public DNS.
 	lan, ok := ctx.Value(LanQueryCtxKey{}).(bool)
+
+	// remove controldPublicDnsWithPort from publicServers for LAN queries
+	// this is to prevent DoS for high frequency local requests
 	if ok && lan {
-		numServers -= len(publicServers)
+		if index := slices.Index(publicServers, controldPublicDnsWithPort); index != -1 {
+			publicServers = slices.Delete(publicServers, index, index+1)
+			numServers--
+		}
 	}
+
+	Log(ctx, ProxyLogger.Load().Debug(), "os resolver query with nameservers: %v", nss)
+
+	// New check: If no resolvers are available, return an error.
 	if numServers == 0 {
-		return nil, errors.New("no nameservers available")
+		return nil, errors.New("no nameservers available for query")
 	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -320,10 +332,6 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 			}(server)
 		}
 	}
-	do(nss, true)
-	if !lan {
-		do(publicServers, false)
-	}
 
 	logAnswer := func(server string) {
 		host, _, err := net.SplitHostPort(server)
@@ -333,6 +341,14 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		}
 		Log(ctx, ProxyLogger.Load().Debug(), "got answer from nameserver: %s", host)
 	}
+
+	// try local nameservers
+	do(nss, true)
+
+	// we must always try the public servers too, since DCHP may have only public servers
+	// this is okay to do since we always prefer LAN nameserver responses
+	do(publicServers, false)
+
 	var (
 		nonSuccessAnswer      *dns.Msg
 		nonSuccessServer      string
