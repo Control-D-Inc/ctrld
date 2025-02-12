@@ -3,6 +3,7 @@ package clientinfo
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os/exec"
 	"strings"
@@ -44,9 +45,9 @@ func (u *ubiosDiscover) refreshDevices() error {
 	cmd := exec.Command("/usr/bin/mongo", "localhost:27117/ace", "--quiet", "--eval", `
 		DBQuery.shellBatchSize = 256;
 		db.user.find({name: {$exists: true, $ne: ""}}, {_id:0, mac:1, name:1});`)
-	b, err := cmd.Output()
+	b, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
+		return fmt.Errorf("out: %s, err: %w", string(b), err)
 	}
 	return u.storeDevices(bytes.NewReader(b))
 }
