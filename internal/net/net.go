@@ -49,8 +49,12 @@ func init() {
 }
 
 func supportIPv6(ctx context.Context) bool {
-	_, err := probeStackDialer.DialContext(ctx, "tcp6", net.JoinHostPort(controldIPv6Test, "443"))
-	return err == nil
+	c, err := probeStackDialer.DialContext(ctx, "tcp6", v6BootstrapDNS)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
 }
 
 func supportListenIPv6Local() bool {

@@ -160,6 +160,7 @@ func resetDNS(iface *net.Interface) (err error) {
 	}
 
 	// TODO(cuonglm): handle DHCPv6 properly.
+	mainLog.Load().Debug().Msg("checking for IPv6 availability")
 	if ctrldnet.IPv6Available(ctx) {
 		c := client6.NewClient()
 		conversation, err := c.Exchange(iface.Name)
@@ -179,6 +180,8 @@ func resetDNS(iface *net.Interface) (err error) {
 				}
 			}
 		}
+	} else {
+		mainLog.Load().Debug().Msg("IPv6 is not available")
 	}
 
 	return ignoringEINTR(func() error {

@@ -102,11 +102,14 @@ func (m *mdns) init(quitCh chan struct{}) error {
 			v4ConnList = append(v4ConnList, conn)
 			go m.readLoop(conn)
 		}
+		ctrld.ProxyLogger.Load().Debug().Msgf("checking for IPv6 availability in mdns init")
 		if ctrldnet.IPv6Available(context.Background()) {
 			if conn, err := net.ListenMulticastUDP("udp6", &iface, mdnsV6Addr); err == nil {
 				v6ConnList = append(v6ConnList, conn)
 				go m.readLoop(conn)
 			}
+		} else {
+			ctrld.ProxyLogger.Load().Debug().Msgf("IPv6 is not available in mdns init")
 		}
 	}
 

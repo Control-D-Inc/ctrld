@@ -18,6 +18,7 @@ const ipv6ProbingInterval = 10 * time.Second
 
 func hasIPv6() bool {
 	hasIPv6Once.Do(func() {
+		Log(context.Background(), ProxyLogger.Load().Debug(), "checking for IPv6 availability once")
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		val := ctrldnet.IPv6Available(ctx)
@@ -43,6 +44,7 @@ func probingIPv6(ctx context.Context, old bool) {
 				if ipv6Available.CompareAndSwap(old, cur) {
 					old = cur
 				}
+				Log(ctx, ProxyLogger.Load().Debug(), "IPv6 availability: %v", cur)
 			}()
 		}
 	}
