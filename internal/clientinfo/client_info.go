@@ -207,11 +207,10 @@ func (t *Table) init() {
 		}
 		for platform, discover := range discovers {
 			if err := discover.refresh(); err != nil {
-				ctrld.ProxyLogger.Load().Error().Err(err).Msgf("could not init %s discover", platform)
-			} else {
-				t.hostnameResolvers = append(t.hostnameResolvers, discover)
-				t.refreshers = append(t.refreshers, discover)
+				ctrld.ProxyLogger.Load().Warn().Err(err).Msgf("failed to init %s discover", platform)
 			}
+			t.hostnameResolvers = append(t.hostnameResolvers, discover)
+			t.refreshers = append(t.refreshers, discover)
 		}
 	}
 	// Hosts file mapping.
