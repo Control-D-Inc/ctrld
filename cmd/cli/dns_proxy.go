@@ -640,19 +640,20 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		} else {
 			mainLog.Load().Debug().Msg("One upstream is down but at least one is healthy; skipping recovery trigger")
 		}
-	}
 
-	// attempt query to OS resolver while as a retry catch all
-	if upstreams[0] != upstreamOS {
-		ctrld.Log(ctx, mainLog.Load().Debug(), "attempting query to OS resolver as a retry catch all")
-		answer := resolve(upstreamOS, osUpstreamConfig, req.msg)
-		if answer != nil {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query successful")
-			res.answer = answer
-			res.upstream = osUpstreamConfig.Endpoint
-			return res
+		// attempt query to OS resolver while as a retry catch all
+		// we dont want this to happen if leakOnUpstreamFailure is false
+		if upstreams[0] != upstreamOS {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "attempting query to OS resolver as a retry catch all")
+			answer := resolve(upstreamOS, osUpstreamConfig, req.msg)
+			if answer != nil {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query successful")
+				res.answer = answer
+				res.upstream = osUpstreamConfig.Endpoint
+				return res
+			}
+			ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query failed")
 		}
-		ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query failed")
 	}
 
 	answer := new(dns.Msg)
