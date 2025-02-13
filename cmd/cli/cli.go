@@ -1739,8 +1739,13 @@ func goArm() string {
 // upgradeUrl returns the url for downloading new ctrld binary.
 func upgradeUrl(baseUrl string) string {
 	dlPath := fmt.Sprintf("%s-%s/ctrld", runtime.GOOS, runtime.GOARCH)
+	// Use arm version set during build time, v5 binary can be run on higher arm version system.
 	if armVersion := goArm(); armVersion != "" {
 		dlPath = fmt.Sprintf("%s-%sv%s/ctrld", runtime.GOOS, runtime.GOARCH, armVersion)
+	}
+	// linux/amd64 has nocgo version, to support systems that missing some libc (like openwrt).
+	if !cgoEnabled && runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		dlPath = fmt.Sprintf("%s-%s-nocgo/ctrld", runtime.GOOS, runtime.GOARCH)
 	}
 	dlUrl := fmt.Sprintf("%s/%s", baseUrl, dlPath)
 	if runtime.GOOS == "windows" {
