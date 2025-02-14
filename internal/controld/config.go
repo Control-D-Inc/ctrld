@@ -226,7 +226,7 @@ func apiTransport(cdDev bool) *http.Transport {
 			addrs[i] = net.JoinHostPort(ips[i], port)
 		}
 		d := &ctrldnet.ParallelDialer{}
-		return d.DialContext(ctx, network, addrs)
+		return d.DialContext(ctx, network, addrs, ctrld.ProxyLogger.Load())
 	}
 	if router.Name() == ddwrt.Name || runtime.GOOS == "android" {
 		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
