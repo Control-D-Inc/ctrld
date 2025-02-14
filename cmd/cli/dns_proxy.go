@@ -1262,6 +1262,13 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 
 		// Get IPs from default route interface in new state
 		selfIP := defaultRouteIP()
+
+		// Ensure that selfIP is an IPv4 address.
+		// If defaultRouteIP mistakenly returns an IPv6 (such as a ULA), clear it
+		if ip := net.ParseIP(selfIP); ip != nil && ip.To4() == nil {
+			mainLog.Load().Debug().Msgf("defaultRouteIP returned a non-IPv4 address: %s, ignoring it", selfIP)
+			selfIP = ""
+		}
 		var ipv6 string
 
 		if delta.New.DefaultRouteInterface != "" {
@@ -1297,7 +1304,8 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			}
 		}
 
-		if ip := net.ParseIP(selfIP); ip != nil {
+		// Only set the IPv4 default if selfIP is a valid IPv4 address.
+		if ip := net.ParseIP(selfIP); ip != nil && ip.To4() != nil {
 			ctrld.SetDefaultLocalIPv4(ip)
 			if !isMobile() && p.ciTable != nil {
 				p.ciTable.SetSelfIP(selfIP)
@@ -1507,12 +1515,14 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 		go func(name string, uc *ctrld.UpstreamConfig) {
 			defer wg.Done()
 			mainLog.Load().Debug().Msgf("Starting recovery check loop for upstream: %s", name)
+			attempts := 0
 			for {
 				select {
 				case <-ctx.Done():
 					mainLog.Load().Debug().Msgf("Context canceled for upstream %s", name)
 					return
 				default:
+					attempts++
 					// checkUpstreamOnce will reset any failure counters on success.
 					if err := p.checkUpstreamOnce(name, uc); err == nil {
 						mainLog.Load().Debug().Msgf("Upstream %s recovered successfully", name)
@@ -1526,6 +1536,18 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 					}
 					mainLog.Load().Debug().Msgf("Upstream %s check failed, sleeping before retry", name)
 					time.Sleep(checkUpstreamBackoffSleep)
+
+					// if this is the upstreamOS and it's the 3rd attempt (or multiple of 3),
+					// we should try to reinit the OS resolver to ensure we can recover
+					if name == upstreamOS && attempts%3 == 0 {
+						mainLog.Load().Debug().Msgf("UpstreamOS check failed on attempt %d, reinitializing OS resolver", attempts)
+						ns := ctrld.InitializeOsResolver(true)
+						if len(ns) == 0 {
+							mainLog.Load().Warn().Msg("No nameservers found for OS resolver; using existing values")
+						} else {
+							mainLog.Load().Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+						}
+					}
 				}
 			}
 		}(name, uc)
