@@ -250,7 +250,7 @@ func (p *prog) registerControlServerHandler() {
 		}
 	}))
 	p.cs.register(sendLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if time.Since(p.internalLogSent) < logSentInterval {
+		if time.Since(p.internalLogSent) < logWriterSentInterval {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
