@@ -860,7 +860,7 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain string) error {
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 500 * time.Millisecond
-	maxAttempts := 20
+	maxAttempts := 10
 	c := new(dns.Client)
 
 	var (
@@ -876,7 +876,7 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 		m := new(dns.Msg)
 		m.SetQuestion(domain+".", dns.TypeA)
 		m.RecursionDesired = true
-		r, _, exErr := exchangeContextWithTimeout(c, time.Second, m, addr)
+		r, _, exErr := exchangeContextWithTimeout(c, 5*time.Second, m, addr)
 		if r != nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
 			mainLog.Load().Debug().Msgf("%s self-check against %q succeeded", scope, domain)
 			return nil

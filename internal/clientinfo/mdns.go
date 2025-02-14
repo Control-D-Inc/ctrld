@@ -92,6 +92,11 @@ func (m *mdns) init(quitCh chan struct{}) error {
 		return err
 	}
 
+	// Check if IPv6 is available once and use the result for the rest of the function.
+	ctrld.ProxyLogger.Load().Debug().Msgf("checking for IPv6 availability in mdns init")
+	ipv6 := ctrldnet.IPv6Available(context.Background())
+	ctrld.ProxyLogger.Load().Debug().Msgf("IPv6 is %v in mdns init", ipv6)
+
 	v4ConnList := make([]*net.UDPConn, 0, len(ifaces))
 	v6ConnList := make([]*net.UDPConn, 0, len(ifaces))
 	for _, iface := range ifaces {
@@ -102,14 +107,12 @@ func (m *mdns) init(quitCh chan struct{}) error {
 			v4ConnList = append(v4ConnList, conn)
 			go m.readLoop(conn)
 		}
-		ctrld.ProxyLogger.Load().Debug().Msgf("checking for IPv6 availability in mdns init")
-		if ctrldnet.IPv6Available(context.Background()) {
+
+		if ipv6 {
 			if conn, err := net.ListenMulticastUDP("udp6", &iface, mdnsV6Addr); err == nil {
 				v6ConnList = append(v6ConnList, conn)
 				go m.readLoop(conn)
 			}
-		} else {
-			ctrld.ProxyLogger.Load().Debug().Msgf("IPv6 is not available in mdns init")
 		}
 	}
 
