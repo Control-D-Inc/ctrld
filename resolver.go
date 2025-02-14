@@ -289,8 +289,11 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 			numServers--
 		}
 	}
-
-	Log(ctx, ProxyLogger.Load().Debug(), "os resolver query with nameservers: %v public: %v", nss, publicServers)
+	question := ""
+	if msg != nil && len(msg.Question) > 0 {
+		question = msg.Question[0].Name
+	}
+	Log(ctx, ProxyLogger.Load().Debug(), "os resolver query for %s with nameservers: %v public: %v", question, nss, publicServers)
 
 	// New check: If no resolvers are available, return an error.
 	if numServers == 0 {

@@ -1250,8 +1250,16 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			}
 		}
 
+		// if the default route changed, set changed to true
+		if delta.New.DefaultRouteInterface != delta.Old.DefaultRouteInterface {
+			changed = true
+			mainLog.Load().Debug().Msgf("Default route changed from %s to %s", delta.Old.DefaultRouteInterface, delta.New.DefaultRouteInterface)
+		}
+
 		if !changed {
 			mainLog.Load().Debug().Msg("Ignoring interface change - no valid interfaces affected")
+			// check if the default IPs are still on an interface that is up
+			ValidateDefaultLocalIPsFromDelta(delta.New)
 			return
 		}
 
@@ -1580,4 +1588,33 @@ func (p *prog) buildRecoveryUpstreams(reason RecoveryReason) map[string]*ctrld.U
 		}
 	}
 	return upstreams
+}
+
+// ValidateDefaultLocalIPsFromDelta checks if the default local IPv4 and IPv6 stored
+// are still present in the new network state (provided by delta.New).
+// If a stored default IP is no longer active, it resets that default (sets it to nil)
+// so that it won't be used in subsequent custom dialer contexts.
+func ValidateDefaultLocalIPsFromDelta(newState *netmon.State) {
+	currentIPv4 := ctrld.GetDefaultLocalIPv4()
+	currentIPv6 := ctrld.GetDefaultLocalIPv6()
+
+	// Build a map of active IP addresses from the new state.
+	activeIPs := make(map[string]bool)
+	for _, prefixes := range newState.InterfaceIPs {
+		for _, prefix := range prefixes {
+			activeIPs[prefix.Addr().String()] = true
+		}
+	}
+
+	// Check if the default IPv4 is still active.
+	if currentIPv4 != nil && !activeIPs[currentIPv4.String()] {
+		mainLog.Load().Debug().Msgf("DefaultLocalIPv4 %s is no longer active in the new state. Resetting.", currentIPv4)
+		ctrld.SetDefaultLocalIPv4(nil)
+	}
+
+	// Check if the default IPv6 is still active.
+	if currentIPv6 != nil && !activeIPs[currentIPv6.String()] {
+		mainLog.Load().Debug().Msgf("DefaultLocalIPv6 %s is no longer active in the new state. Resetting.", currentIPv6)
+		ctrld.SetDefaultLocalIPv6(nil)
+	}
 }
