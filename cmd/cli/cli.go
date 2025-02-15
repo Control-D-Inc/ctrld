@@ -61,7 +61,7 @@ var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	defaultConfigFile    = "ctrld.toml"
 	rootCertPool         *x509.CertPool
-	errSelfCheckNoAnswer = errors.New("No response from ctrld listener. You can try to re-launch with flag --skip_self_checks")
+	errSelfCheckNoAnswer = errors.New("no response from ctrld listener. You can try to re-launch with flag --skip_self_checks")
 )
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains"}

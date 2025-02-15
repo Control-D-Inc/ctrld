@@ -10,6 +10,7 @@ import (
 	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld/internal/router"
+	"github.com/Control-D-Inc/ctrld/internal/router/openwrt"
 )
 
 // newService wraps service.New call to return service.Service
@@ -188,6 +189,13 @@ func checkHasElevatedPrivilege() {
 func unixSystemVServiceStatus() (service.Status, error) {
 	out, err := exec.Command("/etc/init.d/ctrld", "status").CombinedOutput()
 	if err != nil {
+		// Specific case for openwrt >= 24.10, it returns non-success code
+		// for above status command, which may not right.
+		if router.Name() == openwrt.Name {
+			if string(bytes.ToLower(bytes.TrimSpace(out))) == "inactive" {
+				return service.StatusStopped, nil
+			}
+		}
 		return service.StatusUnknown, nil
 	}
 
