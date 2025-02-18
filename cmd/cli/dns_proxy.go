@@ -20,7 +20,6 @@ import (
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
-	"tailscale.com/types/logger"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
@@ -1179,7 +1178,10 @@ func FlushDNSCache() error {
 
 // monitorNetworkChanges starts monitoring for network interface changes
 func (p *prog) monitorNetworkChanges(ctx context.Context) error {
-	mon, err := netmon.New(logger.WithPrefix(mainLog.Load().Printf, "netmon: "))
+	mon, err := netmon.New(func(format string, args ...any) {
+		// Always fetch the latest logger (and inject the prefix)
+		mainLog.Load().Printf("netmon: "+format, args...)
+	})
 	if err != nil {
 		return fmt.Errorf("creating network monitor: %w", err)
 	}
@@ -1457,7 +1459,10 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 	// Immediately remove our DNS settings from the interface.
 	// set recoveryRunning to true to prevent watchdogs from putting the listener back on the interface
 	p.recoveryRunning.Store(true)
-	p.resetDNS()
+	// we do not want to restore any static DNS settings
+	// we must try to get the DHCP values, any static DNS settings
+	// will be appended to nameservers from the saved interface values
+	p.resetDNS(false, false)
 
 	// For an OS failure, reinitialize OS resolver nameservers immediately.
 	if reason == RecoveryReasonOSFailure {

@@ -549,6 +549,11 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 //   - Gateway IP address (depends on OS).
 //   - Input servers.
 func NewBootstrapResolver(servers ...string) Resolver {
+	logger := zerolog.New(io.Discard)
+	if ProxyLogger.Load() != nil {
+		logger = *ProxyLogger.Load()
+	}
+	Log(context.Background(), logger.Debug(), "NewBootstrapResolver called with servers: %v", servers)
 	nss := defaultNameservers()
 	nss = append([]string{controldPublicDnsWithPort}, nss...)
 	for _, ns := range servers {
@@ -565,6 +570,13 @@ func NewBootstrapResolver(servers ...string) Resolver {
 //
 // This is useful for doing PTR lookup in LAN network.
 func NewPrivateResolver() Resolver {
+
+	logger := zerolog.New(io.Discard)
+	if ProxyLogger.Load() != nil {
+		logger = *ProxyLogger.Load()
+	}
+	Log(context.Background(), logger.Debug(), "NewPrivateResolver called")
+
 	nss := defaultNameservers()
 	resolveConfNss := nameserversFromResolvconf()
 	localRfc1918Addrs := Rfc1918Addresses()
@@ -609,6 +621,11 @@ func NewResolverWithNameserver(nameservers []string) Resolver {
 // newResolverWithNameserver returns an OS resolver from given nameservers list.
 // The caller must ensure each server in list is formed "ip:53".
 func newResolverWithNameserver(nameservers []string) *osResolver {
+	logger := zerolog.New(io.Discard)
+	if ProxyLogger.Load() != nil {
+		logger = *ProxyLogger.Load()
+	}
+	Log(context.Background(), logger.Debug(), "newResolverWithNameserver called with nameservers: %v", nameservers)
 	r := &osResolver{}
 	var publicNss []string
 	var lanNss []string

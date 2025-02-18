@@ -268,7 +268,7 @@ func (p *prog) preRun() {
 	if runtime.GOOS == "darwin" {
 		p.onStopped = append(p.onStopped, func() {
 			if !service.Interactive() {
-				p.resetDNS()
+				p.resetDNS(false, true)
 			}
 		})
 	}
@@ -276,7 +276,7 @@ func (p *prog) preRun() {
 
 func (p *prog) postRun() {
 	if !service.Interactive() {
-		p.resetDNS()
+		p.resetDNS(false, true)
 		ns := ctrld.InitializeOsResolver(false)
 		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
 		p.setDNS()
@@ -809,7 +809,13 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 	}
 }
 
-func (p *prog) resetDNS() {
+// resetDNS performs a DNS reset on the running interface.
+// The parameter isStart indicates whether this is being called as part of a start (or restart)
+// command. When true, we check if the current static DNS configuration already differs from the
+// service listener (127.0.0.1). If so, we assume that an admin has manually changed the interface's
+// static DNS settings and we do not override them using the potentially out-of-date saved file.
+// Otherwise, we restore the saved configuration (if any) or reset to DHCP.
+func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 	if p.runningIface == "" {
 		mainLog.Load().Debug().Msg("no running interface, skipping resetDNS")
 		return
@@ -822,17 +828,47 @@ func (p *prog) resetDNS() {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
 	}
-
 	if err := restoreNetworkManager(); err != nil {
 		logger.Error().Err(err).Msg("could not restore NetworkManager")
 		return
 	}
-	logger.Debug().Msg("Restoring DNS for interface")
-	if err := resetDNS(netIface); err != nil {
-		logger.Error().Err(err).Msgf("could not reset DNS")
-		return
+
+	// If starting, check the current static DNS configuration.
+	if isStart {
+		current, err := currentStaticDNS(netIface)
+		if err != nil {
+			logger.Warn().Err(err).Msg("unable to obtain current static DNS configuration; proceeding to restore saved config")
+		} else if len(current) > 0 {
+			// If any static DNS value is not our own listener, assume an admin override.
+			hasManualConfig := false
+			for _, ns := range current {
+				if ns != "127.0.0.1" {
+					hasManualConfig = true
+					break
+				}
+			}
+			if hasManualConfig {
+				logger.Debug().Msgf("Detected manual DNS configuration on interface %q: %v; not overriding with saved configuration", netIface.Name, current)
+				return
+			}
+		}
 	}
-	logger.Debug().Msg("Restoring DNS successfully")
+
+	// Default logic: if there is a saved static DNS configuration, restore it.
+	saved := savedStaticNameservers(netIface)
+	if len(saved) > 0 && restoreStatic {
+		logger.Debug().Msgf("Restoring interface %q from saved static config: %v", netIface.Name, saved)
+		if err := setDNS(netIface, saved); err != nil {
+			logger.Error().Err(err).Msgf("failed to restore static DNS config on interface %q", netIface.Name)
+			return
+		}
+	} else {
+		logger.Debug().Msgf("No saved static DNS config for interface %q; resetting to DHCP", netIface.Name)
+		if err := resetDNS(netIface); err != nil {
+			logger.Error().Err(err).Msgf("failed to reset DNS to DHCP on interface %q", netIface.Name)
+			return
+		}
+	}
 	if allIfaces {
 		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDnsIgnoreUnusableInterface)
 	}

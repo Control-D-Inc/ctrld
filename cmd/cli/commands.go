@@ -355,7 +355,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					}, false, "Save current DNS"},
 					{func() error {
 						return ConfigureWindowsServiceFailureActions(ctrldServiceName)
-					}, false, "Configure Windows service failure actions"},
+					}, false, "Configure service failure actions"},
 					{s.Start, true, "Start"},
 					{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 				}
@@ -608,7 +608,8 @@ func initStopCmd() *cobra.Command {
 			}
 			if doTasks([]task{{s.Stop, true, "Stop"}}) {
 				p.router.Cleanup()
-				p.resetDNS()
+				// restore static DNS settings or DHCP
+				p.resetDNS(false, true)
 
 				// restore DNS settings
 				if netIface, err := netInterface(p.runningIface); err == nil {
@@ -714,7 +715,8 @@ func initRestartCmd() *cobra.Command {
 					{s.Stop, true, "Stop"},
 					{func() error {
 						p.router.Cleanup()
-						p.resetDNS()
+						// restore static DNS settings or DHCP
+						p.resetDNS(false, true)
 						return nil
 					}, false, "Cleanup"},
 					{func() error {
@@ -994,13 +996,13 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 						if os.IsNotExist(err) {
 							continue
 						}
-						mainLog.Load().Warn().Err(err).Msg("failed to remove file")
+						mainLog.Load().Warn().Err(err).Msgf("failed to remove file: %s", file)
 					} else {
 						mainLog.Load().Debug().Msgf("file removed: %s", file)
 					}
 				}
 				if err := selfDeleteExe(); err != nil {
-					mainLog.Load().Warn().Err(err).Msg("failed to remove file")
+					mainLog.Load().Warn().Err(err).Msg("failed to delete ctrld binary")
 				} else {
 					if !supportedSelfDelete {
 						mainLog.Load().Debug().Msgf("file removed: %s", bin)
@@ -1266,7 +1268,8 @@ func initUpgradeCmd() *cobra.Command {
 					{s.Stop, true, "Stop"},
 					{func() error {
 						p.router.Cleanup()
-						p.resetDNS()
+						// restore static DNS settings or DHCP
+						p.resetDNS(false, true)
 						return nil
 					}, false, "Cleanup"},
 					{func() error {

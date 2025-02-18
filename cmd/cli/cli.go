@@ -418,7 +418,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				if err := p.router.Cleanup(); err != nil {
 					mainLog.Load().Error().Err(err).Msg("could not cleanup router")
 				}
-				p.resetDNS()
+				// restore static DNS settings or DHCP
+				p.resetDNS(false, true)
 			})
 		}
 	}
@@ -1030,7 +1031,8 @@ func uninstall(p *prog, s service.Service) {
 			mainLog.Load().Warn().Err(err).Msg("post uninstallation failed, please check system/service log for details error")
 			return
 		}
-		p.resetDNS()
+		// restore static DNS settings or DHCP
+		p.resetDNS(false, true)
 
 		// if present restore the original DNS settings
 		if netIface, err := netInterface(p.runningIface); err == nil {
@@ -1779,12 +1781,14 @@ func resetDnsNoLog(p *prog) {
 	if verbose < 3 {
 		lvl := zerolog.GlobalLevel()
 		zerolog.SetGlobalLevel(zerolog.Disabled)
-		p.resetDNS()
+		// This is startup so interface settings may have changed
+		p.resetDNS(true, true)
 		zerolog.SetGlobalLevel(lvl)
 		return
 	}
 	// For debugging purpose, still emit log.
-	p.resetDNS()
+	// This is startup so interface settings may have changed
+	p.resetDNS(true, true)
 }
 
 // resetDnsTask returns a task which perform reset DNS operation.
@@ -1806,10 +1810,10 @@ func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, ir *ifaceRe
 		}
 		p.runningIface = iface
 		if isCtrldInstalled {
-			mainLog.Load().Debug().Msg("restore system DNS settings")
 			if status, _ := s.Status(); status == service.StatusRunning {
 				mainLog.Load().Fatal().Msg("reset DNS while ctrld still running is not safe")
 			}
+			mainLog.Load().Debug().Msg("Start resetDNS")
 			resetDnsNoLog(p)
 		}
 		iface = oldIface
@@ -1868,8 +1872,8 @@ func uninstallInvalidCdUID(p *prog, logger zerolog.Logger, doStop bool) bool {
 		logger.Warn().Err(err).Msg("failed to create new service")
 		return false
 	}
-
-	p.resetDNS()
+	// restore static DNS settings or DHCP
+	p.resetDNS(false, true)
 
 	tasks := []task{{s.Uninstall, true, "Uninstall"}}
 	if doTasks(tasks) {

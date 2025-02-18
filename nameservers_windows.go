@@ -20,6 +20,7 @@ import (
 	"github.com/rs/zerolog"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
+	"tailscale.com/net/netmon"
 )
 
 const (
@@ -300,6 +301,28 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 			ns = append(ns, dcServer)
 			Log(context.Background(), logger.Debug(),
 				"Added additional domain controller DNS server: %s", dcServer)
+		}
+	}
+
+	// if we have static DNS servers saved for the current default route, we should add them to the list
+	drIfaceName, err := netmon.DefaultRouteInterface()
+	if err != nil {
+		Log(context.Background(), logger.Debug(),
+			"Failed to get default route interface: %v", err)
+	} else {
+		drIface, err := net.InterfaceByName(drIfaceName)
+		if err != nil {
+			Log(context.Background(), logger.Debug(),
+				"Failed to get interface by name %s: %v", drIfaceName, err)
+		} else {
+			staticNs, file := SavedStaticNameservers(drIface)
+			Log(context.Background(), logger.Debug(),
+				"static dns servers from %s: %v", file, staticNs)
+			if len(staticNs) > 0 {
+				Log(context.Background(), logger.Debug(),
+					"Adding static DNS servers from %s: %v", drIfaceName, staticNs)
+				ns = append(ns, staticNs...)
+			}
 		}
 	}
 

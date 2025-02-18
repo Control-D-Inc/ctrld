@@ -155,6 +155,8 @@ func getDHCPNameservers(iface string) ([]string, error) {
 }
 
 func getAllDHCPNameservers() []string {
+	logger := *ProxyLogger.Load()
+
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return nil
@@ -209,6 +211,33 @@ func getAllDHCPNameservers() []string {
 					seen[ns] = true
 					allNameservers = append(allNameservers, ns)
 				}
+			}
+		}
+	}
+
+	// if we have static DNS servers saved for the current default route, we should add them to the list
+	drIfaceName, err := netmon.DefaultRouteInterface()
+	Log(context.Background(), logger.Debug(), "checking for static DNS servers for default route interface: %s", drIfaceName)
+	if err != nil {
+		Log(context.Background(), logger.Debug(),
+			"Failed to get default route interface: %v", err)
+	} else {
+		drIface, err := net.InterfaceByName(drIfaceName)
+		if err != nil {
+			Log(context.Background(), logger.Debug(),
+				"Failed to get interface by name %s: %v", drIfaceName, err)
+		} else if drIface != nil {
+			if _, err := patchNetIfaceName(drIface); err != nil {
+				Log(context.Background(), logger.Debug(),
+					"Failed to patch interface name %s: %v", drIfaceName, err)
+			}
+			staticNs, file := SavedStaticNameservers(drIface)
+			Log(context.Background(), logger.Debug(),
+				"static dns servers from %s: %v", file, staticNs)
+			if len(staticNs) > 0 {
+				Log(context.Background(), logger.Debug(),
+					"Adding static DNS servers from %s: %v", drIface.Name, staticNs)
+				allNameservers = append(allNameservers, staticNs...)
 			}
 		}
 	}
