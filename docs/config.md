@@ -528,6 +528,15 @@ rules = [
 ]
 ```
 
+If there is no explicitly defined rules, LAN queries will be handled solely by the OS resolver.
+
+These following domains are considered LAN queries:
+
+- Queries does not have dot `.` in domain name, like `machine1`, `example`, ... (1)
+- Queries have domain ends with: `.domain`, `.lan`, `.local`.                   (2)
+- All `SRV` queries of LAN hostname (1) + (2).
+- `PTR` queries with private IPs.
+
 ---
 
 Note that the order of matching preference:
