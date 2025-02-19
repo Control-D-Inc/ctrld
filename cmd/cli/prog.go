@@ -276,7 +276,7 @@ func (p *prog) preRun() {
 
 func (p *prog) postRun() {
 	if !service.Interactive() {
-		p.resetDNS(false, true)
+		p.resetDNS(false, false)
 		ns := ctrld.InitializeOsResolver(false)
 		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
 		p.setDNS()
@@ -788,6 +788,24 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 			}
 			if dnsChanged(iface, ns) {
 				logger.Debug().Msg("DNS settings were changed, re-applying settings")
+				// Check if the interface already has static DNS servers configured.
+				// currentStaticDNS is an OS-dependent helper that returns the current static DNS.
+				staticDNS, err := currentStaticDNS(iface)
+				if err != nil {
+					mainLog.Load().Debug().Err(err).Msgf("failed to get static DNS for interface %s", iface.Name)
+				} else if len(staticDNS) > 0 {
+					//filter out loopback addresses
+					staticDNS = slices.DeleteFunc(staticDNS, func(s string) bool {
+						return net.ParseIP(s).IsLoopback()
+					})
+					// if we have a static config and no saved IPs already, save them
+					if len(staticDNS) > 0 && len(savedStaticNameservers(iface)) == 0 {
+						// Save these static DNS values so that they can be restored later.
+						if err := saveCurrentStaticDNS(iface); err != nil {
+							mainLog.Load().Debug().Err(err).Msgf("failed to save static DNS for interface %s", iface.Name)
+						}
+					}
+				}
 				if err := setDNS(iface, ns); err != nil {
 					mainLog.Load().Error().Err(err).Str("iface", iface.Name).Msgf("could not re-apply DNS settings")
 				}
@@ -795,6 +813,26 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 			if allIfaces {
 				withEachPhysicalInterfaces(iface.Name, "", func(i *net.Interface) error {
 					if dnsChanged(i, ns) {
+
+						// Check if the interface already has static DNS servers configured.
+						// currentStaticDNS is an OS-dependent helper that returns the current static DNS.
+						staticDNS, err := currentStaticDNS(i)
+						if err != nil {
+							mainLog.Load().Debug().Err(err).Msgf("failed to get static DNS for interface %s", i.Name)
+						} else if len(staticDNS) > 0 {
+							//filter out loopback addresses
+							staticDNS = slices.DeleteFunc(staticDNS, func(s string) bool {
+								return net.ParseIP(s).IsLoopback()
+							})
+							// if we have a static config and no saved IPs already, save them
+							if len(staticDNS) > 0 && len(savedStaticNameservers(i)) == 0 {
+								// Save these static DNS values so that they can be restored later.
+								if err := saveCurrentStaticDNS(i); err != nil {
+									mainLog.Load().Debug().Err(err).Msgf("failed to save static DNS for interface %s", i.Name)
+								}
+							}
+						}
+
 						if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
 							mainLog.Load().Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
 						} else {
@@ -841,7 +879,7 @@ func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 			// If any static DNS value is not our own listener, assume an admin override.
 			hasManualConfig := false
 			for _, ns := range current {
-				if ns != "127.0.0.1" {
+				if ns != "127.0.0.1" && ns != "::1" {
 					hasManualConfig = true
 					break
 				}
@@ -1221,7 +1259,7 @@ func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.
 		// TODO: investigate whether we should report this error?
 		if err := f(netIface); err == nil {
 			if context != "" {
-				mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
+				mainLog.Load().Debug().Msgf("Ran %s for interface %q successfully", context, i.Name)
 			}
 		} else if !errors.Is(err, errSaveCurrentStaticDNSNotSupported) {
 			mainLog.Load().Err(err).Msgf("%s for interface %q failed", context, i.Name)
@@ -1250,13 +1288,28 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 		return errSaveCurrentStaticDNSNotSupported
 	}
 	file := savedStaticDnsSettingsFilePath(iface)
-	ns, _ := currentStaticDNS(iface)
+	ns, err := currentStaticDNS(iface)
+	if err != nil {
+		mainLog.Load().Warn().Err(err).Msgf("could not get current static DNS settings for %q", iface.Name)
+		return err
+	}
 	if len(ns) == 0 {
+		mainLog.Load().Debug().Msgf("no static DNS settings for %q, removing old static DNS settings file", iface.Name)
 		_ = os.Remove(file) // removing old static DNS settings
 		return nil
 	}
+	//filter out loopback addresses
+	ns = slices.DeleteFunc(ns, func(s string) bool {
+		return net.ParseIP(s).IsLoopback()
+	})
+	//if we now have no static DNS settings and the file already exists
+	// return and do not save the file
+	if len(ns) == 0 {
+		mainLog.Load().Debug().Msgf("loopback on %q, skipping saving static DNS settings", iface.Name)
+		return nil
+	}
 	if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		mainLog.Load().Warn().Err(err).Msg("could not remove old static DNS settings file")
+		mainLog.Load().Warn().Err(err).Msgf("could not remove old static DNS settings file: %s", file)
 	}
 	nss := strings.Join(ns, ",")
 	mainLog.Load().Debug().Msgf("DNS settings for %q is static: %v, saving ...", iface.Name, nss)

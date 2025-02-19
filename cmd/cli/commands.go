@@ -242,6 +242,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					os.Exit(deactivationPinInvalidExitCode)
 				}
 				currentIface = runningIface(s)
+				mainLog.Load().Debug().Msgf("current interface on start: %s", currentIface.Name)
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -339,13 +340,17 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 				}
 
+				// if already running, dont restart
+				if isCtrldRunning {
+					mainLog.Load().Notice().Msg("service is already running")
+					return
+				}
+
 				initInteractiveLogging()
 				tasks := []task{
-					{s.Stop, false, "Stop"},
-					resetDnsTask(p, s, isCtrldInstalled, currentIface),
 					{func() error {
 						// Save current DNS so we can restore later.
-						withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+						withEachPhysicalInterfaces("", "saveCurrentStaticDNS", func(i *net.Interface) error {
 							if err := saveCurrentStaticDNS(i); !errors.Is(err, errSaveCurrentStaticDNSNotSupported) && err != nil {
 								return err
 							}
@@ -424,10 +429,10 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				{s.Stop, false, "Stop"},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true, "Checking config"},
 				{func() error { return ensureUninstall(s) }, false, "Ensure uninstall"},
-				resetDnsTask(p, s, isCtrldInstalled, currentIface),
+				//resetDnsTask(p, s, isCtrldInstalled, currentIface),
 				{func() error {
 					// Save current DNS so we can restore later.
-					withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+					withEachPhysicalInterfaces("", "saveCurrentStaticDNS", func(i *net.Interface) error {
 						if err := saveCurrentStaticDNS(i); !errors.Is(err, errSaveCurrentStaticDNSNotSupported) && err != nil {
 							return err
 						}
@@ -611,14 +616,18 @@ func initStopCmd() *cobra.Command {
 				// restore static DNS settings or DHCP
 				p.resetDNS(false, true)
 
-				// restore DNS settings
-				if netIface, err := netInterface(p.runningIface); err == nil {
-					if err := restoreDNS(netIface); err != nil {
-						mainLog.Load().Error().Err(err).Msg("could not restore DNS on interface")
-					} else {
-						mainLog.Load().Debug().Msg("Restored DNS on interface successfully")
+				// Iterate over all physical interfaces and restore static DNS if a saved static config exists.
+				withEachPhysicalInterfaces("", "restore static DNS", func(i *net.Interface) error {
+					file := savedStaticDnsSettingsFilePath(i)
+					if _, err := os.Stat(file); err == nil {
+						if err := restoreDNS(i); err != nil {
+							mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
+						} else {
+							mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
+						}
 					}
-				}
+					return nil
+				})
 
 				if router.WaitProcessExited() {
 					ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
@@ -1046,9 +1055,16 @@ func initInterfacesCmd() *cobra.Command {
 		Short: "List network interfaces of the host",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+			withEachPhysicalInterfaces("", "Interface list", func(i *net.Interface) error {
 				fmt.Printf("Index : %d\n", i.Index)
 				fmt.Printf("Name  : %s\n", i.Name)
+				var status string
+				if i.Flags&net.FlagUp != 0 {
+					status = "Up"
+				} else {
+					status = "Down"
+				}
+				fmt.Printf("Status: %s\n", status)
 				addrs, _ := i.Addrs()
 				for i, ipaddr := range addrs {
 					if i == 0 {

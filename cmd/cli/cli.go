@@ -1031,14 +1031,22 @@ func uninstall(p *prog, s service.Service) {
 		// restore static DNS settings or DHCP
 		p.resetDNS(false, true)
 
-		// if present restore the original DNS settings
-		if netIface, err := netInterface(p.runningIface); err == nil {
-			if err := restoreDNS(netIface); err != nil {
-				mainLog.Load().Error().Err(err).Msg("could not restore DNS on interface")
-			} else {
-				mainLog.Load().Debug().Msg("Restored DNS on interface successfully")
+		// Iterate over all physical interfaces and restore DNS if a saved static config exists.
+		withEachPhysicalInterfaces("", "restore static DNS", func(i *net.Interface) error {
+			file := savedStaticDnsSettingsFilePath(i)
+			if _, err := os.Stat(file); err == nil {
+				if err := restoreDNS(i); err != nil {
+					mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
+				} else {
+					mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
+					err = os.Remove(file)
+					if err != nil {
+						mainLog.Load().Debug().Err(err).Msgf("Could not remove saved static DNS file for interface %s", i.Name)
+					}
+				}
 			}
-		}
+			return nil
+		})
 
 		if router.Name() != "" {
 			mainLog.Load().Debug().Msg("Router cleanup")

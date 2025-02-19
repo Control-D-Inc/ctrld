@@ -199,9 +199,12 @@ func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 	case ResolverTypeDOQ:
 		return &doqResolver{uc: uc}, nil
 	case ResolverTypeOS:
+		resolverMutex.Lock()
 		if or == nil {
+			ProxyLogger.Load().Debug().Msgf("Initialize new OS resolver")
 			or = newResolverWithNameserver(defaultNameservers())
 		}
+		resolverMutex.Unlock()
 		return or, nil
 	case ResolverTypeLegacy:
 		return &legacyResolver{uc: uc}, nil
@@ -473,9 +476,13 @@ func LookupIP(domain string) []string {
 }
 
 func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) {
+	resolverMutex.Lock()
 	if or == nil {
+		ProxyLogger.Load().Debug().Msgf("Initialize OS resolver in lookupIP")
 		or = newResolverWithNameserver(defaultNameservers())
 	}
+	resolverMutex.Unlock()
+
 	nss := *or.lanServers.Load()
 	nss = append(nss, *or.publicServers.Load()...)
 	if withBootstrapDNS {
