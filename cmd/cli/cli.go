@@ -266,10 +266,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	// Log config do not have thing to validate, so it's safe to init log here,
 	// so it's able to log information in processCDFlags.
-	logWriters := initLogging()
-
-	// Initializing internal logging after global logging.
-	p.initInternalLogging(logWriters)
+	p.initLogging(true)
 
 	mainLog.Load().Info().Msgf("starting ctrld %s", curVersion())
 	mainLog.Load().Info().Msgf("os: %s", osVersion())

@@ -103,12 +103,6 @@ func initConsoleLogging() {
 	}
 }
 
-// initLogging initializes global logging setup.
-func initLogging() []io.Writer {
-	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
-	return initLoggingWithBackup(true)
-}
-
 // initInteractiveLogging is like initLogging, but the ProxyLogger is discarded
 // to be used for all interactive commands.
 //

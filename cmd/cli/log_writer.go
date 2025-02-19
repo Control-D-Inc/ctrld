@@ -93,6 +93,15 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 	return lw.buf.Write(p)
 }
 
+// initLogging initializes global logging setup.
+func (p *prog) initLogging(backup bool) {
+	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
+	logWriters := initLoggingWithBackup(backup)
+
+	// Initializing internal logging after global logging.
+	p.initInternalLogging(logWriters)
+}
+
 // initInternalLogging performs internal logging if there's no log enabled.
 func (p *prog) initInternalLogging(writers []io.Writer) {
 	if !p.needInternalLogging() {

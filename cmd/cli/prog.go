@@ -560,13 +560,12 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	if !reload {
 		// Stop writing log to unix socket.
 		consoleWriter.Out = os.Stdout
-		logWriters := initLoggingWithBackup(false)
+		p.initLogging(false)
 		if p.logConn != nil {
 			_ = p.logConn.Close()
 		}
 		go p.apiConfigReload()
 		p.postRun()
-		p.initInternalLogging(logWriters)
 	}
 	wg.Wait()
 }
