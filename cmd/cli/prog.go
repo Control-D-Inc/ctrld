@@ -43,7 +43,7 @@ const (
 	ctrldControlUnixSockMobile = "cd.sock"
 	upstreamPrefix             = "upstream."
 	upstreamOS                 = upstreamPrefix + "os"
-	upstreamPrivate            = upstreamPrefix + "private"
+	upstreamOSLocal            = upstreamOS + ".local"
 	dnsWatchdogDefaultInterval = 20 * time.Second
 	ctrldServiceName           = "ctrld"
 )

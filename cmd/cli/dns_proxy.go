@@ -435,14 +435,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 		upstreams = []string{upstreamOS}
-	}
-
-	if p.isAdDomainQuery(req.msg) {
-		ctrld.Log(ctx, mainLog.Load().Debug(),
-			"AD domain query detected for %s in domain %s",
-			req.msg.Question[0].Name, p.adDomain)
-		upstreamConfigs = []*ctrld.UpstreamConfig{localUpstreamConfig}
-		upstreams = []string{upstreamOS}
+		// For OS resolver, local addresses are ignored to prevent possible looping.
+		// However, on Active Directory Domain Controller, where it has local DNS server
+		// running and listening on local addresses, these local addresses must be used
+		// as nameservers, so queries for ADDC could be resolved as expected.
+		if p.isAdDomainQuery(req.msg) {
+			ctrld.Log(ctx, mainLog.Load().Debug(),
+				"AD domain query detected for %s in domain %s",
+				req.msg.Question[0].Name, p.adDomain)
+			upstreamConfigs = []*ctrld.UpstreamConfig{localUpstreamConfig}
+			upstreams = []string{upstreamOSLocal}
+		}
 	}
 
 	res := &proxyResponse{}
@@ -458,7 +461,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
 	} else {
 		switch {
-		case isSrvLookup(req.msg):
+		case isSrvLanLookup(req.msg):
 			upstreams = []string{upstreamOS}
 			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 			ctx = ctrld.LanQueryCtx(ctx)
@@ -1109,19 +1112,25 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	default:
 		return false
 	}
-	name := strings.TrimSuffix(q.Name, ".")
+	return isLanHostname(q.Name)
+}
+
+// isSrvLanLookup reports whether DNS message is an SRV query of a LAN hostname.
+func isSrvLanLookup(m *dns.Msg) bool {
+	if m == nil || len(m.Question) == 0 {
+		return false
+	}
+	q := m.Question[0]
+	return q.Qtype == dns.TypeSRV && isLanHostname(q.Name)
+}
+
+// isLanHostname reports whether name is a LAN hostname.
+func isLanHostname(name string) bool {
+	name = strings.TrimSuffix(name, ".")
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
 		strings.HasSuffix(name, ".lan") ||
 		strings.HasSuffix(name, ".local")
-}
-
-// isSrvLookup reports whether DNS message is a SRV query.
-func isSrvLookup(m *dns.Msg) bool {
-	if m == nil || len(m.Question) == 0 {
-		return false
-	}
-	return m.Question[0].Qtype == dns.TypeSRV
 }
 
 // isWanClient reports whether the input is a WAN address.
