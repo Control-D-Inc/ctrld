@@ -32,6 +32,8 @@ const (
 	logURLCom          = apiURLCom + "/logs"
 	logURLDev          = apiURLDev + "/logs"
 	InvalidConfigCode  = 40402
+	defaultTimeout     = 20 * time.Second
+	sendLogTimeout     = 300 * time.Second
 )
 
 // ResolverConfig represents Control D resolver data.
@@ -135,7 +137,7 @@ func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reade
 	req.Header.Add("Content-Type", "application/json")
 	transport := apiTransport(cdDev)
 	client := http.Client{
-		Timeout:   10 * time.Second,
+		Timeout:   defaultTimeout,
 		Transport: transport,
 	}
 	resp, err := client.Do(req)
@@ -176,7 +178,7 @@ func SendLogs(lr *LogsRequest, cdDev bool) error {
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	transport := apiTransport(cdDev)
 	client := http.Client{
-		Timeout:   300 * time.Second,
+		Timeout:   sendLogTimeout,
 		Transport: transport,
 	}
 	resp, err := client.Do(req)
