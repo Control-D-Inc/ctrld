@@ -48,7 +48,15 @@ const (
 
 var controldPublicDnsWithPort = net.JoinHostPort(controldPublicDns, "53")
 
-var localResolver = newLocalResolver()
+var localResolver Resolver
+
+func init() {
+	// Initializing ProxyLogger here, so other places don't have to do nil check.
+	l := zerolog.New(io.Discard)
+	ProxyLogger.Store(&l)
+
+	localResolver = newLocalResolver()
+}
 
 var (
 	resolverMutex    sync.Mutex
@@ -91,10 +99,8 @@ func availableNameservers() []string {
 	machineIPsMap := make(map[string]struct{}, len(regularIPs))
 
 	//load the logger
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
+
 	Log(context.Background(), logger.Debug(),
 		"Got local addresses - regular IPs: %v, loopback IPs: %v", regularIPs, loopbackIPs)
 
@@ -549,10 +555,8 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 //   - Gateway IP address (depends on OS).
 //   - Input servers.
 func NewBootstrapResolver(servers ...string) Resolver {
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
+
 	Log(context.Background(), logger.Debug(), "NewBootstrapResolver called with servers: %v", servers)
 	nss := defaultNameservers()
 	nss = append([]string{controldPublicDnsWithPort}, nss...)
@@ -571,10 +575,8 @@ func NewBootstrapResolver(servers ...string) Resolver {
 // This is useful for doing PTR lookup in LAN network.
 func NewPrivateResolver() Resolver {
 
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
+
 	Log(context.Background(), logger.Debug(), "NewPrivateResolver called")
 
 	nss := defaultNameservers()
@@ -621,10 +623,8 @@ func NewResolverWithNameserver(nameservers []string) Resolver {
 // newResolverWithNameserver returns an OS resolver from given nameservers list.
 // The caller must ensure each server in list is formed "ip:53".
 func newResolverWithNameserver(nameservers []string) *osResolver {
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
+
 	Log(context.Background(), logger.Debug(), "newResolverWithNameserver called with nameservers: %v", nameservers)
 	r := &osResolver{}
 	var publicNss []string

@@ -17,7 +17,6 @@ import (
 	"github.com/microsoft/wmi/pkg/base/query"
 	"github.com/microsoft/wmi/pkg/constant"
 	"github.com/microsoft/wmi/pkg/hardware/network/netadapter"
-	"github.com/rs/zerolog"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 	"tailscale.com/net/netmon"
@@ -63,10 +62,7 @@ func dnsFromAdapter() []string {
 	var ns []string
 	var err error
 
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
 
 	for i := 0; i < maxDNSAdapterRetries; i++ {
 		if ctx.Err() != nil {
@@ -112,10 +108,8 @@ func dnsFromAdapter() []string {
 }
 
 func getDNSServers(ctx context.Context) ([]string, error) {
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
+
 	// Check context before making the call
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -343,10 +337,8 @@ func nameserversFromResolvconf() []string {
 // checkDomainJoined checks if the machine is joined to an Active Directory domain
 // Returns whether it's domain joined and the domain name if available
 func checkDomainJoined() bool {
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
+
 	var domain *uint16
 	var status uint32
 
@@ -423,10 +415,7 @@ func validInterfaces() map[string]struct{} {
 	defer log.SetOutput(os.Stderr)
 
 	//load the logger
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
 
 	whost := host.NewWmiLocalHost()
 	q := query.NewWmiQuery("MSFT_NetAdapter")
