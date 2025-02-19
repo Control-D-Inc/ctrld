@@ -1,19 +1,16 @@
-//go:build darwin || dragonfly || freebsd || netbsd || openbsd
+//go:build dragonfly || freebsd || netbsd || openbsd
 
 package ctrld
 
 import (
 	"net"
-	"os/exec"
-	"runtime"
-	"strings"
 	"syscall"
 
 	"golang.org/x/net/route"
 )
 
 func dnsFns() []dnsFn {
-	return []dnsFn{dnsFromRIB, dnsFromIPConfig}
+	return []dnsFn{dnsFromRIB}
 }
 
 func dnsFromRIB() []string {
@@ -47,18 +44,6 @@ func dnsFromRIB() []string {
 		}
 	}
 	return dns
-}
-
-func dnsFromIPConfig() []string {
-	if runtime.GOOS != "darwin" {
-		return nil
-	}
-	cmd := exec.Command("ipconfig", "getoption", "", "domain_name_server")
-	out, _ := cmd.Output()
-	if ip := net.ParseIP(strings.TrimSpace(string(out))); ip != nil {
-		return []string{ip.String()}
-	}
-	return nil
 }
 
 func toNetIP(addr route.Addr) net.IP {

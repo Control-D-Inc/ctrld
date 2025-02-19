@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os/exec"
 	"runtime"
 	"slices"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
+	"tailscale.com/types/logger"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
@@ -41,12 +43,18 @@ const (
 var osUpstreamConfig = &ctrld.UpstreamConfig{
 	Name:    "OS resolver",
 	Type:    ctrld.ResolverTypeOS,
-	Timeout: 2000,
+	Timeout: 3000,
 }
 
 var privateUpstreamConfig = &ctrld.UpstreamConfig{
 	Name:    "Private resolver",
 	Type:    ctrld.ResolverTypePrivate,
+	Timeout: 2000,
+}
+
+var localUpstreamConfig = &ctrld.UpstreamConfig{
+	Name:    "Local resolver",
+	Type:    ctrld.ResolverTypeLocal,
 	Timeout: 2000,
 }
 
@@ -76,7 +84,13 @@ type upstreamForResult struct {
 	srcAddr        string
 }
 
-func (p *prog) serveDNS(listenerNum string) error {
+func (p *prog) serveDNS(mainCtx context.Context, listenerNum string) error {
+	// Start network monitoring
+	if err := p.monitorNetworkChanges(mainCtx); err != nil {
+		mainLog.Load().Error().Err(err).Msg("Failed to start network monitoring")
+		// Don't return here as we still want DNS service to run
+	}
+
 	listenerConfig := p.cfg.Listener[listenerNum]
 	// make sure ip is allocated
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
@@ -106,11 +120,18 @@ func (p *prog) serveDNS(listenerNum string) error {
 		go p.detectLoop(m)
 		q := m.Question[0]
 		domain := canonicalName(q.Name)
-		if domain == selfCheckInternalTestDomain {
+		switch {
+		case domain == "":
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeFormatError)
+			_ = w.WriteMsg(answer)
+			return
+		case domain == selfCheckInternalTestDomain:
 			answer := resolveInternalDomainTestQuery(ctx, domain, m)
 			_ = w.WriteMsg(answer)
 			return
 		}
+
 		if _, ok := p.cacheFlushDomainsMap[domain]; ok && p.cache != nil {
 			p.cache.Purge()
 			ctrld.Log(ctx, mainLog.Load().Debug(), "received query %q, local cache is purged", domain)
@@ -411,20 +432,16 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
 
-	leaked := false
-	// If ctrld is going to leak query to OS resolver, check remote upstream in background,
-	// so ctrld could be back to normal operation as long as the network is back online.
-	if len(upstreamConfigs) > 0 && p.leakingQuery.Load() {
-		for n, uc := range upstreamConfigs {
-			go p.checkUpstream(upstreams[n], uc)
-		}
-		upstreamConfigs = nil
-		leaked = true
-		ctrld.Log(ctx, mainLog.Load().Debug(), "%v is down, leaking query to OS resolver", upstreams)
-	}
-
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+		upstreams = []string{upstreamOS}
+	}
+
+	if p.isAdDomainQuery(req.msg) {
+		ctrld.Log(ctx, mainLog.Load().Debug(),
+			"AD domain query detected for %s in domain %s",
+			req.msg.Question[0].Name, p.adDomain)
+		upstreamConfigs = []*ctrld.UpstreamConfig{localUpstreamConfig}
 		upstreams = []string{upstreamOS}
 	}
 
@@ -438,13 +455,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// 4. Try remote upstream.
 	isLanOrPtrQuery := false
 	if req.ufr.matched {
-		if leaked {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v (leaked)", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
-		} else {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
-		}
+		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
 	} else {
 		switch {
+		case isSrvLookup(req.msg):
+			upstreams = []string{upstreamOS}
+			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+			ctx = ctrld.LanQueryCtx(ctx)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "SRV record lookup, using upstreams: %v", upstreams)
 		case isPrivatePtrLookup(req.msg):
 			isLanOrPtrQuery = true
 			if answer := p.proxyPrivatePtrLookup(ctx, req.msg); answer != nil {
@@ -452,7 +470,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				res.clientInfo = true
 				return res
 			}
-			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForPtr(upstreams, upstreamConfigs)
+			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
 		case isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
@@ -461,7 +480,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				res.clientInfo = true
 				return res
 			}
-			upstreams, upstreamConfigs = p.upstreamsAndUpstreamConfigForLanAndPtr(upstreams, upstreamConfigs)
+			upstreams = []string{upstreamOS}
+			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
+			ctx = ctrld.LanQueryCtx(ctx)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "lan hostname lookup, using upstreams: %v", upstreams)
 		default:
 			ctrld.Log(ctx, mainLog.Load().Debug(), "no explicit policy matched, using default routing -> %v", upstreams)
@@ -488,8 +509,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			staleAnswer = answer
 		}
 	}
-	resolve1 := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
-		ctrld.Log(ctx, mainLog.Load().Debug(), "sending query to %s: %s", upstreams[n], upstreamConfig.Name)
+	resolve1 := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
+		ctrld.Log(ctx, mainLog.Load().Debug(), "sending query to %s: %s", upstream, upstreamConfig.Name)
 		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
@@ -504,43 +525,53 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 		return dnsResolver.Resolve(resolveCtx, msg)
 	}
-	resolve := func(n int, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
+	resolve := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
 		if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "including client info with the request")
 			ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, req.ci)
 		}
-		answer, err := resolve1(n, upstreamConfig, msg)
+		answer, err := resolve1(upstream, upstreamConfig, msg)
+		// if we have an answer, we should reset the failure count
+		// we dont use reset here since we dont want to prevent failure counts from being incremented
+		if answer != nil {
+			p.um.mu.Lock()
+			p.um.failureReq[upstream] = 0
+			p.um.down[upstream] = false
+			p.um.mu.Unlock()
+			return answer
+		}
+
+		ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
+
+		// increase failure count when there is no answer
+		// rehardless of what kind of error we get
+		p.um.increaseFailureCount(upstream)
+
 		if err != nil {
-			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
-			isNetworkErr := errNetworkError(err)
-			if isNetworkErr {
-				p.um.increaseFailureCount(upstreams[n])
-				if p.um.isDown(upstreams[n]) {
-					go p.checkUpstream(upstreams[n], upstreamConfig)
-				}
-			}
 			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
 			var e net.Error
 			if errors.As(err, &e) && e.Timeout() {
 				upstreamConfig.ReBootstrap()
 			}
-			return nil
 		}
-		return answer
+
+		return nil
 	}
 	for n, upstreamConfig := range upstreamConfigs {
 		if upstreamConfig == nil {
 			continue
 		}
+		logger := mainLog.Load().Debug().
+			Str("upstream", upstreamConfig.String()).
+			Str("query", req.msg.Question[0].Name).
+			Bool("is_ad_query", p.isAdDomainQuery(req.msg)).
+			Bool("is_lan_query", isLanOrPtrQuery)
+
 		if p.isLoop(upstreamConfig) {
-			mainLog.Load().Warn().Msgf("dns loop detected, upstream: %q, endpoint: %q", upstreamConfig.Name, upstreamConfig.Endpoint)
+			ctrld.Log(ctx, logger, "DNS loop detected")
 			continue
 		}
-		if p.um.isDown(upstreams[n]) {
-			ctrld.Log(ctx, mainLog.Load().Warn(), "%s is down", upstreams[n])
-			continue
-		}
-		answer := resolve(n, upstreamConfig, req.msg)
+		answer := resolve(upstreams[n], upstreamConfig, req.msg)
 		if answer == nil {
 			if serveStaleCache && staleAnswer != nil {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
@@ -587,21 +618,49 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		return res
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
-	if cdUID != "" && p.leakOnUpstreamFailure() {
-		p.leakingQueryMu.Lock()
-		if !p.leakingQueryWasRun {
-			p.leakingQueryWasRun = true
-			go p.performLeakingQuery()
+
+	// if we have no healthy upstreams, trigger recovery flow
+	if p.recoverOnUpstreamFailure() {
+		if p.um.countHealthy(upstreams) == 0 {
+			p.recoveryCancelMu.Lock()
+			if p.recoveryCancel == nil {
+				var reason RecoveryReason
+				if upstreams[0] == upstreamOS {
+					reason = RecoveryReasonOSFailure
+				} else {
+					reason = RecoveryReasonRegularFailure
+				}
+				mainLog.Load().Debug().Msgf("No healthy upstreams, triggering recovery with reason: %v", reason)
+				go p.handleRecovery(reason)
+			} else {
+				mainLog.Load().Debug().Msg("Recovery already in progress; skipping duplicate trigger from down detection")
+			}
+			p.recoveryCancelMu.Unlock()
+		} else {
+			mainLog.Load().Debug().Msg("One upstream is down but at least one is healthy; skipping recovery trigger")
 		}
-		p.leakingQueryMu.Unlock()
 	}
+
+	// attempt query to OS resolver while as a retry catch all
+	if upstreams[0] != upstreamOS {
+		ctrld.Log(ctx, mainLog.Load().Debug(), "attempting query to OS resolver as a retry catch all")
+		answer := resolve(upstreamOS, osUpstreamConfig, req.msg)
+		if answer != nil {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query successful")
+			res.answer = answer
+			res.upstream = osUpstreamConfig.Endpoint
+			return res
+		}
+		ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query failed")
+	}
+
 	answer := new(dns.Msg)
 	answer.SetRcode(req.msg, dns.RcodeServerFailure)
 	res.answer = answer
 	return res
 }
 
-func (p *prog) upstreamsAndUpstreamConfigForLanAndPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
+func (p *prog) upstreamsAndUpstreamConfigForPtr(upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) ([]string, []*ctrld.UpstreamConfig) {
 	if len(p.localUpstreams) > 0 {
 		tmp := make([]string, 0, len(p.localUpstreams)+len(upstreams))
 		tmp = append(tmp, p.localUpstreams...)
@@ -618,6 +677,14 @@ func (p *prog) upstreamConfigsFromUpstreamNumbers(upstreams []string) []*ctrld.U
 		upstreamConfigs = append(upstreamConfigs, p.cfg.Upstream[upstreamNum])
 	}
 	return upstreamConfigs
+}
+
+func (p *prog) isAdDomainQuery(msg *dns.Msg) bool {
+	if p.adDomain == "" {
+		return false
+	}
+	cDomainName := canonicalName(msg.Question[0].Name)
+	return dns.IsSubDomain(p.adDomain, cDomainName)
 }
 
 // canonicalName returns canonical name from FQDN with "." trimmed.
@@ -916,18 +983,6 @@ func (p *prog) selfUninstallCoolOfPeriod() {
 	p.selfUninstallMu.Unlock()
 }
 
-// performLeakingQuery performs necessary works to leak queries to OS resolver.
-func (p *prog) performLeakingQuery() {
-	mainLog.Load().Warn().Msg("leaking query to OS resolver")
-	// Signal dns watchers to stop, so changes made below won't be reverted.
-	p.leakingQuery.Store(true)
-	p.resetDNS()
-	ns := ctrld.InitializeOsResolver()
-	mainLog.Load().Debug().Msgf("re-initialized OS resolver with nameservers: %v", ns)
-	p.dnsWg.Wait()
-	p.setDNS()
-}
-
 // forceFetchingAPI sends signal to force syncing API config if run in cd mode,
 // and the domain == "cdUID.verify.controld.com"
 func (p *prog) forceFetchingAPI(domain string) {
@@ -1056,7 +1111,16 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	name := strings.TrimSuffix(q.Name, ".")
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
-		strings.HasSuffix(name, ".lan")
+		strings.HasSuffix(name, ".lan") ||
+		strings.HasSuffix(name, ".local")
+}
+
+// isSrvLookup reports whether DNS message is a SRV query.
+func isSrvLookup(m *dns.Msg) bool {
+	if m == nil || len(m.Question) == 0 {
+		return false
+	}
+	return m.Question[0].Qtype == dns.TypeSRV
 }
 
 // isWanClient reports whether the input is a WAN address.
@@ -1088,4 +1152,407 @@ func resolveInternalDomainTestQuery(ctx context.Context, domain string, m *dns.M
 	}
 	answer.SetReply(m)
 	return answer
+}
+
+// FlushDNSCache flushes the DNS cache on macOS.
+func FlushDNSCache() error {
+	// if not macOS, return
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+
+	// Flush the DNS cache via mDNSResponder.
+	// This is typically needed on modern macOS systems.
+	if out, err := exec.Command("killall", "-HUP", "mDNSResponder").CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to flush mDNSResponder: %w, output: %s", err, string(out))
+	}
+
+	// Optionally, flush the directory services cache.
+	if out, err := exec.Command("dscacheutil", "-flushcache").CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to flush dscacheutil: %w, output: %s", err, string(out))
+	}
+
+	return nil
+}
+
+// monitorNetworkChanges starts monitoring for network interface changes
+func (p *prog) monitorNetworkChanges(ctx context.Context) error {
+	mon, err := netmon.New(logger.WithPrefix(mainLog.Load().Printf, "netmon: "))
+	if err != nil {
+		return fmt.Errorf("creating network monitor: %w", err)
+	}
+
+	mon.RegisterChangeCallback(func(delta *netmon.ChangeDelta) {
+		// Get map of valid interfaces
+		validIfaces := validInterfacesMap()
+
+		isMajorChange := mon.IsMajorChangeFrom(delta.Old, delta.New)
+
+		mainLog.Load().Debug().
+			Interface("old_state", delta.Old).
+			Interface("new_state", delta.New).
+			Bool("is_major_change", isMajorChange).
+			Msg("Network change detected")
+
+		changed := false
+		activeInterfaceExists := false
+		var changeIPs []netip.Prefix
+		// Check each valid interface for changes
+		for ifaceName := range validIfaces {
+			oldIface, oldExists := delta.Old.Interface[ifaceName]
+			newIface, newExists := delta.New.Interface[ifaceName]
+			if !newExists {
+				continue
+			}
+
+			oldIPs := delta.Old.InterfaceIPs[ifaceName]
+			newIPs := delta.New.InterfaceIPs[ifaceName]
+
+			// if a valid interface did not exist in old
+			// check that its up and has usable IPs
+			if !oldExists {
+				// The interface is new (was not present in the old state).
+				usableNewIPs := filterUsableIPs(newIPs)
+				if newIface.IsUp() && len(usableNewIPs) > 0 {
+					changed = true
+					changeIPs = usableNewIPs
+					mainLog.Load().Debug().
+						Str("interface", ifaceName).
+						Interface("new_ips", usableNewIPs).
+						Msg("Interface newly appeared (was not present in old state)")
+					break
+				}
+				continue
+			}
+
+			// Filter new IPs to only those that are usable.
+			usableNewIPs := filterUsableIPs(newIPs)
+
+			// Check if interface is up and has usable IPs.
+			if newIface.IsUp() && len(usableNewIPs) > 0 {
+				activeInterfaceExists = true
+			}
+
+			// Compare interface states and IPs (interfaceIPsEqual will itself filter the IPs).
+			if !interfaceStatesEqual(&oldIface, &newIface) || !interfaceIPsEqual(oldIPs, newIPs) {
+				if newIface.IsUp() && len(usableNewIPs) > 0 {
+					changed = true
+					changeIPs = usableNewIPs
+					mainLog.Load().Debug().
+						Str("interface", ifaceName).
+						Interface("old_ips", oldIPs).
+						Interface("new_ips", usableNewIPs).
+						Msg("Interface state or IPs changed")
+					break
+				}
+			}
+		}
+
+		if !changed {
+			mainLog.Load().Debug().Msg("Ignoring interface change - no valid interfaces affected")
+			return
+		}
+
+		if !activeInterfaceExists {
+			mainLog.Load().Debug().Msg("No active interfaces found, skipping reinitialization")
+			return
+		}
+
+		// Get IPs from default route interface in new state
+		selfIP := defaultRouteIP()
+		var ipv6 string
+
+		if delta.New.DefaultRouteInterface != "" {
+			mainLog.Load().Debug().Msgf("default route interface: %s, IPs: %v", delta.New.DefaultRouteInterface, delta.New.InterfaceIPs[delta.New.DefaultRouteInterface])
+			for _, ip := range delta.New.InterfaceIPs[delta.New.DefaultRouteInterface] {
+				ipAddr, _ := netip.ParsePrefix(ip.String())
+				addr := ipAddr.Addr()
+				if selfIP == "" && addr.Is4() {
+					mainLog.Load().Debug().Msgf("checking IP: %s", addr.String())
+					if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+						selfIP = addr.String()
+					}
+				}
+				if addr.Is6() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+					ipv6 = addr.String()
+				}
+			}
+		} else {
+			// If no default route interface is set yet, use the changed IPs
+			mainLog.Load().Debug().Msgf("no default route interface found, using changed IPs: %v", changeIPs)
+			for _, ip := range changeIPs {
+				ipAddr, _ := netip.ParsePrefix(ip.String())
+				addr := ipAddr.Addr()
+				if selfIP == "" && addr.Is4() {
+					mainLog.Load().Debug().Msgf("checking IP: %s", addr.String())
+					if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+						selfIP = addr.String()
+					}
+				}
+				if addr.Is6() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+					ipv6 = addr.String()
+				}
+			}
+		}
+
+		if ip := net.ParseIP(selfIP); ip != nil {
+			ctrld.SetDefaultLocalIPv4(ip)
+			if !isMobile() && p.ciTable != nil {
+				p.ciTable.SetSelfIP(selfIP)
+			}
+		}
+		if ip := net.ParseIP(ipv6); ip != nil {
+			ctrld.SetDefaultLocalIPv6(ip)
+		}
+		mainLog.Load().Debug().Msgf("Set default local IPv4: %s, IPv6: %s", selfIP, ipv6)
+
+		if p.recoverOnUpstreamFailure() {
+			p.handleRecovery(RecoveryReasonNetworkChange)
+		}
+	})
+
+	mon.Start()
+	mainLog.Load().Debug().Msg("Network monitor started")
+	return nil
+}
+
+// interfaceStatesEqual compares two interface states
+func interfaceStatesEqual(a, b *netmon.Interface) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.IsUp() == b.IsUp()
+}
+
+// filterUsableIPs is a helper that returns only "usable" IP prefixes,
+// filtering out link-local, loopback, multicast, unspecified, broadcast, or CGNAT addresses.
+func filterUsableIPs(prefixes []netip.Prefix) []netip.Prefix {
+	var usable []netip.Prefix
+	for _, p := range prefixes {
+		addr := p.Addr()
+		if addr.IsLinkLocalUnicast() ||
+			addr.IsLoopback() ||
+			addr.IsMulticast() ||
+			addr.IsUnspecified() ||
+			addr.IsLinkLocalMulticast() ||
+			(addr.Is4() && addr.String() == "255.255.255.255") ||
+			tsaddr.CGNATRange().Contains(addr) {
+			continue
+		}
+		usable = append(usable, p)
+	}
+	return usable
+}
+
+// Modified interfaceIPsEqual compares only the usable (non-link local, non-loopback, etc.) IP addresses.
+func interfaceIPsEqual(a, b []netip.Prefix) bool {
+	aUsable := filterUsableIPs(a)
+	bUsable := filterUsableIPs(b)
+	if len(aUsable) != len(bUsable) {
+		return false
+	}
+
+	aMap := make(map[string]bool)
+	for _, ip := range aUsable {
+		aMap[ip.String()] = true
+	}
+	for _, ip := range bUsable {
+		if !aMap[ip.String()] {
+			return false
+		}
+	}
+	return true
+}
+
+// checkUpstreamOnce sends a test query to the specified upstream.
+// Returns nil if the upstream responds successfully.
+func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) error {
+	mainLog.Load().Debug().Msgf("Starting check for upstream: %s", upstream)
+
+	resolver, err := ctrld.NewResolver(uc)
+	if err != nil {
+		mainLog.Load().Error().Err(err).Msgf("Failed to create resolver for upstream %s", upstream)
+		return err
+	}
+
+	msg := new(dns.Msg)
+	msg.SetQuestion(".", dns.TypeNS)
+
+	timeout := 1000 * time.Millisecond
+	if uc.Timeout > 0 {
+		timeout = time.Millisecond * time.Duration(uc.Timeout)
+	}
+	mainLog.Load().Debug().Msgf("Timeout for upstream %s: %s", upstream, timeout)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	uc.ReBootstrap()
+	mainLog.Load().Debug().Msgf("Rebootstrapping resolver for upstream: %s", upstream)
+
+	start := time.Now()
+	_, err = resolver.Resolve(ctx, msg)
+	duration := time.Since(start)
+
+	if err != nil {
+		mainLog.Load().Error().Err(err).Msgf("Upstream %s check failed after %v", upstream, duration)
+	} else {
+		mainLog.Load().Debug().Msgf("Upstream %s responded successfully in %v", upstream, duration)
+	}
+	return err
+}
+
+// handleRecovery performs a unified recovery by removing DNS settings,
+// canceling existing recovery checks for network changes, but coalescing duplicate
+// upstream failure recoveries, waiting for recovery to complete (using a cancellable context without timeout),
+// and then re-applying the DNS settings.
+func (p *prog) handleRecovery(reason RecoveryReason) {
+	mainLog.Load().Debug().Msg("Starting recovery process: removing DNS settings")
+
+	// For network changes, cancel any existing recovery check because the network state has changed.
+	if reason == RecoveryReasonNetworkChange {
+		p.recoveryCancelMu.Lock()
+		if p.recoveryCancel != nil {
+			mainLog.Load().Debug().Msg("Cancelling existing recovery check (network change)")
+			p.recoveryCancel()
+			p.recoveryCancel = nil
+		}
+		p.recoveryCancelMu.Unlock()
+	} else {
+		// For upstream failures, if a recovery is already in progress, do nothing new.
+		p.recoveryCancelMu.Lock()
+		if p.recoveryCancel != nil {
+			mainLog.Load().Debug().Msg("Upstream recovery already in progress; skipping duplicate trigger")
+			p.recoveryCancelMu.Unlock()
+			return
+		}
+		p.recoveryCancelMu.Unlock()
+	}
+
+	// Create a new recovery context without a fixed timeout.
+	p.recoveryCancelMu.Lock()
+	recoveryCtx, cancel := context.WithCancel(context.Background())
+	p.recoveryCancel = cancel
+	p.recoveryCancelMu.Unlock()
+
+	// Immediately remove our DNS settings from the interface.
+	// set recoveryRunning to true to prevent watchdogs from putting the listener back on the interface
+	p.recoveryRunning.Store(true)
+	p.resetDNS()
+
+	// For an OS failure, reinitialize OS resolver nameservers immediately.
+	if reason == RecoveryReasonOSFailure {
+		mainLog.Load().Debug().Msg("OS resolver failure detected; reinitializing OS resolver nameservers")
+		ns := ctrld.InitializeOsResolver(true)
+		if len(ns) == 0 {
+			mainLog.Load().Warn().Msg("No nameservers found for OS resolver; using existing values")
+		} else {
+			mainLog.Load().Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+		}
+	}
+
+	// Build upstream map based on the recovery reason.
+	upstreams := p.buildRecoveryUpstreams(reason)
+
+	// Wait indefinitely until one of the upstreams recovers.
+	recovered, err := p.waitForUpstreamRecovery(recoveryCtx, upstreams)
+	if err != nil {
+		mainLog.Load().Error().Err(err).Msg("Recovery canceled; DNS settings remain removed")
+		p.recoveryCancelMu.Lock()
+		p.recoveryCancel = nil
+		p.recoveryCancelMu.Unlock()
+		return
+	}
+	mainLog.Load().Info().Msgf("Upstream %q recovered; re-applying DNS settings", recovered)
+
+	// reset the upstream failure count and down state
+	p.um.reset(recovered)
+
+	// For network changes we also reinitialize the OS resolver.
+	if reason == RecoveryReasonNetworkChange {
+		ns := ctrld.InitializeOsResolver(true)
+		if len(ns) == 0 {
+			mainLog.Load().Warn().Msg("No nameservers found for OS resolver during network-change recovery; using existing values")
+		} else {
+			mainLog.Load().Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+		}
+	}
+
+	// Apply our DNS settings back and log the interface state.
+	p.setDNS()
+	p.logInterfacesState()
+
+	// allow watchdogs to put the listener back on the interface if its changed for any reason
+	p.recoveryRunning.Store(false)
+
+	// Clear the recovery cancellation for a clean slate.
+	p.recoveryCancelMu.Lock()
+	p.recoveryCancel = nil
+	p.recoveryCancelMu.Unlock()
+}
+
+// waitForUpstreamRecovery checks the provided upstreams concurrently until one recovers.
+// It returns the name of the recovered upstream or an error if the check times out.
+func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string]*ctrld.UpstreamConfig) (string, error) {
+	recoveredCh := make(chan string, 1)
+	var wg sync.WaitGroup
+
+	mainLog.Load().Debug().Msgf("Starting upstream recovery check for %d upstreams", len(upstreams))
+
+	for name, uc := range upstreams {
+		wg.Add(1)
+		go func(name string, uc *ctrld.UpstreamConfig) {
+			defer wg.Done()
+			mainLog.Load().Debug().Msgf("Starting recovery check loop for upstream: %s", name)
+			for {
+				select {
+				case <-ctx.Done():
+					mainLog.Load().Debug().Msgf("Context canceled for upstream %s", name)
+					return
+				default:
+					// checkUpstreamOnce will reset any failure counters on success.
+					if err := p.checkUpstreamOnce(name, uc); err == nil {
+						mainLog.Load().Debug().Msgf("Upstream %s recovered successfully", name)
+						select {
+						case recoveredCh <- name:
+							mainLog.Load().Debug().Msgf("Sent recovery notification for upstream %s", name)
+						default:
+							mainLog.Load().Debug().Msg("Recovery channel full, another upstream already recovered")
+						}
+						return
+					}
+					mainLog.Load().Debug().Msgf("Upstream %s check failed, sleeping before retry", name)
+					time.Sleep(checkUpstreamBackoffSleep)
+				}
+			}
+		}(name, uc)
+	}
+
+	var recovered string
+	select {
+	case recovered = <-recoveredCh:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	wg.Wait()
+	return recovered, nil
+}
+
+// buildRecoveryUpstreams constructs the map of upstream configurations to test.
+// For OS failures we supply the manual OS resolver upstream configuration.
+// For network change or regular failure we use the upstreams defined in p.cfg (ignoring OS).
+func (p *prog) buildRecoveryUpstreams(reason RecoveryReason) map[string]*ctrld.UpstreamConfig {
+	upstreams := make(map[string]*ctrld.UpstreamConfig)
+	switch reason {
+	case RecoveryReasonOSFailure:
+		upstreams[upstreamOS] = osUpstreamConfig
+	case RecoveryReasonNetworkChange, RecoveryReasonRegularFailure:
+		// Use all configured upstreams except any OS type.
+		for k, uc := range p.cfg.Upstream {
+			if uc.Type != ctrld.ResolverTypeOS {
+				upstreams[upstreamPrefix+k] = uc
+			}
+		}
+	}
+	return upstreams
 }

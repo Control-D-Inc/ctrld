@@ -77,6 +77,7 @@ type Table struct {
 	hostnameResolvers []HostnameResolver
 	refreshers        []refresher
 	initOnce          sync.Once
+	stopOnce          sync.Once
 	refreshInterval   int
 
 	dhcp           *dhcp
@@ -90,7 +91,9 @@ type Table struct {
 	vni            *virtualNetworkIface
 	svcCfg         ctrld.ServiceConfig
 	quitCh         chan struct{}
+	stopCh         chan struct{}
 	selfIP         string
+	selfIPLock     sync.RWMutex
 	cdUID          string
 	ptrNameservers []string
 }
@@ -103,6 +106,7 @@ func NewTable(cfg *ctrld.Config, selfIP, cdUID string, ns []string) *Table {
 	return &Table{
 		svcCfg:          cfg.Service,
 		quitCh:          make(chan struct{}),
+		stopCh:          make(chan struct{}),
 		selfIP:          selfIP,
 		cdUID:           cdUID,
 		ptrNameservers:  ns,
@@ -120,22 +124,57 @@ func (t *Table) AddLeaseFile(name string, format ctrld.LeaseFileFormat) {
 // RefreshLoop runs all the refresher to update new client info data.
 func (t *Table) RefreshLoop(ctx context.Context) {
 	timer := time.NewTicker(time.Second * time.Duration(t.refreshInterval))
-	defer timer.Stop()
+	defer func() {
+		timer.Stop()
+		close(t.quitCh)
+	}()
 	for {
 		select {
 		case <-timer.C:
-			for _, r := range t.refreshers {
-				_ = r.refresh()
-			}
+			t.Refresh()
+		case <-t.stopCh:
+			return
 		case <-ctx.Done():
-			close(t.quitCh)
 			return
 		}
 	}
 }
 
+// Init initializes all client info discovers.
 func (t *Table) Init() {
 	t.initOnce.Do(t.init)
+}
+
+// Refresh forces all discovers to retrieve new data.
+func (t *Table) Refresh() {
+	for _, r := range t.refreshers {
+		_ = r.refresh()
+	}
+}
+
+// Stop stops all the discovers.
+// It blocks until all the discovers done.
+func (t *Table) Stop() {
+	t.stopOnce.Do(func() {
+		close(t.stopCh)
+	})
+	<-t.quitCh
+}
+
+// SelfIP returns the selfIP value of the Table in a thread-safe manner.
+func (t *Table) SelfIP() string {
+	t.selfIPLock.RLock()
+	defer t.selfIPLock.RUnlock()
+	return t.selfIP
+}
+
+// SetSelfIP sets the selfIP value of the Table in a thread-safe manner.
+func (t *Table) SetSelfIP(ip string) {
+	t.selfIPLock.Lock()
+	defer t.selfIPLock.Unlock()
+	t.selfIP = ip
+	t.dhcp.selfIP = t.selfIP
+	t.dhcp.addSelf()
 }
 
 func (t *Table) init() {
@@ -381,9 +420,7 @@ func (t *Table) lookupHostnameAll(ip, mac string) []*hostnameEntry {
 
 // ListClients returns list of clients discovered by ctrld.
 func (t *Table) ListClients() []*Client {
-	for _, r := range t.refreshers {
-		_ = r.refresh()
-	}
+	t.Refresh()
 	ipMap := make(map[string]*Client)
 	il := []ipLister{t.dhcp, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
 	for _, ir := range il {

@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -25,7 +27,15 @@ const (
 	deactivationPath = "/deactivation"
 	cdPath           = "/cd"
 	ifacePath        = "/iface"
+	viewLogsPath     = "/log/view"
+	sendLogsPath     = "/log/send"
 )
+
+type ifaceResponse struct {
+	Name string `json:"name"`
+	All  bool   `json:"all"`
+	OK   bool   `json:"ok"`
+}
 
 type controlServer struct {
 	server *http.Server
@@ -201,15 +211,76 @@ func (p *prog) registerControlServerHandler() {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	p.cs.register(ifacePath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		res := &ifaceResponse{Name: iface}
 		// p.setDNS is only called when running as a service
 		if !service.Interactive() {
 			<-p.csSetDnsDone
 			if p.csSetDnsOk {
-				w.Write([]byte(iface))
-				return
+				res.Name = p.runningIface
+				res.All = p.requiredMultiNICsConfig
+				res.OK = true
 			}
 		}
-		w.WriteHeader(http.StatusBadRequest)
+		if err := json.NewEncoder(w).Encode(res); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("could not marshal iface data: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}))
+	p.cs.register(viewLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		lr, err := p.logReader()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer lr.r.Close()
+		if lr.size == 0 {
+			w.WriteHeader(http.StatusMovedPermanently)
+			return
+		}
+		data, err := io.ReadAll(lr.r)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("could not read log: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(&logViewResponse{Data: string(data)}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("could not marshal log data: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}))
+	p.cs.register(sendLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if time.Since(p.internalLogSent) < logSentInterval {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		r, err := p.logReader()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if r.size == 0 {
+			w.WriteHeader(http.StatusMovedPermanently)
+			return
+		}
+		req := &controld.LogsRequest{
+			UID:  cdUID,
+			Data: r.r,
+		}
+		mainLog.Load().Debug().Msg("sending log file to ControlD server")
+		resp := logSentResponse{Size: r.size}
+		if err := controld.SendLogs(req, cdDev); err != nil {
+			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
+			resp.Error = err.Error()
+			w.WriteHeader(http.StatusInternalServerError)
+		} else {
+			mainLog.Load().Debug().Msg("sending log file successfully")
+			w.WriteHeader(http.StatusOK)
+		}
+		if err := json.NewEncoder(w).Encode(&resp); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		p.internalLogSent = time.Now()
 	}))
 }
 

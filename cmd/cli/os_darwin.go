@@ -70,17 +70,21 @@ func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
 
 // TODO(cuonglm): use system API
 func resetDNS(iface *net.Interface) error {
-	if ns := savedStaticNameservers(iface); len(ns) > 0 {
-		if err := setDNS(iface, ns); err == nil {
-			return nil
-		}
-	}
 	cmd := "networksetup"
 	args := []string{"-setdnsservers", iface.Name, "empty"}
 	if out, err := exec.Command(cmd, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("%v: %w", string(out), err)
 	}
 	return nil
+}
+
+// restoreDNS restores the DNS settings of the given interface.
+// this should only be executed upon turning off the ctrld service.
+func restoreDNS(iface *net.Interface) (err error) {
+	if ns := savedStaticNameservers(iface); len(ns) > 0 {
+		err = setDNS(iface, ns)
+	}
+	return err
 }
 
 func currentDNS(_ *net.Interface) []string {

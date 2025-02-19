@@ -4,15 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
+	"runtime"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
 )
@@ -30,8 +32,10 @@ const (
 	ResolverTypeOS = "os"
 	// ResolverTypeLegacy specifies legacy resolver.
 	ResolverTypeLegacy = "legacy"
-	// ResolverTypePrivate is like ResolverTypeOS, but use for local resolver only.
+	// ResolverTypePrivate is like ResolverTypeOS, but use for private resolver only.
 	ResolverTypePrivate = "private"
+	// ResolverTypeLocal is like ResolverTypeOS, but use for local resolver only.
+	ResolverTypeLocal = "local"
 	// ResolverTypeSDNS specifies resolver with information encoded using DNS Stamps.
 	// See: https://dnscrypt.info/stamps-specifications/
 	ResolverTypeSDNS = "sdns"
@@ -44,8 +48,30 @@ const (
 
 var controldPublicDnsWithPort = net.JoinHostPort(controldPublicDns, "53")
 
-// or is the Resolver used for ResolverTypeOS.
-var or = newResolverWithNameserver(defaultNameservers())
+var localResolver = newLocalResolver()
+
+var (
+	resolverMutex    sync.Mutex
+	or               *osResolver
+	defaultLocalIPv4 atomic.Value // holds net.IP (IPv4)
+	defaultLocalIPv6 atomic.Value // holds net.IP (IPv6)
+)
+
+func newLocalResolver() Resolver {
+	var nss []string
+	for _, addr := range Rfc1918Addresses() {
+		nss = append(nss, net.JoinHostPort(addr, "53"))
+	}
+	return NewResolverWithNameserver(nss)
+}
+
+// LanQueryCtxKey is the context.Context key to indicate that the request is for LAN network.
+type LanQueryCtxKey struct{}
+
+// LanQueryCtx returns a context.Context with LanQueryCtxKey set.
+func LanQueryCtx(ctx context.Context) context.Context {
+	return context.WithValue(ctx, LanQueryCtxKey{}, true)
+}
 
 // defaultNameservers is like nameservers with each element formed "ip:53".
 func defaultNameservers() []string {
@@ -63,17 +89,39 @@ func availableNameservers() []string {
 	// Ignore local addresses to prevent loop.
 	regularIPs, loopbackIPs, _ := netmon.LocalAddresses()
 	machineIPsMap := make(map[string]struct{}, len(regularIPs))
-	for _, v := range slices.Concat(regularIPs, loopbackIPs) {
-		machineIPsMap[v.String()] = struct{}{}
+
+	//load the logger
+	logger := zerolog.New(io.Discard)
+	if ProxyLogger.Load() != nil {
+		logger = *ProxyLogger.Load()
 	}
-	for _, ns := range nameservers() {
+	Log(context.Background(), logger.Debug(),
+		"Got local addresses - regular IPs: %v, loopback IPs: %v", regularIPs, loopbackIPs)
+
+	for _, v := range slices.Concat(regularIPs, loopbackIPs) {
+		ipStr := v.String()
+		machineIPsMap[ipStr] = struct{}{}
+		Log(context.Background(), logger.Debug(),
+			"Added local IP to OS resolverexclusion map: %s", ipStr)
+	}
+
+	systemNameservers := nameservers()
+	Log(context.Background(), logger.Debug(),
+		"Got system nameservers: %v", systemNameservers)
+
+	for _, ns := range systemNameservers {
 		if _, ok := machineIPsMap[ns]; ok {
+			Log(context.Background(), logger.Debug(),
+				"Skipping local nameserver: %s", ns)
 			continue
 		}
-		if testNameserver(ns) {
-			nss = append(nss, ns)
-		}
+		nss = append(nss, ns)
+		Log(context.Background(), logger.Debug(),
+			"Added non-local nameserver: %s", ns)
 	}
+
+	Log(context.Background(), logger.Debug(),
+		"Final available nameservers: %v", nss)
 	return nss
 }
 
@@ -82,77 +130,47 @@ func availableNameservers() []string {
 //
 // It's the caller's responsibility to ensure the system DNS is in a clean state before
 // calling this function.
-func InitializeOsResolver() []string {
-	return initializeOsResolver(availableNameservers())
+func InitializeOsResolver(guardAgainstNoNameservers bool) []string {
+	nameservers := availableNameservers()
+	// if no nameservers, return empty slice so we dont remove all nameservers
+	if len(nameservers) == 0 && guardAgainstNoNameservers {
+		return []string{}
+	}
+	ns := initializeOsResolver(nameservers)
+	resolverMutex.Lock()
+	defer resolverMutex.Unlock()
+	or = newResolverWithNameserver(ns)
+	return ns
 }
+
+// initializeOsResolver performs logic for choosing OS resolver nameserver.
+// The logic:
+//
+// - First available LAN servers are saved and store.
+// - Later calls, if no LAN servers available, the saved servers above will be used.
 func initializeOsResolver(servers []string) []string {
-	var (
-		nss       []string
-		publicNss []string
-	)
-	var (
-		lastLanServer         netip.Addr
-		curLanServer          netip.Addr
-		curLanServerAvailable bool
-	)
-	if p := or.currentLanServer.Load(); p != nil {
-		curLanServer = *p
-		or.currentLanServer.Store(nil)
-	}
-	if p := or.lastLanServer.Load(); p != nil {
-		lastLanServer = *p
-		or.lastLanServer.Store(nil)
-	}
+
+	var lanNss, publicNss []string
+
+	// First categorize servers
 	for _, ns := range servers {
 		addr, err := netip.ParseAddr(ns)
 		if err != nil {
 			continue
 		}
 		server := net.JoinHostPort(ns, "53")
-		// Always use new public nameserver.
-		if !isLanAddr(addr) {
-			publicNss = append(publicNss, server)
-			nss = append(nss, server)
-			continue
-		}
-		// For LAN server, storing only current and last LAN server if any.
-		if addr.Compare(curLanServer) == 0 {
-			curLanServerAvailable = true
+		if isLanAddr(addr) {
+			lanNss = append(lanNss, server)
 		} else {
-			if addr.Compare(lastLanServer) == 0 {
-				or.lastLanServer.Store(&addr)
-			} else {
-				if or.currentLanServer.CompareAndSwap(nil, &addr) {
-					nss = append(nss, server)
-				}
-			}
+			publicNss = append(publicNss, server)
 		}
 	}
-	// Store current LAN server as last one only if it's still available.
-	if curLanServerAvailable && curLanServer.IsValid() {
-		or.lastLanServer.Store(&curLanServer)
-		nss = append(nss, net.JoinHostPort(curLanServer.String(), "53"))
-	}
-	if len(publicNss) == 0 {
-		publicNss = append(publicNss, controldPublicDnsWithPort)
-		nss = append(nss, controldPublicDnsWithPort)
-	}
-	or.publicServer.Store(&publicNss)
-	return nss
-}
 
-// testPlainDnsNameserver sends a test query to DNS nameserver to check if the server is available.
-func testNameserver(addr string) bool {
-	msg := new(dns.Msg)
-	msg.SetQuestion("controld.com.", dns.TypeNS)
-	client := new(dns.Client)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, _, err := client.ExchangeContext(ctx, msg, net.JoinHostPort(addr, "53"))
-	if err != nil {
-		ProxyLogger.Load().Debug().Err(err).Msgf("failed to connect to OS nameserver: %s", addr)
+	if len(publicNss) == 0 {
+		publicNss = []string{controldPublicDnsWithPort}
 	}
-	return err == nil
+
+	return slices.Concat(lanNss, publicNss)
 }
 
 // Resolver is the interface that wraps the basic DNS operations.
@@ -175,19 +193,23 @@ func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 	case ResolverTypeDOQ:
 		return &doqResolver{uc: uc}, nil
 	case ResolverTypeOS:
+		if or == nil {
+			or = newResolverWithNameserver(defaultNameservers())
+		}
 		return or, nil
 	case ResolverTypeLegacy:
 		return &legacyResolver{uc: uc}, nil
 	case ResolverTypePrivate:
 		return NewPrivateResolver(), nil
+	case ResolverTypeLocal:
+		return localResolver, nil
 	}
 	return nil, fmt.Errorf("%w: %s", errUnknownResolver, typ)
 }
 
 type osResolver struct {
-	currentLanServer atomic.Pointer[netip.Addr]
-	lastLanServer    atomic.Pointer[netip.Addr]
-	publicServer     atomic.Pointer[[]string]
+	lanServers    atomic.Pointer[[]string]
+	publicServers atomic.Pointer[[]string]
 }
 
 type osResolverResult struct {
@@ -197,26 +219,75 @@ type osResolverResult struct {
 	lan    bool
 }
 
+type publicResponse struct {
+	answer *dns.Msg
+	server string
+}
+
+// SetDefaultLocalIPv4 updates the stored local IPv4.
+func SetDefaultLocalIPv4(ip net.IP) {
+	Log(context.Background(), ProxyLogger.Load().Debug(), "SetDefaultLocalIPv4: %s", ip)
+	defaultLocalIPv4.Store(ip)
+}
+
+// SetDefaultLocalIPv6 updates the stored local IPv6.
+func SetDefaultLocalIPv6(ip net.IP) {
+	Log(context.Background(), ProxyLogger.Load().Debug(), "SetDefaultLocalIPv6: %s", ip)
+	defaultLocalIPv6.Store(ip)
+}
+
+// GetDefaultLocalIPv4 returns the stored local IPv4 or nil if none.
+func GetDefaultLocalIPv4() net.IP {
+	if v := defaultLocalIPv4.Load(); v != nil {
+		return v.(net.IP)
+	}
+	return nil
+}
+
+// GetDefaultLocalIPv6 returns the stored local IPv6 or nil if none.
+func GetDefaultLocalIPv6() net.IP {
+	if v := defaultLocalIPv6.Load(); v != nil {
+		return v.(net.IP)
+	}
+	return nil
+}
+
+// customDNSExchange wraps the DNS exchange to use our debug dialer.
+// It uses dns.ExchangeWithConn so that our custom dialer is used directly.
+func customDNSExchange(ctx context.Context, msg *dns.Msg, server string, desiredLocalIP net.IP) (*dns.Msg, time.Duration, error) {
+	baseDialer := &net.Dialer{
+		Timeout:  3 * time.Second,
+		Resolver: &net.Resolver{PreferGo: true},
+	}
+	if desiredLocalIP != nil {
+		baseDialer.LocalAddr = &net.UDPAddr{IP: desiredLocalIP, Port: 0}
+	}
+	dnsClient := &dns.Client{Net: "udp"}
+	dnsClient.Dialer = baseDialer
+	return dnsClient.ExchangeContext(ctx, msg, server)
+}
+
 // Resolve resolves DNS queries using pre-configured nameservers.
 // Query is sent to all nameservers concurrently, and the first
 // success response will be returned.
 func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	publicServers := *o.publicServer.Load()
-	nss := make([]string, 0, 2)
-	if p := o.currentLanServer.Load(); p != nil {
-		nss = append(nss, net.JoinHostPort(p.String(), "53"))
-	}
-	if p := o.lastLanServer.Load(); p != nil {
-		nss = append(nss, net.JoinHostPort(p.String(), "53"))
+	publicServers := *o.publicServers.Load()
+	var nss []string
+	if p := o.lanServers.Load(); p != nil {
+		nss = append(nss, (*p)...)
 	}
 	numServers := len(nss) + len(publicServers)
+	// If this is a LAN query, skip public DNS.
+	lan, ok := ctx.Value(LanQueryCtxKey{}).(bool)
+	if ok && lan {
+		numServers -= len(publicServers)
+	}
 	if numServers == 0 {
 		return nil, errors.New("no nameservers available")
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	dnsClient := &dns.Client{Net: "udp"}
 	ch := make(chan *osResolverResult, numServers)
 	wg := &sync.WaitGroup{}
 	wg.Add(numServers)
@@ -229,57 +300,86 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		for _, server := range servers {
 			go func(server string) {
 				defer wg.Done()
-				answer, _, err := dnsClient.ExchangeContext(ctx, msg.Copy(), server)
+				var answer *dns.Msg
+				var err error
+				var localOSResolverIP net.IP
+				if runtime.GOOS == "darwin" {
+					host, _, err := net.SplitHostPort(server)
+					if err == nil {
+						ip := net.ParseIP(host)
+						if ip != nil && ip.To4() == nil {
+							// IPv6 nameserver; use default IPv6 address (if set)
+							localOSResolverIP = GetDefaultLocalIPv6()
+						} else {
+							localOSResolverIP = GetDefaultLocalIPv4()
+						}
+					}
+				}
+				answer, _, err = customDNSExchange(ctx, msg.Copy(), server, localOSResolverIP)
 				ch <- &osResolverResult{answer: answer, err: err, server: server, lan: isLan}
 			}(server)
 		}
 	}
 	do(nss, true)
-	do(publicServers, false)
+	if !lan {
+		do(publicServers, false)
+	}
 
 	logAnswer := func(server string) {
-		if before, _, found := strings.Cut(server, ":"); found {
-			server = before
+		host, _, err := net.SplitHostPort(server)
+		if err != nil {
+			// If splitting fails, fallback to the original server string
+			host = server
 		}
-		Log(ctx, ProxyLogger.Load().Debug(), "got answer from nameserver: %s", server)
+		Log(ctx, ProxyLogger.Load().Debug(), "got answer from nameserver: %s", host)
 	}
 	var (
 		nonSuccessAnswer      *dns.Msg
 		nonSuccessServer      string
 		controldSuccessAnswer *dns.Msg
-		publicServerAnswer    *dns.Msg
-		publicServer          string
+		publicResponses       []publicResponse
 	)
 	errs := make([]error, 0, numServers)
 	for res := range ch {
 		switch {
 		case res.answer != nil && res.answer.Rcode == dns.RcodeSuccess:
 			switch {
-			case res.server == controldPublicDnsWithPort:
-				controldSuccessAnswer = res.answer // only use ControlD answer as last one.
-			case !res.lan && publicServerAnswer == nil:
-				publicServerAnswer = res.answer // use public DNS answer after LAN server..
-				publicServer = res.server
-			default:
+			case res.lan:
+				// Always prefer LAN responses immediately
+				Log(ctx, ProxyLogger.Load().Debug(), "using LAN answer from: %s", res.server)
 				cancel()
 				logAnswer(res.server)
 				return res.answer, nil
+			case res.server == controldPublicDnsWithPort:
+				controldSuccessAnswer = res.answer
+			case !res.lan:
+				publicResponses = append(publicResponses, publicResponse{
+					answer: res.answer,
+					server: res.server,
+				})
 			}
 		case res.answer != nil:
 			nonSuccessAnswer = res.answer
 			nonSuccessServer = res.server
+			Log(ctx, ProxyLogger.Load().Debug(), "got non-success answer from: %s with code: %d",
+				res.server, res.answer.Rcode)
 		}
 		errs = append(errs, res.err)
 	}
-	if publicServerAnswer != nil {
-		logAnswer(publicServer)
-		return publicServerAnswer, nil
+
+	if len(publicResponses) > 0 {
+		resp := publicResponses[0]
+		Log(ctx, ProxyLogger.Load().Debug(), "got public answer from: %s", resp.server)
+		logAnswer(resp.server)
+		return resp.answer, nil
 	}
 	if controldSuccessAnswer != nil {
+		Log(ctx, ProxyLogger.Load().Debug(), "got ControlD answer from: %s", controldPublicDnsWithPort)
 		logAnswer(controldPublicDnsWithPort)
 		return controldSuccessAnswer, nil
 	}
 	if nonSuccessAnswer != nil {
+		Log(ctx, ProxyLogger.Load().Debug(), "got non-success answer from: %s", nonSuccessServer)
 		logAnswer(nonSuccessServer)
 		return nonSuccessAnswer, nil
 	}
@@ -328,7 +428,11 @@ func LookupIP(domain string) []string {
 }
 
 func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) {
-	nss := defaultNameservers()
+	if or == nil {
+		or = newResolverWithNameserver(defaultNameservers())
+	}
+	nss := *or.lanServers.Load()
+	nss = append(nss, *or.publicServers.Load()...)
 	if withBootstrapDNS {
 		nss = append([]string{net.JoinHostPort(controldBootstrapDns, "53")}, nss...)
 	}
@@ -467,17 +571,19 @@ func NewResolverWithNameserver(nameservers []string) Resolver {
 // The caller must ensure each server in list is formed "ip:53".
 func newResolverWithNameserver(nameservers []string) *osResolver {
 	r := &osResolver{}
-	nss := slices.Sorted(slices.Values(nameservers))
-	for i, ns := range nss {
+	var publicNss []string
+	var lanNss []string
+	for _, ns := range slices.Sorted(slices.Values(nameservers)) {
 		ip, _, _ := net.SplitHostPort(ns)
 		addr, _ := netip.ParseAddr(ip)
 		if isLanAddr(addr) {
-			r.currentLanServer.Store(&addr)
-			nss = slices.Delete(nss, i, i+1)
-			break
+			lanNss = append(lanNss, ns)
+		} else {
+			publicNss = append(publicNss, ns)
 		}
 	}
-	r.publicServer.Store(&nss)
+	r.lanServers.Store(&lanNss)
+	r.publicServers.Store(&publicNss)
 	return r
 }
 

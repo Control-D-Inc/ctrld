@@ -3,12 +3,9 @@ package ctrld
 import (
 	"context"
 	"net"
-	"slices"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
 
 	"github.com/miekg/dns"
 )
@@ -20,7 +17,7 @@ func Test_osResolver_Resolve(t *testing.T) {
 	go func() {
 		defer cancel()
 		resolver := &osResolver{}
-		resolver.publicServer.Store(&[]string{"127.0.0.127:5353"})
+		resolver.publicServers.Store(&[]string{"127.0.0.127:5353"})
 		m := new(dns.Msg)
 		m.SetQuestion("controld.com.", dns.TypeA)
 		m.RecursionDesired = true
@@ -34,26 +31,51 @@ func Test_osResolver_Resolve(t *testing.T) {
 	}
 }
 
+func Test_osResolver_ResolveLanHostname(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reqId := "req-id"
+	ctx = context.WithValue(ctx, ReqIdCtxKey{}, reqId)
+	ctx = LanQueryCtx(ctx)
+
+	go func(ctx context.Context) {
+		defer cancel()
+		id, ok := ctx.Value(ReqIdCtxKey{}).(string)
+		if !ok || id != reqId {
+			t.Error("missing request id")
+			return
+		}
+		lan, ok := ctx.Value(LanQueryCtxKey{}).(bool)
+		if !ok || !lan {
+			t.Error("not a LAN query")
+			return
+		}
+		resolver := &osResolver{}
+		resolver.publicServers.Store(&[]string{"76.76.2.0:53"})
+		m := new(dns.Msg)
+		m.SetQuestion("controld.com.", dns.TypeA)
+		m.RecursionDesired = true
+		_, err := resolver.Resolve(ctx, m)
+		if err == nil {
+			t.Error("os resolver succeeded unexpectedly")
+			return
+		}
+	}(ctx)
+
+	select {
+	case <-time.After(10 * time.Second):
+		t.Error("os resolver hangs")
+	case <-ctx.Done():
+	}
+}
+
 func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 	ns := make([]string, 0, 2)
 	servers := make([]*dns.Server, 0, 2)
-	successHandler := dns.HandlerFunc(func(w dns.ResponseWriter, msg *dns.Msg) {
-		m := new(dns.Msg)
-		m.SetRcode(msg, dns.RcodeSuccess)
-		w.WriteMsg(m)
-	})
-	nonSuccessHandlerWithRcode := func(rcode int) dns.HandlerFunc {
-		return dns.HandlerFunc(func(w dns.ResponseWriter, msg *dns.Msg) {
-			m := new(dns.Msg)
-			m.SetRcode(msg, rcode)
-			w.WriteMsg(m)
-		})
-	}
-
 	handlers := []dns.Handler{
 		nonSuccessHandlerWithRcode(dns.RcodeRefused),
 		nonSuccessHandlerWithRcode(dns.RcodeNameError),
-		successHandler,
+		successHandler(),
 	}
 	for i := range handlers {
 		pc, err := net.ListenPacket("udp", ":0")
@@ -74,7 +96,7 @@ func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 		}
 	}()
 	resolver := &osResolver{}
-	resolver.publicServer.Store(&ns)
+	resolver.publicServers.Store(&ns)
 	msg := new(dns.Msg)
 	msg.SetQuestion(".", dns.TypeNS)
 	answer, err := resolver.Resolve(context.Background(), msg)
@@ -93,7 +115,7 @@ func Test_osResolver_InitializationRace(t *testing.T) {
 	for range n {
 		go func() {
 			defer wg.Done()
-			InitializeOsResolver()
+			InitializeOsResolver(false)
 		}()
 	}
 	wg.Wait()
@@ -153,41 +175,18 @@ func runLocalPacketConnTestServer(t *testing.T, pc net.PacketConn, handler dns.H
 	return server, addr, nil
 }
 
-func Test_initializeOsResolver(t *testing.T) {
-	lanServer1 := "192.168.1.1"
-	lanServer2 := "10.0.10.69"
-	wanServer := "1.1.1.1"
-	publicServers := []string{net.JoinHostPort(wanServer, "53")}
+func successHandler() dns.HandlerFunc {
+	return func(w dns.ResponseWriter, msg *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(msg, dns.RcodeSuccess)
+		w.WriteMsg(m)
+	}
+}
 
-	// First initialization.
-	initializeOsResolver([]string{lanServer1, wanServer})
-	p := or.currentLanServer.Load()
-	assert.NotNil(t, p)
-	assert.Equal(t, lanServer1, p.String())
-	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
-
-	// No new LAN server, current LAN server -> last LAN server.
-	initializeOsResolver([]string{lanServer1, wanServer})
-	p = or.currentLanServer.Load()
-	assert.Nil(t, p)
-	p = or.lastLanServer.Load()
-	assert.NotNil(t, p)
-	assert.Equal(t, lanServer1, p.String())
-	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
-
-	// New LAN server detected.
-	initializeOsResolver([]string{lanServer2, lanServer1, wanServer})
-	p = or.currentLanServer.Load()
-	assert.NotNil(t, p)
-	assert.Equal(t, lanServer2, p.String())
-	p = or.lastLanServer.Load()
-	assert.NotNil(t, p)
-	assert.Equal(t, lanServer1, p.String())
-	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
-
-	// No LAN server available.
-	initializeOsResolver([]string{wanServer})
-	assert.Nil(t, or.currentLanServer.Load())
-	assert.Nil(t, or.lastLanServer.Load())
-	assert.True(t, slices.Equal(*or.publicServer.Load(), publicServers))
+func nonSuccessHandlerWithRcode(rcode int) dns.HandlerFunc {
+	return func(w dns.ResponseWriter, msg *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(msg, rcode)
+		w.WriteMsg(m)
+	}
 }

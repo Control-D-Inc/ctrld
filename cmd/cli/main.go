@@ -101,9 +101,23 @@ func initConsoleLogging() {
 }
 
 // initLogging initializes global logging setup.
-func initLogging() {
+func initLogging() []io.Writer {
 	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
-	initLoggingWithBackup(true)
+	return initLoggingWithBackup(true)
+}
+
+// initInteractiveLogging is like initLogging, but the ProxyLogger is discarded
+// to be used for all interactive commands.
+//
+// Current log file config will also be ignored.
+func initInteractiveLogging() {
+	old := cfg.Service.LogPath
+	cfg.Service.LogPath = ""
+	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
+	initLoggingWithBackup(false)
+	cfg.Service.LogPath = old
+	l := zerolog.New(io.Discard)
+	ctrld.ProxyLogger.Store(&l)
 }
 
 // initLoggingWithBackup initializes log setup base on current config.
@@ -112,8 +126,8 @@ func initLogging() {
 // This is only used in runCmd for special handling in case of logging config
 // change in cd mode. Without special reason, the caller should use initLogging
 // wrapper instead of calling this function directly.
-func initLoggingWithBackup(doBackup bool) {
-	writers := []io.Writer{io.Discard}
+func initLoggingWithBackup(doBackup bool) []io.Writer {
+	var writers []io.Writer
 	if logFilePath := normalizeLogFilePath(cfg.Service.LogPath); logFilePath != "" {
 		// Create parent directory if necessary.
 		if err := os.MkdirAll(filepath.Dir(logFilePath), 0750); err != nil {
@@ -151,21 +165,22 @@ func initLoggingWithBackup(doBackup bool) {
 	switch {
 	case silent:
 		zerolog.SetGlobalLevel(zerolog.NoLevel)
-		return
+		return writers
 	case verbose == 1:
 		logLevel = "info"
 	case verbose > 1:
 		logLevel = "debug"
 	}
 	if logLevel == "" {
-		return
+		return writers
 	}
 	level, err := zerolog.ParseLevel(logLevel)
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not set log level")
-		return
+		return writers
 	}
 	zerolog.SetGlobalLevel(level)
+	return writers
 }
 
 func initCache() {
