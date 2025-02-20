@@ -110,8 +110,8 @@ systemdResolve:
 			}
 			time.Sleep(time.Second)
 		}
+		mainLog.Load().Debug().Msg("DNS was not set for some reason")
 	}
-	mainLog.Load().Debug().Msg("DNS was not set for some reason")
 	return nil
 }
 

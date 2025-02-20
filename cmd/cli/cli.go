@@ -781,7 +781,13 @@ func defaultIfaceName() string {
 		if oi := osinfo.New(); strings.Contains(oi.String(), "Microsoft") {
 			return "lo"
 		}
-		mainLog.Load().Fatal().Err(err).Msg("failed to get default route interface")
+		// On linux, it could be either resolvconf or systemd which is managing DNS settings,
+		// so the interface name does not matter if there's no default route interface.
+		if runtime.GOOS == "linux" {
+			return "lo"
+		}
+		mainLog.Load().Debug().Err(err).Msg("no default route interface found")
+		return ""
 	}
 	return dri
 }

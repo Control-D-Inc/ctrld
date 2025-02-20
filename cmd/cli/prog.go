@@ -646,16 +646,74 @@ func (p *prog) setDNS() {
 	if cfg.Listener == nil {
 		return
 	}
-	if p.runningIface == "" {
-		return
-	}
-
-	// allIfaces tracks whether we should set DNS for all physical interfaces.
-	allIfaces := p.requiredMultiNICsConfig
 	lc := cfg.FirstListener()
 	if lc == nil {
 		return
 	}
+	ns := lc.IP
+	switch {
+	case lc.IsDirectDnsListener():
+		// If ctrld is direct listener, use 127.0.0.1 as nameserver.
+		ns = "127.0.0.1"
+	case lc.Port != 53:
+		ns = "127.0.0.1"
+		if resolver := router.LocalResolverIP(); resolver != "" {
+			ns = resolver
+		}
+	default:
+		// If we ever reach here, it means ctrld is running on lc.IP port 53,
+		// so we could just use lc.IP as nameserver.
+	}
+
+	nameservers := []string{ns}
+	if needRFC1918Listeners(lc) {
+		nameservers = append(nameservers, ctrld.Rfc1918Addresses()...)
+	}
+	if needLocalIPv6Listener() {
+		nameservers = append(nameservers, "::1")
+	}
+
+	slices.Sort(nameservers)
+
+	netIfaceName := ""
+	netIface := p.setDnsForRunningIface(nameservers)
+	if netIface != nil {
+		netIfaceName = netIface.Name
+	}
+	setDnsOK = true
+
+	if p.requiredMultiNICsConfig {
+		withEachPhysicalInterfaces(netIfaceName, "set DNS", func(i *net.Interface) error {
+			return setDnsIgnoreUnusableInterface(i, nameservers)
+		})
+	}
+	// resolvconf file is only useful when we have default route interface,
+	// then set DNS on this interface will push change to /etc/resolv.conf file.
+	if netIface != nil && shouldWatchResolvconf() {
+		servers := make([]netip.Addr, len(nameservers))
+		for i := range nameservers {
+			servers[i] = netip.MustParseAddr(nameservers[i])
+		}
+		p.dnsWg.Add(1)
+		go func() {
+			defer p.dnsWg.Done()
+			p.watchResolvConf(netIface, servers, setResolvConf)
+		}()
+	}
+	if p.dnsWatchdogEnabled() {
+		p.dnsWg.Add(1)
+		go func() {
+			defer p.dnsWg.Done()
+			p.dnsWatchdog(netIface, nameservers)
+		}()
+	}
+}
+
+func (p *prog) setDnsForRunningIface(nameservers []string) (runningIface *net.Interface) {
+	if p.runningIface == "" {
+		return
+	}
+
 	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
 
 	const maxDNSRetryAttempts = 3
@@ -689,59 +747,14 @@ func (p *prog) setDNS() {
 		return
 	}
 
+	runningIface = netIface
 	logger.Debug().Msg("setting DNS for interface")
-	ns := lc.IP
-	switch {
-	case lc.IsDirectDnsListener():
-		// If ctrld is direct listener, use 127.0.0.1 as nameserver.
-		ns = "127.0.0.1"
-	case lc.Port != 53:
-		ns = "127.0.0.1"
-		if resolver := router.LocalResolverIP(); resolver != "" {
-			ns = resolver
-		}
-	default:
-		// If we ever reach here, it means ctrld is running on lc.IP port 53,
-		// so we could just use lc.IP as nameserver.
-	}
-
-	nameservers := []string{ns}
-	if needRFC1918Listeners(lc) {
-		nameservers = append(nameservers, ctrld.Rfc1918Addresses()...)
-	}
-	if needLocalIPv6Listener() {
-		nameservers = append(nameservers, "::1")
-	}
-	slices.Sort(nameservers)
 	if err := setDNS(netIface, nameservers); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return
 	}
-	setDnsOK = true
 	logger.Debug().Msg("setting DNS successfully")
-	if allIfaces {
-		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
-			return setDnsIgnoreUnusableInterface(i, nameservers)
-		})
-	}
-	if shouldWatchResolvconf() {
-		servers := make([]netip.Addr, len(nameservers))
-		for i := range nameservers {
-			servers[i] = netip.MustParseAddr(nameservers[i])
-		}
-		p.dnsWg.Add(1)
-		go func() {
-			defer p.dnsWg.Done()
-			p.watchResolvConf(netIface, servers, setResolvConf)
-		}()
-	}
-	if p.dnsWatchdogEnabled() {
-		p.dnsWg.Add(1)
-		go func() {
-			defer p.dnsWg.Done()
-			p.dnsWatchdog(netIface, nameservers, allIfaces)
-		}()
-	}
+	return
 }
 
 // dnsWatchdogEnabled reports whether DNS watchdog is enabled.
@@ -764,12 +777,12 @@ func (p *prog) dnsWatchdogDuration() time.Duration {
 
 // dnsWatchdog watches for DNS changes on Darwin and Windows then re-applying ctrld's settings.
 // This is only works when deactivation pin set.
-func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces bool) {
+func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 	if !requiredMultiNICsConfig() {
 		return
 	}
-	logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
-	logger.Debug().Msg("start DNS settings watchdog")
+
+	mainLog.Load().Debug().Msg("start DNS settings watchdog")
 
 	ns := nameservers
 	slices.Sort(ns)
@@ -787,7 +800,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 				return
 			}
 			if dnsChanged(iface, ns) {
-				logger.Debug().Msg("DNS settings were changed, re-applying settings")
+				mainLog.Load().Debug().Msg("DNS settings were changed, re-applying settings")
 				// Check if the interface already has static DNS servers configured.
 				// currentStaticDNS is an OS-dependent helper that returns the current static DNS.
 				staticDNS, err := currentStaticDNS(iface)
@@ -810,8 +823,12 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 					mainLog.Load().Error().Err(err).Str("iface", iface.Name).Msgf("could not re-apply DNS settings")
 				}
 			}
-			if allIfaces {
-				withEachPhysicalInterfaces(iface.Name, "", func(i *net.Interface) error {
+			if p.requiredMultiNICsConfig {
+				ifaceName := ""
+				if iface != nil {
+					ifaceName = iface.Name
+				}
+				withEachPhysicalInterfaces(ifaceName, "", func(i *net.Interface) error {
 					if dnsChanged(i, ns) {
 
 						// Check if the interface already has static DNS servers configured.
@@ -846,25 +863,36 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 	}
 }
 
-// resetDNS performs a DNS reset on the running interface.
+// resetDNS performs a DNS reset for all interfaces.
+func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
+	netIfaceName := ""
+	if netIface := p.resetDNSForRunningIface(isStart, restoreStatic); netIface != nil {
+		netIfaceName = netIface.Name
+	}
+	// See corresponding comments in (*prog).setDNS function.
+	if p.requiredMultiNICsConfig {
+		withEachPhysicalInterfaces(netIfaceName, "reset DNS", resetDnsIgnoreUnusableInterface)
+	}
+}
+
+// resetDNSForRunningIface performs a DNS reset on the running interface.
 // The parameter isStart indicates whether this is being called as part of a start (or restart)
 // command. When true, we check if the current static DNS configuration already differs from the
 // service listener (127.0.0.1). If so, we assume that an admin has manually changed the interface's
 // static DNS settings and we do not override them using the potentially out-of-date saved file.
 // Otherwise, we restore the saved configuration (if any) or reset to DHCP.
-func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
+func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runningIface *net.Interface) {
 	if p.runningIface == "" {
 		mainLog.Load().Debug().Msg("no running interface, skipping resetDNS")
 		return
 	}
-	// See corresponding comments in (*prog).setDNS function.
-	allIfaces := p.requiredMultiNICsConfig
 	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
 	netIface, err := netInterface(p.runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
 	}
+	runningIface = netIface
 	if err := restoreNetworkManager(); err != nil {
 		logger.Error().Err(err).Msg("could not restore NetworkManager")
 		return
@@ -906,9 +934,7 @@ func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 			return
 		}
 	}
-	if allIfaces {
-		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDnsIgnoreUnusableInterface)
-	}
+	return
 }
 
 func (p *prog) logInterfacesState() {
@@ -1347,8 +1373,13 @@ func savedStaticNameservers(iface *net.Interface) []string {
 }
 
 // dnsChanged reports whether DNS settings for given interface was changed.
+// It returns false for a nil iface.
+//
 // The caller must sort the nameservers before calling this function.
 func dnsChanged(iface *net.Interface, nameservers []string) bool {
+	if iface == nil {
+		return false
+	}
 	curNameservers, _ := currentStaticDNS(iface)
 	slices.Sort(curNameservers)
 	if !slices.Equal(curNameservers, nameservers) {
