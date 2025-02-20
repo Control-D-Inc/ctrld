@@ -222,10 +222,16 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			lc := &logConn{conn: conn}
 			consoleWriter.Out = io.MultiWriter(os.Stdout, lc)
 			p.logConn = lc
+		} else {
+			mainLog.Load().Warn().Err(err).Msgf("unable to create log ipc connection")
 		}
+	} else {
+		mainLog.Load().Warn().Err(err).Msgf("unable to resolve socket address: %s", sockPath)
 	}
 	notifyExitToLogServer := func() {
-		_, _ = p.logConn.Write([]byte(msgExit))
+		if p.logConn != nil {
+			_, _ = p.logConn.Write([]byte(msgExit))
+		}
 	}
 
 	if daemon && runtime.GOOS == "windows" {
