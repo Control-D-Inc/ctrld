@@ -205,7 +205,13 @@ func initStartCmd() *cobra.Command {
 		Long: `Install and start the ctrld service
 
 NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
-		Args: cobra.NoArgs,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf("'ctrld start' doesn't accept positional arguments\n" +
+					"Use flags instead (e.g. --cd, --iface) or see 'ctrld start --help' for all options")
+			}
+			return nil
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			checkStrFlagEmpty(cmd, cdUidFlagName)
 			checkStrFlagEmpty(cmd, cdOrgFlagName)
@@ -555,6 +561,13 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 		Long: `Quick start service and configure DNS on interface
 
 NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf("'ctrld start' doesn't accept positional arguments\n" +
+					"Use flags instead (e.g. --cd, --iface) or see 'ctrld start --help' for all options")
+			}
+			return nil
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(os.Args) == 2 {
 				startOnly = true
