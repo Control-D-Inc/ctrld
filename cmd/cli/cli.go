@@ -1786,52 +1786,6 @@ func runningIface(s service.Service) *ifaceResponse {
 	return nil
 }
 
-// resetDnsNoLog performs resetting DNS with logging disable.
-func resetDnsNoLog(p *prog) {
-	// Normally, disable log to prevent annoying users.
-	if verbose < 3 {
-		lvl := zerolog.GlobalLevel()
-		zerolog.SetGlobalLevel(zerolog.Disabled)
-		// This is startup so interface settings may have changed
-		p.resetDNS(true, true)
-		zerolog.SetGlobalLevel(lvl)
-		return
-	}
-	// For debugging purpose, still emit log.
-	// This is startup so interface settings may have changed
-	p.resetDNS(true, true)
-}
-
-// resetDnsTask returns a task which perform reset DNS operation.
-func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, ir *ifaceResponse) task {
-	return task{func() error {
-		if iface == "" {
-			mainLog.Load().Debug().Msg("no iface, skipping resetDnsTask")
-			return nil
-		}
-		// Always reset DNS first, ensuring DNS setting is in a good state.
-		// resetDNS must use the "iface" value of current running ctrld
-		// process to reset what setDNS has done properly.
-		oldIface := iface
-		iface = "auto"
-		p.requiredMultiNICsConfig = requiredMultiNICsConfig()
-		if ir != nil {
-			iface = ir.Name
-			p.requiredMultiNICsConfig = ir.All
-		}
-		p.runningIface = iface
-		if isCtrldInstalled {
-			if status, _ := s.Status(); status == service.StatusRunning {
-				mainLog.Load().Fatal().Msg("reset DNS while ctrld still running is not safe")
-			}
-			mainLog.Load().Debug().Msg("Start resetDNS")
-			resetDnsNoLog(p)
-		}
-		iface = oldIface
-		return nil
-	}, false, "Reset DNS"}
-}
-
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
 func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
