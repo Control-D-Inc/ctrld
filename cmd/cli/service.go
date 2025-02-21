@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 
 	"github.com/kardianos/service"
 
@@ -168,7 +169,11 @@ func doTasks(tasks []task) bool {
 				mainLog.Load().Error().Msgf("error running task %s: %v", task.Name, err)
 				return false
 			}
-			mainLog.Load().Debug().Msgf("error running task %s: %v", task.Name, err)
+			// if this is darwin stop command, dont print debug
+			// since launchctl complains on every start
+			if runtime.GOOS != "darwin" || task.Name != "Stop" {
+				mainLog.Load().Debug().Msgf("error running task %s: %v", task.Name, err)
+			}
 		}
 	}
 	return true

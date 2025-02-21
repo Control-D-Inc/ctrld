@@ -216,19 +216,55 @@ func apiTransport(cdDev bool) *http.Transport {
 		if cdDev {
 			apiDomain = apiDomainDev
 		}
+
+		// First try IPv4
+		dialer := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+
 		ips := ctrld.LookupIP(apiDomain)
 		if len(ips) == 0 {
-			ctrld.ProxyLogger.Load().Warn().Msgf("No IPs found for %s, connecting to %s", apiDomain, addr)
-			return ctrldnet.Dialer.DialContext(ctx, network, addr)
+			ctrld.ProxyLogger.Load().Warn().Msgf("No IPs found for %s, falling back to direct connection to %s", apiDomain, addr)
+			return dialer.DialContext(ctx, network, addr)
 		}
-		ctrld.ProxyLogger.Load().Debug().Msgf("API IPs: %v", ips)
+
+		// Separate IPv4 and IPv6 addresses
+		var ipv4s, ipv6s []string
+		for _, ip := range ips {
+			if strings.Contains(ip, ":") {
+				ipv6s = append(ipv6s, ip)
+			} else {
+				ipv4s = append(ipv4s, ip)
+			}
+		}
+
 		_, port, _ := net.SplitHostPort(addr)
-		addrs := make([]string, len(ips))
-		for i := range ips {
-			addrs[i] = net.JoinHostPort(ips[i], port)
+
+		// Try IPv4 first
+		if len(ipv4s) > 0 {
+			addrs := make([]string, len(ipv4s))
+			for i, ip := range ipv4s {
+				addrs[i] = net.JoinHostPort(ip, port)
+			}
+			d := &ctrldnet.ParallelDialer{}
+			if conn, err := d.DialContext(ctx, "tcp4", addrs, ctrld.ProxyLogger.Load()); err == nil {
+				return conn, nil
+			}
 		}
-		d := &ctrldnet.ParallelDialer{}
-		return d.DialContext(ctx, network, addrs, ctrld.ProxyLogger.Load())
+
+		// Fall back to IPv6 if available
+		if len(ipv6s) > 0 {
+			addrs := make([]string, len(ipv6s))
+			for i, ip := range ipv6s {
+				addrs[i] = net.JoinHostPort(ip, port)
+			}
+			d := &ctrldnet.ParallelDialer{}
+			return d.DialContext(ctx, "tcp6", addrs, ctrld.ProxyLogger.Load())
+		}
+
+		// Final fallback to direct connection
+		return dialer.DialContext(ctx, network, addr)
 	}
 	if router.Name() == ddwrt.Name || runtime.GOOS == "android" {
 		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}

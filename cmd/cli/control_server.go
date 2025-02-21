@@ -79,33 +79,81 @@ func (s *controlServer) register(pattern string, handler http.Handler) {
 
 func (p *prog) registerControlServerHandler() {
 	p.cs.register(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		mainLog.Load().Debug().Msg("handling list clients request")
+
 		clients := p.ciTable.ListClients()
+		mainLog.Load().Debug().Int("client_count", len(clients)).Msg("retrieved clients list")
+
 		sort.Slice(clients, func(i, j int) bool {
 			return clients[i].IP.Less(clients[j].IP)
 		})
+		mainLog.Load().Debug().Msg("sorted clients by IP address")
+
 		if p.metricsQueryStats.Load() {
-			for _, client := range clients {
+			mainLog.Load().Debug().Msg("metrics query stats enabled, collecting query counts")
+
+			for idx, client := range clients {
+				mainLog.Load().Debug().
+					Int("index", idx).
+					Str("ip", client.IP.String()).
+					Str("mac", client.Mac).
+					Str("hostname", client.Hostname).
+					Msg("processing client metrics")
+
 				client.IncludeQueryCount = true
 				dm := &dto.Metric{}
+
+				if statsClientQueriesCount.MetricVec == nil {
+					mainLog.Load().Debug().
+						Str("client_ip", client.IP.String()).
+						Msg("skipping metrics collection: MetricVec is nil")
+					continue
+				}
+
 				m, err := statsClientQueriesCount.MetricVec.GetMetricWithLabelValues(
 					client.IP.String(),
 					client.Mac,
 					client.Hostname,
 				)
 				if err != nil {
-					mainLog.Load().Debug().Err(err).Msgf("could not get metrics for client: %v", client)
+					mainLog.Load().Debug().
+						Err(err).
+						Str("client_ip", client.IP.String()).
+						Str("mac", client.Mac).
+						Str("hostname", client.Hostname).
+						Msg("failed to get metrics for client")
 					continue
 				}
-				if err := m.Write(dm); err == nil {
+
+				if err := m.Write(dm); err == nil && dm.Counter != nil {
 					client.QueryCount = int64(dm.Counter.GetValue())
+					mainLog.Load().Debug().
+						Str("client_ip", client.IP.String()).
+						Int64("query_count", client.QueryCount).
+						Msg("successfully collected query count")
+				} else if err != nil {
+					mainLog.Load().Debug().
+						Err(err).
+						Str("client_ip", client.IP.String()).
+						Msg("failed to write metric")
 				}
 			}
+		} else {
+			mainLog.Load().Debug().Msg("metrics query stats disabled, skipping query counts")
 		}
 
 		if err := json.NewEncoder(w).Encode(&clients); err != nil {
+			mainLog.Load().Error().
+				Err(err).
+				Int("client_count", len(clients)).
+				Msg("failed to encode clients response")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		mainLog.Load().Debug().
+			Int("client_count", len(clients)).
+			Msg("successfully sent clients list response")
 	}))
 	p.cs.register(startedPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		select {

@@ -422,17 +422,27 @@ func (t *Table) ListClients() []*Client {
 	t.Refresh()
 	ipMap := make(map[string]*Client)
 	il := []ipLister{t.dhcp, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
+
 	for _, ir := range il {
+		if ir == nil {
+			continue
+		}
+
 		for _, ip := range ir.List() {
-			c, ok := ipMap[ip]
-			if !ok {
-				c = &Client{
-					IP:     netip.MustParseAddr(ip),
-					Source: map[string]struct{}{ir.String(): {}},
+			// Validate IP before using MustParseAddr
+			if addr, err := netip.ParseAddr(ip); err == nil {
+				c, ok := ipMap[ip]
+				if !ok {
+					c = &Client{
+						IP:     addr,
+						Source: map[string]struct{}{},
+					}
+					ipMap[ip] = c
 				}
-				ipMap[ip] = c
-			} else {
-				c.Source[ir.String()] = struct{}{}
+				// Safely get source name
+				if src := ir.String(); src != "" {
+					c.Source[src] = struct{}{}
+				}
 			}
 		}
 	}

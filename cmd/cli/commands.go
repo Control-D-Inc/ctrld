@@ -1273,7 +1273,8 @@ func initUpgradeCmd() *cobra.Command {
 			}
 			dlUrl := upgradeUrl(baseUrl)
 			mainLog.Load().Debug().Msgf("Downloading binary: %s", dlUrl)
-			resp, err := http.Get(dlUrl)
+
+			resp, err := getWithRetry(dlUrl)
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to download binary")
 			}
