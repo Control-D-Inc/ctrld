@@ -853,10 +853,12 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 	}
 
 	mainLog.Load().Debug().Msg("ctrld listener is ready")
-	mainLog.Load().Debug().Msg("performing self-check")
 
 	lc := cfg.FirstListener()
 	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
+
+	mainLog.Load().Debug().Msgf("performing listener test, sending queries to %s", addr)
+
 	if err := selfCheckResolveDomain(context.TODO(), addr, "internal", selfCheckInternalTestDomain); err != nil {
 		return false, status, err
 	}

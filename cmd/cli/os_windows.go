@@ -43,21 +43,42 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		// If there's a Dns server running, that means we are on AD with Dns feature enabled.
 		// Configuring the Dns server to forward queries to ctrld instead.
 		if hasLocalDnsServerRunning() {
+			mainLog.Load().Debug().Msg("Local DNS server detected, configuring forwarders")
+
 			file := absHomeDir(windowsForwardersFilename)
-			oldForwardersContent, _ := os.ReadFile(file)
+			mainLog.Load().Debug().Msgf("Using forwarders file: %s", file)
+
+			oldForwardersContent, err := os.ReadFile(file)
+			if err != nil {
+				mainLog.Load().Debug().Err(err).Msg("Could not read existing forwarders file")
+			} else {
+				mainLog.Load().Debug().Msgf("Existing forwarders content: %s", string(oldForwardersContent))
+			}
+
 			hasLocalIPv6Listener := needLocalIPv6Listener()
+			mainLog.Load().Debug().Bool("has_ipv6_listener", hasLocalIPv6Listener).Msg("IPv6 listener status")
+
 			forwarders := slices.DeleteFunc(slices.Clone(nameservers), func(s string) bool {
 				if !hasLocalIPv6Listener {
 					return false
 				}
 				return s == "::1"
 			})
+			mainLog.Load().Debug().Strs("forwarders", forwarders).Msg("Filtered forwarders list")
+
 			if err := os.WriteFile(file, []byte(strings.Join(forwarders, ",")), 0600); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("could not save forwarders settings")
+			} else {
+				mainLog.Load().Debug().Msg("Successfully wrote new forwarders file")
 			}
+
 			oldForwarders := strings.Split(string(oldForwardersContent), ",")
+			mainLog.Load().Debug().Strs("old_forwarders", oldForwarders).Msg("Previous forwarders")
+
 			if err := addDnsServerForwarders(forwarders, oldForwarders); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("could not set forwarders settings")
+			} else {
+				mainLog.Load().Debug().Msg("Successfully configured DNS server forwarders")
 			}
 		}
 	})
@@ -229,7 +250,11 @@ func currentStaticDNS(iface *net.Interface) ([]string, error) {
 				if len(value) > 0 {
 					mainLog.Load().Debug().Msgf("found static DNS for interface %q: %s", iface.Name, value)
 					parsed := parseDNSServers(value)
-					ns = append(ns, parsed...)
+					for _, pns := range parsed {
+						if !slices.Contains(ns, pns) {
+							ns = append(ns, pns)
+						}
+					}
 				}
 			}
 		}()
