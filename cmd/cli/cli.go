@@ -325,7 +325,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		}
 	}
 
-	updated := updateListenerConfig(&cfg)
+	updated := updateListenerConfig(&cfg, notifyExitToLogServer)
 
 	if cdUID != "" {
 		processLogAndCacheFlags()
@@ -488,7 +488,7 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 			mainLog.Load().Fatal().Msgf("failed to unmarshal default config: %v", err)
 		}
 		nop := zerolog.Nop()
-		_, _ = tryUpdateListenerConfig(&cfg, &nop, true)
+		_, _ = tryUpdateListenerConfig(&cfg, &nop, func() {}, true)
 		addExtraSplitDnsRule(&cfg)
 		if err := writeConfigFile(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
@@ -1167,8 +1167,8 @@ func mobileListenerIp() string {
 // updateListenerConfig updates the config for listeners if not defined,
 // or defined but invalid to be used, e.g: using loopback address other
 // than 127.0.0.1 with systemd-resolved.
-func updateListenerConfig(cfg *ctrld.Config) bool {
-	updated, _ := tryUpdateListenerConfig(cfg, nil, true)
+func updateListenerConfig(cfg *ctrld.Config, notifyToLogServerFunc func()) bool {
+	updated, _ := tryUpdateListenerConfig(cfg, nil, notifyToLogServerFunc, true)
 	if addExtraSplitDnsRule(cfg) {
 		updated = true
 	}
@@ -1178,7 +1178,7 @@ func updateListenerConfig(cfg *ctrld.Config) bool {
 // tryUpdateListenerConfig tries updating listener config with a working one.
 // If fatal is true, and there's listen address conflicted, the function do
 // fatal error.
-func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fatal bool) (updated, ok bool) {
+func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, notifyFunc func(), fatal bool) (updated, ok bool) {
 	ok = true
 	lcc := make(map[string]*listenerConfigCheck)
 	cdMode := cdUID != ""
@@ -1310,6 +1310,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 		maxAttempts := 10
 		for {
 			if attempts == maxAttempts {
+				notifyFunc()
 				logMsg(mainLog.Load().Fatal(), n, "could not find available listen ip and port")
 			}
 			addr := net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port))
@@ -1322,6 +1323,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 
 			if !check.IP && !check.Port {
 				if fatal {
+					notifyFunc()
 					logMsg(mainLog.Load().Fatal(), n, "failed to listen: %v", err)
 				}
 				ok = false
@@ -1389,6 +1391,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 			}
 			if listener.IP == oldIP && listener.Port == oldPort {
 				if fatal {
+					notifyFunc()
 					logMsg(mainLog.Load().Fatal(), n, "could not listen on %s: %v", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)), err)
 				}
 				ok = false
@@ -1427,6 +1430,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 					}
 				}
 				if !found {
+					notifyFunc()
 					logMsg(mainLog.Load().Fatal(), n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
 				}
 			}
@@ -1631,7 +1635,7 @@ func doGenerateNextDNSConfig(uid string) error {
 	}
 	mainLog.Load().Notice().Msgf("Generating nextdns config: %s", defaultConfigFile)
 	generateNextDNSConfig(uid)
-	updateListenerConfig(&cfg)
+	updateListenerConfig(&cfg, func() {})
 	return writeConfigFile(&cfg)
 }
 
