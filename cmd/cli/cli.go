@@ -1185,6 +1185,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 	nextdnsMode := nextdns != ""
 	// For Windows server with local Dns server running, we can only try on random local IP.
 	hasLocalDnsServer := hasLocalDnsServerRunning()
+	notRouter := router.Name() == ""
 	for n, listener := range cfg.Listener {
 		lcc[n] = &listenerConfigCheck{}
 		if listener.IP == "" {
@@ -1214,6 +1215,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 		}
 		updated = updated || lcc[n].IP || lcc[n].Port
 	}
+
 	il := mainLog.Load()
 	if infoLogger != nil {
 		il = infoLogger
@@ -1298,6 +1300,12 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 			tryOldIPPort5354 = false
 			tryPort5354 = false
 		}
+		// if not running on a router, we should not try to listen on any port other than 53
+		// if we do, this will break the dns resolution for the system.
+		if notRouter {
+			tryOldIPPort5354 = false
+			tryPort5354 = false
+		}
 		attempts := 0
 		maxAttempts := 10
 		for {
@@ -1309,6 +1317,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 			if err == nil {
 				break
 			}
+
+			logMsg(il.Info(), n, "error listening on address: %s, error: %v", addr, err)
+
 			if !check.IP && !check.Port {
 				if fatal {
 					logMsg(mainLog.Load().Fatal(), n, "failed to listen: %v", err)
@@ -1369,14 +1380,16 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 			} else {
 				listener.IP = oldIP
 			}
-			if check.Port {
+			// if we are not running on a router, we should not try to listen on any port other than 53
+			// if we do, this will break the dns resolution for the system.
+			if check.Port && !notRouter {
 				listener.Port = randomPort()
 			} else {
 				listener.Port = oldPort
 			}
 			if listener.IP == oldIP && listener.Port == oldPort {
 				if fatal {
-					logMsg(mainLog.Load().Fatal(), n, "could not listener on %s: %v", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)), err)
+					logMsg(mainLog.Load().Fatal(), n, "could not listen on %s: %v", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)), err)
 				}
 				ok = false
 				break
