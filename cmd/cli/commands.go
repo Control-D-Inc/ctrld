@@ -462,6 +462,9 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					return
 				}
 
+				// add a small delay to ensure the service is started and did not crash
+				time.Sleep(1 * time.Second)
+
 				ok, status, err := selfCheckStatus(ctx, s, sockDir)
 				switch {
 				case ok && status == service.StatusRunning:
