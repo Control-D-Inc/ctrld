@@ -1314,6 +1314,10 @@ var errSaveCurrentStaticDNSNotSupported = errors.New("saving current DNS is not 
 // saveCurrentStaticDNS saves the current static DNS settings for restoring later.
 // Only works on Windows and Mac.
 func saveCurrentStaticDNS(iface *net.Interface) error {
+	if iface == nil {
+		mainLog.Load().Debug().Msg("could not save current static DNS settings for nil interface")
+		return nil
+	}
 	switch runtime.GOOS {
 	case "windows", "darwin":
 	default:
@@ -1355,6 +1359,9 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 
 // savedStaticDnsSettingsFilePath returns the path to saved DNS settings of the given interface.
 func savedStaticDnsSettingsFilePath(iface *net.Interface) string {
+	if iface == nil {
+		return ""
+	}
 	return absHomeDir(".dns_" + iface.Name)
 }
 
@@ -1362,6 +1369,10 @@ func savedStaticDnsSettingsFilePath(iface *net.Interface) string {
 //
 //lint:ignore U1000 use in os_windows.go and os_darwin.go
 func savedStaticNameservers(iface *net.Interface) []string {
+	if iface == nil {
+		mainLog.Load().Debug().Msg("could not get saved static DNS settings for nil interface")
+		return nil
+	}
 	file := savedStaticDnsSettingsFilePath(iface)
 	if data, _ := os.ReadFile(file); len(data) > 0 {
 		saveValues := strings.Split(string(data), ",")

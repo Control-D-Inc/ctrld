@@ -248,7 +248,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					os.Exit(deactivationPinInvalidExitCode)
 				}
 				currentIface = runningIface(s)
-				mainLog.Load().Debug().Msgf("current interface on start: %s", currentIface.Name)
+				mainLog.Load().Debug().Msgf("current interface on start: %v", currentIface)
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
