@@ -649,11 +649,15 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	// Fetch config, unmarshal to cfg.
 	if resolverConfig.Ctrld.CustomConfig != "" {
 		logger.Info().Msg("using defined custom config of Control-D resolver")
-		if err := validateCdRemoteConfig(resolverConfig, cfg); err == nil {
+		var cfgErr error
+		if cfgErr = validateCdRemoteConfig(resolverConfig, cfg); cfgErr == nil {
 			setListenerDefaultValue(cfg)
-			return resolverConfig, nil
+			setNetworkDefaultValue(cfg)
+			if cfgErr = validateConfig(cfg); cfgErr == nil {
+				return resolverConfig, nil
+			}
 		}
-		mainLog.Load().Err(err).Msg("disregarding invalid custom config")
+		mainLog.Load().Warn().Err(err).Msg("disregarding invalid custom config")
 	}
 
 	bootstrapIP := func(endpoint string) string {
@@ -670,11 +674,7 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 		}
 		return ""
 	}
-	cfg.Network = make(map[string]*ctrld.NetworkConfig)
-	cfg.Network["0"] = &ctrld.NetworkConfig{
-		Name:  "Network 0",
-		Cidrs: []string{"0.0.0.0/0"},
-	}
+
 	cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
 	cfg.Upstream["0"] = &ctrld.UpstreamConfig{
 		BootstrapIP: bootstrapIP(resolverConfig.DOH),
@@ -697,6 +697,7 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 
 	// Set default value.
 	setListenerDefaultValue(cfg)
+	setNetworkDefaultValue(cfg)
 
 	return resolverConfig, nil
 }
@@ -710,7 +711,21 @@ func setListenerDefaultValue(cfg *ctrld.Config) {
 	}
 }
 
+// setListenerDefaultValue sets the default value for cfg.Listener if none existed.
+func setNetworkDefaultValue(cfg *ctrld.Config) {
+	if len(cfg.Network) == 0 {
+		cfg.Network = map[string]*ctrld.NetworkConfig{
+			"0": {
+				Name:  "Network 0",
+				Cidrs: []string{"0.0.0.0/0"},
+			},
+		}
+	}
+}
+
 // validateCdRemoteConfig validates the custom config from ControlD if defined.
+// This only validate the config syntax. To validate the config rules, calling
+// validateConfig with the cfg after calling this function.
 func validateCdRemoteConfig(rc *controld.ResolverConfig, cfg *ctrld.Config) error {
 	if rc.Ctrld.CustomConfig == "" {
 		return nil
@@ -1826,8 +1841,10 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	}
 	// validateCdRemoteConfig clobbers v, saving it here to restore later.
 	oldV := v
-	if err := validateCdRemoteConfig(rc, &ctrld.Config{}); err != nil {
-		if errors.As(err, &viper.ConfigParseError{}) {
+	var cfgErr error
+	remoteCfg := &ctrld.Config{}
+	if cfgErr = validateCdRemoteConfig(rc, remoteCfg); cfgErr != nil {
+		if errors.As(cfgErr, &viper.ConfigParseError{}) {
 			if configStr, _ := base64.StdEncoding.DecodeString(rc.Ctrld.CustomConfig); len(configStr) > 0 {
 				tmpDir := os.TempDir()
 				tmpConfFile := filepath.Join(tmpDir, "ctrld.toml")
@@ -1843,12 +1860,15 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 				}
 				// If we could not log details error, emit what we have already got.
 				if !errorLogged {
-					mainLog.Load().Error().Msgf("failed to parse custom config: %v", err)
+					mainLog.Load().Error().Msgf("failed to parse custom config: %v", cfgErr)
 				}
 			}
 		} else {
 			mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
 		}
+	}
+	cfgErr = validateConfig(remoteCfg)
+	if cfgErr != nil {
 		mainLog.Load().Warn().Msg("disregarding invalid custom config")
 	}
 	v = oldV

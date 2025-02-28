@@ -359,6 +359,7 @@ func (p *prog) apiConfigReload() {
 				return
 			}
 			setListenerDefaultValue(cfg)
+			setNetworkDefaultValue(cfg)
 			logger.Debug().Msg("custom config changes detected, reloading...")
 			p.apiReloadCh <- cfg
 		} else {
