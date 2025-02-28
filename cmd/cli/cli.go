@@ -1866,6 +1866,9 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 		} else {
 			mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
 		}
+	} else {
+		setListenerDefaultValue(remoteCfg)
+		setNetworkDefaultValue(remoteCfg)
 	}
 	cfgErr = validateConfig(remoteCfg)
 	if cfgErr != nil {
