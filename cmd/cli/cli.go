@@ -1843,7 +1843,11 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	oldV := v
 	var cfgErr error
 	remoteCfg := &ctrld.Config{}
-	if cfgErr = validateCdRemoteConfig(rc, remoteCfg); cfgErr != nil {
+	if cfgErr = validateCdRemoteConfig(rc, remoteCfg); cfgErr == nil {
+		setListenerDefaultValue(remoteCfg)
+		setNetworkDefaultValue(remoteCfg)
+		cfgErr = validateConfig(remoteCfg)
+	} else {
 		if errors.As(cfgErr, &viper.ConfigParseError{}) {
 			if configStr, _ := base64.StdEncoding.DecodeString(rc.Ctrld.CustomConfig); len(configStr) > 0 {
 				tmpDir := os.TempDir()
@@ -1866,11 +1870,7 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 		} else {
 			mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
 		}
-	} else {
-		setListenerDefaultValue(remoteCfg)
-		setNetworkDefaultValue(remoteCfg)
 	}
-	cfgErr = validateConfig(remoteCfg)
 	if cfgErr != nil {
 		mainLog.Load().Warn().Msg("disregarding invalid custom config")
 	}

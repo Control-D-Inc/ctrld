@@ -351,15 +351,19 @@ func (p *prog) apiConfigReload() {
 		if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated || forced {
 			lastUpdated = time.Now().Unix()
 			cfg := &ctrld.Config{}
-			if err := validateCdRemoteConfig(resolverConfig, cfg); err != nil {
+			var cfgErr error
+			if cfgErr = validateCdRemoteConfig(resolverConfig, cfg); cfgErr == nil {
+				setListenerDefaultValue(cfg)
+				setNetworkDefaultValue(cfg)
+				cfgErr = validateConfig(cfg)
+			}
+			if cfgErr != nil {
 				logger.Warn().Err(err).Msg("skipping invalid custom config")
 				if _, err := controld.UpdateCustomLastFailed(cdUID, rootCmd.Version, cdDev, true); err != nil {
 					logger.Error().Err(err).Msg("could not mark custom last update failed")
 				}
 				return
 			}
-			setListenerDefaultValue(cfg)
-			setNetworkDefaultValue(cfg)
 			logger.Debug().Msg("custom config changes detected, reloading...")
 			p.apiReloadCh <- cfg
 		} else {
