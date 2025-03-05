@@ -1839,6 +1839,12 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 			return err
 		}
 	}
+
+	// return earlier if there's no custom config.
+	if rc.Ctrld.CustomConfig == "" {
+		return nil
+	}
+
 	// validateCdRemoteConfig clobbers v, saving it here to restore later.
 	oldV := v
 	var cfgErr error
