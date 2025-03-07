@@ -529,7 +529,7 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 		for i := range addrs {
 			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
 		}
-		conn, err := pd.DialContext(ctx, network, dialAddrs)
+		conn, err := pd.DialContext(ctx, network, dialAddrs, ProxyLogger.Load())
 		if err != nil {
 			return nil, err
 		}

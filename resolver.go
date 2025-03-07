@@ -48,7 +48,15 @@ const (
 
 var controldPublicDnsWithPort = net.JoinHostPort(controldPublicDns, "53")
 
-var localResolver = newLocalResolver()
+var localResolver Resolver
+
+func init() {
+	// Initializing ProxyLogger here, so other places don't have to do nil check.
+	l := zerolog.New(io.Discard)
+	ProxyLogger.Store(&l)
+
+	localResolver = newLocalResolver()
+}
 
 var (
 	resolverMutex    sync.Mutex
@@ -91,10 +99,8 @@ func availableNameservers() []string {
 	machineIPsMap := make(map[string]struct{}, len(regularIPs))
 
 	//load the logger
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
+
 	Log(context.Background(), logger.Debug(),
 		"Got local addresses - regular IPs: %v, loopback IPs: %v", regularIPs, loopbackIPs)
 
@@ -193,9 +199,12 @@ func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 	case ResolverTypeDOQ:
 		return &doqResolver{uc: uc}, nil
 	case ResolverTypeOS:
+		resolverMutex.Lock()
 		if or == nil {
+			ProxyLogger.Load().Debug().Msgf("Initialize new OS resolver")
 			or = newResolverWithNameserver(defaultNameservers())
 		}
+		resolverMutex.Unlock()
 		return or, nil
 	case ResolverTypeLegacy:
 		return &legacyResolver{uc: uc}, nil
@@ -277,14 +286,29 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		nss = append(nss, (*p)...)
 	}
 	numServers := len(nss) + len(publicServers)
+
 	// If this is a LAN query, skip public DNS.
 	lan, ok := ctx.Value(LanQueryCtxKey{}).(bool)
+
+	// remove controldPublicDnsWithPort from publicServers for LAN queries
+	// this is to prevent DoS for high frequency local requests
 	if ok && lan {
-		numServers -= len(publicServers)
+		if index := slices.Index(publicServers, controldPublicDnsWithPort); index != -1 {
+			publicServers = slices.Delete(publicServers, index, index+1)
+			numServers--
+		}
 	}
+	question := ""
+	if msg != nil && len(msg.Question) > 0 {
+		question = msg.Question[0].Name
+	}
+	Log(ctx, ProxyLogger.Load().Debug(), "os resolver query for %s with nameservers: %v public: %v", question, nss, publicServers)
+
+	// New check: If no resolvers are available, return an error.
 	if numServers == 0 {
-		return nil, errors.New("no nameservers available")
+		return nil, errors.New("no nameservers available for query")
 	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -320,10 +344,6 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 			}(server)
 		}
 	}
-	do(nss, true)
-	if !lan {
-		do(publicServers, false)
-	}
 
 	logAnswer := func(server string) {
 		host, _, err := net.SplitHostPort(server)
@@ -333,6 +353,18 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		}
 		Log(ctx, ProxyLogger.Load().Debug(), "got answer from nameserver: %s", host)
 	}
+
+	// try local nameservers
+	if len(nss) > 0 {
+		do(nss, true)
+	}
+
+	// we must always try the public servers too, since DCHP may have only public servers
+	// this is okay to do since we always prefer LAN nameserver responses
+	if len(publicServers) > 0 {
+		do(publicServers, false)
+	}
+
 	var (
 		nonSuccessAnswer      *dns.Msg
 		nonSuccessServer      string
@@ -353,33 +385,49 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 			case res.server == controldPublicDnsWithPort:
 				controldSuccessAnswer = res.answer
 			case !res.lan:
+				// if there are no LAN nameservers, we should not wait
+				// just use the first response
+				if len(nss) == 0 {
+					Log(ctx, ProxyLogger.Load().Debug(), "using public answer from: %s", res.server)
+					cancel()
+					logAnswer(res.server)
+					return res.answer, nil
+				}
 				publicResponses = append(publicResponses, publicResponse{
 					answer: res.answer,
 					server: res.server,
 				})
 			}
 		case res.answer != nil:
-			nonSuccessAnswer = res.answer
-			nonSuccessServer = res.server
 			Log(ctx, ProxyLogger.Load().Debug(), "got non-success answer from: %s with code: %d",
 				res.server, res.answer.Rcode)
+			// When there are no LAN nameservers, we should not wait
+			// for other nameservers to respond.
+			if len(nss) == 0 {
+				Log(ctx, ProxyLogger.Load().Debug(), "no lan nameservers using public non success answer")
+				cancel()
+				logAnswer(res.server)
+				return res.answer, nil
+			}
+			nonSuccessAnswer = res.answer
+			nonSuccessServer = res.server
 		}
 		errs = append(errs, res.err)
 	}
 
 	if len(publicResponses) > 0 {
 		resp := publicResponses[0]
-		Log(ctx, ProxyLogger.Load().Debug(), "got public answer from: %s", resp.server)
+		Log(ctx, ProxyLogger.Load().Debug(), "using public answer from: %s", resp.server)
 		logAnswer(resp.server)
 		return resp.answer, nil
 	}
 	if controldSuccessAnswer != nil {
-		Log(ctx, ProxyLogger.Load().Debug(), "got ControlD answer from: %s", controldPublicDnsWithPort)
+		Log(ctx, ProxyLogger.Load().Debug(), "using ControlD answer from: %s", controldPublicDnsWithPort)
 		logAnswer(controldPublicDnsWithPort)
 		return controldSuccessAnswer, nil
 	}
 	if nonSuccessAnswer != nil {
-		Log(ctx, ProxyLogger.Load().Debug(), "got non-success answer from: %s", nonSuccessServer)
+		Log(ctx, ProxyLogger.Load().Debug(), "using non-success answer from: %s", nonSuccessServer)
 		logAnswer(nonSuccessServer)
 		return nonSuccessAnswer, nil
 	}
@@ -428,9 +476,13 @@ func LookupIP(domain string) []string {
 }
 
 func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) {
+	resolverMutex.Lock()
 	if or == nil {
+		ProxyLogger.Load().Debug().Msgf("Initialize OS resolver in lookupIP")
 		or = newResolverWithNameserver(defaultNameservers())
 	}
+	resolverMutex.Unlock()
+
 	nss := *or.lanServers.Load()
 	nss = append(nss, *or.publicServers.Load()...)
 	if withBootstrapDNS {
@@ -510,6 +562,9 @@ func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) 
 //   - Gateway IP address (depends on OS).
 //   - Input servers.
 func NewBootstrapResolver(servers ...string) Resolver {
+	logger := *ProxyLogger.Load()
+
+	Log(context.Background(), logger.Debug(), "NewBootstrapResolver called with servers: %v", servers)
 	nss := defaultNameservers()
 	nss = append([]string{controldPublicDnsWithPort}, nss...)
 	for _, ns := range servers {
@@ -526,6 +581,11 @@ func NewBootstrapResolver(servers ...string) Resolver {
 //
 // This is useful for doing PTR lookup in LAN network.
 func NewPrivateResolver() Resolver {
+
+	logger := *ProxyLogger.Load()
+
+	Log(context.Background(), logger.Debug(), "NewPrivateResolver called")
+
 	nss := defaultNameservers()
 	resolveConfNss := nameserversFromResolvconf()
 	localRfc1918Addrs := Rfc1918Addresses()
@@ -570,6 +630,9 @@ func NewResolverWithNameserver(nameservers []string) Resolver {
 // newResolverWithNameserver returns an OS resolver from given nameservers list.
 // The caller must ensure each server in list is formed "ip:53".
 func newResolverWithNameserver(nameservers []string) *osResolver {
+	logger := *ProxyLogger.Load()
+
+	Log(context.Background(), logger.Debug(), "newResolverWithNameserver called with nameservers: %v", nameservers)
 	r := &osResolver{}
 	var publicNss []string
 	var lanNss []string

@@ -166,7 +166,6 @@ before serving the query.
 
 ### max_concurrent_requests
 The number of concurrent requests that will be handled, must be a non-negative integer. 
-Tweaking this value depends on the capacity of your system.
 
 - Type: number
 - Required: no
@@ -253,9 +252,7 @@ Specifying the `ip` and `port` of the Prometheus metrics server. The Prometheus 
 - Default: ""
 
 ### dns_watchdog_enabled
-Checking DNS changes to network interfaces and reverting to ctrld's own settings.
-
-The DNS watchdog process only runs on Windows and MacOS, while in `--cd` mode. 
+Watches all physical interfaces for DNS changes and reverts them to ctrld's settings.The DNS watchdog process only runs on Windows and MacOS.
 
 - Type: boolean
 - Required: no
@@ -274,7 +271,7 @@ If the time duration is non-positive, default value will be used.
 - Default: 20s
 
 ### refetch_time
-Time in seconds between each iteration that reloads custom config if changed.
+Time in seconds between each iteration that reloads custom config from the API.
 
 The value must be a positive number, any invalid value will be ignored and default value will be used.
 - Type: number
@@ -282,7 +279,7 @@ The value must be a positive number, any invalid value will be ignored and defau
 - Default: 3600
 
 ### leak_on_upstream_failure
-Once ctrld is "offline", mean ctrld could not connect to any upstream, next queries will be leaked to OS resolver.
+If a remote upstream fails to resolve a query or is unreachable, `ctrld` will forward the queries to the default DNS resolver on the network. If failures persist, `ctrld` will remove itself from all networking interfaces until connectivity is restored. 
 
 - Type: boolean
 - Required: no
@@ -530,6 +527,15 @@ rules = [
     {"*.local" = []},
 ]
 ```
+
+If there is no explicitly defined rules, LAN queries will be handled solely by the OS resolver.
+
+These following domains are considered LAN queries:
+
+- Queries does not have dot `.` in domain name, like `machine1`, `example`, ... (1)
+- Queries have domain ends with: `.domain`, `.lan`, `.local`.                   (2)
+- All `SRV` queries of LAN hostname (1) + (2).
+- `PTR` queries with private IPs.
 
 ---
 

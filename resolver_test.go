@@ -70,41 +70,59 @@ func Test_osResolver_ResolveLanHostname(t *testing.T) {
 }
 
 func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
-	ns := make([]string, 0, 2)
-	servers := make([]*dns.Server, 0, 2)
-	handlers := []dns.Handler{
+	// Set up a LAN nameserver that returns a success response.
+	lanPC, err := net.ListenPacket("udp", "127.0.0.1:0") // 127.0.0.1 is considered LAN (loopback)
+	if err != nil {
+		t.Fatalf("failed to listen on LAN address: %v", err)
+	}
+	lanServer, lanAddr, err := runLocalPacketConnTestServer(t, lanPC, successHandler())
+	if err != nil {
+		t.Fatalf("failed to run LAN test server: %v", err)
+	}
+	defer lanServer.Shutdown()
+
+	// Set up two public nameservers that return non-success responses.
+	publicHandlers := []dns.Handler{
 		nonSuccessHandlerWithRcode(dns.RcodeRefused),
 		nonSuccessHandlerWithRcode(dns.RcodeNameError),
-		successHandler(),
 	}
-	for i := range handlers {
+	var publicNS []string
+	var publicServers []*dns.Server
+	for _, handler := range publicHandlers {
 		pc, err := net.ListenPacket("udp", ":0")
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("failed to listen on public address: %v", err)
 		}
-
-		s, addr, err := runLocalPacketConnTestServer(t, pc, handlers[i])
+		s, addr, err := runLocalPacketConnTestServer(t, pc, handler)
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("failed to run public test server: %v", err)
 		}
-		ns = append(ns, addr)
-		servers = append(servers, s)
+		publicNS = append(publicNS, addr)
+		publicServers = append(publicServers, s)
 	}
 	defer func() {
-		for _, server := range servers {
-			server.Shutdown()
+		for _, s := range publicServers {
+			s.Shutdown()
 		}
 	}()
+
+	// We now create an osResolver which has both a LAN and public nameserver.
 	resolver := &osResolver{}
-	resolver.publicServers.Store(&ns)
+	// Explicitly store the LAN nameserver.
+	resolver.lanServers.Store(&[]string{lanAddr})
+	// And store the public nameservers.
+	resolver.publicServers.Store(&publicNS)
+
 	msg := new(dns.Msg)
 	msg.SetQuestion(".", dns.TypeNS)
 	answer, err := resolver.Resolve(context.Background(), msg)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// Since a LAN nameserver is available and returns a success answer, we expect RcodeSuccess.
 	if answer.Rcode != dns.RcodeSuccess {
-		t.Errorf("unexpected return code: %s", dns.RcodeToString[answer.Rcode])
+		t.Errorf("expected a success answer from LAN nameserver (RcodeSuccess) but got: %s", dns.RcodeToString[answer.Rcode])
 	}
 }
 

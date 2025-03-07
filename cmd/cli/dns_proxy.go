@@ -20,12 +20,12 @@ import (
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
-	"tailscale.com/types/logger"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
+	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 const (
@@ -435,14 +435,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 		upstreams = []string{upstreamOS}
-	}
-
-	if p.isAdDomainQuery(req.msg) {
-		ctrld.Log(ctx, mainLog.Load().Debug(),
-			"AD domain query detected for %s in domain %s",
-			req.msg.Question[0].Name, p.adDomain)
-		upstreamConfigs = []*ctrld.UpstreamConfig{localUpstreamConfig}
-		upstreams = []string{upstreamOS}
+		// For OS resolver, local addresses are ignored to prevent possible looping.
+		// However, on Active Directory Domain Controller, where it has local DNS server
+		// running and listening on local addresses, these local addresses must be used
+		// as nameservers, so queries for ADDC could be resolved as expected.
+		if p.isAdDomainQuery(req.msg) {
+			ctrld.Log(ctx, mainLog.Load().Debug(),
+				"AD domain query detected for %s in domain %s",
+				req.msg.Question[0].Name, p.adDomain)
+			upstreamConfigs = []*ctrld.UpstreamConfig{localUpstreamConfig}
+			upstreams = []string{upstreamOSLocal}
+		}
 	}
 
 	res := &proxyResponse{}
@@ -458,7 +461,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
 	} else {
 		switch {
-		case isSrvLookup(req.msg):
+		case isSrvLanLookup(req.msg):
 			upstreams = []string{upstreamOS}
 			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 			ctx = ctrld.LanQueryCtx(ctx)
@@ -620,7 +623,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
 
 	// if we have no healthy upstreams, trigger recovery flow
-	if p.recoverOnUpstreamFailure() {
+	if p.leakOnUpstreamFailure() {
 		if p.um.countHealthy(upstreams) == 0 {
 			p.recoveryCancelMu.Lock()
 			if p.recoveryCancel == nil {
@@ -639,19 +642,20 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		} else {
 			mainLog.Load().Debug().Msg("One upstream is down but at least one is healthy; skipping recovery trigger")
 		}
-	}
 
-	// attempt query to OS resolver while as a retry catch all
-	if upstreams[0] != upstreamOS {
-		ctrld.Log(ctx, mainLog.Load().Debug(), "attempting query to OS resolver as a retry catch all")
-		answer := resolve(upstreamOS, osUpstreamConfig, req.msg)
-		if answer != nil {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query successful")
-			res.answer = answer
-			res.upstream = osUpstreamConfig.Endpoint
-			return res
+		// attempt query to OS resolver while as a retry catch all
+		// we dont want this to happen if leakOnUpstreamFailure is false
+		if upstreams[0] != upstreamOS {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "attempting query to OS resolver as a retry catch all")
+			answer := resolve(upstreamOS, osUpstreamConfig, req.msg)
+			if answer != nil {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query successful")
+				res.answer = answer
+				res.upstream = osUpstreamConfig.Endpoint
+				return res
+			}
+			ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query failed")
 		}
-		ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query failed")
 	}
 
 	answer := new(dns.Msg)
@@ -1108,19 +1112,25 @@ func isLanHostnameQuery(m *dns.Msg) bool {
 	default:
 		return false
 	}
-	name := strings.TrimSuffix(q.Name, ".")
+	return isLanHostname(q.Name)
+}
+
+// isSrvLanLookup reports whether DNS message is an SRV query of a LAN hostname.
+func isSrvLanLookup(m *dns.Msg) bool {
+	if m == nil || len(m.Question) == 0 {
+		return false
+	}
+	q := m.Question[0]
+	return q.Qtype == dns.TypeSRV && isLanHostname(q.Name)
+}
+
+// isLanHostname reports whether name is a LAN hostname.
+func isLanHostname(name string) bool {
+	name = strings.TrimSuffix(name, ".")
 	return !strings.Contains(name, ".") ||
 		strings.HasSuffix(name, ".domain") ||
 		strings.HasSuffix(name, ".lan") ||
 		strings.HasSuffix(name, ".local")
-}
-
-// isSrvLookup reports whether DNS message is a SRV query.
-func isSrvLookup(m *dns.Msg) bool {
-	if m == nil || len(m.Question) == 0 {
-		return false
-	}
-	return m.Question[0].Qtype == dns.TypeSRV
 }
 
 // isWanClient reports whether the input is a WAN address.
@@ -1177,7 +1187,10 @@ func FlushDNSCache() error {
 
 // monitorNetworkChanges starts monitoring for network interface changes
 func (p *prog) monitorNetworkChanges(ctx context.Context) error {
-	mon, err := netmon.New(logger.WithPrefix(mainLog.Load().Printf, "netmon: "))
+	mon, err := netmon.New(func(format string, args ...any) {
+		// Always fetch the latest logger (and inject the prefix)
+		mainLog.Load().Printf("netmon: "+format, args...)
+	})
 	if err != nil {
 		return fmt.Errorf("creating network monitor: %w", err)
 	}
@@ -1248,8 +1261,16 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			}
 		}
 
+		// if the default route changed, set changed to true
+		if delta.New.DefaultRouteInterface != delta.Old.DefaultRouteInterface {
+			changed = true
+			mainLog.Load().Debug().Msgf("Default route changed from %s to %s", delta.Old.DefaultRouteInterface, delta.New.DefaultRouteInterface)
+		}
+
 		if !changed {
 			mainLog.Load().Debug().Msg("Ignoring interface change - no valid interfaces affected")
+			// check if the default IPs are still on an interface that is up
+			ValidateDefaultLocalIPsFromDelta(delta.New)
 			return
 		}
 
@@ -1260,6 +1281,13 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 
 		// Get IPs from default route interface in new state
 		selfIP := defaultRouteIP()
+
+		// Ensure that selfIP is an IPv4 address.
+		// If defaultRouteIP mistakenly returns an IPv6 (such as a ULA), clear it
+		if ip := net.ParseIP(selfIP); ip != nil && ip.To4() == nil {
+			mainLog.Load().Debug().Msgf("defaultRouteIP returned a non-IPv4 address: %s, ignoring it", selfIP)
+			selfIP = ""
+		}
 		var ipv6 string
 
 		if delta.New.DefaultRouteInterface != "" {
@@ -1295,7 +1323,8 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			}
 		}
 
-		if ip := net.ParseIP(selfIP); ip != nil {
+		// Only set the IPv4 default if selfIP is a valid IPv4 address.
+		if ip := net.ParseIP(selfIP); ip != nil && ip.To4() != nil {
 			ctrld.SetDefaultLocalIPv4(ip)
 			if !isMobile() && p.ciTable != nil {
 				p.ciTable.SetSelfIP(selfIP)
@@ -1306,7 +1335,8 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		}
 		mainLog.Load().Debug().Msgf("Set default local IPv4: %s, IPv6: %s", selfIP, ipv6)
 
-		if p.recoverOnUpstreamFailure() {
+		// we only trigger recovery flow for network changes on non router devices
+		if router.Name() == "" {
 			p.handleRecovery(RecoveryReasonNetworkChange)
 		}
 	})
@@ -1438,7 +1468,10 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 	// Immediately remove our DNS settings from the interface.
 	// set recoveryRunning to true to prevent watchdogs from putting the listener back on the interface
 	p.recoveryRunning.Store(true)
-	p.resetDNS()
+	// we do not want to restore any static DNS settings
+	// we must try to get the DHCP values, any static DNS settings
+	// will be appended to nameservers from the saved interface values
+	p.resetDNS(false, false)
 
 	// For an OS failure, reinitialize OS resolver nameservers immediately.
 	if reason == RecoveryReasonOSFailure {
@@ -1504,12 +1537,14 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 		go func(name string, uc *ctrld.UpstreamConfig) {
 			defer wg.Done()
 			mainLog.Load().Debug().Msgf("Starting recovery check loop for upstream: %s", name)
+			attempts := 0
 			for {
 				select {
 				case <-ctx.Done():
 					mainLog.Load().Debug().Msgf("Context canceled for upstream %s", name)
 					return
 				default:
+					attempts++
 					// checkUpstreamOnce will reset any failure counters on success.
 					if err := p.checkUpstreamOnce(name, uc); err == nil {
 						mainLog.Load().Debug().Msgf("Upstream %s recovered successfully", name)
@@ -1523,6 +1558,18 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 					}
 					mainLog.Load().Debug().Msgf("Upstream %s check failed, sleeping before retry", name)
 					time.Sleep(checkUpstreamBackoffSleep)
+
+					// if this is the upstreamOS and it's the 3rd attempt (or multiple of 3),
+					// we should try to reinit the OS resolver to ensure we can recover
+					if name == upstreamOS && attempts%3 == 0 {
+						mainLog.Load().Debug().Msgf("UpstreamOS check failed on attempt %d, reinitializing OS resolver", attempts)
+						ns := ctrld.InitializeOsResolver(true)
+						if len(ns) == 0 {
+							mainLog.Load().Warn().Msg("No nameservers found for OS resolver; using existing values")
+						} else {
+							mainLog.Load().Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+						}
+					}
 				}
 			}
 		}(name, uc)
@@ -1555,4 +1602,33 @@ func (p *prog) buildRecoveryUpstreams(reason RecoveryReason) map[string]*ctrld.U
 		}
 	}
 	return upstreams
+}
+
+// ValidateDefaultLocalIPsFromDelta checks if the default local IPv4 and IPv6 stored
+// are still present in the new network state (provided by delta.New).
+// If a stored default IP is no longer active, it resets that default (sets it to nil)
+// so that it won't be used in subsequent custom dialer contexts.
+func ValidateDefaultLocalIPsFromDelta(newState *netmon.State) {
+	currentIPv4 := ctrld.GetDefaultLocalIPv4()
+	currentIPv6 := ctrld.GetDefaultLocalIPv6()
+
+	// Build a map of active IP addresses from the new state.
+	activeIPs := make(map[string]bool)
+	for _, prefixes := range newState.InterfaceIPs {
+		for _, prefix := range prefixes {
+			activeIPs[prefix.Addr().String()] = true
+		}
+	}
+
+	// Check if the default IPv4 is still active.
+	if currentIPv4 != nil && !activeIPs[currentIPv4.String()] {
+		mainLog.Load().Debug().Msgf("DefaultLocalIPv4 %s is no longer active in the new state. Resetting.", currentIPv4)
+		ctrld.SetDefaultLocalIPv4(nil)
+	}
+
+	// Check if the default IPv6 is still active.
+	if currentIPv6 != nil && !activeIPs[currentIPv6.String()] {
+		mainLog.Load().Debug().Msgf("DefaultLocalIPv6 %s is no longer active in the new state. Resetting.", currentIPv6)
+		ctrld.SetDefaultLocalIPv6(nil)
+	}
 }

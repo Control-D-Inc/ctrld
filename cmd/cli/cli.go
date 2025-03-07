@@ -61,7 +61,7 @@ var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	defaultConfigFile    = "ctrld.toml"
 	rootCertPool         *x509.CertPool
-	errSelfCheckNoAnswer = errors.New("no answer from ctrld listener")
+	errSelfCheckNoAnswer = errors.New("no response from ctrld listener. You can try to re-launch with flag --skip_self_checks")
 )
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains"}
@@ -222,10 +222,16 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			lc := &logConn{conn: conn}
 			consoleWriter.Out = io.MultiWriter(os.Stdout, lc)
 			p.logConn = lc
+		} else {
+			mainLog.Load().Warn().Err(err).Msgf("unable to create log ipc connection")
 		}
+	} else {
+		mainLog.Load().Warn().Err(err).Msgf("unable to resolve socket address: %s", sockPath)
 	}
 	notifyExitToLogServer := func() {
-		_, _ = p.logConn.Write([]byte(msgExit))
+		if p.logConn != nil {
+			_, _ = p.logConn.Write([]byte(msgExit))
+		}
 	}
 
 	if daemon && runtime.GOOS == "windows" {
@@ -266,10 +272,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	// Log config do not have thing to validate, so it's safe to init log here,
 	// so it's able to log information in processCDFlags.
-	logWriters := initLogging()
-
-	// Initializing internal logging after global logging.
-	p.initInternalLogging(logWriters)
+	p.initLogging(true)
 
 	mainLog.Load().Info().Msgf("starting ctrld %s", curVersion())
 	mainLog.Load().Info().Msgf("os: %s", osVersion())
@@ -322,7 +325,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		}
 	}
 
-	updated := updateListenerConfig(&cfg)
+	updated := updateListenerConfig(&cfg, notifyExitToLogServer)
 
 	if cdUID != "" {
 		processLogAndCacheFlags()
@@ -418,7 +421,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				if err := p.router.Cleanup(); err != nil {
 					mainLog.Load().Error().Err(err).Msg("could not cleanup router")
 				}
-				p.resetDNS()
+				// restore static DNS settings or DHCP
+				p.resetDNS(false, true)
 			})
 		}
 	}
@@ -484,7 +488,7 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 			mainLog.Load().Fatal().Msgf("failed to unmarshal default config: %v", err)
 		}
 		nop := zerolog.Nop()
-		_, _ = tryUpdateListenerConfig(&cfg, &nop, true)
+		_, _ = tryUpdateListenerConfig(&cfg, &nop, func() {}, true)
 		addExtraSplitDnsRule(&cfg)
 		if err := writeConfigFile(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
@@ -645,11 +649,15 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	// Fetch config, unmarshal to cfg.
 	if resolverConfig.Ctrld.CustomConfig != "" {
 		logger.Info().Msg("using defined custom config of Control-D resolver")
-		if err := validateCdRemoteConfig(resolverConfig, cfg); err == nil {
+		var cfgErr error
+		if cfgErr = validateCdRemoteConfig(resolverConfig, cfg); cfgErr == nil {
 			setListenerDefaultValue(cfg)
-			return resolverConfig, nil
+			setNetworkDefaultValue(cfg)
+			if cfgErr = validateConfig(cfg); cfgErr == nil {
+				return resolverConfig, nil
+			}
 		}
-		mainLog.Load().Err(err).Msg("disregarding invalid custom config")
+		mainLog.Load().Warn().Err(err).Msg("disregarding invalid custom config")
 	}
 
 	bootstrapIP := func(endpoint string) string {
@@ -666,11 +674,7 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 		}
 		return ""
 	}
-	cfg.Network = make(map[string]*ctrld.NetworkConfig)
-	cfg.Network["0"] = &ctrld.NetworkConfig{
-		Name:  "Network 0",
-		Cidrs: []string{"0.0.0.0/0"},
-	}
+
 	cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
 	cfg.Upstream["0"] = &ctrld.UpstreamConfig{
 		BootstrapIP: bootstrapIP(resolverConfig.DOH),
@@ -693,6 +697,7 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 
 	// Set default value.
 	setListenerDefaultValue(cfg)
+	setNetworkDefaultValue(cfg)
 
 	return resolverConfig, nil
 }
@@ -706,7 +711,21 @@ func setListenerDefaultValue(cfg *ctrld.Config) {
 	}
 }
 
+// setListenerDefaultValue sets the default value for cfg.Listener if none existed.
+func setNetworkDefaultValue(cfg *ctrld.Config) {
+	if len(cfg.Network) == 0 {
+		cfg.Network = map[string]*ctrld.NetworkConfig{
+			"0": {
+				Name:  "Network 0",
+				Cidrs: []string{"0.0.0.0/0"},
+			},
+		}
+	}
+}
+
 // validateCdRemoteConfig validates the custom config from ControlD if defined.
+// This only validate the config syntax. To validate the config rules, calling
+// validateConfig with the cfg after calling this function.
 func validateCdRemoteConfig(rc *controld.ResolverConfig, cfg *ctrld.Config) error {
 	if rc.Ctrld.CustomConfig == "" {
 		return nil
@@ -783,7 +802,13 @@ func defaultIfaceName() string {
 		if oi := osinfo.New(); strings.Contains(oi.String(), "Microsoft") {
 			return "lo"
 		}
-		mainLog.Load().Fatal().Err(err).Msg("failed to get default route interface")
+		// On linux, it could be either resolvconf or systemd which is managing DNS settings,
+		// so the interface name does not matter if there's no default route interface.
+		if runtime.GOOS == "linux" {
+			return "lo"
+		}
+		mainLog.Load().Debug().Err(err).Msg("no default route interface found")
+		return ""
 	}
 	return dri
 }
@@ -843,10 +868,12 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 	}
 
 	mainLog.Load().Debug().Msg("ctrld listener is ready")
-	mainLog.Load().Debug().Msg("performing self-check")
 
 	lc := cfg.FirstListener()
 	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
+
+	mainLog.Load().Debug().Msgf("performing listener test, sending queries to %s", addr)
+
 	if err := selfCheckResolveDomain(context.TODO(), addr, "internal", selfCheckInternalTestDomain); err != nil {
 		return false, status, err
 	}
@@ -860,7 +887,7 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain string) error {
 	bo := backoff.NewBackoff("self-check", logf, 10*time.Second)
 	bo.LogLongerThan = 500 * time.Millisecond
-	maxAttempts := 20
+	maxAttempts := 10
 	c := new(dns.Client)
 
 	var (
@@ -876,7 +903,7 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 		m := new(dns.Msg)
 		m.SetQuestion(domain+".", dns.TypeA)
 		m.RecursionDesired = true
-		r, _, exErr := exchangeContextWithTimeout(c, time.Second, m, addr)
+		r, _, exErr := exchangeContextWithTimeout(c, 5*time.Second, m, addr)
 		if r != nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
 			mainLog.Load().Debug().Msgf("%s self-check against %q succeeded", scope, domain)
 			return nil
@@ -1030,16 +1057,25 @@ func uninstall(p *prog, s service.Service) {
 			mainLog.Load().Warn().Err(err).Msg("post uninstallation failed, please check system/service log for details error")
 			return
 		}
-		p.resetDNS()
+		// restore static DNS settings or DHCP
+		p.resetDNS(false, true)
 
-		// if present restore the original DNS settings
-		if netIface, err := netInterface(p.runningIface); err == nil {
-			if err := restoreDNS(netIface); err != nil {
-				mainLog.Load().Error().Err(err).Msg("could not restore DNS on interface")
-			} else {
-				mainLog.Load().Debug().Msg("Restored DNS on interface successfully")
+		// Iterate over all physical interfaces and restore DNS if a saved static config exists.
+		withEachPhysicalInterfaces("", "restore static DNS", func(i *net.Interface) error {
+			file := savedStaticDnsSettingsFilePath(i)
+			if _, err := os.Stat(file); err == nil {
+				if err := restoreDNS(i); err != nil {
+					mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
+				} else {
+					mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
+					err = os.Remove(file)
+					if err != nil {
+						mainLog.Load().Debug().Err(err).Msgf("Could not remove saved static DNS file for interface %s", i.Name)
+					}
+				}
 			}
-		}
+			return nil
+		})
 
 		if router.Name() != "" {
 			mainLog.Load().Debug().Msg("Router cleanup")
@@ -1146,8 +1182,8 @@ func mobileListenerIp() string {
 // updateListenerConfig updates the config for listeners if not defined,
 // or defined but invalid to be used, e.g: using loopback address other
 // than 127.0.0.1 with systemd-resolved.
-func updateListenerConfig(cfg *ctrld.Config) bool {
-	updated, _ := tryUpdateListenerConfig(cfg, nil, true)
+func updateListenerConfig(cfg *ctrld.Config, notifyToLogServerFunc func()) bool {
+	updated, _ := tryUpdateListenerConfig(cfg, nil, notifyToLogServerFunc, true)
 	if addExtraSplitDnsRule(cfg) {
 		updated = true
 	}
@@ -1157,13 +1193,14 @@ func updateListenerConfig(cfg *ctrld.Config) bool {
 // tryUpdateListenerConfig tries updating listener config with a working one.
 // If fatal is true, and there's listen address conflicted, the function do
 // fatal error.
-func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fatal bool) (updated, ok bool) {
+func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, notifyFunc func(), fatal bool) (updated, ok bool) {
 	ok = true
 	lcc := make(map[string]*listenerConfigCheck)
 	cdMode := cdUID != ""
 	nextdnsMode := nextdns != ""
 	// For Windows server with local Dns server running, we can only try on random local IP.
 	hasLocalDnsServer := hasLocalDnsServerRunning()
+	notRouter := router.Name() == ""
 	for n, listener := range cfg.Listener {
 		lcc[n] = &listenerConfigCheck{}
 		if listener.IP == "" {
@@ -1193,6 +1230,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 		}
 		updated = updated || lcc[n].IP || lcc[n].Port
 	}
+
 	il := mainLog.Load()
 	if infoLogger != nil {
 		il = infoLogger
@@ -1277,10 +1315,17 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 			tryOldIPPort5354 = false
 			tryPort5354 = false
 		}
+		// if not running on a router, we should not try to listen on any port other than 53
+		// if we do, this will break the dns resolution for the system.
+		if notRouter {
+			tryOldIPPort5354 = false
+			tryPort5354 = false
+		}
 		attempts := 0
 		maxAttempts := 10
 		for {
 			if attempts == maxAttempts {
+				notifyFunc()
 				logMsg(mainLog.Load().Fatal(), n, "could not find available listen ip and port")
 			}
 			addr := net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port))
@@ -1288,8 +1333,12 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 			if err == nil {
 				break
 			}
+
+			logMsg(il.Info(), n, "error listening on address: %s, error: %v", addr, err)
+
 			if !check.IP && !check.Port {
 				if fatal {
+					notifyFunc()
 					logMsg(mainLog.Load().Fatal(), n, "failed to listen: %v", err)
 				}
 				ok = false
@@ -1348,14 +1397,17 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 			} else {
 				listener.IP = oldIP
 			}
-			if check.Port {
+			// if we are not running on a router, we should not try to listen on any port other than 53
+			// if we do, this will break the dns resolution for the system.
+			if check.Port && !notRouter {
 				listener.Port = randomPort()
 			} else {
 				listener.Port = oldPort
 			}
 			if listener.IP == oldIP && listener.Port == oldPort {
 				if fatal {
-					logMsg(mainLog.Load().Fatal(), n, "could not listener on %s: %v", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)), err)
+					notifyFunc()
+					logMsg(mainLog.Load().Fatal(), n, "could not listen on %s: %v", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)), err)
 				}
 				ok = false
 				break
@@ -1393,6 +1445,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, fata
 					}
 				}
 				if !found {
+					notifyFunc()
 					logMsg(mainLog.Load().Fatal(), n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
 				}
 			}
@@ -1597,7 +1650,7 @@ func doGenerateNextDNSConfig(uid string) error {
 	}
 	mainLog.Load().Notice().Msgf("Generating nextdns config: %s", defaultConfigFile)
 	generateNextDNSConfig(uid)
-	updateListenerConfig(&cfg)
+	updateListenerConfig(&cfg, func() {})
 	return writeConfigFile(&cfg)
 }
 
@@ -1739,8 +1792,13 @@ func goArm() string {
 // upgradeUrl returns the url for downloading new ctrld binary.
 func upgradeUrl(baseUrl string) string {
 	dlPath := fmt.Sprintf("%s-%s/ctrld", runtime.GOOS, runtime.GOARCH)
+	// Use arm version set during build time, v5 binary can be run on higher arm version system.
 	if armVersion := goArm(); armVersion != "" {
 		dlPath = fmt.Sprintf("%s-%sv%s/ctrld", runtime.GOOS, runtime.GOARCH, armVersion)
+	}
+	// linux/amd64 has nocgo version, to support systems that missing some libc (like openwrt).
+	if !cgoEnabled && runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		dlPath = fmt.Sprintf("%s-%s-nocgo/ctrld", runtime.GOOS, runtime.GOARCH)
 	}
 	dlUrl := fmt.Sprintf("%s/%s", baseUrl, dlPath)
 	if runtime.GOOS == "windows" {
@@ -1768,50 +1826,6 @@ func runningIface(s service.Service) *ifaceResponse {
 	return nil
 }
 
-// resetDnsNoLog performs resetting DNS with logging disable.
-func resetDnsNoLog(p *prog) {
-	// Normally, disable log to prevent annoying users.
-	if verbose < 3 {
-		lvl := zerolog.GlobalLevel()
-		zerolog.SetGlobalLevel(zerolog.Disabled)
-		p.resetDNS()
-		zerolog.SetGlobalLevel(lvl)
-		return
-	}
-	// For debugging purpose, still emit log.
-	p.resetDNS()
-}
-
-// resetDnsTask returns a task which perform reset DNS operation.
-func resetDnsTask(p *prog, s service.Service, isCtrldInstalled bool, ir *ifaceResponse) task {
-	return task{func() error {
-		if iface == "" {
-			mainLog.Load().Debug().Msg("no iface, skipping resetDnsTask")
-			return nil
-		}
-		// Always reset DNS first, ensuring DNS setting is in a good state.
-		// resetDNS must use the "iface" value of current running ctrld
-		// process to reset what setDNS has done properly.
-		oldIface := iface
-		iface = "auto"
-		p.requiredMultiNICsConfig = requiredMultiNICsConfig()
-		if ir != nil {
-			iface = ir.Name
-			p.requiredMultiNICsConfig = ir.All
-		}
-		p.runningIface = iface
-		if isCtrldInstalled {
-			mainLog.Load().Debug().Msg("restore system DNS settings")
-			if status, _ := s.Status(); status == service.StatusRunning {
-				mainLog.Load().Fatal().Msg("reset DNS while ctrld still running is not safe")
-			}
-			resetDnsNoLog(p)
-		}
-		iface = oldIface
-		return nil
-	}, false, "Reset DNS"}
-}
-
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
 func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
@@ -1825,10 +1839,22 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 			return err
 		}
 	}
+
+	// return earlier if there's no custom config.
+	if rc.Ctrld.CustomConfig == "" {
+		return nil
+	}
+
 	// validateCdRemoteConfig clobbers v, saving it here to restore later.
 	oldV := v
-	if err := validateCdRemoteConfig(rc, &ctrld.Config{}); err != nil {
-		if errors.As(err, &viper.ConfigParseError{}) {
+	var cfgErr error
+	remoteCfg := &ctrld.Config{}
+	if cfgErr = validateCdRemoteConfig(rc, remoteCfg); cfgErr == nil {
+		setListenerDefaultValue(remoteCfg)
+		setNetworkDefaultValue(remoteCfg)
+		cfgErr = validateConfig(remoteCfg)
+	} else {
+		if errors.As(cfgErr, &viper.ConfigParseError{}) {
 			if configStr, _ := base64.StdEncoding.DecodeString(rc.Ctrld.CustomConfig); len(configStr) > 0 {
 				tmpDir := os.TempDir()
 				tmpConfFile := filepath.Join(tmpDir, "ctrld.toml")
@@ -1844,12 +1870,14 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 				}
 				// If we could not log details error, emit what we have already got.
 				if !errorLogged {
-					mainLog.Load().Error().Msgf("failed to parse custom config: %v", err)
+					mainLog.Load().Error().Msgf("failed to parse custom config: %v", cfgErr)
 				}
 			}
 		} else {
 			mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
 		}
+	}
+	if cfgErr != nil {
 		mainLog.Load().Warn().Msg("disregarding invalid custom config")
 	}
 	v = oldV
@@ -1863,8 +1891,8 @@ func uninstallInvalidCdUID(p *prog, logger zerolog.Logger, doStop bool) bool {
 		logger.Warn().Err(err).Msg("failed to create new service")
 		return false
 	}
-
-	p.resetDNS()
+	// restore static DNS settings or DHCP
+	p.resetDNS(false, true)
 
 	tasks := []task{{s.Uninstall, true, "Uninstall"}}
 	if doTasks(tasks) {

@@ -2,10 +2,13 @@ package openwrt
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/kardianos/service"
@@ -15,9 +18,12 @@ import (
 )
 
 const (
-	Name                     = "openwrt"
-	openwrtDNSMasqConfigPath = "/tmp/dnsmasq.d/ctrld.conf"
+	Name                           = "openwrt"
+	openwrtDNSMasqConfigName       = "ctrld.conf"
+	openwrtDNSMasqDefaultConfigDir = "/tmp/dnsmasq.d"
 )
+
+var openwrtDnsmasqDefaultConfigPath = filepath.Join(openwrtDNSMasqDefaultConfigDir, openwrtDNSMasqConfigName)
 
 type Openwrt struct {
 	cfg              *ctrld.Config
@@ -67,7 +73,7 @@ func (o *Openwrt) Setup() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(openwrtDNSMasqConfigPath, []byte(data), 0600); err != nil {
+	if err := os.WriteFile(dnsmasqConfPathFromUbus(), []byte(data), 0600); err != nil {
 		return err
 	}
 	// Restart dnsmasq service.
@@ -82,7 +88,7 @@ func (o *Openwrt) Cleanup() error {
 		return nil
 	}
 	// Remove the custom dnsmasq config
-	if err := os.Remove(openwrtDNSMasqConfigPath); err != nil {
+	if err := os.Remove(dnsmasqConfPathFromUbus()); err != nil {
 		return err
 	}
 
@@ -125,4 +131,61 @@ func uci(args ...string) (string, error) {
 		return "", fmt.Errorf("%s:%w", stderr.String(), err)
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// openwrtServiceList represents openwrt services config.
+type openwrtServiceList struct {
+	Dnsmasq dnsmasqConf `json:"dnsmasq"`
+}
+
+// dnsmasqConf represents dnsmasq config.
+type dnsmasqConf struct {
+	Instances map[string]confInstances `json:"instances"`
+}
+
+// confInstances represents an instance config of a service.
+type confInstances struct {
+	Mount map[string]string `json:"mount"`
+}
+
+// dnsmasqConfPath returns the dnsmasq config path.
+//
+// Since version 24.10, openwrt makes some changes to dnsmasq to support
+// multiple instances of dnsmasq. This change causes breaking changes to
+// software which depends on the default dnsmasq path.
+//
+// There are some discussion/PRs in openwrt repo to address this:
+//
+// - https://github.com/openwrt/openwrt/pull/16806
+// - https://github.com/openwrt/openwrt/pull/16890
+//
+// In the meantime, workaround this problem by querying the actual config path
+// by querying ubus service list.
+func dnsmasqConfPath(r io.Reader) string {
+	var svc openwrtServiceList
+	if err := json.NewDecoder(r).Decode(&svc); err != nil {
+		return openwrtDnsmasqDefaultConfigPath
+	}
+	for _, inst := range svc.Dnsmasq.Instances {
+		for mount := range inst.Mount {
+			dirName := filepath.Base(mount)
+			parts := strings.Split(dirName, ".")
+			if len(parts) < 2 {
+				continue
+			}
+			if parts[0] == "dnsmasq" && parts[len(parts)-1] == "d" {
+				return filepath.Join(mount, openwrtDNSMasqConfigName)
+			}
+		}
+	}
+	return openwrtDnsmasqDefaultConfigPath
+}
+
+// dnsmasqConfPathFromUbus get dnsmasq config path from ubus service list.
+func dnsmasqConfPathFromUbus() string {
+	output, err := exec.Command("ubus", "call", "service", "list").Output()
+	if err != nil {
+		return openwrtDnsmasqDefaultConfigPath
+	}
+	return dnsmasqConfPath(bytes.NewReader(output))
 }

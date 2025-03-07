@@ -9,11 +9,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func init() {
-	l := zerolog.New(io.Discard)
-	ProxyLogger.Store(&l)
-}
-
 // ProxyLog emits the log record for proxy operations.
 // The caller should set it only once.
 // DEPRECATED: use ProxyLogger instead.

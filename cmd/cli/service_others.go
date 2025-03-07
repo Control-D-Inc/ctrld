@@ -18,3 +18,5 @@ func openLogFile(path string, flags int) (*os.File, error) {
 func hasLocalDnsServerRunning() bool { return false }
 
 func ConfigureWindowsServiceFailureActions(serviceName string) error { return nil }
+
+func isRunningOnDomainControllerWindows() (bool, int) { return false, 0 }
