@@ -113,6 +113,12 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 		c.Transport = transport
 	}
 	resp, err := c.Do(req)
+	if err != nil && r.uc.FallbackToDirectIP() {
+		retryCtx, cancel := r.uc.Context(context.WithoutCancel(ctx))
+		defer cancel()
+		Log(ctx, ProxyLogger.Load().Warn().Err(err), "retrying request after fallback to direct ip")
+		resp, err = c.Do(req.Clone(retryCtx))
+	}
 	if err != nil {
 		if r.isDoH3 {
 			if closer, ok := c.Transport.(io.Closer); ok {

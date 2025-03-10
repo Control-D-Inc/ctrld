@@ -24,7 +24,10 @@ import (
 
 const (
 	apiDomainCom       = "api.controld.com"
+	apiDomainComIPv4   = "147.185.34.1"
+	apiDomainComIPv6   = "2606:1a40:3::1"
 	apiDomainDev       = "api.controld.dev"
+	apiDomainDevIPv4   = "23.171.240.84"
 	apiURLCom          = "https://api.controld.com"
 	apiURLDev          = "https://api.controld.dev"
 	resolverDataURLCom = apiURLCom + "/utility"
@@ -136,11 +139,11 @@ func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reade
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/json")
 	transport := apiTransport(cdDev)
-	client := http.Client{
+	client := &http.Client{
 		Timeout:   defaultTimeout,
 		Transport: transport,
 	}
-	resp, err := client.Do(req)
+	resp, err := doWithFallback(client, req, apiServerIP(cdDev))
 	if err != nil {
 		return nil, fmt.Errorf("postUtilityAPI client.Do: %w", err)
 	}
@@ -177,11 +180,11 @@ func SendLogs(lr *LogsRequest, cdDev bool) error {
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	transport := apiTransport(cdDev)
-	client := http.Client{
+	client := &http.Client{
 		Timeout:   sendLogTimeout,
 		Transport: transport,
 	}
-	resp, err := client.Do(req)
+	resp, err := doWithFallback(client, req, apiServerIP(cdDev))
 	if err != nil {
 		return fmt.Errorf("SendLogs client.Do: %w", err)
 	}
@@ -213,20 +216,20 @@ func apiTransport(cdDev bool) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		apiDomain := apiDomainCom
+		apiIpsV4 := []string{apiDomainComIPv4}
+		apiIpsV6 := []string{apiDomainComIPv6}
+		apiIPs := []string{apiDomainComIPv4, apiDomainComIPv6}
 		if cdDev {
 			apiDomain = apiDomainDev
-		}
-
-		// First try IPv4
-		dialer := &net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
+			apiIpsV4 = []string{apiDomainDevIPv4}
+			apiIpsV6 = []string{}
+			apiIPs = []string{apiDomainDevIPv4}
 		}
 
 		ips := ctrld.LookupIP(apiDomain)
 		if len(ips) == 0 {
-			ctrld.ProxyLogger.Load().Warn().Msgf("No IPs found for %s, falling back to direct connection to %s", apiDomain, addr)
-			return dialer.DialContext(ctx, network, addr)
+			ctrld.ProxyLogger.Load().Warn().Msgf("No IPs found for %s, use direct IPs: %v", apiDomain, apiIPs)
+			ips = apiIPs
 		}
 
 		// Separate IPv4 and IPv6 addresses
@@ -239,35 +242,62 @@ func apiTransport(cdDev bool) *http.Transport {
 			}
 		}
 
+		dial := func(ctx context.Context, network string, addrs []string) (net.Conn, error) {
+			d := &ctrldnet.ParallelDialer{}
+			return d.DialContext(ctx, network, addrs, ctrld.ProxyLogger.Load())
+		}
 		_, port, _ := net.SplitHostPort(addr)
 
 		// Try IPv4 first
 		if len(ipv4s) > 0 {
-			addrs := make([]string, len(ipv4s))
-			for i, ip := range ipv4s {
-				addrs[i] = net.JoinHostPort(ip, port)
-			}
-			d := &ctrldnet.ParallelDialer{}
-			if conn, err := d.DialContext(ctx, "tcp4", addrs, ctrld.ProxyLogger.Load()); err == nil {
+			if conn, err := dial(ctx, "tcp4", addrsFromPort(ipv4s, port)); err == nil {
 				return conn, nil
 			}
 		}
-
-		// Fall back to IPv6 if available
-		if len(ipv6s) > 0 {
-			addrs := make([]string, len(ipv6s))
-			for i, ip := range ipv6s {
-				addrs[i] = net.JoinHostPort(ip, port)
-			}
-			d := &ctrldnet.ParallelDialer{}
-			return d.DialContext(ctx, "tcp6", addrs, ctrld.ProxyLogger.Load())
+		// Fallback to direct IPv4
+		if conn, err := dial(ctx, "tcp4", addrsFromPort(apiIpsV4, port)); err == nil {
+			return conn, nil
 		}
 
-		// Final fallback to direct connection
-		return dialer.DialContext(ctx, network, addr)
+		// Fallback to IPv6 if available
+		if len(ipv6s) > 0 {
+			if conn, err := dial(ctx, "tcp6", addrsFromPort(ipv6s, port)); err == nil {
+				return conn, nil
+			}
+		}
+		// Fallback to direct IPv6
+		return dial(ctx, "tcp6", addrsFromPort(apiIpsV6, port))
 	}
 	if router.Name() == ddwrt.Name || runtime.GOOS == "android" {
 		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
 	}
 	return transport
+}
+
+func addrsFromPort(ips []string, port string) []string {
+	addrs := make([]string, len(ips))
+	for i, ip := range ips {
+		addrs[i] = net.JoinHostPort(ip, port)
+	}
+	return addrs
+}
+
+func doWithFallback(client *http.Client, req *http.Request, apiIp string) (*http.Response, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		ctrld.ProxyLogger.Load().Warn().Err(err).Msgf("failed to send request, fallback to direct IP: %s", apiIp)
+		ipReq := req.Clone(req.Context())
+		ipReq.Host = apiIp
+		ipReq.URL.Host = apiIp
+		resp, err = client.Do(ipReq)
+	}
+	return resp, err
+}
+
+// apiServerIP returns the direct IP to connect to API server.
+func apiServerIP(cdDev bool) string {
+	if cdDev {
+		return apiDomainDevIPv4
+	}
+	return apiDomainComIPv4
 }

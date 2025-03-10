@@ -28,6 +28,7 @@ type AppConfig struct {
 const (
 	defaultHTTPTimeout = 30 * time.Second
 	defaultMaxRetries  = 3
+	downloadServerIp   = "23.171.240.151"
 )
 
 // httpClientWithFallback returns an HTTP client configured with timeout and IPv4 fallback
@@ -46,10 +47,15 @@ func httpClientWithFallback(timeout time.Duration) *http.Client {
 }
 
 // doWithRetry performs an HTTP request with retries
-func doWithRetry(req *http.Request, maxRetries int) (*http.Response, error) {
+func doWithRetry(req *http.Request, maxRetries int, ip string) (*http.Response, error) {
 	var lastErr error
 	client := httpClientWithFallback(defaultHTTPTimeout)
-
+	var ipReq *http.Request
+	if ip != "" {
+		ipReq = req.Clone(req.Context())
+		ipReq.Host = ip
+		ipReq.URL.Host = ip
+	}
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
 			time.Sleep(time.Second * time.Duration(attempt+1)) // Exponential backoff
@@ -59,6 +65,15 @@ func doWithRetry(req *http.Request, maxRetries int) (*http.Response, error) {
 		if err == nil {
 			return resp, nil
 		}
+		if ipReq != nil {
+			mainLog.Load().Warn().Err(err).Msgf("dial to %q failed", req.Host)
+			mainLog.Load().Warn().Msgf("fallback to direct IP to download prod version: %q", ip)
+			resp, err = client.Do(ipReq)
+			if err == nil {
+				return resp, nil
+			}
+		}
+
 		lastErr = err
 		mainLog.Load().Debug().Err(err).
 			Str("method", req.Method).
@@ -69,10 +84,10 @@ func doWithRetry(req *http.Request, maxRetries int) (*http.Response, error) {
 }
 
 // Helper for making GET requests with retries
-func getWithRetry(url string) (*http.Response, error) {
+func getWithRetry(url string, ip string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	return doWithRetry(req, defaultMaxRetries)
+	return doWithRetry(req, defaultMaxRetries, ip)
 }
