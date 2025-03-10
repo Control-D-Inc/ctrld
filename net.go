@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"tailscale.com/net/netmon"
+
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
@@ -14,38 +16,38 @@ var (
 	ipv6Available atomic.Bool
 )
 
-const ipv6ProbingInterval = 10 * time.Second
-
-func hasIPv6() bool {
+// HasIPv6 reports whether the current network stack has IPv6 available.
+func HasIPv6() bool {
 	hasIPv6Once.Do(func() {
-		Log(context.Background(), ProxyLogger.Load().Debug(), "checking for IPv6 availability once")
+		ProxyLogger.Load().Debug().Msg("checking for IPv6 availability once")
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		val := ctrldnet.IPv6Available(ctx)
 		ipv6Available.Store(val)
-		go probingIPv6(context.TODO(), val)
+		ProxyLogger.Load().Debug().Msgf("ipv6 availability: %v", val)
+		mon, err := netmon.New(func(format string, args ...any) {})
+		if err != nil {
+			ProxyLogger.Load().Debug().Err(err).Msg("failed to monitor IPv6 state")
+			return
+		}
+		mon.RegisterChangeCallback(func(delta *netmon.ChangeDelta) {
+			old := ipv6Available.Load()
+			cur := delta.Monitor.InterfaceState().HaveV6
+			if old != cur {
+				ProxyLogger.Load().Warn().Msgf("ipv6 availability changed, old: %v, new: %v", old, cur)
+			} else {
+				ProxyLogger.Load().Debug().Msg("ipv6 availability does not changed")
+			}
+			ipv6Available.Store(cur)
+		})
+		mon.Start()
 	})
 	return ipv6Available.Load()
 }
 
-// TODO(cuonglm): doing poll check natively for supported platforms.
-func probingIPv6(ctx context.Context, old bool) {
-	ticker := time.NewTicker(ipv6ProbingInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				cur := ctrldnet.IPv6Available(ctx)
-				if ipv6Available.CompareAndSwap(old, cur) {
-					old = cur
-				}
-				Log(ctx, ProxyLogger.Load().Debug(), "IPv6 availability: %v", cur)
-			}()
-		}
+// DisableIPv6 marks IPv6 as unavailable if enabled.
+func DisableIPv6() {
+	if ipv6Available.CompareAndSwap(true, false) {
+		ProxyLogger.Load().Debug().Msg("turned off IPv6 availability")
 	}
 }

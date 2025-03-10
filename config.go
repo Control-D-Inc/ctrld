@@ -485,7 +485,7 @@ func (uc *UpstreamConfig) setupDOHTransport() {
 		uc.transport = uc.newDOHTransport(uc.bootstrapIPs6)
 	case IpStackSplit:
 		uc.transport4 = uc.newDOHTransport(uc.bootstrapIPs4)
-		if hasIPv6() {
+		if HasIPv6() {
 			uc.transport6 = uc.newDOHTransport(uc.bootstrapIPs6)
 		} else {
 			uc.transport6 = uc.transport4
@@ -655,7 +655,7 @@ func (uc *UpstreamConfig) bootstrapIPForDNSType(dnsType uint16) string {
 		case dns.TypeA:
 			return pick(uc.bootstrapIPs4)
 		default:
-			if hasIPv6() {
+			if HasIPv6() {
 				return pick(uc.bootstrapIPs6)
 			}
 			return pick(uc.bootstrapIPs4)
@@ -677,7 +677,7 @@ func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
 		case dns.TypeA:
 			return "tcp4-tls", "udp4"
 		default:
-			if hasIPv6() {
+			if HasIPv6() {
 				return "tcp6-tls", "udp6"
 			}
 			return "tcp4-tls", "udp4"

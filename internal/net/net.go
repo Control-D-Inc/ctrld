@@ -17,9 +17,8 @@ import (
 )
 
 const (
-	controldIPv6Test = "ipv6.controld.io"
-	v4BootstrapDNS   = "76.76.2.22:53"
-	v6BootstrapDNS   = "[2606:1a40::22]:53"
+	v4BootstrapDNS = "76.76.2.22:53"
+	v6BootstrapDNS = "[2606:1a40::22]:53"
 )
 
 var Dialer = &net.Dialer{

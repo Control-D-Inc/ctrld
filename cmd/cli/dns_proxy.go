@@ -556,6 +556,10 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			if errors.As(err, &e) && e.Timeout() {
 				upstreamConfig.ReBootstrap()
 			}
+			// For network error, turn ipv6 off if enabled.
+			if ctrld.HasIPv6() && (errUrlNetworkError(err) || errNetworkError(err)) {
+				ctrld.DisableIPv6()
+			}
 		}
 
 		return nil

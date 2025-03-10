@@ -24,7 +24,7 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs6)
 	case IpStackSplit:
 		uc.http3RoundTripper4 = uc.newDOH3Transport(uc.bootstrapIPs4)
-		if hasIPv6() {
+		if HasIPv6() {
 			uc.http3RoundTripper6 = uc.newDOH3Transport(uc.bootstrapIPs6)
 		} else {
 			uc.http3RoundTripper6 = uc.http3RoundTripper4
