@@ -177,15 +177,27 @@ func (t *Table) SetSelfIP(ip string) {
 	t.dhcp.addSelf()
 }
 
+// initSelfDiscover initializes necessary client metadata for self query.
+func (t *Table) initSelfDiscover() {
+	t.dhcp = &dhcp{selfIP: t.selfIP}
+	t.dhcp.addSelf()
+	t.ipResolvers = append(t.ipResolvers, t.dhcp)
+	t.macResolvers = append(t.macResolvers, t.dhcp)
+	t.hostnameResolvers = append(t.hostnameResolvers, t.dhcp)
+}
+
 func (t *Table) init() {
 	// Custom client ID presents, use it as the only source.
 	if _, clientID := controld.ParseRawUID(t.cdUID); clientID != "" {
-		ctrld.ProxyLogger.Load().Debug().Msg("start self discovery")
-		t.dhcp = &dhcp{selfIP: t.selfIP}
-		t.dhcp.addSelf()
-		t.ipResolvers = append(t.ipResolvers, t.dhcp)
-		t.macResolvers = append(t.macResolvers, t.dhcp)
-		t.hostnameResolvers = append(t.hostnameResolvers, t.dhcp)
+		ctrld.ProxyLogger.Load().Debug().Msg("start self discovery with custom client id")
+		t.initSelfDiscover()
+		return
+	}
+
+	// If we are running on platforms that should only do self discover, use it as the only source, too.
+	if ctrld.SelfDiscover() {
+		ctrld.ProxyLogger.Load().Debug().Msg("start self discovery on desktop platforms")
+		t.initSelfDiscover()
 		return
 	}
 

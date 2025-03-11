@@ -178,12 +178,16 @@ Perform LAN client discovery using mDNS. This will spawn a listener on port 5353
 - Required: no
 - Default: true
 
+This config is ignored, and always set to `false` on Windows Desktop and Macos.
+
 ### discover_arp
 Perform LAN client discovery using ARP.  
 
 - Type: boolean
 - Required: no
 - Default: true
+
+This config is ignored, and always set to `false` on Windows Desktop and Macos.
 
 ### discover_dhcp
 Perform LAN client discovery using DHCP leases files. Common file locations are auto-discovered.  
@@ -192,6 +196,8 @@ Perform LAN client discovery using DHCP leases files. Common file locations are 
 - Required: no
 - Default: true
 
+This config is ignored, and always set to `false` on Windows Desktop and Macos.
+
 ### discover_ptr
 Perform LAN client discovery using PTR queries.  
 
@@ -199,12 +205,16 @@ Perform LAN client discovery using PTR queries.
 - Required: no
 - Default: true
 
+This config is ignored, and always set to `false` on Windows Desktop and Macos.
+
 ### discover_hosts
 Perform LAN client discovery using hosts file.
 
 - Type: boolean
 - Required: no
 - Default: true
+
+This config is ignored, and always set to `false` on Windows Desktop and Macos.
 
 ### discover_refresh_interval
 Time in seconds between each discovery refresh loop to update new client information data. 
