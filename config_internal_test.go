@@ -2,16 +2,12 @@ package ctrld
 
 import (
 	"net/url"
-	"os"
 	"testing"
 
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestUpstreamConfig_SetupBootstrapIP(t *testing.T) {
-	l := zerolog.New(os.Stdout)
-	ProxyLogger.Store(&l)
 	uc := &UpstreamConfig{
 		Name:     "test",
 		Type:     ResolverTypeDOH,
@@ -19,7 +15,7 @@ func TestUpstreamConfig_SetupBootstrapIP(t *testing.T) {
 		Timeout:  5000,
 	}
 	uc.Init()
-	uc.setupBootstrapIP(false)
+	uc.SetupBootstrapIP()
 	if len(uc.bootstrapIPs) == 0 {
 		t.Log(defaultNameservers())
 		t.Fatal("could not bootstrap ip without bootstrap DNS")
