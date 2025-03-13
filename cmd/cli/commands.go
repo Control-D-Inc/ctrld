@@ -234,6 +234,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				mainLog.Load().Error().Msg(err.Error())
 				return
 			}
+			p.preRun()
 
 			status, err := s.Status()
 			isCtrldRunning := status == service.StatusRunning
