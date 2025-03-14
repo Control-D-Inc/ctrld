@@ -215,6 +215,20 @@ func LeaseFilesDir() string {
 	return ""
 }
 
+// ServiceDependencies returns list of dependencies that ctrld services needs on this router.
+// See https://pkg.go.dev/github.com/kardianos/service#Config for list format.
+func ServiceDependencies() []string {
+	if Name() == ubios.Name {
+		// On Ubios, ctrld needs to start after unifi-mongodb,
+		// so it can query custom client info mapping.
+		return []string{
+			"Wants=unifi-mongodb.service",
+			"After=unifi-mongodb.service",
+		}
+	}
+	return nil
+}
+
 func distroName() string {
 	switch {
 	case bytes.HasPrefix(unameO(), []byte("DD-WRT")):

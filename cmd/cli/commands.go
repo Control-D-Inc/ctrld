@@ -205,7 +205,13 @@ func initStartCmd() *cobra.Command {
 		Long: `Install and start the ctrld service
 
 NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
-		Args: cobra.NoArgs,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf("'ctrld start' doesn't accept positional arguments\n" +
+					"Use flags instead (e.g. --cd, --iface) or see 'ctrld start --help' for all options")
+			}
+			return nil
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			checkStrFlagEmpty(cmd, cdUidFlagName)
 			checkStrFlagEmpty(cmd, cdOrgFlagName)
@@ -242,6 +248,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					os.Exit(deactivationPinInvalidExitCode)
 				}
 				currentIface = runningIface(s)
+				mainLog.Load().Debug().Msgf("current interface on start: %v", currentIface)
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -339,13 +346,17 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
 				}
 
+				// if already running, dont restart
+				if isCtrldRunning {
+					mainLog.Load().Notice().Msg("service is already running")
+					return
+				}
+
 				initInteractiveLogging()
 				tasks := []task{
-					{s.Stop, false, "Stop"},
-					resetDnsTask(p, s, isCtrldInstalled, currentIface),
 					{func() error {
 						// Save current DNS so we can restore later.
-						withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+						withEachPhysicalInterfaces("", "saveCurrentStaticDNS", func(i *net.Interface) error {
 							if err := saveCurrentStaticDNS(i); !errors.Is(err, errSaveCurrentStaticDNSNotSupported) && err != nil {
 								return err
 							}
@@ -355,7 +366,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					}, false, "Save current DNS"},
 					{func() error {
 						return ConfigureWindowsServiceFailureActions(ctrldServiceName)
-					}, false, "Configure Windows service failure actions"},
+					}, false, "Configure service failure actions"},
 					{s.Start, true, "Start"},
 					{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 				}
@@ -424,10 +435,10 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				{s.Stop, false, "Stop"},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true, "Checking config"},
 				{func() error { return ensureUninstall(s) }, false, "Ensure uninstall"},
-				resetDnsTask(p, s, isCtrldInstalled, currentIface),
+				//resetDnsTask(p, s, isCtrldInstalled, currentIface),
 				{func() error {
 					// Save current DNS so we can restore later.
-					withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+					withEachPhysicalInterfaces("", "saveCurrentStaticDNS", func(i *net.Interface) error {
 						if err := saveCurrentStaticDNS(i); !errors.Is(err, errSaveCurrentStaticDNSNotSupported) && err != nil {
 							return err
 						}
@@ -450,6 +461,9 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					mainLog.Load().Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
 					return
 				}
+
+				// add a small delay to ensure the service is started and did not crash
+				time.Sleep(1 * time.Second)
 
 				ok, status, err := selfCheckStatus(ctx, s, sockDir)
 				switch {
@@ -550,6 +564,13 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 		Long: `Quick start service and configure DNS on interface
 
 NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf("'ctrld start' doesn't accept positional arguments\n" +
+					"Use flags instead (e.g. --cd, --iface) or see 'ctrld start --help' for all options")
+			}
+			return nil
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(os.Args) == 2 {
 				startOnly = true
@@ -608,16 +629,21 @@ func initStopCmd() *cobra.Command {
 			}
 			if doTasks([]task{{s.Stop, true, "Stop"}}) {
 				p.router.Cleanup()
-				p.resetDNS()
+				// restore static DNS settings or DHCP
+				p.resetDNS(false, true)
 
-				// restore DNS settings
-				if netIface, err := netInterface(p.runningIface); err == nil {
-					if err := restoreDNS(netIface); err != nil {
-						mainLog.Load().Error().Err(err).Msg("could not restore DNS on interface")
-					} else {
-						mainLog.Load().Debug().Msg("Restored DNS on interface successfully")
+				// Iterate over all physical interfaces and restore static DNS if a saved static config exists.
+				withEachPhysicalInterfaces("", "restore static DNS", func(i *net.Interface) error {
+					file := savedStaticDnsSettingsFilePath(i)
+					if _, err := os.Stat(file); err == nil {
+						if err := restoreDNS(i); err != nil {
+							mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
+						} else {
+							mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
+						}
 					}
-				}
+					return nil
+				})
 
 				if router.WaitProcessExited() {
 					ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
@@ -714,7 +740,8 @@ func initRestartCmd() *cobra.Command {
 					{s.Stop, true, "Stop"},
 					{func() error {
 						p.router.Cleanup()
-						p.resetDNS()
+						// restore static DNS settings or DHCP
+						p.resetDNS(false, true)
 						return nil
 					}, false, "Cleanup"},
 					{func() error {
@@ -994,13 +1021,13 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 						if os.IsNotExist(err) {
 							continue
 						}
-						mainLog.Load().Warn().Err(err).Msg("failed to remove file")
+						mainLog.Load().Warn().Err(err).Msgf("failed to remove file: %s", file)
 					} else {
 						mainLog.Load().Debug().Msgf("file removed: %s", file)
 					}
 				}
 				if err := selfDeleteExe(); err != nil {
-					mainLog.Load().Warn().Err(err).Msg("failed to remove file")
+					mainLog.Load().Warn().Err(err).Msg("failed to delete ctrld binary")
 				} else {
 					if !supportedSelfDelete {
 						mainLog.Load().Debug().Msgf("file removed: %s", bin)
@@ -1044,9 +1071,16 @@ func initInterfacesCmd() *cobra.Command {
 		Short: "List network interfaces of the host",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
+			withEachPhysicalInterfaces("", "Interface list", func(i *net.Interface) error {
 				fmt.Printf("Index : %d\n", i.Index)
 				fmt.Printf("Name  : %s\n", i.Name)
+				var status string
+				if i.Flags&net.FlagUp != 0 {
+					status = "Up"
+				} else {
+					status = "Down"
+				}
+				fmt.Printf("Status: %s\n", status)
 				addrs, _ := i.Addrs()
 				for i, ipaddr := range addrs {
 					if i == 0 {
@@ -1242,7 +1276,8 @@ func initUpgradeCmd() *cobra.Command {
 			}
 			dlUrl := upgradeUrl(baseUrl)
 			mainLog.Load().Debug().Msgf("Downloading binary: %s", dlUrl)
-			resp, err := http.Get(dlUrl)
+
+			resp, err := getWithRetry(dlUrl)
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to download binary")
 			}
@@ -1266,7 +1301,8 @@ func initUpgradeCmd() *cobra.Command {
 					{s.Stop, true, "Stop"},
 					{func() error {
 						p.router.Cleanup()
-						p.resetDNS()
+						// restore static DNS settings or DHCP
+						p.resetDNS(false, true)
 						return nil
 					}, false, "Cleanup"},
 					{func() error {

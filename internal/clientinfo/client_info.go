@@ -207,11 +207,10 @@ func (t *Table) init() {
 		}
 		for platform, discover := range discovers {
 			if err := discover.refresh(); err != nil {
-				ctrld.ProxyLogger.Load().Error().Err(err).Msgf("could not init %s discover", platform)
-			} else {
-				t.hostnameResolvers = append(t.hostnameResolvers, discover)
-				t.refreshers = append(t.refreshers, discover)
+				ctrld.ProxyLogger.Load().Warn().Err(err).Msgf("failed to init %s discover", platform)
 			}
+			t.hostnameResolvers = append(t.hostnameResolvers, discover)
+			t.refreshers = append(t.refreshers, discover)
 		}
 	}
 	// Hosts file mapping.
@@ -423,17 +422,27 @@ func (t *Table) ListClients() []*Client {
 	t.Refresh()
 	ipMap := make(map[string]*Client)
 	il := []ipLister{t.dhcp, t.arp, t.ndp, t.ptr, t.mdns, t.vni}
+
 	for _, ir := range il {
+		if ir == nil {
+			continue
+		}
+
 		for _, ip := range ir.List() {
-			c, ok := ipMap[ip]
-			if !ok {
-				c = &Client{
-					IP:     netip.MustParseAddr(ip),
-					Source: map[string]struct{}{ir.String(): {}},
+			// Validate IP before using MustParseAddr
+			if addr, err := netip.ParseAddr(ip); err == nil {
+				c, ok := ipMap[ip]
+				if !ok {
+					c = &Client{
+						IP:     addr,
+						Source: map[string]struct{}{},
+					}
+					ipMap[ip] = c
 				}
-				ipMap[ip] = c
-			} else {
-				c.Source[ir.String()] = struct{}{}
+				// Safely get source name
+				if src := ir.String(); src != "" {
+					c.Source[src] = struct{}{}
+				}
 			}
 		}
 	}

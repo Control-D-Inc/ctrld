@@ -418,20 +418,21 @@ func Test_isPrivatePtrLookup(t *testing.T) {
 	}
 }
 
-func Test_isSrvLookup(t *testing.T) {
+func Test_isSrvLanLookup(t *testing.T) {
 	tests := []struct {
 		name        string
 		msg         *dns.Msg
 		isSrvLookup bool
 	}{
-		{"SRV", newDnsMsgWithHostname("foo", dns.TypeSRV), true},
+		{"SRV LAN", newDnsMsgWithHostname("foo", dns.TypeSRV), true},
 		{"Not SRV", newDnsMsgWithHostname("foo", dns.TypeNone), false},
+		{"Not SRV LAN", newDnsMsgWithHostname("controld.com", dns.TypeSRV), false},
 	}
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := isSrvLookup(tc.msg); tc.isSrvLookup != got {
+			if got := isSrvLanLookup(tc.msg); tc.isSrvLookup != got {
 				t.Errorf("unexpected result, want: %v, got: %v", tc.isSrvLookup, got)
 			}
 		})

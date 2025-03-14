@@ -219,6 +219,8 @@ const ubiosBootSystemdService = `[Unit]
 Description=Run ctrld On Startup UDM
 Wants=network-online.target
 After=network-online.target
+Wants=unifi-mongodb
+After=unifi-mongodb
 StartLimitIntervalSec=500
 StartLimitBurst=5
 

@@ -17,9 +17,9 @@ import (
 	"github.com/microsoft/wmi/pkg/base/query"
 	"github.com/microsoft/wmi/pkg/constant"
 	"github.com/microsoft/wmi/pkg/hardware/network/netadapter"
-	"github.com/rs/zerolog"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
+	"tailscale.com/net/netmon"
 )
 
 const (
@@ -62,10 +62,7 @@ func dnsFromAdapter() []string {
 	var ns []string
 	var err error
 
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
 
 	for i := 0; i < maxDNSAdapterRetries; i++ {
 		if ctx.Err() != nil {
@@ -111,10 +108,8 @@ func dnsFromAdapter() []string {
 }
 
 func getDNSServers(ctx context.Context) ([]string, error) {
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
+
 	// Check context before making the call
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -303,6 +298,28 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	// if we have static DNS servers saved for the current default route, we should add them to the list
+	drIfaceName, err := netmon.DefaultRouteInterface()
+	if err != nil {
+		Log(context.Background(), logger.Debug(),
+			"Failed to get default route interface: %v", err)
+	} else {
+		drIface, err := net.InterfaceByName(drIfaceName)
+		if err != nil {
+			Log(context.Background(), logger.Debug(),
+				"Failed to get interface by name %s: %v", drIfaceName, err)
+		} else {
+			staticNs, file := SavedStaticNameservers(drIface)
+			Log(context.Background(), logger.Debug(),
+				"static dns servers from %s: %v", file, staticNs)
+			if len(staticNs) > 0 {
+				Log(context.Background(), logger.Debug(),
+					"Adding static DNS servers from %s: %v", drIfaceName, staticNs)
+				ns = append(ns, staticNs...)
+			}
+		}
+	}
+
 	if len(ns) == 0 {
 		return nil, fmt.Errorf("no valid DNS servers found")
 	}
@@ -320,10 +337,8 @@ func nameserversFromResolvconf() []string {
 // checkDomainJoined checks if the machine is joined to an Active Directory domain
 // Returns whether it's domain joined and the domain name if available
 func checkDomainJoined() bool {
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
+
 	var domain *uint16
 	var status uint32
 
@@ -400,10 +415,7 @@ func validInterfaces() map[string]struct{} {
 	defer log.SetOutput(os.Stderr)
 
 	//load the logger
-	logger := zerolog.New(io.Discard)
-	if ProxyLogger.Load() != nil {
-		logger = *ProxyLogger.Load()
-	}
+	logger := *ProxyLogger.Load()
 
 	whost := host.NewWmiLocalHost()
 	q := query.NewWmiQuery("MSFT_NetAdapter")

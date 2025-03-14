@@ -16,13 +16,12 @@ import (
 )
 
 const (
-	logWriterSize        = 1024 * 1024 * 5 // 5 MB
-	logWriterSmallSize   = 1024 * 1024 * 1 // 1 MB
-	logWriterInitialSize = 32 * 1024       // 32 KB
-	logSentInterval      = time.Minute
-	logStartEndMarker    = "\n\n=== INIT_END ===\n\n"
-	logLogEndMarker      = "\n\n=== LOG_END ===\n\n"
-	logWarnEndMarker     = "\n\n=== WARN_END ===\n\n"
+	logWriterSize          = 1024 * 1024 * 5 // 5 MB
+	logWriterSmallSize     = 1024 * 1024 * 1 // 1 MB
+	logWriterInitialSize   = 32 * 1024       // 32 KB
+	logWriterSentInterval  = time.Minute
+	logWriterInitEndMarker = "\n\n=== INIT_END ===\n\n"
+	logWriterLogEndMarker  = "\n\n=== LOG_END ===\n\n"
 )
 
 type logViewResponse struct {
@@ -69,19 +68,38 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 	// If writing p causes overflows, discard old data.
 	if lw.buf.Len()+len(p) > lw.size {
 		buf := lw.buf.Bytes()
-		buf = buf[:logWriterInitialSize]
-		if idx := bytes.LastIndex(buf, []byte("\n")); idx != -1 {
-			buf = buf[:idx]
+		haveEndMarker := false
+		// If there's init end marker already, preserve the data til the marker.
+		if idx := bytes.LastIndex(buf, []byte(logWriterInitEndMarker)); idx >= 0 {
+			buf = buf[:idx+len(logWriterInitEndMarker)]
+			haveEndMarker = true
+		} else {
+			// Otherwise, preserve the initial size data.
+			buf = buf[:logWriterInitialSize]
+			if idx := bytes.LastIndex(buf, []byte("\n")); idx != -1 {
+				buf = buf[:idx]
+			}
 		}
 		lw.buf.Reset()
 		lw.buf.Write(buf)
-		lw.buf.WriteString(logStartEndMarker) // indicate that the log was truncated.
+		if !haveEndMarker {
+			lw.buf.WriteString(logWriterInitEndMarker) // indicate that the log was truncated.
+		}
 	}
 	// If p is bigger than buffer size, truncate p by half until its size is smaller.
 	for len(p)+lw.buf.Len() > lw.size {
 		p = p[len(p)/2:]
 	}
 	return lw.buf.Write(p)
+}
+
+// initLogging initializes global logging setup.
+func (p *prog) initLogging(backup bool) {
+	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
+	logWriters := initLoggingWithBackup(backup)
+
+	// Initializing internal logging after global logging.
+	p.initInternalLogging(logWriters)
 }
 
 // initInternalLogging performs internal logging if there's no log enabled.
@@ -92,7 +110,7 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 	p.initInternalLogWriterOnce.Do(func() {
 		mainLog.Load().Notice().Msg("internal logging enabled")
 		p.internalLogWriter = newLogWriter()
-		p.internalLogSent = time.Now().Add(-logSentInterval)
+		p.internalLogSent = time.Now().Add(-logWriterSentInterval)
 		p.internalWarnLogWriter = newSmallLogWriter()
 	})
 	p.mu.Lock()
@@ -158,7 +176,7 @@ func (p *prog) logReader() (*logReader, error) {
 		wlwReader := bytes.NewReader(wlw.buf.Bytes())
 		wlwSize := wlw.buf.Len()
 		wlw.mu.Unlock()
-		reader := io.MultiReader(lwReader, bytes.NewReader([]byte(logLogEndMarker)), wlwReader)
+		reader := io.MultiReader(lwReader, bytes.NewReader([]byte(logWriterLogEndMarker)), wlwReader)
 		lr := &logReader{r: io.NopCloser(reader)}
 		lr.size = int64(lwSize + wlwSize)
 		if lr.size == 0 {

@@ -43,7 +43,7 @@ const (
 	ctrldControlUnixSockMobile = "cd.sock"
 	upstreamPrefix             = "upstream."
 	upstreamOS                 = upstreamPrefix + "os"
-	upstreamPrivate            = upstreamPrefix + "private"
+	upstreamOSLocal            = upstreamOS + ".local"
 	dnsWatchdogDefaultInterval = 20 * time.Second
 	ctrldServiceName           = "ctrld"
 )
@@ -120,6 +120,7 @@ type prog struct {
 	runningIface              string
 	requiredMultiNICsConfig   bool
 	adDomain                  string
+	runningOnDomainController bool
 
 	selfUninstallMu       sync.Mutex
 	refusedQueryCount     int
@@ -268,7 +269,7 @@ func (p *prog) preRun() {
 	if runtime.GOOS == "darwin" {
 		p.onStopped = append(p.onStopped, func() {
 			if !service.Interactive() {
-				p.resetDNS()
+				p.resetDNS(false, true)
 			}
 		})
 	}
@@ -276,7 +277,12 @@ func (p *prog) preRun() {
 
 func (p *prog) postRun() {
 	if !service.Interactive() {
-		p.resetDNS()
+		if runtime.GOOS == "windows" {
+			isDC, roleInt := isRunningOnDomainController()
+			p.runningOnDomainController = isDC
+			mainLog.Load().Debug().Msgf("running on domain controller: %t, role: %d", p.runningOnDomainController, roleInt)
+		}
+		p.resetDNS(false, false)
 		ns := ctrld.InitializeOsResolver(false)
 		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
 		p.setDNS()
@@ -345,14 +351,19 @@ func (p *prog) apiConfigReload() {
 		if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated || forced {
 			lastUpdated = time.Now().Unix()
 			cfg := &ctrld.Config{}
-			if err := validateCdRemoteConfig(resolverConfig, cfg); err != nil {
+			var cfgErr error
+			if cfgErr = validateCdRemoteConfig(resolverConfig, cfg); cfgErr == nil {
+				setListenerDefaultValue(cfg)
+				setNetworkDefaultValue(cfg)
+				cfgErr = validateConfig(cfg)
+			}
+			if cfgErr != nil {
 				logger.Warn().Err(err).Msg("skipping invalid custom config")
 				if _, err := controld.UpdateCustomLastFailed(cdUID, rootCmd.Version, cdDev, true); err != nil {
 					logger.Error().Err(err).Msg("could not mark custom last update failed")
 				}
 				return
 			}
-			setListenerDefaultValue(cfg)
 			logger.Debug().Msg("custom config changes detected, reloading...")
 			p.apiReloadCh <- cfg
 		} else {
@@ -560,13 +571,12 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	if !reload {
 		// Stop writing log to unix socket.
 		consoleWriter.Out = os.Stdout
-		logWriters := initLoggingWithBackup(false)
+		p.initLogging(false)
 		if p.logConn != nil {
 			_ = p.logConn.Close()
 		}
 		go p.apiConfigReload()
 		p.postRun()
-		p.initInternalLogging(logWriters)
 	}
 	wg.Wait()
 }
@@ -647,16 +657,74 @@ func (p *prog) setDNS() {
 	if cfg.Listener == nil {
 		return
 	}
-	if p.runningIface == "" {
-		return
-	}
-
-	// allIfaces tracks whether we should set DNS for all physical interfaces.
-	allIfaces := p.requiredMultiNICsConfig
 	lc := cfg.FirstListener()
 	if lc == nil {
 		return
 	}
+	ns := lc.IP
+	switch {
+	case lc.IsDirectDnsListener():
+		// If ctrld is direct listener, use 127.0.0.1 as nameserver.
+		ns = "127.0.0.1"
+	case lc.Port != 53:
+		ns = "127.0.0.1"
+		if resolver := router.LocalResolverIP(); resolver != "" {
+			ns = resolver
+		}
+	default:
+		// If we ever reach here, it means ctrld is running on lc.IP port 53,
+		// so we could just use lc.IP as nameserver.
+	}
+
+	nameservers := []string{ns}
+	if needRFC1918Listeners(lc) {
+		nameservers = append(nameservers, ctrld.Rfc1918Addresses()...)
+	}
+	if needLocalIPv6Listener() {
+		nameservers = append(nameservers, "::1")
+	}
+
+	slices.Sort(nameservers)
+
+	netIfaceName := ""
+	netIface := p.setDnsForRunningIface(nameservers)
+	if netIface != nil {
+		netIfaceName = netIface.Name
+	}
+	setDnsOK = true
+
+	if p.requiredMultiNICsConfig {
+		withEachPhysicalInterfaces(netIfaceName, "set DNS", func(i *net.Interface) error {
+			return setDnsIgnoreUnusableInterface(i, nameservers)
+		})
+	}
+	// resolvconf file is only useful when we have default route interface,
+	// then set DNS on this interface will push change to /etc/resolv.conf file.
+	if netIface != nil && shouldWatchResolvconf() {
+		servers := make([]netip.Addr, len(nameservers))
+		for i := range nameservers {
+			servers[i] = netip.MustParseAddr(nameservers[i])
+		}
+		p.dnsWg.Add(1)
+		go func() {
+			defer p.dnsWg.Done()
+			p.watchResolvConf(netIface, servers, setResolvConf)
+		}()
+	}
+	if p.dnsWatchdogEnabled() {
+		p.dnsWg.Add(1)
+		go func() {
+			defer p.dnsWg.Done()
+			p.dnsWatchdog(netIface, nameservers)
+		}()
+	}
+}
+
+func (p *prog) setDnsForRunningIface(nameservers []string) (runningIface *net.Interface) {
+	if p.runningIface == "" {
+		return
+	}
+
 	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
 
 	const maxDNSRetryAttempts = 3
@@ -690,59 +758,14 @@ func (p *prog) setDNS() {
 		return
 	}
 
+	runningIface = netIface
 	logger.Debug().Msg("setting DNS for interface")
-	ns := lc.IP
-	switch {
-	case lc.IsDirectDnsListener():
-		// If ctrld is direct listener, use 127.0.0.1 as nameserver.
-		ns = "127.0.0.1"
-	case lc.Port != 53:
-		ns = "127.0.0.1"
-		if resolver := router.LocalResolverIP(); resolver != "" {
-			ns = resolver
-		}
-	default:
-		// If we ever reach here, it means ctrld is running on lc.IP port 53,
-		// so we could just use lc.IP as nameserver.
-	}
-
-	nameservers := []string{ns}
-	if needRFC1918Listeners(lc) {
-		nameservers = append(nameservers, ctrld.Rfc1918Addresses()...)
-	}
-	if needLocalIPv6Listener() {
-		nameservers = append(nameservers, "::1")
-	}
-	slices.Sort(nameservers)
 	if err := setDNS(netIface, nameservers); err != nil {
 		logger.Error().Err(err).Msgf("could not set DNS for interface")
 		return
 	}
-	setDnsOK = true
 	logger.Debug().Msg("setting DNS successfully")
-	if allIfaces {
-		withEachPhysicalInterfaces(netIface.Name, "set DNS", func(i *net.Interface) error {
-			return setDnsIgnoreUnusableInterface(i, nameservers)
-		})
-	}
-	if shouldWatchResolvconf() {
-		servers := make([]netip.Addr, len(nameservers))
-		for i := range nameservers {
-			servers[i] = netip.MustParseAddr(nameservers[i])
-		}
-		p.dnsWg.Add(1)
-		go func() {
-			defer p.dnsWg.Done()
-			p.watchResolvConf(netIface, servers, setResolvConf)
-		}()
-	}
-	if p.dnsWatchdogEnabled() {
-		p.dnsWg.Add(1)
-		go func() {
-			defer p.dnsWg.Done()
-			p.dnsWatchdog(netIface, nameservers, allIfaces)
-		}()
-	}
+	return
 }
 
 // dnsWatchdogEnabled reports whether DNS watchdog is enabled.
@@ -765,12 +788,12 @@ func (p *prog) dnsWatchdogDuration() time.Duration {
 
 // dnsWatchdog watches for DNS changes on Darwin and Windows then re-applying ctrld's settings.
 // This is only works when deactivation pin set.
-func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces bool) {
+func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 	if !requiredMultiNICsConfig() {
 		return
 	}
-	logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
-	logger.Debug().Msg("start DNS settings watchdog")
+
+	mainLog.Load().Debug().Msg("start DNS settings watchdog")
 
 	ns := nameservers
 	slices.Sort(ns)
@@ -788,14 +811,56 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 				return
 			}
 			if dnsChanged(iface, ns) {
-				logger.Debug().Msg("DNS settings were changed, re-applying settings")
+				mainLog.Load().Debug().Msg("DNS settings were changed, re-applying settings")
+				// Check if the interface already has static DNS servers configured.
+				// currentStaticDNS is an OS-dependent helper that returns the current static DNS.
+				staticDNS, err := currentStaticDNS(iface)
+				if err != nil {
+					mainLog.Load().Debug().Err(err).Msgf("failed to get static DNS for interface %s", iface.Name)
+				} else if len(staticDNS) > 0 {
+					//filter out loopback addresses
+					staticDNS = slices.DeleteFunc(staticDNS, func(s string) bool {
+						return net.ParseIP(s).IsLoopback()
+					})
+					// if we have a static config and no saved IPs already, save them
+					if len(staticDNS) > 0 && len(savedStaticNameservers(iface)) == 0 {
+						// Save these static DNS values so that they can be restored later.
+						if err := saveCurrentStaticDNS(iface); err != nil {
+							mainLog.Load().Debug().Err(err).Msgf("failed to save static DNS for interface %s", iface.Name)
+						}
+					}
+				}
 				if err := setDNS(iface, ns); err != nil {
 					mainLog.Load().Error().Err(err).Str("iface", iface.Name).Msgf("could not re-apply DNS settings")
 				}
 			}
-			if allIfaces {
-				withEachPhysicalInterfaces(iface.Name, "", func(i *net.Interface) error {
+			if p.requiredMultiNICsConfig {
+				ifaceName := ""
+				if iface != nil {
+					ifaceName = iface.Name
+				}
+				withEachPhysicalInterfaces(ifaceName, "", func(i *net.Interface) error {
 					if dnsChanged(i, ns) {
+
+						// Check if the interface already has static DNS servers configured.
+						// currentStaticDNS is an OS-dependent helper that returns the current static DNS.
+						staticDNS, err := currentStaticDNS(i)
+						if err != nil {
+							mainLog.Load().Debug().Err(err).Msgf("failed to get static DNS for interface %s", i.Name)
+						} else if len(staticDNS) > 0 {
+							//filter out loopback addresses
+							staticDNS = slices.DeleteFunc(staticDNS, func(s string) bool {
+								return net.ParseIP(s).IsLoopback()
+							})
+							// if we have a static config and no saved IPs already, save them
+							if len(staticDNS) > 0 && len(savedStaticNameservers(i)) == 0 {
+								// Save these static DNS values so that they can be restored later.
+								if err := saveCurrentStaticDNS(i); err != nil {
+									mainLog.Load().Debug().Err(err).Msgf("failed to save static DNS for interface %s", i.Name)
+								}
+							}
+						}
+
 						if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
 							mainLog.Load().Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
 						} else {
@@ -809,33 +874,78 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string, allIfaces
 	}
 }
 
-func (p *prog) resetDNS() {
+// resetDNS performs a DNS reset for all interfaces.
+func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
+	netIfaceName := ""
+	if netIface := p.resetDNSForRunningIface(isStart, restoreStatic); netIface != nil {
+		netIfaceName = netIface.Name
+	}
+	// See corresponding comments in (*prog).setDNS function.
+	if p.requiredMultiNICsConfig {
+		withEachPhysicalInterfaces(netIfaceName, "reset DNS", resetDnsIgnoreUnusableInterface)
+	}
+}
+
+// resetDNSForRunningIface performs a DNS reset on the running interface.
+// The parameter isStart indicates whether this is being called as part of a start (or restart)
+// command. When true, we check if the current static DNS configuration already differs from the
+// service listener (127.0.0.1). If so, we assume that an admin has manually changed the interface's
+// static DNS settings and we do not override them using the potentially out-of-date saved file.
+// Otherwise, we restore the saved configuration (if any) or reset to DHCP.
+func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runningIface *net.Interface) {
 	if p.runningIface == "" {
 		mainLog.Load().Debug().Msg("no running interface, skipping resetDNS")
 		return
 	}
-	// See corresponding comments in (*prog).setDNS function.
-	allIfaces := p.requiredMultiNICsConfig
 	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
 	netIface, err := netInterface(p.runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
 		return
 	}
-
+	runningIface = netIface
 	if err := restoreNetworkManager(); err != nil {
 		logger.Error().Err(err).Msg("could not restore NetworkManager")
 		return
 	}
-	logger.Debug().Msg("Restoring DNS for interface")
-	if err := resetDNS(netIface); err != nil {
-		logger.Error().Err(err).Msgf("could not reset DNS")
-		return
+
+	// If starting, check the current static DNS configuration.
+	if isStart {
+		current, err := currentStaticDNS(netIface)
+		if err != nil {
+			logger.Warn().Err(err).Msg("unable to obtain current static DNS configuration; proceeding to restore saved config")
+		} else if len(current) > 0 {
+			// If any static DNS value is not our own listener, assume an admin override.
+			hasManualConfig := false
+			for _, ns := range current {
+				if ns != "127.0.0.1" && ns != "::1" {
+					hasManualConfig = true
+					break
+				}
+			}
+			if hasManualConfig {
+				logger.Debug().Msgf("Detected manual DNS configuration on interface %q: %v; not overriding with saved configuration", netIface.Name, current)
+				return
+			}
+		}
 	}
-	logger.Debug().Msg("Restoring DNS successfully")
-	if allIfaces {
-		withEachPhysicalInterfaces(netIface.Name, "reset DNS", resetDnsIgnoreUnusableInterface)
+
+	// Default logic: if there is a saved static DNS configuration, restore it.
+	saved := savedStaticNameservers(netIface)
+	if len(saved) > 0 && restoreStatic {
+		logger.Debug().Msgf("Restoring interface %q from saved static config: %v", netIface.Name, saved)
+		if err := setDNS(netIface, saved); err != nil {
+			logger.Error().Err(err).Msgf("failed to restore static DNS config on interface %q", netIface.Name)
+			return
+		}
+	} else {
+		logger.Debug().Msgf("No saved static DNS config for interface %q; resetting to DHCP", netIface.Name)
+		if err := resetDNS(netIface); err != nil {
+			logger.Error().Err(err).Msgf("failed to reset DNS to DHCP on interface %q", netIface.Name)
+			return
+		}
 	}
+	return
 }
 
 func (p *prog) logInterfacesState() {
@@ -983,12 +1093,6 @@ func findWorkingInterface(currentIface string) string {
 		Str("current_iface", currentIface).
 		Msg("no working physical interface found, keeping current")
 	return currentIface
-}
-
-// recoverOnUpstreamFailure reports whether ctrld should recover from upstream failure.
-func (p *prog) recoverOnUpstreamFailure() bool {
-	// Default is false on routers, since this recovery flow is only useful for devices that move between networks.
-	return router.Name() == ""
 }
 
 func randomLocalIP() string {
@@ -1192,7 +1296,7 @@ func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.
 		// TODO: investigate whether we should report this error?
 		if err := f(netIface); err == nil {
 			if context != "" {
-				mainLog.Load().Debug().Msgf("%s for interface %q successfully", context, i.Name)
+				mainLog.Load().Debug().Msgf("Ran %s for interface %q successfully", context, i.Name)
 			}
 		} else if !errors.Is(err, errSaveCurrentStaticDNSNotSupported) {
 			mainLog.Load().Err(err).Msgf("%s for interface %q failed", context, i.Name)
@@ -1215,19 +1319,38 @@ var errSaveCurrentStaticDNSNotSupported = errors.New("saving current DNS is not 
 // saveCurrentStaticDNS saves the current static DNS settings for restoring later.
 // Only works on Windows and Mac.
 func saveCurrentStaticDNS(iface *net.Interface) error {
+	if iface == nil {
+		mainLog.Load().Debug().Msg("could not save current static DNS settings for nil interface")
+		return nil
+	}
 	switch runtime.GOOS {
 	case "windows", "darwin":
 	default:
 		return errSaveCurrentStaticDNSNotSupported
 	}
 	file := savedStaticDnsSettingsFilePath(iface)
-	ns, _ := currentStaticDNS(iface)
+	ns, err := currentStaticDNS(iface)
+	if err != nil {
+		mainLog.Load().Warn().Err(err).Msgf("could not get current static DNS settings for %q", iface.Name)
+		return err
+	}
 	if len(ns) == 0 {
+		mainLog.Load().Debug().Msgf("no static DNS settings for %q, removing old static DNS settings file", iface.Name)
 		_ = os.Remove(file) // removing old static DNS settings
 		return nil
 	}
+	//filter out loopback addresses
+	ns = slices.DeleteFunc(ns, func(s string) bool {
+		return net.ParseIP(s).IsLoopback()
+	})
+	//if we now have no static DNS settings and the file already exists
+	// return and do not save the file
+	if len(ns) == 0 {
+		mainLog.Load().Debug().Msgf("loopback on %q, skipping saving static DNS settings", iface.Name)
+		return nil
+	}
 	if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		mainLog.Load().Warn().Err(err).Msg("could not remove old static DNS settings file")
+		mainLog.Load().Warn().Err(err).Msgf("could not remove old static DNS settings file: %s", file)
 	}
 	nss := strings.Join(ns, ",")
 	mainLog.Load().Debug().Msgf("DNS settings for %q is static: %v, saving ...", iface.Name, nss)
@@ -1241,6 +1364,9 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 
 // savedStaticDnsSettingsFilePath returns the path to saved DNS settings of the given interface.
 func savedStaticDnsSettingsFilePath(iface *net.Interface) string {
+	if iface == nil {
+		return ""
+	}
 	return absHomeDir(".dns_" + iface.Name)
 }
 
@@ -1248,6 +1374,10 @@ func savedStaticDnsSettingsFilePath(iface *net.Interface) string {
 //
 //lint:ignore U1000 use in os_windows.go and os_darwin.go
 func savedStaticNameservers(iface *net.Interface) []string {
+	if iface == nil {
+		mainLog.Load().Debug().Msg("could not get saved static DNS settings for nil interface")
+		return nil
+	}
 	file := savedStaticDnsSettingsFilePath(iface)
 	if data, _ := os.ReadFile(file); len(data) > 0 {
 		saveValues := strings.Split(string(data), ",")
@@ -1265,8 +1395,13 @@ func savedStaticNameservers(iface *net.Interface) []string {
 }
 
 // dnsChanged reports whether DNS settings for given interface was changed.
+// It returns false for a nil iface.
+//
 // The caller must sort the nameservers before calling this function.
 func dnsChanged(iface *net.Interface, nameservers []string) bool {
+	if iface == nil {
+		return false
+	}
 	curNameservers, _ := currentStaticDNS(iface)
 	slices.Sort(curNameservers)
 	if !slices.Equal(curNameservers, nameservers) {
@@ -1285,4 +1420,37 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 		// Perform self-uninstall now.
 		selfUninstall(p, logger)
 	}
+}
+
+// leakOnUpstreamFailure reports whether ctrld should initiate a recovery flow
+// when upstream failures occur.
+func (p *prog) leakOnUpstreamFailure() bool {
+	if ptr := p.cfg.Service.LeakOnUpstreamFailure; ptr != nil {
+		return *ptr
+	}
+	// Default is false on routers, since this leaking is only useful for devices that move between networks.
+	if router.Name() != "" {
+		return false
+	}
+	// if we are running on ADDC, we should not leak on upstream failure
+	if p.runningOnDomainController {
+		return false
+	}
+	return true
+}
+
+// Domain controller role values from Win32_ComputerSystem
+// https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-computersystem
+const (
+	BackupDomainController  = 4
+	PrimaryDomainController = 5
+)
+
+// isRunningOnDomainController checks if the current machine is a domain controller
+// by querying the DomainRole property from Win32_ComputerSystem via WMI.
+func isRunningOnDomainController() (bool, int) {
+	if runtime.GOOS != "windows" {
+		return false, 0
+	}
+	return isRunningOnDomainControllerWindows()
 }

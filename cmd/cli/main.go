@@ -88,22 +88,19 @@ func initConsoleLogging() {
 	multi := zerolog.MultiLevelWriter(consoleWriter)
 	l := mainLog.Load().Output(multi).With().Timestamp().Logger()
 	mainLog.Store(&l)
+
 	switch {
 	case silent:
 		zerolog.SetGlobalLevel(zerolog.NoLevel)
 	case verbose == 1:
+		ctrld.ProxyLogger.Store(&l)
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	case verbose > 1:
+		ctrld.ProxyLogger.Store(&l)
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	default:
 		zerolog.SetGlobalLevel(zerolog.NoticeLevel)
 	}
-}
-
-// initLogging initializes global logging setup.
-func initLogging() []io.Writer {
-	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
-	return initLoggingWithBackup(true)
 }
 
 // initInteractiveLogging is like initLogging, but the ProxyLogger is discarded
