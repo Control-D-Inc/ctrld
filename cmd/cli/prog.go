@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/exec"
 	"runtime"
 	"slices"
 	"sort"
@@ -21,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/kardianos/service"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
@@ -304,6 +306,16 @@ func (p *prog) apiConfigReload() {
 	logger := mainLog.Load().With().Str("mode", "api-reload").Logger()
 	logger.Debug().Msg("starting custom config reload timer")
 	lastUpdated := time.Now().Unix()
+	curVerStr := curVersion()
+	curVer, err := semver.NewVersion(curVerStr)
+	isStable := curVer != nil && curVer.Prerelease() == ""
+	if err != nil || !isStable {
+		l := mainLog.Load().Warn()
+		if err != nil {
+			l = l.Err(err)
+		}
+		l.Msgf("current version is not stable, skipping self-upgrade: %s", curVerStr)
+	}
 
 	doReloadApiConfig := func(forced bool, logger zerolog.Logger) {
 		resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
@@ -311,6 +323,11 @@ func (p *prog) apiConfigReload() {
 		if err != nil {
 			logger.Warn().Err(err).Msg("could not fetch resolver config")
 			return
+		}
+
+		// Performing self-upgrade check for production version.
+		if isStable {
+			selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, &logger)
 		}
 
 		if resolverConfig.DeactivationPin != nil {
@@ -1420,6 +1437,46 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 		// Perform self-uninstall now.
 		selfUninstall(p, logger)
 	}
+}
+
+// selfUpgradeCheck checks if the version target vt is greater
+// than the current one cv, perform self-upgrade then.
+//
+// The callers must ensure curVer and logger are non-nil.
+func selfUpgradeCheck(vt string, cv *semver.Version, logger *zerolog.Logger) {
+	if vt == "" {
+		logger.Debug().Msg("no version target set, skipped checking self-upgrade")
+		return
+	}
+	vts := vt
+	if !strings.HasPrefix(vts, "v") {
+		vts = "v" + vts
+	}
+	targetVer, err := semver.NewVersion(vts)
+	if err != nil {
+		logger.Warn().Err(err).Msgf("invalid target version, skipped self-upgrade: %s", vt)
+		return
+	}
+	if !targetVer.GreaterThan(cv) {
+		logger.Debug().
+			Str("target", vt).
+			Str("current", cv.String()).
+			Msgf("target version is not greater than current one, skipped self-upgrade")
+		return
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		mainLog.Load().Error().Err(err).Msg("failed to get executable path, skipped self-upgrade")
+		return
+	}
+	cmd := exec.Command(exe, "upgrade", "prod", "-vv")
+	cmd.SysProcAttr = sysProcAttrForSelfUpgrade()
+	if err := cmd.Start(); err != nil {
+		mainLog.Load().Error().Err(err).Msg("failed to start self-upgrade")
+		return
+	}
+	mainLog.Load().Debug().Msgf("self-upgrade triggered, version target: %s", vts)
 }
 
 // leakOnUpstreamFailure reports whether ctrld should initiate a recovery flow

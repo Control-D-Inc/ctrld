@@ -45,6 +45,7 @@ type ResolverConfig struct {
 	Ctrld struct {
 		CustomConfig     string `json:"custom_config"`
 		CustomLastUpdate int64  `json:"custom_last_update"`
+		VersionTarget    string `json:"version_target"`
 	} `json:"ctrld"`
 	Exclude         []string `json:"exclude"`
 	UID             string   `json:"uid"`

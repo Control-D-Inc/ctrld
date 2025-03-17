@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 
+	"github.com/coreos/go-systemd/v22/unit"
 	"github.com/kardianos/service"
 
 	"github.com/Control-D-Inc/ctrld/internal/router"
@@ -130,6 +132,59 @@ func (s *systemd) Status() (service.Status, error) {
 		return service.StatusStopped, nil
 	}
 	return s.Service.Status()
+}
+
+func (s *systemd) Start() error {
+	const systemdUnitFile = "/etc/systemd/system/ctrld.service"
+	f, err := os.Open(systemdUnitFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if opts, change := ensureSystemdKillMode(f); change {
+		mode := os.FileMode(0644)
+		buf, err := io.ReadAll(unit.Serialize(opts))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(systemdUnitFile, buf, mode); err != nil {
+			return err
+		}
+		if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+			return fmt.Errorf("systemctl daemon-reload failed: %w\n%s", err, string(out))
+		}
+		mainLog.Load().Debug().Msg("set KillMode=process successfully")
+	}
+	return s.Service.Start()
+}
+
+// ensureSystemdKillMode ensure systemd unit file is configured with KillMode=process.
+// This is necessary for running self-upgrade flow.
+func ensureSystemdKillMode(r io.Reader) (opts []*unit.UnitOption, change bool) {
+	opts, err := unit.DeserializeOptions(r)
+	if err != nil {
+		mainLog.Load().Error().Err(err).Msg("failed to deserialize options")
+		return
+	}
+	change = true
+	needKillModeOpt := true
+	killModeOpt := unit.NewUnitOption("Service", "KillMode", "process")
+	for _, opt := range opts {
+		if opt.Match(killModeOpt) {
+			needKillModeOpt = false
+			change = false
+			break
+		}
+		if opt.Section == killModeOpt.Section && opt.Name == killModeOpt.Name {
+			opt.Value = killModeOpt.Value
+			needKillModeOpt = false
+			break
+		}
+	}
+	if needKillModeOpt {
+		opts = append(opts, killModeOpt)
+	}
+	return opts, change
 }
 
 func newLaunchd(s service.Service) *launchd {

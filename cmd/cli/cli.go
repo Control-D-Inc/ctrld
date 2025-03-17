@@ -25,7 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Masterminds/semver"
+	"github.com/Masterminds/semver/v3"
 	"github.com/cuonglm/osinfo"
 	"github.com/go-playground/validator/v10"
 	"github.com/kardianos/service"

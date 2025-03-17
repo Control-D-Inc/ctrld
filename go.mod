@@ -5,7 +5,7 @@ go 1.23.0
 toolchain go1.23.7
 
 require (
-	github.com/Masterminds/semver v1.5.0
+	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/ameshkov/dnsstamps v1.0.3
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/cuonglm/osinfo v0.0.0-20230921071424-e0e1b1e0bbbf
