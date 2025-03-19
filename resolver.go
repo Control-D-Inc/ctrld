@@ -478,10 +478,10 @@ func lookupIP(domain string, timeout int) (ips []string) {
 		ProxyLogger.Load().Debug().Msgf("Initialize OS resolver in lookupIP")
 		or = newResolverWithNameserver(defaultNameservers())
 	}
-	resolverMutex.Unlock()
-
 	nss := *or.lanServers.Load()
 	nss = append(nss, *or.publicServers.Load()...)
+	resolverMutex.Unlock()
+
 	resolver := newResolverWithNameserver(nss)
 	ProxyLogger.Load().Debug().Msgf("resolving %q using bootstrap DNS %q", domain, nss)
 	timeoutMs := 2000
@@ -575,12 +575,13 @@ func NewBootstrapResolver(servers ...string) Resolver {
 //
 // This is useful for doing PTR lookup in LAN network.
 func NewPrivateResolver() Resolver {
-
-	logger := *ProxyLogger.Load()
-
-	Log(context.Background(), logger.Debug(), "NewPrivateResolver called")
-
-	nss := defaultNameservers()
+	resolverMutex.Lock()
+	if or == nil {
+		ProxyLogger.Load().Debug().Msgf("Initialize new OS resolver in NewPrivateResolver")
+		or = newResolverWithNameserver(defaultNameservers())
+	}
+	nss := *or.lanServers.Load()
+	resolverMutex.Unlock()
 	resolveConfNss := nameserversFromResolvconf()
 	localRfc1918Addrs := Rfc1918Addresses()
 	n := 0
