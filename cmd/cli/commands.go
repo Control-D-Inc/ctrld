@@ -629,23 +629,6 @@ func initStopCmd() *cobra.Command {
 				os.Exit(deactivationPinInvalidExitCode)
 			}
 			if doTasks([]task{{s.Stop, true, "Stop"}}) {
-				p.router.Cleanup()
-				// restore static DNS settings or DHCP
-				p.resetDNS(false, true)
-
-				// Iterate over all physical interfaces and restore static DNS if a saved static config exists.
-				withEachPhysicalInterfaces("", "restore static DNS", func(i *net.Interface) error {
-					file := savedStaticDnsSettingsFilePath(i)
-					if _, err := os.Stat(file); err == nil {
-						if err := restoreDNS(i); err != nil {
-							mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
-						} else {
-							mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
-						}
-					}
-					return nil
-				})
-
 				if router.WaitProcessExited() {
 					ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 					defer cancel()

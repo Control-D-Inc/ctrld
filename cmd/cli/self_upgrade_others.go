@@ -6,7 +6,7 @@ import (
 	"syscall"
 )
 
-// sysProcAttrForSelfUpgrade returns *syscall.SysProcAttr instance for running self-upgrade command.
-func sysProcAttrForSelfUpgrade() *syscall.SysProcAttr {
+// sysProcAttrForDetachedChildProcess returns *syscall.SysProcAttr instance for running a detached child command.
+func sysProcAttrForDetachedChildProcess() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setsid: true}
 }

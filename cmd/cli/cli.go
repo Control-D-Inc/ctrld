@@ -199,6 +199,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	p := &prog{
 		waitCh:           waitCh,
 		stopCh:           stopCh,
+		pinCodeValidCh:   make(chan struct{}, 1),
 		reloadCh:         make(chan struct{}),
 		reloadDoneCh:     make(chan struct{}),
 		dnsWatcherStopCh: make(chan struct{}),
@@ -421,19 +422,28 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				if err := p.router.Cleanup(); err != nil {
 					mainLog.Load().Error().Err(err).Msg("could not cleanup router")
 				}
-				// restore static DNS settings or DHCP
-				p.resetDNS(false, true)
 			})
 		}
 	}
+	p.onStopped = append(p.onStopped, func() {
+		// restore static DNS settings or DHCP
+		p.resetDNS(false, true)
+		// Iterate over all physical interfaces and restore static DNS if a saved static config exists.
+		withEachPhysicalInterfaces("", "restore static DNS", func(i *net.Interface) error {
+			file := savedStaticDnsSettingsFilePath(i)
+			if _, err := os.Stat(file); err == nil {
+				if err := restoreDNS(i); err != nil {
+					mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
+				} else {
+					mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
+				}
+			}
+			return nil
+		})
+	})
 
 	close(waitCh)
 	<-stopCh
-
-	p.stopDnsWatchers()
-	for _, f := range p.onStopped {
-		f()
-	}
 }
 
 func writeConfigFile(cfg *ctrld.Config) error {
@@ -609,9 +619,9 @@ func init() {
 	cdDeactivationPin.Store(defaultDeactivationPin)
 }
 
-// deactivationPinNotSet reports whether cdDeactivationPin was not set by processCDFlags.
-func deactivationPinNotSet() bool {
-	return cdDeactivationPin.Load() == defaultDeactivationPin
+// deactivationPinSet indicates if cdDeactivationPin is non-default..
+func deactivationPinSet() bool {
+	return cdDeactivationPin.Load() != defaultDeactivationPin
 }
 
 func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
