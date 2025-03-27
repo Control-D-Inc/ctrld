@@ -473,6 +473,9 @@ func LookupIP(domain string) []string {
 }
 
 func lookupIP(domain string, timeout int) (ips []string) {
+	if net.ParseIP(domain) != nil {
+		return []string{domain}
+	}
 	resolverMutex.Lock()
 	if or == nil {
 		ProxyLogger.Load().Debug().Msgf("Initialize OS resolver in lookupIP")
