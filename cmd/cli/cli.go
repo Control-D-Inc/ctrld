@@ -97,6 +97,9 @@ func curVersion() string {
 	if version != "dev" && !strings.HasPrefix(version, "v") {
 		version = "v" + version
 	}
+	if version != "" && version != "dev" {
+		return version
+	}
 	if len(commit) > 7 {
 		commit = commit[:7]
 	}
