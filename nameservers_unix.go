@@ -3,6 +3,7 @@
 package ctrld
 
 import (
+	"context"
 	"net"
 	"slices"
 	"time"
@@ -20,7 +21,7 @@ func currentNameserversFromResolvconf() []string {
 // dnsFromResolvConf reads usable nameservers from /etc/resolv.conf file.
 // A nameserver is usable if it's not one of current machine's IP addresses
 // and loopback IP addresses.
-func dnsFromResolvConf() []string {
+func dnsFromResolvConf(_ context.Context) []string {
 	const (
 		maxRetries    = 10
 		retryInterval = 100 * time.Millisecond

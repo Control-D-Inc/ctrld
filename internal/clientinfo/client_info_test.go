@@ -2,6 +2,8 @@ package clientinfo
 
 import (
 	"testing"
+
+	"github.com/Control-D-Inc/ctrld"
 )
 
 func Test_normalizeIP(t *testing.T) {
@@ -28,8 +30,9 @@ func Test_normalizeIP(t *testing.T) {
 
 func TestTable_LookupRFC1918IPv4(t *testing.T) {
 	table := &Table{
-		dhcp: &dhcp{},
-		arp:  &arpDiscover{},
+		dhcp:   &dhcp{},
+		arp:    &arpDiscover{},
+		logger: ctrld.NopLogger,
 	}
 
 	table.ipResolvers = append(table.ipResolvers, table.dhcp)

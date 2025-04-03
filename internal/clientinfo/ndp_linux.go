@@ -5,15 +5,13 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
-
-	"github.com/Control-D-Inc/ctrld"
 )
 
 // scan populates NDP table using information from system mappings.
 func (nd *ndpDiscover) scan() {
 	neighs, err := netlink.NeighList(0, netlink.FAMILY_V6)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Warn().Err(err).Msg("could not get neigh list")
+		nd.logger.Warn().Err(err).Msg("could not get neigh list")
 		return
 	}
 
@@ -34,7 +32,7 @@ func (nd *ndpDiscover) subscribe(ctx context.Context) {
 	done := make(chan struct{})
 	defer close(done)
 	if err := netlink.NeighSubscribe(ch, done); err != nil {
-		ctrld.ProxyLogger.Load().Err(err).Msg("could not perform neighbor subscribing")
+		nd.logger.Err(err).Msg("could not perform neighbor subscribing")
 		return
 	}
 	for {
@@ -47,7 +45,7 @@ func (nd *ndpDiscover) subscribe(ctx context.Context) {
 			}
 			ip := normalizeIP(nu.IP.String())
 			if nu.Type == unix.RTM_DELNEIGH {
-				ctrld.ProxyLogger.Load().Debug().Msgf("removing NDP neighbor: %s", ip)
+				nd.logger.Debug().Msgf("removing NDP neighbor: %s", ip)
 				nd.mac.Delete(ip)
 				continue
 			}
@@ -56,7 +54,7 @@ func (nd *ndpDiscover) subscribe(ctx context.Context) {
 			case netlink.NUD_REACHABLE:
 				nd.saveInfo(ip, mac)
 			case netlink.NUD_FAILED:
-				ctrld.ProxyLogger.Load().Debug().Msgf("removing NDP neighbor with failed state: %s", ip)
+				nd.logger.Debug().Msgf("removing NDP neighbor with failed state: %s", ip)
 				nd.mac.Delete(ip)
 			}
 		}

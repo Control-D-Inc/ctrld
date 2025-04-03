@@ -349,7 +349,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
 		// After processCDFlags, log config may change, so reset mainLog and re-init logging.
 		l := zerolog.New(io.Discard)
-		mainLog.Store(&l)
+		mainLog.Store(&ctrld.Logger{Logger: &l})
 
 		// Copy logs written so far to new log file if possible.
 		if buf, err := os.ReadFile(oldLogPath); err == nil {
@@ -502,8 +502,7 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		if err := v.Unmarshal(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to unmarshal default config: %v", err)
 		}
-		nop := zerolog.Nop()
-		_, _ = tryUpdateListenerConfig(&cfg, &nop, func() {}, true)
+		_, _ = tryUpdateListenerConfig(&cfg, func() {}, true)
 		addExtraSplitDnsRule(&cfg)
 		if err := writeConfigFile(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
@@ -591,7 +590,8 @@ func processNoConfigFlags(noConfigStart bool) {
 		Type:     pType,
 		Timeout:  5000,
 	}
-	puc.Init()
+	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+	puc.Init(loggerCtx)
 	upstream := map[string]*ctrld.UpstreamConfig{"0": puc}
 	if secondaryUpstream != "" {
 		sEndpoint, sType := endpointAndTyp(secondaryUpstream)
@@ -601,7 +601,7 @@ func processNoConfigFlags(noConfigStart bool) {
 			Type:     sType,
 			Timeout:  5000,
 		}
-		suc.Init()
+		suc.Init(loggerCtx)
 		upstream["1"] = suc
 		rules := make([]ctrld.Rule, 0, len(domains))
 		for _, domain := range domains {
@@ -634,13 +634,13 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
 	bo.LogLongerThan = 30 * time.Second
-	ctx := context.Background()
-	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+	ctx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+	resolverConfig, err := controld.FetchResolverConfig(ctx, cdUID, rootCmd.Version, cdDev)
 	for {
 		if errUrlNetworkError(err) {
 			bo.BackOff(ctx, err)
 			logger.Warn().Msg("could not fetch resolver using bootstrap DNS, retrying...")
-			resolverConfig, err = controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+			resolverConfig, err = controld.FetchResolverConfig(ctx, cdUID, rootCmd.Version, cdDev)
 			continue
 		}
 		break
@@ -938,9 +938,10 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 		bo.BackOff(ctx, fmt.Errorf("ExchangeContext: %w", exErr))
 	}
 	mainLog.Load().Debug().Msgf("self-check against %q failed", domain)
+	loggerCtx := ctrld.LoggerCtx(ctx, mainLog.Load())
 	// Ping all upstreams to provide better error message to users.
 	for name, uc := range cfg.Upstream {
-		if err := uc.ErrorPing(); err != nil {
+		if err := uc.ErrorPing(loggerCtx); err != nil {
 			mainLog.Load().Err(err).Msgf("failed to connect to upstream.%s, endpoint: %s", name, uc.Endpoint)
 		}
 	}
@@ -1181,7 +1182,7 @@ func mobileListenerIp() string {
 // or defined but invalid to be used, e.g: using loopback address other
 // than 127.0.0.1 with systemd-resolved.
 func updateListenerConfig(cfg *ctrld.Config, notifyToLogServerFunc func()) bool {
-	updated, _ := tryUpdateListenerConfig(cfg, nil, notifyToLogServerFunc, true)
+	updated, _ := tryUpdateListenerConfig(cfg, notifyToLogServerFunc, true)
 	if addExtraSplitDnsRule(cfg) {
 		updated = true
 	}
@@ -1191,7 +1192,7 @@ func updateListenerConfig(cfg *ctrld.Config, notifyToLogServerFunc func()) bool 
 // tryUpdateListenerConfig tries updating listener config with a working one.
 // If fatal is true, and there's listen address conflicted, the function do
 // fatal error.
-func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, notifyFunc func(), fatal bool) (updated, ok bool) {
+func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (updated, ok bool) {
 	ok = true
 	lcc := make(map[string]*listenerConfigCheck)
 	cdMode := cdUID != ""
@@ -1235,9 +1236,6 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 	}
 
 	il := mainLog.Load()
-	if infoLogger != nil {
-		il = infoLogger
-	}
 	if isMobile() {
 		// On Mobile, only use first listener, ignore others.
 		firstLn := cfg.FirstListener()
@@ -1492,7 +1490,8 @@ func cdUIDFromProvToken() string {
 	}
 	req := &controld.UtilityOrgRequest{ProvToken: cdOrg, Hostname: customHostname}
 	// Process provision token if provided.
-	resolverConfig, err := controld.FetchResolverUID(req, rootCmd.Version, cdDev)
+	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+	resolverConfig, err := controld.FetchResolverUID(loggerCtx, req, rootCmd.Version, cdDev)
 	if err != nil {
 		mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid with provision token: %s", cdOrg)
 	}
@@ -1819,7 +1818,8 @@ func runningIface(s service.Service) *ifaceResponse {
 
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
 func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
-	rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+	rc, err := controld.FetchResolverConfig(loggerCtx, cdUID, rootCmd.Version, cdDev)
 	if err != nil {
 		logger := mainLog.Load().Fatal()
 		if !fatal {

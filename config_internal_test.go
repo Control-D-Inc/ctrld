@@ -1,6 +1,7 @@
 package ctrld
 
 import (
+	"context"
 	"net/url"
 	"testing"
 
@@ -36,10 +37,10 @@ func TestUpstreamConfig_SetupBootstrapIP(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Enable parallel tests once https://github.com/microsoft/wmi/issues/165 fixed.
 			// t.Parallel()
-			tc.uc.Init()
-			tc.uc.SetupBootstrapIP()
+			tc.uc.Init(context.Background())
+			tc.uc.SetupBootstrapIP(context.Background())
 			if len(tc.uc.bootstrapIPs) == 0 {
-				t.Log(defaultNameservers())
+				t.Log(defaultNameservers(context.Background()))
 				t.Fatalf("could not bootstrap ip: %s", tc.uc.String())
 			}
 		})
@@ -355,7 +356,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tc.uc.Init()
+			tc.uc.Init(context.Background())
 			tc.uc.uid = "" // we don't care about the uid.
 			assert.Equal(t, tc.expected, tc.uc)
 		})
@@ -497,7 +498,7 @@ func TestUpstreamConfig_IsDiscoverable(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tc.uc.Init()
+			tc.uc.Init(context.Background())
 			if got := tc.uc.IsDiscoverable(); got != tc.discoverable {
 				t.Errorf("unexpected result, want: %v, got: %v", tc.discoverable, got)
 			}

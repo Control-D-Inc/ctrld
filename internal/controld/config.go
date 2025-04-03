@@ -88,18 +88,18 @@ type LogsRequest struct {
 }
 
 // FetchResolverConfig fetch Control D config for given uid.
-func FetchResolverConfig(rawUID, version string, cdDev bool) (*ResolverConfig, error) {
+func FetchResolverConfig(ctx context.Context, rawUID, version string, cdDev bool) (*ResolverConfig, error) {
 	uid, clientID := ParseRawUID(rawUID)
 	req := utilityRequest{UID: uid}
 	if clientID != "" {
 		req.ClientID = clientID
 	}
 	body, _ := json.Marshal(req)
-	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
+	return postUtilityAPI(ctx, version, cdDev, false, bytes.NewReader(body))
 }
 
 // FetchResolverUID fetch resolver uid from provision token.
-func FetchResolverUID(req *UtilityOrgRequest, version string, cdDev bool) (*ResolverConfig, error) {
+func FetchResolverUID(ctx context.Context, req *UtilityOrgRequest, version string, cdDev bool) (*ResolverConfig, error) {
 	if req == nil {
 		return nil, errors.New("invalid request")
 	}
@@ -108,21 +108,21 @@ func FetchResolverUID(req *UtilityOrgRequest, version string, cdDev bool) (*Reso
 		hostname, _ = os.Hostname()
 	}
 	body, _ := json.Marshal(UtilityOrgRequest{ProvToken: req.ProvToken, Hostname: hostname})
-	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
+	return postUtilityAPI(ctx, version, cdDev, false, bytes.NewReader(body))
 }
 
 // UpdateCustomLastFailed calls API to mark custom config is bad.
-func UpdateCustomLastFailed(rawUID, version string, cdDev, lastUpdatedFailed bool) (*ResolverConfig, error) {
+func UpdateCustomLastFailed(ctx context.Context, rawUID, version string, cdDev, lastUpdatedFailed bool) (*ResolverConfig, error) {
 	uid, clientID := ParseRawUID(rawUID)
 	req := utilityRequest{UID: uid}
 	if clientID != "" {
 		req.ClientID = clientID
 	}
 	body, _ := json.Marshal(req)
-	return postUtilityAPI(version, cdDev, true, bytes.NewReader(body))
+	return postUtilityAPI(ctx, version, cdDev, true, bytes.NewReader(body))
 }
 
-func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reader) (*ResolverConfig, error) {
+func postUtilityAPI(ctx context.Context, version string, cdDev, lastUpdatedFailed bool, body io.Reader) (*ResolverConfig, error) {
 	apiUrl := resolverDataURLCom
 	if cdDev {
 		apiUrl = resolverDataURLDev
@@ -139,12 +139,12 @@ func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reade
 	}
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/json")
-	transport := apiTransport(cdDev)
+	transport := apiTransport(ctx, cdDev)
 	client := &http.Client{
 		Timeout:   defaultTimeout,
 		Transport: transport,
 	}
-	resp, err := doWithFallback(client, req, apiServerIP(cdDev))
+	resp, err := doWithFallback(ctx, client, req, apiServerIP(cdDev))
 	if err != nil {
 		return nil, fmt.Errorf("postUtilityAPI client.Do: %w", err)
 	}
@@ -166,7 +166,7 @@ func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reade
 }
 
 // SendLogs sends runtime log to ControlD API.
-func SendLogs(lr *LogsRequest, cdDev bool) error {
+func SendLogs(ctx context.Context, lr *LogsRequest, cdDev bool) error {
 	defer lr.Data.Close()
 	apiUrl := logURLCom
 	if cdDev {
@@ -180,12 +180,12 @@ func SendLogs(lr *LogsRequest, cdDev bool) error {
 	q.Set("uid", lr.UID)
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	transport := apiTransport(cdDev)
+	transport := apiTransport(ctx, cdDev)
 	client := &http.Client{
 		Timeout:   sendLogTimeout,
 		Transport: transport,
 	}
-	resp, err := doWithFallback(client, req, apiServerIP(cdDev))
+	resp, err := doWithFallback(ctx, client, req, apiServerIP(cdDev))
 	if err != nil {
 		return fmt.Errorf("SendLogs client.Do: %w", err)
 	}
@@ -213,7 +213,7 @@ func ParseRawUID(rawUID string) (string, string) {
 }
 
 // apiTransport returns an HTTP transport for connecting to ControlD API endpoint.
-func apiTransport(cdDev bool) *http.Transport {
+func apiTransport(loggerCtx context.Context, cdDev bool) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		apiDomain := apiDomainCom
@@ -227,9 +227,10 @@ func apiTransport(cdDev bool) *http.Transport {
 			apiIPs = []string{apiDomainDevIPv4}
 		}
 
-		ips := ctrld.LookupIP(apiDomain)
+		ips := ctrld.LookupIP(loggerCtx, apiDomain)
 		if len(ips) == 0 {
-			ctrld.ProxyLogger.Load().Warn().Msgf("No IPs found for %s, use direct IPs: %v", apiDomain, apiIPs)
+			logger := ctrld.LoggerFromCtx(loggerCtx)
+			logger.Warn().Msgf("No IPs found for %s, use direct IPs: %v", apiDomain, apiIPs)
 			ips = apiIPs
 		}
 
@@ -245,7 +246,8 @@ func apiTransport(cdDev bool) *http.Transport {
 
 		dial := func(ctx context.Context, network string, addrs []string) (net.Conn, error) {
 			d := &ctrldnet.ParallelDialer{}
-			return d.DialContext(ctx, network, addrs, ctrld.ProxyLogger.Load())
+			logger := ctrld.LoggerFromCtx(loggerCtx)
+			return d.DialContext(ctx, network, addrs, logger.Logger)
 		}
 		_, port, _ := net.SplitHostPort(addr)
 
@@ -283,10 +285,11 @@ func addrsFromPort(ips []string, port string) []string {
 	return addrs
 }
 
-func doWithFallback(client *http.Client, req *http.Request, apiIp string) (*http.Response, error) {
+func doWithFallback(ctx context.Context, client *http.Client, req *http.Request, apiIp string) (*http.Response, error) {
 	resp, err := client.Do(req)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Warn().Err(err).Msgf("failed to send request, fallback to direct IP: %s", apiIp)
+		logger := ctrld.LoggerFromCtx(ctx)
+		logger.Warn().Err(err).Msgf("failed to send request, fallback to direct IP: %s", apiIp)
 		ipReq := req.Clone(req.Context())
 		ipReq.Host = apiIp
 		ipReq.URL.Host = apiIp

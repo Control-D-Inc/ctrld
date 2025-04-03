@@ -79,6 +79,7 @@ type Table struct {
 	initOnce          sync.Once
 	stopOnce          sync.Once
 	refreshInterval   int
+	logger            *ctrld.Logger
 
 	dhcp           *dhcp
 	merlin         *merlinDiscover
@@ -98,10 +99,13 @@ type Table struct {
 	ptrNameservers []string
 }
 
-func NewTable(cfg *ctrld.Config, selfIP, cdUID string, ns []string) *Table {
+func NewTable(cfg *ctrld.Config, selfIP, cdUID string, ns []string, logger *ctrld.Logger) *Table {
 	refreshInterval := cfg.Service.DiscoverRefreshInterval
 	if refreshInterval <= 0 {
 		refreshInterval = 2 * 60 // 2 minutes
+	}
+	if logger == nil {
+		logger = ctrld.NopLogger
 	}
 	return &Table{
 		svcCfg:          cfg.Service,
@@ -111,6 +115,7 @@ func NewTable(cfg *ctrld.Config, selfIP, cdUID string, ns []string) *Table {
 		cdUID:           cdUID,
 		ptrNameservers:  ns,
 		refreshInterval: refreshInterval,
+		logger:          logger,
 	}
 }
 
@@ -179,7 +184,7 @@ func (t *Table) SetSelfIP(ip string) {
 
 // initSelfDiscover initializes necessary client metadata for self query.
 func (t *Table) initSelfDiscover() {
-	t.dhcp = &dhcp{selfIP: t.selfIP}
+	t.dhcp = &dhcp{selfIP: t.selfIP, logger: t.logger}
 	t.dhcp.addSelf()
 	t.ipResolvers = append(t.ipResolvers, t.dhcp)
 	t.macResolvers = append(t.macResolvers, t.dhcp)
@@ -189,14 +194,14 @@ func (t *Table) initSelfDiscover() {
 func (t *Table) init() {
 	// Custom client ID presents, use it as the only source.
 	if _, clientID := controld.ParseRawUID(t.cdUID); clientID != "" {
-		ctrld.ProxyLogger.Load().Debug().Msg("start self discovery with custom client id")
+		t.logger.Debug().Msg("start self discovery with custom client id")
 		t.initSelfDiscover()
 		return
 	}
 
 	// If we are running on platforms that should only do self discover, use it as the only source, too.
 	if ctrld.SelfDiscover() {
-		ctrld.ProxyLogger.Load().Debug().Msg("start self discovery on desktop platforms")
+		t.logger.Debug().Msg("start self discovery on desktop platforms")
 		t.initSelfDiscover()
 		return
 	}
@@ -208,7 +213,7 @@ func (t *Table) init() {
 	//  - Merlin
 	//  - Ubios
 	if t.discoverDHCP() || t.discoverARP() {
-		t.merlin = &merlinDiscover{}
+		t.merlin = &merlinDiscover{logger: t.logger}
 		t.ubios = &ubiosDiscover{}
 		discovers := map[string]interface {
 			refresher
@@ -219,7 +224,7 @@ func (t *Table) init() {
 		}
 		for platform, discover := range discovers {
 			if err := discover.refresh(); err != nil {
-				ctrld.ProxyLogger.Load().Warn().Err(err).Msgf("failed to init %s discover", platform)
+				t.logger.Warn().Err(err).Msgf("failed to init %s discover", platform)
 			}
 			t.hostnameResolvers = append(t.hostnameResolvers, discover)
 			t.refreshers = append(t.refreshers, discover)
@@ -227,10 +232,10 @@ func (t *Table) init() {
 	}
 	// Hosts file mapping.
 	if t.discoverHosts() {
-		t.hf = &hostsFile{}
-		ctrld.ProxyLogger.Load().Debug().Msg("start hosts file discovery")
+		t.hf = &hostsFile{logger: t.logger}
+		t.logger.Debug().Msg("start hosts file discovery")
 		if err := t.hf.init(); err != nil {
-			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init hosts file discover")
+			t.logger.Error().Err(err).Msg("could not init hosts file discover")
 		} else {
 			t.hostnameResolvers = append(t.hostnameResolvers, t.hf)
 			t.refreshers = append(t.refreshers, t.hf)
@@ -239,10 +244,10 @@ func (t *Table) init() {
 	}
 	// DHCP lease files.
 	if t.discoverDHCP() {
-		t.dhcp = &dhcp{selfIP: t.selfIP}
-		ctrld.ProxyLogger.Load().Debug().Msg("start dhcp discovery")
+		t.dhcp = &dhcp{selfIP: t.selfIP, logger: t.logger}
+		t.logger.Debug().Msg("start dhcp discovery")
 		if err := t.dhcp.init(); err != nil {
-			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init DHCP discover")
+			t.logger.Error().Err(err).Msg("could not init DHCP discover")
 		} else {
 			t.ipResolvers = append(t.ipResolvers, t.dhcp)
 			t.macResolvers = append(t.macResolvers, t.dhcp)
@@ -253,8 +258,8 @@ func (t *Table) init() {
 	// ARP/NDP table.
 	if t.discoverARP() {
 		t.arp = &arpDiscover{}
-		t.ndp = &ndpDiscover{}
-		ctrld.ProxyLogger.Load().Debug().Msg("start arp discovery")
+		t.ndp = &ndpDiscover{logger: t.logger}
+		t.logger.Debug().Msg("start arp discovery")
 		discovers := map[string]interface {
 			refresher
 			IpResolver
@@ -266,7 +271,7 @@ func (t *Table) init() {
 
 		for protocol, discover := range discovers {
 			if err := discover.refresh(); err != nil {
-				ctrld.ProxyLogger.Load().Error().Err(err).Msgf("could not init %s discover", protocol)
+				t.logger.Error().Err(err).Msgf("could not init %s discover", protocol)
 			} else {
 				t.ipResolvers = append(t.ipResolvers, discover)
 				t.macResolvers = append(t.macResolvers, discover)
@@ -283,7 +288,10 @@ func (t *Table) init() {
 	}
 	// PTR lookup.
 	if t.discoverPTR() {
-		t.ptr = &ptrDiscover{resolver: ctrld.NewPrivateResolver()}
+		t.ptr = &ptrDiscover{
+			resolver: ctrld.NewPrivateResolver(context.Background()),
+			logger:   t.logger,
+		}
 		if len(t.ptrNameservers) > 0 {
 			nss := make([]string, 0, len(t.ptrNameservers))
 			for _, ns := range t.ptrNameservers {
@@ -295,18 +303,18 @@ func (t *Table) init() {
 				if _, portErr := strconv.Atoi(port); portErr == nil && port != "0" && net.ParseIP(host) != nil {
 					nss = append(nss, net.JoinHostPort(host, port))
 				} else {
-					ctrld.ProxyLogger.Load().Warn().Msgf("ignoring invalid nameserver for ptr discover: %q", ns)
+					t.logger.Warn().Msgf("ignoring invalid nameserver for ptr discover: %q", ns)
 				}
 			}
 			if len(nss) > 0 {
 				t.ptr.resolver = ctrld.NewResolverWithNameserver(nss)
-				ctrld.ProxyLogger.Load().Debug().Msgf("using nameservers %v for ptr discovery", nss)
+				t.logger.Debug().Msgf("using nameservers %v for ptr discovery", nss)
 			}
 
 		}
-		ctrld.ProxyLogger.Load().Debug().Msg("start ptr discovery")
+		t.logger.Debug().Msg("start ptr discovery")
 		if err := t.ptr.refresh(); err != nil {
-			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init PTR discover")
+			t.logger.Error().Err(err).Msg("could not init PTR discover")
 		} else {
 			t.hostnameResolvers = append(t.hostnameResolvers, t.ptr)
 			t.refreshers = append(t.refreshers, t.ptr)
@@ -314,10 +322,10 @@ func (t *Table) init() {
 	}
 	// mdns.
 	if t.discoverMDNS() {
-		t.mdns = &mdns{}
-		ctrld.ProxyLogger.Load().Debug().Msg("start mdns discovery")
+		t.mdns = &mdns{logger: t.logger}
+		t.logger.Debug().Msg("start mdns discovery")
 		if err := t.mdns.init(t.quitCh); err != nil {
-			ctrld.ProxyLogger.Load().Error().Err(err).Msg("could not init mDNS discover")
+			t.logger.Error().Err(err).Msg("could not init mDNS discover")
 		} else {
 			t.hostnameResolvers = append(t.hostnameResolvers, t.mdns)
 		}

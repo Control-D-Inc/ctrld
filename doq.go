@@ -26,7 +26,7 @@ func (r *doqResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 		if msg != nil && len(msg.Question) > 0 {
 			dnsTyp = msg.Question[0].Qtype
 		}
-		ip = r.uc.bootstrapIPForDNSType(dnsTyp)
+		ip = r.uc.bootstrapIPForDNSType(ctx, dnsTyp)
 	}
 	tlsConfig.ServerName = r.uc.Domain
 	_, port, _ := net.SplitHostPort(endpoint)

@@ -102,6 +102,7 @@ func (p *prog) checkDnsLoop() {
 	}
 	p.loopMu.Unlock()
 
+	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
 	for uid := range p.loop {
 		msg := loopTestMsg(uid)
 		uc := upstream[uid]
@@ -109,7 +110,7 @@ func (p *prog) checkDnsLoop() {
 		if uc == nil {
 			continue
 		}
-		resolver, err := ctrld.NewResolver(uc)
+		resolver, err := ctrld.NewResolver(loggerCtx, uc)
 		if err != nil {
 			mainLog.Load().Warn().Err(err).Msgf("could not perform loop check for upstream: %q, endpoint: %q", uc.Name, uc.Endpoint)
 			continue

@@ -34,7 +34,8 @@ var (
 )
 
 type mdns struct {
-	name sync.Map // ip => hostname
+	name   sync.Map // ip => hostname
+	logger *ctrld.Logger
 }
 
 func (m *mdns) LookupHostnameByIP(ip string) string {
@@ -93,9 +94,9 @@ func (m *mdns) init(quitCh chan struct{}) error {
 	}
 
 	// Check if IPv6 is available once and use the result for the rest of the function.
-	ctrld.ProxyLogger.Load().Debug().Msgf("checking for IPv6 availability in mdns init")
+	m.logger.Debug().Msgf("checking for IPv6 availability in mdns init")
 	ipv6 := ctrldnet.IPv6Available(context.Background())
-	ctrld.ProxyLogger.Load().Debug().Msgf("IPv6 is %v in mdns init", ipv6)
+	m.logger.Debug().Msgf("IPv6 is %v in mdns init", ipv6)
 
 	v4ConnList := make([]*net.UDPConn, 0, len(ifaces))
 	v6ConnList := make([]*net.UDPConn, 0, len(ifaces))
@@ -129,11 +130,11 @@ func (m *mdns) probeLoop(conns []*net.UDPConn, remoteAddr net.Addr, quitCh chan 
 	for {
 		err := m.probe(conns, remoteAddr)
 		if shouldStopProbing(err) {
-			ctrld.ProxyLogger.Load().Warn().Msgf("stop probing %q: %v", remoteAddr, err)
+			m.logger.Warn().Msgf("stop probing %q: %v", remoteAddr, err)
 			break
 		}
 		if err != nil {
-			ctrld.ProxyLogger.Load().Warn().Err(err).Msg("error while probing mdns")
+			m.logger.Warn().Err(err).Msg("error while probing mdns")
 			bo.BackOff(context.Background(), errors.New("mdns probe backoff"))
 			continue
 		}
@@ -161,7 +162,7 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			ctrld.ProxyLogger.Load().Debug().Err(err).Msg("mdns readLoop error")
+			m.logger.Debug().Err(err).Msg("mdns readLoop error")
 			return
 		}
 
@@ -184,11 +185,11 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 			if ip != "" && name != "" {
 				name = normalizeHostname(name)
 				if val, loaded := m.name.LoadOrStore(ip, name); !loaded {
-					ctrld.ProxyLogger.Load().Debug().Msgf("found hostname: %q, ip: %q via mdns", name, ip)
+					m.logger.Debug().Msgf("found hostname: %q, ip: %q via mdns", name, ip)
 				} else {
 					old := val.(string)
 					if old != name {
-						ctrld.ProxyLogger.Load().Debug().Msgf("update hostname: %q, ip: %q, old: %q via mdns", name, ip, old)
+						m.logger.Debug().Msgf("update hostname: %q, ip: %q, old: %q via mdns", name, ip, old)
 						m.name.Store(ip, name)
 					}
 				}
@@ -227,7 +228,7 @@ func (m *mdns) probe(conns []*net.UDPConn, remoteAddr net.Addr) error {
 // getDataFromAvahiDaemonCache reads entries from avahi-daemon cache to update mdns data.
 func (m *mdns) getDataFromAvahiDaemonCache() {
 	if _, err := exec.LookPath("avahi-browse"); err != nil {
-		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("could not find avahi-browse binary, skipping.")
+		m.logger.Debug().Err(err).Msg("could not find avahi-browse binary, skipping.")
 		return
 	}
 	// Run avahi-browse to discover services from cache:
@@ -237,7 +238,7 @@ func (m *mdns) getDataFromAvahiDaemonCache() {
 	//  - "-c" -> read from cache.
 	out, err := exec.Command("avahi-browse", "-a", "-r", "-p", "-c").Output()
 	if err != nil {
-		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("could not browse services from avahi cache")
+		m.logger.Debug().Err(err).Msg("could not browse services from avahi cache")
 		return
 	}
 	m.storeDataFromAvahiBrowseOutput(bytes.NewReader(out))
@@ -257,7 +258,7 @@ func (m *mdns) storeDataFromAvahiBrowseOutput(r io.Reader) {
 		name := normalizeHostname(fields[6])
 		// Only using cache value if we don't have existed one.
 		if _, loaded := m.name.LoadOrStore(ip, name); !loaded {
-			ctrld.ProxyLogger.Load().Debug().Msgf("found hostname: %q, ip: %q via avahi cache", name, ip)
+			m.logger.Debug().Msgf("found hostname: %q, ip: %q via avahi cache", name, ip)
 		}
 	}
 }

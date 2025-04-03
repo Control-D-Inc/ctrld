@@ -5,6 +5,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"github.com/Control-D-Inc/ctrld"
 )
 
 func (p *prog) watchLinkState(ctx context.Context) {
@@ -26,7 +28,7 @@ func (p *prog) watchLinkState(ctx context.Context) {
 			if lu.Change&unix.IFF_UP != 0 {
 				mainLog.Load().Debug().Msgf("link state changed, re-bootstrapping")
 				for _, uc := range p.cfg.Upstream {
-					uc.ReBootstrap()
+					uc.ReBootstrap(ctrld.LoggerCtx(ctx, mainLog.Load()))
 				}
 			}
 		}
