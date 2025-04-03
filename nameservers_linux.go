@@ -3,6 +3,7 @@ package ctrld
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/hex"
 	"net"
 	"os"
@@ -20,7 +21,7 @@ func dnsFns() []dnsFn {
 	return []dnsFn{dnsFromResolvConf, dns4, dns6, dnsFromSystemdResolver}
 }
 
-func dns4() []string {
+func dns4(_ context.Context) []string {
 	f, err := os.Open(v4RouteFile)
 	if err != nil {
 		return nil
@@ -60,7 +61,7 @@ func dns4() []string {
 	return dns
 }
 
-func dns6() []string {
+func dns6(_ context.Context) []string {
 	f, err := os.Open(v6RouteFile)
 	if err != nil {
 		return nil
@@ -94,7 +95,7 @@ func dns6() []string {
 	return dns
 }
 
-func dnsFromSystemdResolver() []string {
+func dnsFromSystemdResolver(_ context.Context) []string {
 	c, err := resolvconffile.ParseFile("/run/systemd/resolve/resolv.conf")
 	if err != nil {
 		return nil

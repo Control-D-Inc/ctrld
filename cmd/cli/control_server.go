@@ -216,8 +216,9 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 
+		loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
 		// Re-fetch pin code from API.
-		if rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev); rc != nil {
+		if rc, err := controld.FetchResolverConfig(loggerCtx, cdUID, rootCmd.Version, cdDev); rc != nil {
 			if rc.DeactivationPin != nil {
 				cdDeactivationPin.Store(*rc.DeactivationPin)
 			} else {
@@ -321,7 +322,8 @@ func (p *prog) registerControlServerHandler() {
 		}
 		mainLog.Load().Debug().Msg("sending log file to ControlD server")
 		resp := logSentResponse{Size: r.size}
-		if err := controld.SendLogs(req, cdDev); err != nil {
+		loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+		if err := controld.SendLogs(loggerCtx, req, cdDev); err != nil {
 			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
 			resp.Error = err.Error()
 			w.WriteHeader(http.StatusInternalServerError)

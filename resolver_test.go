@@ -132,7 +132,7 @@ func Test_osResolver_InitializationRace(t *testing.T) {
 	for range n {
 		go func() {
 			defer wg.Done()
-			InitializeOsResolver(false)
+			InitializeOsResolver(LoggerCtx(context.Background(), nil), false)
 		}()
 	}
 	wg.Wait()

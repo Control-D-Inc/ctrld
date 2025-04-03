@@ -110,6 +110,7 @@ func (p *prog) serveDNS(mainCtx context.Context, listenerNum string) error {
 		listenerConfig := p.cfg.Listener[listenerNum]
 		reqId := requestID()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
+		ctx = ctrld.LoggerCtx(ctx, mainLog.Load())
 		if !listenerConfig.AllowWanClients && isWanClient(w.RemoteAddr()) {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "query refused, listener does not allow WAN clients: %s", w.RemoteAddr().String())
 			answer := new(dns.Msg)
@@ -514,7 +515,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	}
 	resolve1 := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "sending query to %s: %s", upstream, upstreamConfig.Name)
-		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
+		dnsResolver, err := ctrld.NewResolver(ctx, upstreamConfig)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
 			return nil, err
@@ -549,11 +550,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			// For timeout error (i.e: context deadline exceed), force re-bootstrapping.
 			var e net.Error
 			if errors.As(err, &e) && e.Timeout() {
-				upstreamConfig.ReBootstrap()
+				upstreamConfig.ReBootstrap(ctx)
 			}
 			// For network error, turn ipv6 off if enabled.
-			if ctrld.HasIPv6() && (errUrlNetworkError(err) || errNetworkError(err)) {
-				ctrld.DisableIPv6()
+			if ctrld.HasIPv6(ctx) && (errUrlNetworkError(err) || errNetworkError(err)) {
+				ctrld.DisableIPv6(ctx)
 			}
 		}
 
@@ -960,7 +961,8 @@ func (p *prog) doSelfUninstall(answer *dns.Msg) {
 	logger := mainLog.Load().With().Str("mode", "self-uninstall").Logger()
 	if p.refusedQueryCount > selfUninstallMaxQueries {
 		p.checkingSelfUninstall = true
-		_, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+		loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+		_, err := controld.FetchResolverConfig(loggerCtx, cdUID, rootCmd.Version, cdDev)
 		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
 		selfUninstallCheck(err, p, logger)
 
@@ -1326,13 +1328,13 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 
 		// Only set the IPv4 default if selfIP is a valid IPv4 address.
 		if ip := net.ParseIP(selfIP); ip != nil && ip.To4() != nil {
-			ctrld.SetDefaultLocalIPv4(ip)
+			ctrld.SetDefaultLocalIPv4(ctrld.LoggerCtx(ctx, mainLog.Load()), ip)
 			if !isMobile() && p.ciTable != nil {
 				p.ciTable.SetSelfIP(selfIP)
 			}
 		}
 		if ip := net.ParseIP(ipv6); ip != nil {
-			ctrld.SetDefaultLocalIPv6(ip)
+			ctrld.SetDefaultLocalIPv6(ctrld.LoggerCtx(ctx, mainLog.Load()), ip)
 		}
 		mainLog.Load().Debug().Msgf("Set default local IPv4: %s, IPv6: %s", selfIP, ipv6)
 
@@ -1400,7 +1402,7 @@ func interfaceIPsEqual(a, b []netip.Prefix) bool {
 func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) error {
 	mainLog.Load().Debug().Msgf("Starting check for upstream: %s", upstream)
 
-	resolver, err := ctrld.NewResolver(uc)
+	resolver, err := ctrld.NewResolver(ctrld.LoggerCtx(context.Background(), mainLog.Load()), uc)
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msgf("Failed to create resolver for upstream %s", upstream)
 		return err
@@ -1418,7 +1420,7 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	uc.ReBootstrap()
+	uc.ReBootstrap(ctrld.LoggerCtx(ctx, mainLog.Load()))
 	mainLog.Load().Debug().Msgf("Rebootstrapping resolver for upstream: %s", upstream)
 
 	start := time.Now()
@@ -1474,10 +1476,11 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 	// will be appended to nameservers from the saved interface values
 	p.resetDNS(false, false)
 
+	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
 	// For an OS failure, reinitialize OS resolver nameservers immediately.
 	if reason == RecoveryReasonOSFailure {
 		mainLog.Load().Debug().Msg("OS resolver failure detected; reinitializing OS resolver nameservers")
-		ns := ctrld.InitializeOsResolver(true)
+		ns := ctrld.InitializeOsResolver(loggerCtx, true)
 		if len(ns) == 0 {
 			mainLog.Load().Warn().Msg("No nameservers found for OS resolver; using existing values")
 		} else {
@@ -1504,7 +1507,7 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 
 	// For network changes we also reinitialize the OS resolver.
 	if reason == RecoveryReasonNetworkChange {
-		ns := ctrld.InitializeOsResolver(true)
+		ns := ctrld.InitializeOsResolver(loggerCtx, true)
 		if len(ns) == 0 {
 			mainLog.Load().Warn().Msg("No nameservers found for OS resolver during network-change recovery; using existing values")
 		} else {
@@ -1564,7 +1567,7 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 					// we should try to reinit the OS resolver to ensure we can recover
 					if name == upstreamOS && attempts%3 == 0 {
 						mainLog.Load().Debug().Msgf("UpstreamOS check failed on attempt %d, reinitializing OS resolver", attempts)
-						ns := ctrld.InitializeOsResolver(true)
+						ns := ctrld.InitializeOsResolver(ctrld.LoggerCtx(ctx, mainLog.Load()), true)
 						if len(ns) == 0 {
 							mainLog.Load().Warn().Msg("No nameservers found for OS resolver; using existing values")
 						} else {
@@ -1624,12 +1627,12 @@ func ValidateDefaultLocalIPsFromDelta(newState *netmon.State) {
 	// Check if the default IPv4 is still active.
 	if currentIPv4 != nil && !activeIPs[currentIPv4.String()] {
 		mainLog.Load().Debug().Msgf("DefaultLocalIPv4 %s is no longer active in the new state. Resetting.", currentIPv4)
-		ctrld.SetDefaultLocalIPv4(nil)
+		ctrld.SetDefaultLocalIPv4(ctrld.LoggerCtx(context.Background(), mainLog.Load()), nil)
 	}
 
 	// Check if the default IPv6 is still active.
 	if currentIPv6 != nil && !activeIPs[currentIPv6.String()] {
 		mainLog.Load().Debug().Msgf("DefaultLocalIPv6 %s is no longer active in the new state. Resetting.", currentIPv6)
-		ctrld.SetDefaultLocalIPv6(nil)
+		ctrld.SetDefaultLocalIPv6(ctrld.LoggerCtx(context.Background(), mainLog.Load()), nil)
 	}
 }

@@ -105,19 +105,20 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	if len(msg.Question) > 0 {
 		dnsTyp = msg.Question[0].Qtype
 	}
-	c := http.Client{Transport: r.uc.dohTransport(dnsTyp)}
+	c := http.Client{Transport: r.uc.dohTransport(ctx, dnsTyp)}
 	if r.isDoH3 {
-		transport := r.uc.doh3Transport(dnsTyp)
+		transport := r.uc.doh3Transport(ctx, dnsTyp)
 		if transport == nil {
 			return nil, errors.New("DoH3 is not supported")
 		}
 		c.Transport = transport
 	}
 	resp, err := c.Do(req)
-	if err != nil && r.uc.FallbackToDirectIP() {
+	if err != nil && r.uc.FallbackToDirectIP(ctx) {
 		retryCtx, cancel := r.uc.Context(context.WithoutCancel(ctx))
 		defer cancel()
-		Log(ctx, ProxyLogger.Load().Warn().Err(err), "retrying request after fallback to direct ip")
+		logger := LoggerFromCtx(ctx)
+		logger.Warn().Err(err).Msg("retrying request after fallback to direct ip")
 		resp, err = c.Do(req.Clone(retryCtx))
 	}
 	if err != nil {
@@ -163,7 +164,8 @@ func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 		}
 	}
 	if printed {
-		Log(ctx, ProxyLogger.Load().Debug(), "sending request header: %v", dohHeader)
+		logger := LoggerFromCtx(ctx)
+		logger.Debug().Msgf("sending request header: %v", dohHeader)
 	}
 	dohHeader.Set("Content-Type", headerApplicationDNS)
 	dohHeader.Set("Accept", headerApplicationDNS)

@@ -137,8 +137,7 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 	})
 	multi := zerolog.MultiLevelWriter(writers...)
 	l := mainLog.Load().Output(multi).With().Logger()
-	mainLog.Store(&l)
-	ctrld.ProxyLogger.Store(&l)
+	mainLog.Store(&ctrld.Logger{Logger: &l})
 }
 
 // needInternalLogging reports whether prog needs to run internal logging.

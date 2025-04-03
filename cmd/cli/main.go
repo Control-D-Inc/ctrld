@@ -40,7 +40,7 @@ var (
 	cleanup           bool
 	startOnly         bool
 
-	mainLog       atomic.Pointer[zerolog.Logger]
+	mainLog       atomic.Pointer[ctrld.Logger]
 	consoleWriter zerolog.ConsoleWriter
 	noConfigStart bool
 )
@@ -54,7 +54,7 @@ const (
 
 func init() {
 	l := zerolog.New(io.Discard)
-	mainLog.Store(&l)
+	mainLog.Store(&ctrld.Logger{Logger: &l})
 }
 
 func Main() {
@@ -87,16 +87,14 @@ func initConsoleLogging() {
 	})
 	multi := zerolog.MultiLevelWriter(consoleWriter)
 	l := mainLog.Load().Output(multi).With().Timestamp().Logger()
-	mainLog.Store(&l)
+	mainLog.Store(&ctrld.Logger{Logger: &l})
 
 	switch {
 	case silent:
 		zerolog.SetGlobalLevel(zerolog.NoLevel)
 	case verbose == 1:
-		ctrld.ProxyLogger.Store(&l)
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	case verbose > 1:
-		ctrld.ProxyLogger.Store(&l)
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	default:
 		zerolog.SetGlobalLevel(zerolog.NoticeLevel)
@@ -113,8 +111,6 @@ func initInteractiveLogging() {
 	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
 	initLoggingWithBackup(false)
 	cfg.Service.LogPath = old
-	l := zerolog.New(io.Discard)
-	ctrld.ProxyLogger.Store(&l)
 }
 
 // initLoggingWithBackup initializes log setup base on current config.
@@ -153,9 +149,7 @@ func initLoggingWithBackup(doBackup bool) []io.Writer {
 	writers = append(writers, consoleWriter)
 	multi := zerolog.MultiLevelWriter(writers...)
 	l := mainLog.Load().Output(multi).With().Logger()
-	mainLog.Store(&l)
-	// TODO: find a better way.
-	ctrld.ProxyLogger.Store(&l)
+	mainLog.Store(&ctrld.Logger{Logger: &l})
 
 	zerolog.SetGlobalLevel(zerolog.NoticeLevel)
 	logLevel := cfg.Service.LogLevel

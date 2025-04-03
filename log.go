@@ -3,19 +3,37 @@ package ctrld
 import (
 	"context"
 	"fmt"
-	"io"
-	"sync/atomic"
 
 	"github.com/rs/zerolog"
 )
 
-// ProxyLog emits the log record for proxy operations.
-// The caller should set it only once.
-// DEPRECATED: use ProxyLogger instead.
-var ProxyLog = zerolog.New(io.Discard)
+// LoggerCtxKey is the context.Context key for a logger.
+type LoggerCtxKey struct{}
 
-// ProxyLogger emits the log record for proxy operations.
-var ProxyLogger atomic.Pointer[zerolog.Logger]
+// LoggerCtx returns a context.Context with LoggerCtxKey set.
+func LoggerCtx(ctx context.Context, l *Logger) context.Context {
+	return context.WithValue(ctx, LoggerCtxKey{}, l)
+}
+
+// A Logger provides fast, leveled, structured logging.
+type Logger struct {
+	*zerolog.Logger
+}
+
+var noOpZeroLogger = zerolog.Nop()
+
+// NopLogger returns a logger which all operation are no-op.
+var NopLogger = &Logger{&noOpZeroLogger}
+
+// LoggerFromCtx returns the logger associated with given ctx.
+//
+// If there's no logger, a no-op logger will be returned.
+func LoggerFromCtx(ctx context.Context) *Logger {
+	if logger, ok := ctx.Value(LoggerCtxKey{}).(*Logger); ok && logger != nil {
+		return logger
+	}
+	return NopLogger
+}
 
 // ReqIdCtxKey is the context.Context key for a request id.
 type ReqIdCtxKey struct{}

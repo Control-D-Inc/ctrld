@@ -15,6 +15,7 @@ const merlinNvramCustomClientListKey = "custom_clientlist"
 
 type merlinDiscover struct {
 	hostname sync.Map // mac => hostname
+	logger   *ctrld.Logger
 }
 
 func (m *merlinDiscover) refresh() error {
@@ -25,7 +26,7 @@ func (m *merlinDiscover) refresh() error {
 	if err != nil {
 		return err
 	}
-	ctrld.ProxyLogger.Load().Debug().Msg("reading Merlin custom client list")
+	m.logger.Debug().Msg("reading Merlin custom client list")
 	m.parseMerlinCustomClientList(out)
 	return nil
 }

@@ -286,7 +286,7 @@ func (p *prog) postRun() {
 			mainLog.Load().Debug().Msgf("running on domain controller: %t, role: %d", p.runningOnDomainController, roleInt)
 		}
 		p.resetDNS(false, false)
-		ns := ctrld.InitializeOsResolver(false)
+		ns := ctrld.InitializeOsResolver(ctrld.LoggerCtx(context.Background(), mainLog.Load()), false)
 		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
 		p.setDNS()
 		p.csSetDnsDone <- struct{}{}
@@ -319,7 +319,8 @@ func (p *prog) apiConfigReload() {
 	}
 
 	doReloadApiConfig := func(forced bool, logger zerolog.Logger) {
-		resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+		loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+		resolverConfig, err := controld.FetchResolverConfig(loggerCtx, cdUID, rootCmd.Version, cdDev)
 		selfUninstallCheck(err, p, logger)
 		if err != nil {
 			logger.Warn().Err(err).Msg("could not fetch resolver config")
@@ -377,7 +378,7 @@ func (p *prog) apiConfigReload() {
 			}
 			if cfgErr != nil {
 				logger.Warn().Err(err).Msg("skipping invalid custom config")
-				if _, err := controld.UpdateCustomLastFailed(cdUID, rootCmd.Version, cdDev, true); err != nil {
+				if _, err := controld.UpdateCustomLastFailed(loggerCtx, cdUID, rootCmd.Version, cdDev, true); err != nil {
 					logger.Error().Err(err).Msg("could not mark custom last update failed")
 				}
 				return
@@ -404,22 +405,23 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 	localUpstreams := make([]string, 0, len(cfg.Upstream))
 	ptrNameservers := make([]string, 0, len(cfg.Upstream))
 	isControlDUpstream := false
+	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
 	for n := range cfg.Upstream {
 		uc := cfg.Upstream[n]
 		sdns := uc.Type == ctrld.ResolverTypeSDNS
-		uc.Init()
+		uc.Init(loggerCtx)
 		if sdns {
 			mainLog.Load().Debug().Msgf("initialized DNS Stamps with endpoint: %s, type: %s", uc.Endpoint, uc.Type)
 		}
 		isControlDUpstream = isControlDUpstream || uc.IsControlD()
 		if uc.BootstrapIP == "" {
-			uc.SetupBootstrapIP()
+			uc.SetupBootstrapIP(ctrld.LoggerCtx(context.Background(), mainLog.Load()))
 			mainLog.Load().Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
 		} else {
 			mainLog.Load().Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("using bootstrap IP for upstream.%s", n)
 		}
 		uc.SetCertPool(rootCertPool)
-		go uc.Ping()
+		go uc.Ping(loggerCtx)
 
 		if canBeLocalUpstream(uc.Domain) {
 			localUpstreams = append(localUpstreams, upstreamPrefix+n)
@@ -601,7 +603,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 // setupClientInfoDiscover performs necessary works for running client info discover.
 func (p *prog) setupClientInfoDiscover(selfIP string) {
-	p.ciTable = clientinfo.NewTable(&cfg, selfIP, cdUID, p.ptrNameservers)
+	p.ciTable = clientinfo.NewTable(&cfg, selfIP, cdUID, p.ptrNameservers, mainLog.Load())
 	if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
 		mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)

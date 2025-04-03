@@ -22,8 +22,8 @@ func dnsFns() []dnsFn {
 	return []dnsFn{dnsFromResolvConf, getDNSFromScutil, getAllDHCPNameservers}
 }
 
-func getDNSFromScutil() []string {
-	logger := *ProxyLogger.Load()
+func getDNSFromScutil(ctx context.Context) []string {
+	logger := LoggerFromCtx(ctx)
 
 	const (
 		maxRetries    = 10
@@ -109,8 +109,8 @@ func getDHCPNameservers(iface string) ([]string, error) {
 	return nameservers, nil
 }
 
-func getAllDHCPNameservers() []string {
-	logger := *ProxyLogger.Load()
+func getAllDHCPNameservers(ctx context.Context) []string {
+	logger := LoggerFromCtx(ctx)
 
 	interfaces, err := net.Interfaces()
 	if err != nil {

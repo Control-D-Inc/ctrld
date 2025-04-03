@@ -23,7 +23,7 @@ func (r *dotResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	if msg != nil && len(msg.Question) > 0 {
 		dnsTyp = msg.Question[0].Qtype
 	}
-	tcpNet, _ := r.uc.netForDNSType(dnsTyp)
+	tcpNet, _ := r.uc.netForDNSType(ctx, dnsTyp)
 	dnsClient := &dns.Client{
 		Net:       tcpNet,
 		Dialer:    dialer,

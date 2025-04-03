@@ -3,6 +3,7 @@
 package ctrld
 
 import (
+	"context"
 	"net"
 	"syscall"
 
@@ -13,7 +14,7 @@ func dnsFns() []dnsFn {
 	return []dnsFn{dnsFromResolvConf, dnsFromRIB}
 }
 
-func dnsFromRIB() []string {
+func dnsFromRIB(_ context.Context) []string {
 	var dns []string
 	rib, err := route.FetchRIB(syscall.AF_UNSPEC, route.RIBTypeRoute, 0)
 	if err != nil {
