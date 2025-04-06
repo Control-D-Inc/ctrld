@@ -41,7 +41,7 @@ All DNS protocols are supported, including:
 - Common routers (See Router Mode below)
 
 # Install
-There are several ways to download and install `ctrld.
+There are several ways to download and install `ctrld`.
 
 ## Quick Install
 The simplest way to download and install `ctrld` is to use the following installer command on any UNIX-like platform:
