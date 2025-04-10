@@ -3,6 +3,7 @@ package merlin
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -73,30 +74,42 @@ func (m *Merlin) Setup() error {
 	if val, _ := nvram.Run("get", nvram.CtrldSetupKey); val == "1" {
 		return nil
 	}
-	buf, err := os.ReadFile(dnsmasq.MerlinPostConfPath)
-	// Already setup.
-	if bytes.Contains(buf, []byte(dnsmasq.MerlinPostConfMarker)) {
-		return nil
-	}
-	if err != nil && !os.IsNotExist(err) {
+
+	if err := m.writeDnsmasqPostconf(); err != nil {
 		return err
 	}
 
-	data, err := dnsmasq.ConfTmpl(dnsmasq.MerlinPostConfTmpl, m.cfg)
+	// Copy current dnsmasq config to /jffs/configs/dnsmasq.conf,
+	// Then we will run postconf script on this file.
+	//
+	// Normally, adding postconf script is enough. However, we see
+	// reports on some Merlin devices that postconf scripts does not
+	// work, but manipulating the config directly via /jffs/configs does.
+	src, err := os.Open(dnsmasq.MerlinConfPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open dnsmasq config: %w", err)
 	}
-	data = strings.Join([]string{
-		data,
-		"\n",
-		dnsmasq.MerlinPostConfMarker,
-		"\n",
-		string(buf),
-	}, "\n")
-	// Write dnsmasq post conf file.
-	if err := os.WriteFile(dnsmasq.MerlinPostConfPath, []byte(data), 0750); err != nil {
-		return err
+	defer src.Close()
+
+	dst, err := os.Create(dnsmasq.MerlinJffsConfPath)
+	if err != nil {
+		return fmt.Errorf("failed to create %s: %w", dnsmasq.MerlinJffsConfPath, err)
 	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("failed to copy current dnsmasq config: %w", err)
+	}
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("failed to save %s: %w", dnsmasq.MerlinJffsConfPath, err)
+	}
+
+	// Run postconf script on /jffs/configs/dnsmasq.conf directly.
+	cmd := exec.Command("/bin/sh", dnsmasq.MerlinPostConfPath, dnsmasq.MerlinJffsConfPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to run post conf: %s: %w", string(out), err)
+	}
+
 	// Restart dnsmasq service.
 	if err := restartDNSMasq(); err != nil {
 		return err
@@ -130,11 +143,40 @@ func (m *Merlin) Cleanup() error {
 	if err := os.WriteFile(dnsmasq.MerlinPostConfPath, merlinParsePostConf(buf), 0750); err != nil {
 		return err
 	}
+	// Remove /jffs/configs/dnsmasq.conf file.
+	if err := os.Remove(dnsmasq.MerlinJffsConfPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	// Restart dnsmasq service.
 	if err := restartDNSMasq(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (m *Merlin) writeDnsmasqPostconf() error {
+	buf, err := os.ReadFile(dnsmasq.MerlinPostConfPath)
+	// Already setup.
+	if bytes.Contains(buf, []byte(dnsmasq.MerlinPostConfMarker)) {
+		return nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	data, err := dnsmasq.ConfTmpl(dnsmasq.MerlinPostConfTmpl, m.cfg)
+	if err != nil {
+		return err
+	}
+	data = strings.Join([]string{
+		data,
+		"\n",
+		dnsmasq.MerlinPostConfMarker,
+		"\n",
+		string(buf),
+	}, "\n")
+	// Write dnsmasq post conf file.
+	return os.WriteFile(dnsmasq.MerlinPostConfPath, []byte(data), 0750)
 }
 
 func restartDNSMasq() error {

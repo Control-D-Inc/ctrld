@@ -228,7 +228,7 @@ func (p *prog) registerControlServerHandler() {
 		}
 
 		// If pin code not set, allowing deactivation.
-		if deactivationPinNotSet() {
+		if !deactivationPinSet() {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -244,6 +244,10 @@ func (p *prog) registerControlServerHandler() {
 		switch req.Pin {
 		case cdDeactivationPin.Load():
 			code = http.StatusOK
+			select {
+			case p.pinCodeValidCh <- struct{}{}:
+			default:
+			}
 		case defaultDeactivationPin:
 			// If the pin code was set, but users do not provide --pin, return proper code to client.
 			code = http.StatusBadRequest

@@ -53,10 +53,27 @@ const (
 	FreeDnsDomain = "freedns.controld.com"
 	// FreeDNSBoostrapIP is the IP address of freedns.controld.com.
 	FreeDNSBoostrapIP = "76.76.2.11"
+	// FreeDNSBoostrapIPv6 is the IPv6 address of freedns.controld.com.
+	FreeDNSBoostrapIPv6 = "2606:1a40::11"
 	// PremiumDnsDomain is the domain name of premium ControlD service.
 	PremiumDnsDomain = "dns.controld.com"
 	// PremiumDNSBoostrapIP is the IP address of dns.controld.com.
 	PremiumDNSBoostrapIP = "76.76.2.22"
+	// PremiumDNSBoostrapIPv6 is the IPv6 address of dns.controld.com.
+	PremiumDNSBoostrapIPv6 = "2606:1a40::22"
+
+	// freeDnsDomainDev is the domain name of free ControlD service on dev env.
+	freeDnsDomainDev = "freedns.controld.dev"
+	// freeDNSBoostrapIP is the IP address of freedns.controld.dev.
+	freeDNSBoostrapIP = "176.125.239.11"
+	// freeDNSBoostrapIPv6 is the IPv6 address of freedns.controld.com.
+	freeDNSBoostrapIPv6 = "2606:1a40:f000::11"
+	// premiumDnsDomainDev is the domain name of premium ControlD service on dev env.
+	premiumDnsDomainDev = "dns.controld.dev"
+	// premiumDNSBoostrapIP is the IP address of dns.controld.dev.
+	premiumDNSBoostrapIP = "176.125.239.22"
+	// premiumDNSBoostrapIPv6 is the IPv6 address of dns.controld.dev.
+	premiumDNSBoostrapIPv6 = "2606:1a40:f000::22"
 
 	controlDComDomain = "controld.com"
 	controlDNetDomain = "controld.net"
@@ -261,6 +278,7 @@ type UpstreamConfig struct {
 	http3RoundTripper6 http.RoundTripper
 	certPool           *x509.CertPool
 	u                  *url.URL
+	fallbackOnce       sync.Once
 	uid                string
 }
 
@@ -402,12 +420,6 @@ func (uc *UpstreamConfig) SetCertPool(cp *x509.CertPool) {
 	uc.certPool = cp
 }
 
-// SetupBootstrapIP manually find all available IPs of the upstream.
-// The first usable IP will be used as bootstrap IP of the upstream.
-func (uc *UpstreamConfig) SetupBootstrapIP() {
-	uc.setupBootstrapIP(true)
-}
-
 // UID returns the unique identifier of the upstream.
 func (uc *UpstreamConfig) UID() string {
 	return uc.uid
@@ -415,11 +427,11 @@ func (uc *UpstreamConfig) UID() string {
 
 // SetupBootstrapIP manually find all available IPs of the upstream.
 // The first usable IP will be used as bootstrap IP of the upstream.
-func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
+func (uc *UpstreamConfig) SetupBootstrapIP() {
 	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
 	isControlD := uc.IsControlD()
 	for {
-		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, withBootstrapDNS)
+		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout)
 		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
 		// filtering them out here to prevent weird behavior.
 		if isControlD {
@@ -432,6 +444,10 @@ func (uc *UpstreamConfig) setupBootstrapIP(withBootstrapDNS bool) {
 				}
 			}
 			uc.bootstrapIPs = uc.bootstrapIPs[:n]
+			if len(uc.bootstrapIPs) == 0 {
+				uc.bootstrapIPs = bootstrapIPsFromControlDDomain(uc.Domain)
+				ProxyLogger.Load().Warn().Msgf("no bootstrap IPs found for %q, fallback to direct IPs", uc.Domain)
+			}
 		}
 		if len(uc.bootstrapIPs) > 0 {
 			break
@@ -485,7 +501,7 @@ func (uc *UpstreamConfig) setupDOHTransport() {
 		uc.transport = uc.newDOHTransport(uc.bootstrapIPs6)
 	case IpStackSplit:
 		uc.transport4 = uc.newDOHTransport(uc.bootstrapIPs4)
-		if hasIPv6() {
+		if HasIPv6() {
 			uc.transport6 = uc.newDOHTransport(uc.bootstrapIPs6)
 		} else {
 			uc.transport6 = uc.transport4
@@ -544,7 +560,10 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 
 // Ping warms up the connection to DoH/DoH3 upstream.
 func (uc *UpstreamConfig) Ping() {
-	_ = uc.ping()
+	if err := uc.ping(); err != nil {
+		ProxyLogger.Load().Debug().Err(err).Msgf("upstream ping failed: %s", uc.Endpoint)
+		_ = uc.FallbackToDirectIP()
+	}
 }
 
 // ErrorPing is like Ping, but return an error if any.
@@ -581,7 +600,6 @@ func (uc *UpstreamConfig) ping() error {
 	for _, typ := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		switch uc.Type {
 		case ResolverTypeDOH:
-
 			if err := ping(uc.dohTransport(typ)); err != nil {
 				return err
 			}
@@ -655,7 +673,7 @@ func (uc *UpstreamConfig) bootstrapIPForDNSType(dnsType uint16) string {
 		case dns.TypeA:
 			return pick(uc.bootstrapIPs4)
 		default:
-			if hasIPv6() {
+			if HasIPv6() {
 				return pick(uc.bootstrapIPs6)
 			}
 			return pick(uc.bootstrapIPs4)
@@ -677,7 +695,7 @@ func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
 		case dns.TypeA:
 			return "tcp4-tls", "udp4"
 		default:
-			if hasIPv6() {
+			if HasIPv6() {
 				return "tcp6-tls", "udp6"
 			}
 			return "tcp4-tls", "udp4"
@@ -747,6 +765,41 @@ func (uc *UpstreamConfig) initDnsStamps() error {
 	}
 	uc.BootstrapIP = ip
 	return nil
+}
+
+// Context returns a new context with timeout set from upstream config.
+func (uc *UpstreamConfig) Context(ctx context.Context) (context.Context, context.CancelFunc) {
+	if uc.Timeout > 0 {
+		return context.WithTimeout(ctx, time.Millisecond*time.Duration(uc.Timeout))
+	}
+	return context.WithCancel(ctx)
+}
+
+// FallbackToDirectIP changes ControlD upstream endpoint to use direct IP instead of domain.
+func (uc *UpstreamConfig) FallbackToDirectIP() bool {
+	if !uc.IsControlD() {
+		return false
+	}
+	if uc.u == nil || uc.Domain == "" {
+		return false
+	}
+
+	done := false
+	uc.fallbackOnce.Do(func() {
+		var ip string
+		switch {
+		case dns.IsSubDomain(PremiumDnsDomain, uc.Domain):
+			ip = PremiumDNSBoostrapIP
+		case dns.IsSubDomain(FreeDnsDomain, uc.Domain):
+			ip = FreeDNSBoostrapIP
+		default:
+			return
+		}
+		ProxyLogger.Load().Warn().Msgf("using direct IP for %q: %s", uc.Endpoint, ip)
+		uc.u.Host = ip
+		done = true
+	})
+	return done
 }
 
 // Init initialized necessary values for an ListenerConfig.
@@ -894,4 +947,19 @@ func (uc *UpstreamConfig) String() string {
 	}
 	return fmt.Sprintf("{name: %q, type: %q, endpoint: %q, bootstrap_ip: %q, domain: %q, ip_stack: %q}",
 		uc.Name, uc.Type, uc.Endpoint, uc.BootstrapIP, uc.Domain, uc.IPStack)
+}
+
+// bootstrapIPsFromControlDDomain returns bootstrap IPs for ControlD domain.
+func bootstrapIPsFromControlDDomain(domain string) []string {
+	switch domain {
+	case PremiumDnsDomain:
+		return []string{PremiumDNSBoostrapIP, PremiumDNSBoostrapIPv6}
+	case FreeDnsDomain:
+		return []string{FreeDNSBoostrapIP, FreeDNSBoostrapIPv6}
+	case premiumDnsDomainDev:
+		return []string{premiumDNSBoostrapIP, premiumDNSBoostrapIPv6}
+	case freeDnsDomainDev:
+		return []string{freeDNSBoostrapIP, freeDNSBoostrapIPv6}
+	}
+	return nil
 }

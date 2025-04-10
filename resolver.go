@@ -41,10 +41,7 @@ const (
 	ResolverTypeSDNS = "sdns"
 )
 
-const (
-	controldBootstrapDns = "76.76.2.22"
-	controldPublicDns    = "76.76.2.0"
-)
+const controldPublicDns = "76.76.2.0"
 
 var controldPublicDnsWithPort = net.JoinHostPort(controldPublicDns, "53")
 
@@ -440,7 +437,7 @@ type legacyResolver struct {
 
 func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	// See comment in (*dotResolver).resolve method.
-	dialer := newDialer(net.JoinHostPort(controldBootstrapDns, "53"))
+	dialer := newDialer(net.JoinHostPort(controldPublicDns, "53"))
 	dnsTyp := uint16(0)
 	if msg != nil && len(msg.Question) > 0 {
 		dnsTyp = msg.Question[0].Qtype
@@ -472,22 +469,22 @@ func (d dummyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, err
 // LookupIP looks up host using OS resolver.
 // It returns a slice of that host's IPv4 and IPv6 addresses.
 func LookupIP(domain string) []string {
-	return lookupIP(domain, -1, true)
+	return lookupIP(domain, -1)
 }
 
-func lookupIP(domain string, timeout int, withBootstrapDNS bool) (ips []string) {
+func lookupIP(domain string, timeout int) (ips []string) {
+	if net.ParseIP(domain) != nil {
+		return []string{domain}
+	}
 	resolverMutex.Lock()
 	if or == nil {
 		ProxyLogger.Load().Debug().Msgf("Initialize OS resolver in lookupIP")
 		or = newResolverWithNameserver(defaultNameservers())
 	}
-	resolverMutex.Unlock()
-
 	nss := *or.lanServers.Load()
 	nss = append(nss, *or.publicServers.Load()...)
-	if withBootstrapDNS {
-		nss = append([]string{net.JoinHostPort(controldBootstrapDns, "53")}, nss...)
-	}
+	resolverMutex.Unlock()
+
 	resolver := newResolverWithNameserver(nss)
 	ProxyLogger.Load().Debug().Msgf("resolving %q using bootstrap DNS %q", domain, nss)
 	timeoutMs := 2000
@@ -581,12 +578,13 @@ func NewBootstrapResolver(servers ...string) Resolver {
 //
 // This is useful for doing PTR lookup in LAN network.
 func NewPrivateResolver() Resolver {
-
-	logger := *ProxyLogger.Load()
-
-	Log(context.Background(), logger.Debug(), "NewPrivateResolver called")
-
-	nss := defaultNameservers()
+	resolverMutex.Lock()
+	if or == nil {
+		ProxyLogger.Load().Debug().Msgf("Initialize new OS resolver in NewPrivateResolver")
+		or = newResolverWithNameserver(defaultNameservers())
+	}
+	nss := *or.lanServers.Load()
+	resolverMutex.Unlock()
 	resolveConfNss := nameserversFromResolvconf()
 	localRfc1918Addrs := Rfc1918Addresses()
 	n := 0

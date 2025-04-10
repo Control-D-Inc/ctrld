@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/exec"
 	"runtime"
 	"slices"
 	"sort"
@@ -21,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/kardianos/service"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
@@ -85,6 +87,7 @@ type prog struct {
 	mu                   sync.Mutex
 	waitCh               chan struct{}
 	stopCh               chan struct{}
+	pinCodeValidCh       chan struct{}
 	reloadCh             chan struct{} // For Windows.
 	reloadDoneCh         chan struct{}
 	apiReloadCh          chan *ctrld.Config
@@ -266,13 +269,6 @@ func (p *prog) preRun() {
 		p.requiredMultiNICsConfig = requiredMultiNICsConfig()
 	}
 	p.runningIface = iface
-	if runtime.GOOS == "darwin" {
-		p.onStopped = append(p.onStopped, func() {
-			if !service.Interactive() {
-				p.resetDNS(false, true)
-			}
-		})
-	}
 }
 
 func (p *prog) postRun() {
@@ -304,6 +300,16 @@ func (p *prog) apiConfigReload() {
 	logger := mainLog.Load().With().Str("mode", "api-reload").Logger()
 	logger.Debug().Msg("starting custom config reload timer")
 	lastUpdated := time.Now().Unix()
+	curVerStr := curVersion()
+	curVer, err := semver.NewVersion(curVerStr)
+	isStable := curVer != nil && curVer.Prerelease() == ""
+	if err != nil || !isStable {
+		l := mainLog.Load().Warn()
+		if err != nil {
+			l = l.Err(err)
+		}
+		l.Msgf("current version is not stable, skipping self-upgrade: %s", curVerStr)
+	}
 
 	doReloadApiConfig := func(forced bool, logger zerolog.Logger) {
 		resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
@@ -311,6 +317,11 @@ func (p *prog) apiConfigReload() {
 		if err != nil {
 			logger.Warn().Err(err).Msg("could not fetch resolver config")
 			return
+		}
+
+		// Performing self-upgrade check for production version.
+		if isStable {
+			selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, &logger)
 		}
 
 		if resolverConfig.DeactivationPin != nil {
@@ -605,14 +616,41 @@ func (p *prog) metricsEnabled() bool {
 func (p *prog) Stop(s service.Service) error {
 	p.stopDnsWatchers()
 	mainLog.Load().Debug().Msg("dns watchers stopped")
+	for _, f := range p.onStopped {
+		f()
+	}
+	mainLog.Load().Debug().Msg("finish running onStopped functions")
 	defer func() {
 		mainLog.Load().Info().Msg("Service stopped")
 	}()
-	close(p.stopCh)
 	if err := p.deAllocateIP(); err != nil {
 		mainLog.Load().Error().Err(err).Msg("de-allocate ip failed")
 		return err
 	}
+	if deactivationPinSet() {
+		select {
+		case <-p.pinCodeValidCh:
+			// Allow stopping the service, pinCodeValidCh is only filled
+			// after control server did validate the pin code.
+		case <-time.After(time.Millisecond * 100):
+			// No valid pin code was checked, that mean we are stopping
+			// because of OS signal sent directly from someone else.
+			// In this case, restarting ctrld service by ourselves.
+			mainLog.Load().Debug().Msgf("receiving stopping signal without valid pin code")
+			mainLog.Load().Debug().Msgf("self restarting ctrld service")
+			if exe, err := os.Executable(); err == nil {
+				cmd := exec.Command(exe, "restart")
+				cmd.SysProcAttr = sysProcAttrForDetachedChildProcess()
+				if err := cmd.Start(); err != nil {
+					mainLog.Load().Error().Err(err).Msg("failed to run self restart command")
+				}
+			} else {
+				mainLog.Load().Error().Err(err).Msg("failed to self restart ctrld service")
+			}
+			os.Exit(deactivationPinInvalidExitCode)
+		}
+	}
+	close(p.stopCh)
 	return nil
 }
 
@@ -1420,6 +1458,46 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 		// Perform self-uninstall now.
 		selfUninstall(p, logger)
 	}
+}
+
+// selfUpgradeCheck checks if the version target vt is greater
+// than the current one cv, perform self-upgrade then.
+//
+// The callers must ensure curVer and logger are non-nil.
+func selfUpgradeCheck(vt string, cv *semver.Version, logger *zerolog.Logger) {
+	if vt == "" {
+		logger.Debug().Msg("no version target set, skipped checking self-upgrade")
+		return
+	}
+	vts := vt
+	if !strings.HasPrefix(vts, "v") {
+		vts = "v" + vts
+	}
+	targetVer, err := semver.NewVersion(vts)
+	if err != nil {
+		logger.Warn().Err(err).Msgf("invalid target version, skipped self-upgrade: %s", vt)
+		return
+	}
+	if !targetVer.GreaterThan(cv) {
+		logger.Debug().
+			Str("target", vt).
+			Str("current", cv.String()).
+			Msgf("target version is not greater than current one, skipped self-upgrade")
+		return
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		mainLog.Load().Error().Err(err).Msg("failed to get executable path, skipped self-upgrade")
+		return
+	}
+	cmd := exec.Command(exe, "upgrade", "prod", "-vv")
+	cmd.SysProcAttr = sysProcAttrForDetachedChildProcess()
+	if err := cmd.Start(); err != nil {
+		mainLog.Load().Error().Err(err).Msg("failed to start self-upgrade")
+		return
+	}
+	mainLog.Load().Debug().Msgf("self-upgrade triggered, version target: %s", vts)
 }
 
 // leakOnUpstreamFailure reports whether ctrld should initiate a recovery flow

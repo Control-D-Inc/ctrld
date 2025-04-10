@@ -519,13 +519,8 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
 			return nil, err
 		}
-		resolveCtx, cancel := context.WithCancel(ctx)
+		resolveCtx, cancel := upstreamConfig.Context(ctx)
 		defer cancel()
-		if upstreamConfig.Timeout > 0 {
-			timeoutCtx, cancel := context.WithTimeout(resolveCtx, time.Millisecond*time.Duration(upstreamConfig.Timeout))
-			defer cancel()
-			resolveCtx = timeoutCtx
-		}
 		return dnsResolver.Resolve(resolveCtx, msg)
 	}
 	resolve := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) *dns.Msg {
@@ -555,6 +550,10 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			var e net.Error
 			if errors.As(err, &e) && e.Timeout() {
 				upstreamConfig.ReBootstrap()
+			}
+			// For network error, turn ipv6 off if enabled.
+			if ctrld.HasIPv6() && (errUrlNetworkError(err) || errNetworkError(err)) {
+				ctrld.DisableIPv6()
 			}
 		}
 

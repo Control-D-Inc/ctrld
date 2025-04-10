@@ -22,7 +22,7 @@ func selfUninstall(p *prog, logger zerolog.Logger) {
 		logger.Fatal().Err(err).Msg("could not determine executable")
 	}
 	args := []string{"uninstall"}
-	if !deactivationPinNotSet() {
+	if deactivationPinSet() {
 		args = append(args, fmt.Sprintf("--pin=%d", cdDeactivationPin.Load()))
 	}
 	cmd := exec.Command(bin, args...)
