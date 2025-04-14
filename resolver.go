@@ -466,27 +466,26 @@ func (d dummyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, err
 	return ans, nil
 }
 
-// LookupIP looks up host using OS resolver.
+// LookupIP looks up domain using current system nameservers settings.
 // It returns a slice of that host's IPv4 and IPv6 addresses.
 func LookupIP(domain string) []string {
-	return lookupIP(domain, -1)
+	return lookupIP(domain, -1, defaultNameservers())
 }
 
-func lookupIP(domain string, timeout int) (ips []string) {
+// lookupIP looks up domain with given timeout and bootstrapDNS.
+// If timeout is negative, default timeout 2000 ms will be used.
+// It returns nil if bootstrapDNS is nil or empty.
+func lookupIP(domain string, timeout int, bootstrapDNS []string) (ips []string) {
 	if net.ParseIP(domain) != nil {
 		return []string{domain}
 	}
-	resolverMutex.Lock()
-	if or == nil {
-		ProxyLogger.Load().Debug().Msgf("Initialize OS resolver in lookupIP")
-		or = newResolverWithNameserver(defaultNameservers())
+	if bootstrapDNS == nil {
+		ProxyLogger.Load().Debug().Msgf("empty bootstrap DNS")
+		return nil
 	}
-	nss := *or.lanServers.Load()
-	nss = append(nss, *or.publicServers.Load()...)
-	resolverMutex.Unlock()
 
-	resolver := newResolverWithNameserver(nss)
-	ProxyLogger.Load().Debug().Msgf("resolving %q using bootstrap DNS %q", domain, nss)
+	resolver := newResolverWithNameserver(bootstrapDNS)
+	ProxyLogger.Load().Debug().Msgf("resolving %q using bootstrap DNS %q", domain, bootstrapDNS)
 	timeoutMs := 2000
 	if timeout > 0 && timeout < timeoutMs {
 		timeoutMs = timeout
