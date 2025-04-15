@@ -584,7 +584,7 @@ func NewPrivateResolver() Resolver {
 	}
 	nss := *or.lanServers.Load()
 	resolverMutex.Unlock()
-	resolveConfNss := nameserversFromResolvconf()
+	resolveConfNss := currentNameserversFromResolvconf()
 	localRfc1918Addrs := Rfc1918Addresses()
 	n := 0
 	for _, ns := range nss {

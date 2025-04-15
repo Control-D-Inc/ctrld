@@ -17,7 +17,7 @@ const (
 )
 
 func dnsFns() []dnsFn {
-	return []dnsFn{dns4, dns6, dnsFromSystemdResolver}
+	return []dnsFn{dnsFromResolvConf, dns4, dns6, dnsFromSystemdResolver}
 }
 
 func dns4() []string {
