@@ -10,7 +10,7 @@ import (
 )
 
 func dnsFns() []dnsFn {
-	return []dnsFn{dnsFromRIB}
+	return []dnsFn{dnsFromResolvConf, dnsFromRIB}
 }
 
 func dnsFromRIB() []string {

@@ -227,7 +227,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			consoleWriter.Out = io.MultiWriter(os.Stdout, lc)
 			p.logConn = lc
 		} else {
-			mainLog.Load().Warn().Err(err).Msgf("unable to create log ipc connection")
+			if !errors.Is(err, os.ErrNotExist) {
+				mainLog.Load().Warn().Err(err).Msg("unable to create log ipc connection")
+			}
 		}
 	} else {
 		mainLog.Load().Warn().Err(err).Msgf("unable to resolve socket address: %s", sockPath)

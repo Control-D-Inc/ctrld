@@ -427,11 +427,18 @@ func (uc *UpstreamConfig) UID() string {
 
 // SetupBootstrapIP manually find all available IPs of the upstream.
 // The first usable IP will be used as bootstrap IP of the upstream.
+// The upstream domain will be looked up using following orders:
+//
+// - Current system DNS settings.
+// - Direct IPs table for ControlD upstreams.
+// - ControlD Bootstrap DNS 76.76.2.22
+//
+// The setup process will block until there's usable IPs found.
 func (uc *UpstreamConfig) SetupBootstrapIP() {
 	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
 	isControlD := uc.IsControlD()
 	for {
-		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout)
+		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, defaultNameservers())
 		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
 		// filtering them out here to prevent weird behavior.
 		if isControlD {
@@ -446,8 +453,13 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 			uc.bootstrapIPs = uc.bootstrapIPs[:n]
 			if len(uc.bootstrapIPs) == 0 {
 				uc.bootstrapIPs = bootstrapIPsFromControlDDomain(uc.Domain)
-				ProxyLogger.Load().Warn().Msgf("no bootstrap IPs found for %q, fallback to direct IPs", uc.Domain)
+				ProxyLogger.Load().Warn().Msgf("no record found for %q, lookup from direct IP table", uc.Domain)
 			}
+		}
+		if len(uc.bootstrapIPs) == 0 {
+			ProxyLogger.Load().Warn().Msgf("no record found for %q, using bootstrap server: %s", uc.Domain, PremiumDNSBoostrapIP)
+			uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, []string{net.JoinHostPort(PremiumDNSBoostrapIP, "53")})
+
 		}
 		if len(uc.bootstrapIPs) > 0 {
 			break
@@ -951,14 +963,14 @@ func (uc *UpstreamConfig) String() string {
 
 // bootstrapIPsFromControlDDomain returns bootstrap IPs for ControlD domain.
 func bootstrapIPsFromControlDDomain(domain string) []string {
-	switch domain {
-	case PremiumDnsDomain:
+	switch {
+	case dns.IsSubDomain(PremiumDnsDomain, domain):
 		return []string{PremiumDNSBoostrapIP, PremiumDNSBoostrapIPv6}
-	case FreeDnsDomain:
+	case dns.IsSubDomain(FreeDnsDomain, domain):
 		return []string{FreeDNSBoostrapIP, FreeDNSBoostrapIPv6}
-	case premiumDnsDomainDev:
+	case dns.IsSubDomain(premiumDnsDomainDev, domain):
 		return []string{premiumDNSBoostrapIP, premiumDNSBoostrapIPv6}
-	case freeDnsDomainDev:
+	case dns.IsSubDomain(freeDnsDomainDev, domain):
 		return []string{freeDNSBoostrapIP, freeDNSBoostrapIPv6}
 	}
 	return nil
