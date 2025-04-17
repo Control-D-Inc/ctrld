@@ -34,7 +34,8 @@ func TestUpstreamConfig_SetupBootstrapIP(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			// Enable parallel tests once https://github.com/microsoft/wmi/issues/165 fixed.
+			// t.Parallel()
 			tc.uc.Init()
 			tc.uc.SetupBootstrapIP()
 			if len(tc.uc.bootstrapIPs) == 0 {
