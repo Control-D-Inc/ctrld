@@ -158,7 +158,7 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 					0,                                    // DomainGuid - not needed
 					0,                                    // SiteName - not needed
 					uintptr(flags),                       // Flags
-					uintptr(unsafe.Pointer(&info)))       // DomainControllerInfo - output
+					uintptr(unsafe.Pointer(&info))) // DomainControllerInfo - output
 
 				if ret != 0 {
 					switch ret {
@@ -330,7 +330,8 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 	return ns, nil
 }
 
-func nameserversFromResolvconf() []string {
+// currentNameserversFromResolvconf returns a nil slice of strings.
+func currentNameserversFromResolvconf() []string {
 	return nil
 }
 
