@@ -12,7 +12,7 @@ import (
 
 const (
 	nmConfDir           = "/etc/NetworkManager/conf.d"
-	nmCtrldConfFilename = "99-ctrld.conf"
+	nmCtrldConfFilename = "zz-ctrld.conf"
 	nmCtrldConfContent  = `[main]
 dns=none
 systemd-resolved=false
