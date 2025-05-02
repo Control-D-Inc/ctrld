@@ -2,12 +2,15 @@ package ctrld
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -94,6 +97,17 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	query.Add("dns", enc)
 
 	endpoint := *r.endpoint
+
+	if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
+		switch r.uc.ClientIdType {
+		case "subdomain":
+			endpoint.Host = clientIdFromClientInfo(r.uc, ci) + "." + endpoint.Host
+
+		case "path":
+			endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/" + clientIdFromClientInfo(r.uc, ci)
+		}
+	}
+
 	endpoint.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
@@ -153,7 +167,7 @@ func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 		if ci, ok := ctx.Value(ClientInfoCtxKey{}).(*ClientInfo); ok && ci != nil {
 			printed = ci.Mac != "" || ci.IP != "" || ci.Hostname != ""
 			switch {
-			case uc.IsControlD():
+			case uc.IsControlD() || uc.ClientIdType == "" || uc.ClientIdType == "headers":
 				dohHeader = newControlDHeaders(ci)
 			case uc.isNextDNS():
 				dohHeader = newNextDNSHeaders(ci)
@@ -207,4 +221,40 @@ func newNextDNSHeaders(ci *ClientInfo) http.Header {
 		header.Set("X-Device-Name", ci.Hostname)
 	}
 	return header
+}
+
+func clientIdFromClientInfo(uc *UpstreamConfig, ci *ClientInfo) string {
+	switch ci.ClientIDPref {
+	case "mac":
+		return clientIdFromMac(ci.Mac)
+	case "host":
+		return clientIdFromHostname(ci.Hostname)
+	}
+	return hashHostnameAndMac(ci.Hostname, ci.Mac)
+}
+
+func hashHostnameAndMac(hostname, mac string) string {
+	h := sha256.New()
+	h.Write([]byte(hostname + mac))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func clientIdFromMac(mac string) string {
+	return strings.ReplaceAll(mac, ":", "-")
+}
+
+func clientIdFromHostname(hostname string) string {
+	// Define a regular expression to match allowed characters
+	re := regexp.MustCompile(`[^a-zA-Z0-9-]`)
+
+	// Remove chars not allowed in subdomain
+	subdomain := re.ReplaceAllString(hostname, "")
+
+	// Replace spaces with --
+	subdomain = strings.ReplaceAll(subdomain, " ", "--")
+
+	// Trim leading and trailing hyphens
+	subdomain = strings.Trim(subdomain, "-")
+
+	return subdomain
 }
