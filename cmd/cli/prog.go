@@ -868,7 +868,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 						return net.ParseIP(s).IsLoopback()
 					})
 					// if we have a static config and no saved IPs already, save them
-					if len(staticDNS) > 0 && len(savedStaticNameservers(iface)) == 0 {
+					if len(staticDNS) > 0 && len(ctrld.SavedStaticNameservers(iface)) == 0 {
 						// Save these static DNS values so that they can be restored later.
 						if err := saveCurrentStaticDNS(iface); err != nil {
 							mainLog.Load().Debug().Err(err).Msgf("failed to save static DNS for interface %s", iface.Name)
@@ -898,7 +898,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 								return net.ParseIP(s).IsLoopback()
 							})
 							// if we have a static config and no saved IPs already, save them
-							if len(staticDNS) > 0 && len(savedStaticNameservers(i)) == 0 {
+							if len(staticDNS) > 0 && len(ctrld.SavedStaticNameservers(i)) == 0 {
 								// Save these static DNS values so that they can be restored later.
 								if err := saveCurrentStaticDNS(i); err != nil {
 									mainLog.Load().Debug().Err(err).Msgf("failed to save static DNS for interface %s", i.Name)
@@ -976,7 +976,7 @@ func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runnin
 	}
 
 	// Default logic: if there is a saved static DNS configuration, restore it.
-	saved := savedStaticNameservers(netIface)
+	saved := ctrld.SavedStaticNameservers(netIface)
 	if len(saved) > 0 && restoreStatic {
 		logger.Debug().Msgf("Restoring interface %q from saved static config: %v", netIface.Name, saved)
 		if err := setDNS(netIface, saved); err != nil {
@@ -1373,7 +1373,7 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 	default:
 		return errSaveCurrentStaticDNSNotSupported
 	}
-	file := savedStaticDnsSettingsFilePath(iface)
+	file := ctrld.SavedStaticDnsSettingsFilePath(iface)
 	ns, err := currentStaticDNS(iface)
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msgf("could not get current static DNS settings for %q", iface.Name)
@@ -1404,38 +1404,6 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 		return err
 	}
 	mainLog.Load().Debug().Msgf("save DNS settings for interface %q successfully", iface.Name)
-	return nil
-}
-
-// savedStaticDnsSettingsFilePath returns the path to saved DNS settings of the given interface.
-func savedStaticDnsSettingsFilePath(iface *net.Interface) string {
-	if iface == nil {
-		return ""
-	}
-	return absHomeDir(".dns_" + iface.Name)
-}
-
-// savedStaticNameservers returns the static DNS nameservers of the given interface.
-//
-//lint:ignore U1000 use in os_windows.go and os_darwin.go
-func savedStaticNameservers(iface *net.Interface) []string {
-	if iface == nil {
-		mainLog.Load().Debug().Msg("could not get saved static DNS settings for nil interface")
-		return nil
-	}
-	file := savedStaticDnsSettingsFilePath(iface)
-	if data, _ := os.ReadFile(file); len(data) > 0 {
-		saveValues := strings.Split(string(data), ",")
-		returnValues := []string{}
-		// check each one, if its in loopback range, remove it
-		for _, v := range saveValues {
-			if net.ParseIP(v).IsLoopback() {
-				continue
-			}
-			returnValues = append(returnValues, v)
-		}
-		return returnValues
-	}
 	return nil
 }
 

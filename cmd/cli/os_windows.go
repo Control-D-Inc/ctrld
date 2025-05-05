@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 
+	"github.com/Control-D-Inc/ctrld"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
@@ -161,7 +162,7 @@ func resetDNS(iface *net.Interface) error {
 // restoreDNS restores the DNS settings of the given interface.
 // this should only be executed upon turning off the ctrld service.
 func restoreDNS(iface *net.Interface) (err error) {
-	if nss := savedStaticNameservers(iface); len(nss) > 0 {
+	if nss := ctrld.SavedStaticNameservers(iface); len(nss) > 0 {
 		v4ns := make([]string, 0, 2)
 		v6ns := make([]string, 0, 2)
 		for _, ns := range nss {

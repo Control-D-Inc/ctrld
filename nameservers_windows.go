@@ -158,7 +158,7 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 					0,                                    // DomainGuid - not needed
 					0,                                    // SiteName - not needed
 					uintptr(flags),                       // Flags
-					uintptr(unsafe.Pointer(&info))) // DomainControllerInfo - output
+					uintptr(unsafe.Pointer(&info)))       // DomainControllerInfo - output
 
 				if ret != 0 {
 					switch ret {
@@ -309,7 +309,7 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 			Log(context.Background(), logger.Debug(),
 				"Failed to get interface by name %s: %v", drIfaceName, err)
 		} else {
-			staticNs, file := SavedStaticNameservers(drIface)
+			staticNs, file := SavedStaticNameserversAndPath(drIface)
 			Log(context.Background(), logger.Debug(),
 				"static dns servers from %s: %v", file, staticNs)
 			if len(staticNs) > 0 {

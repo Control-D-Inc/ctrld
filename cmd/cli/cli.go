@@ -435,7 +435,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		p.resetDNS(false, true)
 		// Iterate over all physical interfaces and restore static DNS if a saved static config exists.
 		withEachPhysicalInterfaces("", "restore static DNS", func(i *net.Interface) error {
-			file := savedStaticDnsSettingsFilePath(i)
+			file := ctrld.SavedStaticDnsSettingsFilePath(i)
 			if _, err := os.Stat(file); err == nil {
 				if err := restoreDNS(i); err != nil {
 					mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
@@ -1077,7 +1077,7 @@ func uninstall(p *prog, s service.Service) {
 
 		// Iterate over all physical interfaces and restore DNS if a saved static config exists.
 		withEachPhysicalInterfaces(p.runningIface, "restore static DNS", func(i *net.Interface) error {
-			file := savedStaticDnsSettingsFilePath(i)
+			file := ctrld.SavedStaticDnsSettingsFilePath(i)
 			if _, err := os.Stat(file); err == nil {
 				if err := restoreDNS(i); err != nil {
 					mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)

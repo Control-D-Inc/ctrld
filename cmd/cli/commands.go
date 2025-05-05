@@ -977,7 +977,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				}
 				// Static DNS settings files.
 				withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
-					file := savedStaticDnsSettingsFilePath(i)
+					file := ctrld.SavedStaticDnsSettingsFilePath(i)
 					if _, err := os.Stat(file); err == nil {
 						files = append(files, file)
 					}

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
@@ -84,7 +85,7 @@ func resetDNS(iface *net.Interface) error {
 // restoreDNS restores the DNS settings of the given interface.
 // this should only be executed upon turning off the ctrld service.
 func restoreDNS(iface *net.Interface) (err error) {
-	if ns := savedStaticNameservers(iface); len(ns) > 0 {
+	if ns := ctrld.SavedStaticNameservers(iface); len(ns) > 0 {
 		err = setDNS(iface, ns)
 	}
 	return err
