@@ -186,7 +186,7 @@ func getAllDHCPNameservers() []string {
 				Log(context.Background(), logger.Debug(),
 					"Failed to patch interface name %s: %v", drIfaceName, err)
 			}
-			staticNs, file := SavedStaticNameservers(drIface)
+			staticNs, file := SavedStaticNameserversAndPath(drIface)
 			Log(context.Background(), logger.Debug(),
 				"static dns servers from %s: %v", file, staticNs)
 			if len(staticNs) > 0 {

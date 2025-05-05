@@ -54,13 +54,18 @@ func userHomeDir() (string, error) {
 
 // SavedStaticDnsSettingsFilePath returns the file path where the static DNS settings
 // for the provided interface are saved.
+//
+// The caller must ensure iface is non-nil.
 func SavedStaticDnsSettingsFilePath(iface *net.Interface) string {
 	// The file is stored in the user home directory under a hidden file.
 	return absHomeDir(".dns_" + iface.Name)
 }
 
-// SavedStaticNameservers returns the stored static nameservers for the given interface.
-func SavedStaticNameservers(iface *net.Interface) ([]string, string) {
+// SavedStaticNameserversAndPath returns the stored static nameservers for the given interface,
+// and the absolute path to file that stored the settings.
+//
+// The caller must ensure iface is non-nil.
+func SavedStaticNameserversAndPath(iface *net.Interface) ([]string, string) {
 	file := SavedStaticDnsSettingsFilePath(iface)
 	data, err := os.ReadFile(file)
 	if err != nil || len(data) == 0 {
@@ -76,4 +81,10 @@ func SavedStaticNameservers(iface *net.Interface) ([]string, string) {
 		ns = append(ns, v)
 	}
 	return ns, file
+}
+
+// SavedStaticNameservers is like SavedStaticNameserversAndPath, but only returns the static nameservers.
+func SavedStaticNameservers(iface *net.Interface) []string {
+	nss, _ := SavedStaticNameserversAndPath(iface)
+	return nss
 }
