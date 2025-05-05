@@ -985,7 +985,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				})
 				// Windows forwarders file.
 				if hasLocalDnsServerRunning() {
-					files = append(files, absHomeDir(windowsForwardersFilename))
+					files = append(files, ctrld.AbsHomeDir(windowsForwardersFilename))
 				}
 				// Binary itself.
 				bin, _ := os.Executable()

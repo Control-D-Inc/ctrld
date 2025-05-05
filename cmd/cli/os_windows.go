@@ -46,7 +46,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		if hasLocalDnsServerRunning() {
 			mainLog.Load().Debug().Msg("Local DNS server detected, configuring forwarders")
 
-			file := absHomeDir(windowsForwardersFilename)
+			file := ctrld.AbsHomeDir(windowsForwardersFilename)
 			mainLog.Load().Debug().Msgf("Using forwarders file: %s", file)
 
 			oldForwardersContent, err := os.ReadFile(file)
@@ -131,7 +131,7 @@ func resetDNS(iface *net.Interface) error {
 	resetDNSOnce.Do(func() {
 		// See corresponding comment in setDNS.
 		if hasLocalDnsServerRunning() {
-			file := absHomeDir(windowsForwardersFilename)
+			file := ctrld.AbsHomeDir(windowsForwardersFilename)
 			content, err := os.ReadFile(file)
 			if err != nil {
 				mainLog.Load().Error().Err(err).Msg("could not read forwarders settings")
