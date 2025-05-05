@@ -8,14 +8,9 @@ import (
 	"strings"
 )
 
-var homedir string
-
-// absHomeDir returns the absolute path to given filename using home directory as root dir.
-func absHomeDir(filename string) string {
-	if homedir != "" {
-		return filepath.Join(homedir, filename)
-	}
-	dir, err := userHomeDir()
+// AbsHomeDir returns the absolute path to given filename using home directory as root dir.
+func AbsHomeDir(filename string) string {
+	dir, err := UserHomeDir()
 	if err != nil {
 		return filename
 	}
@@ -31,7 +26,8 @@ func dirWritable(dir string) (bool, error) {
 	return true, f.Close()
 }
 
-func userHomeDir() (string, error) {
+// UserHomeDir returns the home directory for user who is running ctrld.
+func UserHomeDir() (string, error) {
 	// viper will expand for us.
 	if runtime.GOOS == "windows" {
 		// If we're on windows, use the install path for this.
@@ -58,7 +54,7 @@ func userHomeDir() (string, error) {
 // The caller must ensure iface is non-nil.
 func SavedStaticDnsSettingsFilePath(iface *net.Interface) string {
 	// The file is stored in the user home directory under a hidden file.
-	return absHomeDir(".dns_" + iface.Name)
+	return AbsHomeDir(".dns_" + iface.Name)
 }
 
 // SavedStaticNameserversAndPath returns the stored static nameservers for the given interface,

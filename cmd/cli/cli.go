@@ -966,28 +966,11 @@ func userHomeDir() (string, error) {
 	if dir != "" {
 		return dir, nil
 	}
-	// viper will expand for us.
-	if runtime.GOOS == "windows" {
-		// If we're on windows, use the install path for this.
-		exePath, err := os.Executable()
-		if err != nil {
-			return "", err
-		}
-
-		return filepath.Dir(exePath), nil
-	}
 	// Mobile platform should provide a rw dir path for this.
 	if isMobile() {
 		return homedir, nil
 	}
-	dir = "/etc/controld"
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return os.UserHomeDir() // fallback to user home directory
-	}
-	if ok, _ := dirWritable(dir); !ok {
-		return os.UserHomeDir()
-	}
-	return dir, nil
+	return ctrld.UserHomeDir()
 }
 
 // socketDir returns directory that ctrld will create socket file for running controlServer.
@@ -1752,18 +1735,6 @@ func exchangeContextWithTimeout(c *dns.Client, timeout time.Duration, msg *dns.M
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return c.ExchangeContext(ctx, msg, addr)
-}
-
-// absHomeDir returns the absolute path to given filename using home directory as root dir.
-func absHomeDir(filename string) string {
-	if homedir != "" {
-		return filepath.Join(homedir, filename)
-	}
-	dir, err := userHomeDir()
-	if err != nil {
-		return filename
-	}
-	return filepath.Join(dir, filename)
 }
 
 // runInCdMode reports whether ctrld service is running in cd mode.
