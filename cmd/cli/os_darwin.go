@@ -47,6 +47,9 @@ func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) e
 // networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
 // TODO(cuonglm): use system API
 func setDNS(iface *net.Interface, nameservers []string) error {
+	// Note that networksetup won't modify search domains settings,
+	// This assignment is just a placeholder to silent linter.
+	_ = searchDomains
 	cmd := "networksetup"
 	args := []string{"-setdnsservers", iface.Name}
 	args = append(args, nameservers...)
@@ -88,7 +91,7 @@ func restoreDNS(iface *net.Interface) (err error) {
 }
 
 func currentDNS(_ *net.Interface) []string {
-	return resolvconffile.NameServers("")
+	return resolvconffile.NameServers()
 }
 
 // currentStaticDNS returns the current static DNS settings of given interface.

@@ -71,6 +71,11 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		Nameservers:   ns,
 		SearchDomains: []dnsname.FQDN{},
 	}
+	if sds, err := searchDomains(); err == nil {
+		osConfig.SearchDomains = sds
+	} else {
+		mainLog.Load().Debug().Err(err).Msg("failed to get search domains list")
+	}
 	trySystemdResolve := false
 	if err := r.SetDNS(osConfig); err != nil {
 		if strings.Contains(err.Error(), "Rejected send message") &&
@@ -196,7 +201,8 @@ func restoreDNS(iface *net.Interface) (err error) {
 }
 
 func currentDNS(iface *net.Interface) []string {
-	for _, fn := range []getDNS{getDNSByResolvectl, getDNSBySystemdResolved, getDNSByNmcli, resolvconffile.NameServers} {
+	resolvconfFunc := func(_ string) []string { return resolvconffile.NameServers() }
+	for _, fn := range []getDNS{getDNSByResolvectl, getDNSBySystemdResolved, getDNSByNmcli, resolvconfFunc} {
 		if ns := fn(iface.Name); len(ns) > 0 {
 			return ns
 		}

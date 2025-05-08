@@ -14,7 +14,7 @@ import (
 
 // currentNameserversFromResolvconf returns the current nameservers set from /etc/resolv.conf file.
 func currentNameserversFromResolvconf() []string {
-	return resolvconffile.NameServers("")
+	return resolvconffile.NameServers()
 }
 
 // dnsFromResolvConf reads usable nameservers from /etc/resolv.conf file.
@@ -34,7 +34,7 @@ func dnsFromResolvConf() []string {
 			time.Sleep(retryInterval)
 		}
 
-		nss := resolvconffile.NameServers("")
+		nss := resolvconffile.NameServers()
 		var localDNS []string
 		seen := make(map[string]bool)
 

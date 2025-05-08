@@ -100,6 +100,10 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		}
 	}
 
+	// Note that Windows won't modify the current search domains if passing nil to luid.SetDNS function.
+	// searchDomains is still implemented for Windows just in case Windows API changes in future versions.
+	_ = searchDomains
+
 	if len(serversV4) == 0 && len(serversV6) == 0 {
 		return errors.New("invalid DNS nameservers")
 	}
