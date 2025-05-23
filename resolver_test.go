@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,8 +17,7 @@ func Test_osResolver_Resolve(t *testing.T) {
 
 	go func() {
 		defer cancel()
-		resolver := &osResolver{}
-		resolver.publicServers.Store(&[]string{"127.0.0.127:5353"})
+		resolver := newResolverWithNameserver([]string{"127.0.0.127:5353"})
 		m := new(dns.Msg)
 		m.SetQuestion("controld.com.", dns.TypeA)
 		m.RecursionDesired = true
@@ -50,8 +50,7 @@ func Test_osResolver_ResolveLanHostname(t *testing.T) {
 			t.Error("not a LAN query")
 			return
 		}
-		resolver := &osResolver{}
-		resolver.publicServers.Store(&[]string{"76.76.2.0:53"})
+		resolver := newResolverWithNameserver([]string{"76.76.2.0:53"})
 		m := new(dns.Msg)
 		m.SetQuestion("controld.com.", dns.TypeA)
 		m.RecursionDesired = true
@@ -107,11 +106,9 @@ func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 	}()
 
 	// We now create an osResolver which has both a LAN and public nameserver.
-	resolver := &osResolver{}
-	// Explicitly store the LAN nameserver.
-	resolver.lanServers.Store(&[]string{lanAddr})
-	// And store the public nameservers.
-	resolver.publicServers.Store(&publicNS)
+	nss := []string{lanAddr}
+	nss = append(nss, publicNS...)
+	resolver := newResolverWithNameserver(nss)
 
 	msg := new(dns.Msg)
 	msg.SetQuestion(".", dns.TypeNS)
@@ -137,6 +134,102 @@ func Test_osResolver_InitializationRace(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func Test_osResolver_Singleflight(t *testing.T) {
+	lanPC, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on LAN address: %v", err)
+	}
+	call := &atomic.Int64{}
+	lanServer, lanAddr, err := runLocalPacketConnTestServer(t, lanPC, countHandler(call))
+	if err != nil {
+		t.Fatalf("failed to run LAN test server: %v", err)
+	}
+	defer lanServer.Shutdown()
+
+	or := newResolverWithNameserver([]string{lanAddr})
+	domain := "controld.com"
+	n := 10
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			m := new(dns.Msg)
+			m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+			m.RecursionDesired = true
+			_, err := or.Resolve(context.Background(), m)
+			if err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// All above queries should only make 1 call to server.
+	if call.Load() != 1 {
+		t.Fatalf("expected 1 result from singleflight lookup, got %d", call)
+	}
+}
+
+func Test_osResolver_HotCache(t *testing.T) {
+	lanPC, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on LAN address: %v", err)
+	}
+	call := &atomic.Int64{}
+	lanServer, lanAddr, err := runLocalPacketConnTestServer(t, lanPC, countHandler(call))
+	if err != nil {
+		t.Fatalf("failed to run LAN test server: %v", err)
+	}
+	defer lanServer.Shutdown()
+
+	or := newResolverWithNameserver([]string{lanAddr})
+	domain := "controld.com"
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	m.RecursionDesired = true
+
+	// Make 2 repeated queries to server, should hit hot cache.
+	for i := 0; i < 2; i++ {
+		if _, err := or.Resolve(context.Background(), m.Copy()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if call.Load() != 1 {
+		t.Fatalf("cache not hit, server was called: %d", call.Load())
+	}
+
+	timeoutChan := make(chan struct{})
+	time.AfterFunc(5*time.Second, func() {
+		close(timeoutChan)
+	})
+
+	for {
+		select {
+		case <-timeoutChan:
+			t.Fatal("timed out waiting for cache cleaned")
+		default:
+			count := 0
+			or.cache.Range(func(key, value interface{}) bool {
+				count++
+				return true
+			})
+			if count != 0 {
+				t.Logf("hot cache is not empty: %d elements", count)
+				continue
+			}
+		}
+		break
+	}
+
+	if _, err := or.Resolve(context.Background(), m.Copy()); err != nil {
+		t.Fatal(err)
+	}
+	if call.Load() != 2 {
+		t.Fatal("cache hit unexpectedly")
+	}
 }
 
 func Test_upstreamTypeFromEndpoint(t *testing.T) {
@@ -206,5 +299,14 @@ func nonSuccessHandlerWithRcode(rcode int) dns.HandlerFunc {
 		m := new(dns.Msg)
 		m.SetRcode(msg, rcode)
 		w.WriteMsg(m)
+	}
+}
+
+func countHandler(call *atomic.Int64) dns.HandlerFunc {
+	return func(w dns.ResponseWriter, msg *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(msg, dns.RcodeSuccess)
+		w.WriteMsg(m)
+		call.Add(1)
 	}
 }
