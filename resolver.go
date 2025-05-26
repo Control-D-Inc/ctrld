@@ -305,7 +305,7 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		if val, ok := val.(*dns.Msg); ok {
 			Log(ctx, ProxyLogger.Load().Debug(), "hit hot cached result: %s - %s", domain, dns.TypeToString[qtype])
 			res := val.Copy()
-			res.SetRcode(msg, val.Rcode)
+			SetCacheReply(res, msg, val.Rcode)
 			return res, nil
 		}
 	}
@@ -336,7 +336,7 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		return nil, fmt.Errorf("invalid answer for key: %s", key)
 	}
 	res := sharedMsg.Copy()
-	res.SetRcode(msg, sharedMsg.Rcode)
+	SetCacheReply(res, msg, sharedMsg.Rcode)
 	if shared {
 		Log(ctx, ProxyLogger.Load().Debug(), "shared result: %s - %s", domain, dns.TypeToString[qtype])
 	}

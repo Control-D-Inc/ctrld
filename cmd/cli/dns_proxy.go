@@ -500,7 +500,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				continue
 			}
 			answer := cachedValue.Msg.Copy()
-			answer.SetRcode(req.msg, answer.Rcode)
+			ctrld.SetCacheReply(answer, req.msg, answer.Rcode)
 			now := time.Now()
 			if cachedValue.Expire.After(now) {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "hit cached response")

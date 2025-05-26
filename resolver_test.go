@@ -2,6 +2,8 @@ package ctrld
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -232,6 +234,54 @@ func Test_osResolver_HotCache(t *testing.T) {
 	}
 }
 
+func Test_Edns0_CacheReply(t *testing.T) {
+	lanPC, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on LAN address: %v", err)
+	}
+	call := &atomic.Int64{}
+	lanServer, lanAddr, err := runLocalPacketConnTestServer(t, lanPC, countHandler(call))
+	if err != nil {
+		t.Fatalf("failed to run LAN test server: %v", err)
+	}
+	defer lanServer.Shutdown()
+
+	or := newResolverWithNameserver([]string{lanAddr})
+	domain := "controld.com"
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	m.RecursionDesired = true
+
+	do := func() *dns.Msg {
+		msg := m.Copy()
+		msg.SetEdns0(4096, true)
+		cookieOption := new(dns.EDNS0_COOKIE)
+		cookieOption.Code = dns.EDNS0COOKIE
+		cookieOption.Cookie = generateEdns0ClientCookie()
+		msg.IsEdns0().Option = append(msg.IsEdns0().Option, cookieOption)
+
+		answer, err := or.Resolve(context.Background(), msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return answer
+	}
+	answer1 := do()
+	answer2 := do()
+	// Ensure the cache was hit, so we can check that edns0 cookie must be modified.
+	if call.Load() != 1 {
+		t.Fatalf("cache not hit, server was called: %d", call.Load())
+	}
+	cookie1 := getEdns0Cookie(answer1.IsEdns0())
+	cookie2 := getEdns0Cookie(answer2.IsEdns0())
+	if cookie1 == nil || cookie2 == nil {
+		t.Fatalf("unexpected nil cookie value (cookie1: %v, cookie2: %v)", cookie1, cookie2)
+	}
+	if cookie1.Cookie == cookie2.Cookie {
+		t.Fatalf("edns0 cookie is not modified: %v", cookie1)
+	}
+}
+
 func Test_upstreamTypeFromEndpoint(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -306,7 +356,32 @@ func countHandler(call *atomic.Int64) dns.HandlerFunc {
 	return func(w dns.ResponseWriter, msg *dns.Msg) {
 		m := new(dns.Msg)
 		m.SetRcode(msg, dns.RcodeSuccess)
+		if cookie := getEdns0Cookie(msg.IsEdns0()); cookie != nil {
+			if m.IsEdns0() == nil {
+				m.SetEdns0(4096, false)
+			}
+			cookieOption := new(dns.EDNS0_COOKIE)
+			cookieOption.Code = dns.EDNS0COOKIE
+			cookieOption.Cookie = generateEdns0ServerCookie(cookie.Cookie)
+			m.IsEdns0().Option = append(m.IsEdns0().Option, cookieOption)
+		}
 		w.WriteMsg(m)
 		call.Add(1)
 	}
+}
+
+func generateEdns0ClientCookie() string {
+	cookie := make([]byte, 8)
+	if _, err := rand.Read(cookie); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(cookie)
+}
+
+func generateEdns0ServerCookie(clientCookie string) string {
+	cookie := make([]byte, 32)
+	if _, err := rand.Read(cookie); err != nil {
+		panic(err)
+	}
+	return clientCookie + hex.EncodeToString(cookie)
 }
