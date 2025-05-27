@@ -9,7 +9,7 @@ import (
 )
 
 func TestNameServers(t *testing.T) {
-	ns := NameServers("")
+	ns := NameServers()
 	require.NotNil(t, ns)
 	t.Log(ns)
 }
