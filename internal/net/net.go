@@ -17,9 +17,16 @@ import (
 )
 
 const (
-	v4BootstrapDNS = "76.76.2.22:53"
-	v6BootstrapDNS = "[2606:1a40::22]:53"
+	v4BootstrapDNS    = "76.76.2.22:53"
+	v6BootstrapDNS    = "[2606:1a40::22]:53"
+	v6BootstrapIP     = "2606:1a40::22"
+	defaultHTTPSPort  = "443"
+	defaultHTTPPort   = "80"
+	defaultDNSPort    = "53"
+	probeStackTimeout = 2 * time.Second
 )
+
+var commonIPv6Ports = []string{defaultHTTPSPort, defaultHTTPPort, defaultDNSPort}
 
 var Dialer = &net.Dialer{
 	Resolver: &net.Resolver{
@@ -32,8 +39,6 @@ var Dialer = &net.Dialer{
 		},
 	},
 }
-
-const probeStackTimeout = 2 * time.Second
 
 var probeStackDialer = &net.Dialer{
 	Resolver: Dialer.Resolver,
@@ -50,12 +55,28 @@ func init() {
 	stackOnce.Store(new(sync.Once))
 }
 
-func supportIPv6(ctx context.Context) bool {
-	c, err := probeStackDialer.DialContext(ctx, "tcp6", v6BootstrapDNS)
+// supportIPv6 checks for IPv6 connectivity by attempting to connect to predefined ports
+// on a specific IPv6 address.
+// Returns a boolean indicating if IPv6 is supported and the port on which the connection succeeded.
+// If no connection is successful, returns false and an empty string.
+func supportIPv6(ctx context.Context) (supported bool, successPort string) {
+	for _, port := range commonIPv6Ports {
+		if canConnectToIPv6Port(ctx, port) {
+			return true, string(port)
+		}
+	}
+	return false, ""
+}
+
+// canConnectToIPv6Port attempts to establish a TCP connection to the specified port
+// using IPv6. Returns true if the connection was successful.
+func canConnectToIPv6Port(ctx context.Context, port string) bool {
+	address := net.JoinHostPort(v6BootstrapIP, port)
+	conn, err := probeStackDialer.DialContext(ctx, "tcp6", address)
 	if err != nil {
 		return false
 	}
-	c.Close()
+	_ = conn.Close()
 	return true
 }
 
@@ -110,7 +131,8 @@ func SupportsIPv6ListenLocal() bool {
 
 // IPv6Available is like SupportsIPv6, but always do the check without caching.
 func IPv6Available(ctx context.Context) bool {
-	return supportIPv6(ctx)
+	hasV6, _ := supportIPv6(ctx)
+	return hasV6
 }
 
 // IsIPv6 checks if the provided IP is v6.
