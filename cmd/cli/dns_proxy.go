@@ -500,7 +500,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				continue
 			}
 			answer := cachedValue.Msg.Copy()
-			answer.SetRcode(req.msg, answer.Rcode)
+			ctrld.SetCacheReply(answer, req.msg, answer.Rcode)
 			now := time.Now()
 			if cachedValue.Expire.After(now) {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "hit cached response")
@@ -1042,8 +1042,10 @@ func (p *prog) queryFromSelf(ip string) bool {
 	return false
 }
 
+// needRFC1918Listeners reports whether ctrld need to spawn listener for RFC 1918 addresses.
+// This is helpful for non-desktop platforms to receive queries from LAN clients.
 func needRFC1918Listeners(lc *ctrld.ListenerConfig) bool {
-	return lc.IP == "127.0.0.1" && lc.Port == 53
+	return lc.IP == "127.0.0.1" && lc.Port == 53 && !ctrld.IsDesktopPlatform()
 }
 
 // ipFromARPA parses a FQDN arpa domain and return the IP address if valid.

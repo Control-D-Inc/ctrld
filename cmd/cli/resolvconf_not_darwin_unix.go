@@ -13,9 +13,9 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/dns"
 )
 
-// setResolvConf sets the content of resolv.conf file using the given nameservers list.
+// setResolvConf sets the content of the resolv.conf file using the given nameservers list.
 func setResolvConf(iface *net.Interface, ns []netip.Addr) error {
-	r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, &health.Tracker{}, &controlknobs.Knobs{}, "lo") // interface name does not matter.
+	r, err := newLoopbackOSConfigurator()
 	if err != nil {
 		return err
 	}
@@ -24,12 +24,17 @@ func setResolvConf(iface *net.Interface, ns []netip.Addr) error {
 		Nameservers:   ns,
 		SearchDomains: []dnsname.FQDN{},
 	}
+	if sds, err := searchDomains(); err == nil {
+		oc.SearchDomains = sds
+	} else {
+		mainLog.Load().Debug().Err(err).Msg("failed to get search domains list when reverting resolv.conf file")
+	}
 	return r.SetDNS(oc)
 }
 
 // shouldWatchResolvconf reports whether ctrld should watch changes to resolv.conf file with given OS configurator.
 func shouldWatchResolvconf() bool {
-	r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, &health.Tracker{}, &controlknobs.Knobs{}, "lo") // interface name does not matter.
+	r, err := newLoopbackOSConfigurator()
 	if err != nil {
 		return false
 	}
@@ -39,4 +44,9 @@ func shouldWatchResolvconf() bool {
 	default:
 		return false
 	}
+}
+
+// newLoopbackOSConfigurator creates an OSConfigurator for DNS management using the "lo" interface.
+func newLoopbackOSConfigurator() (dns.OSConfigurator, error) {
+	return dns.NewOSConfigurator(noopLogf, &health.Tracker{}, &controlknobs.Knobs{}, "lo")
 }

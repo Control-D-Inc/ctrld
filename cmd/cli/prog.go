@@ -70,9 +70,16 @@ func ControlSocketName() string {
 	}
 }
 
+// logf is a function variable used for logging formatted debug messages with optional arguments.
+// This is used only when creating a new DNS OS configurator.
 var logf = func(format string, args ...any) {
 	mainLog.Load().Debug().Msgf(format, args...)
 }
+
+// noopLogf is like logf but discards formatted log messages and arguments without any processing.
+//
+//lint:ignore U1000 use in newLoopbackOSConfigurator
+var noopLogf = func(format string, args ...any) {}
 
 var svcConfig = &service.Config{
 	Name:        ctrldServiceName,

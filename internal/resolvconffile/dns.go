@@ -6,6 +6,7 @@ import (
 	"net"
 
 	"tailscale.com/net/dns/resolvconffile"
+	"tailscale.com/util/dnsname"
 )
 
 const resolvconfPath = "/etc/resolv.conf"
@@ -22,7 +23,7 @@ func NameServersWithPort() []string {
 	return ns
 }
 
-func NameServers(_ string) []string {
+func NameServers() []string {
 	c, err := resolvconffile.ParseFile(resolvconfPath)
 	if err != nil {
 		return nil
@@ -32,4 +33,13 @@ func NameServers(_ string) []string {
 		ns = append(ns, nameserver.String())
 	}
 	return ns
+}
+
+// SearchDomains returns the current search domains config in /etc/resolv.conf file.
+func SearchDomains() ([]dnsname.FQDN, error) {
+	c, err := resolvconffile.ParseFile(resolvconfPath)
+	if err != nil {
+		return nil, err
+	}
+	return c.SearchDomains, nil
 }
