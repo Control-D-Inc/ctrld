@@ -437,8 +437,9 @@ func (uc *UpstreamConfig) UID() string {
 func (uc *UpstreamConfig) SetupBootstrapIP() {
 	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
 	isControlD := uc.IsControlD()
+	nss := initDefaultOsResolver()
 	for {
-		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, defaultNameservers())
+		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, nss)
 		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
 		// filtering them out here to prevent weird behavior.
 		if isControlD {

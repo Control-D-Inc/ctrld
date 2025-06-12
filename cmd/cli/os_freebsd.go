@@ -7,6 +7,7 @@ import (
 
 	"tailscale.com/control/controlknobs"
 	"tailscale.com/health"
+	"tailscale.com/util/dnsname"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns"
 	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
@@ -50,7 +51,17 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		ns = append(ns, netip.MustParseAddr(nameserver))
 	}
 
-	if err := r.SetDNS(dns.OSConfig{Nameservers: ns}); err != nil {
+	osConfig := dns.OSConfig{
+		Nameservers:   ns,
+		SearchDomains: []dnsname.FQDN{},
+	}
+	if sds, err := searchDomains(); err == nil {
+		osConfig.SearchDomains = sds
+	} else {
+		mainLog.Load().Debug().Err(err).Msg("failed to get search domains list")
+	}
+
+	if err := r.SetDNS(osConfig); err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to set DNS")
 		return err
 	}
@@ -83,7 +94,7 @@ func restoreDNS(iface *net.Interface) (err error) {
 }
 
 func currentDNS(_ *net.Interface) []string {
-	return resolvconffile.NameServers("")
+	return resolvconffile.NameServers()
 }
 
 // currentStaticDNS returns the current static DNS settings of given interface.

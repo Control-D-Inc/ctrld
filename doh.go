@@ -2,6 +2,7 @@ package ctrld
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -120,6 +121,7 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 		resp, err = c.Do(req.Clone(retryCtx))
 	}
 	if err != nil {
+		err = wrapUrlError(err)
 		if r.isDoH3 {
 			if closer, ok := c.Transport.(io.Closer); ok {
 				closer.Close()
@@ -207,4 +209,53 @@ func newNextDNSHeaders(ci *ClientInfo) http.Header {
 		header.Set("X-Device-Name", ci.Hostname)
 	}
 	return header
+}
+
+// wrapCertificateVerificationError wraps a certificate verification error with additional context about the certificate issuer.
+// It extracts information like the issuer, organization, and subject from the certificate for a more descriptive error output.
+// If no certificate-related information is available, it simply returns the original error unmodified.
+func wrapCertificateVerificationError(err error) error {
+	var tlsErr *tls.CertificateVerificationError
+	if errors.As(err, &tlsErr) {
+		if len(tlsErr.UnverifiedCertificates) > 0 {
+			cert := tlsErr.UnverifiedCertificates[0]
+			// Extract a more user-friendly issuer name
+			var issuer string
+			var organization string
+			if len(cert.Issuer.Organization) > 0 {
+				organization = cert.Issuer.Organization[0]
+				issuer = organization
+			} else if cert.Issuer.CommonName != "" {
+				issuer = cert.Issuer.CommonName
+			} else {
+				issuer = cert.Issuer.String()
+			}
+
+			// Get the organization from the subject field as well
+			if len(cert.Subject.Organization) > 0 {
+				organization = cert.Subject.Organization[0]
+			}
+
+			// Extract the subject information
+			subjectCN := cert.Subject.CommonName
+			if subjectCN == "" && len(cert.Subject.Organization) > 0 {
+				subjectCN = cert.Subject.Organization[0]
+			}
+			return fmt.Errorf("%w: %s, %s, %s", tlsErr, subjectCN, organization, issuer)
+		}
+	}
+	return err
+}
+
+// wrapUrlError inspects and wraps a URL error, focusing on certificate verification errors for detailed context.
+func wrapUrlError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		var tlsErr *tls.CertificateVerificationError
+		if errors.As(urlErr.Err, &tlsErr) {
+			urlErr.Err = wrapCertificateVerificationError(tlsErr)
+			return urlErr
+		}
+	}
+	return err
 }

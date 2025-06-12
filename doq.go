@@ -43,7 +43,7 @@ func resolve(ctx context.Context, msg *dns.Msg, endpoint string, tlsConfig *tls.
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, wrapCertificateVerificationError(err)
 		}
 		return answer, nil
 	}
