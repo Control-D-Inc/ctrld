@@ -1216,13 +1216,18 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 	// For Windows server with local Dns server running, we can only try on random local IP.
 	hasLocalDnsServer := hasLocalDnsServerRunning()
 	notRouter := router.Name() == ""
+	isDesktop := ctrld.IsDesktopPlatform()
 	for n, listener := range cfg.Listener {
 		lcc[n] = &listenerConfigCheck{}
 		if listener.IP == "" {
 			listener.IP = "0.0.0.0"
-			if hasLocalDnsServer {
-				// Windows Server lies to us that we could listen on 0.0.0.0:53
-				// even there's a process already done that, stick to local IP only.
+			// Windows Server lies to us that we could listen on 0.0.0.0:53
+			// even there's a process already done that, stick to local IP only.
+			//
+			// For desktop clients, also stick the listener to the local IP only.
+			// Listening on 0.0.0.0 would expose it to the entire local network, potentially
+			// creating security vulnerabilities (such as DNS amplification or abusing).
+			if hasLocalDnsServer || isDesktop {
 				listener.IP = "127.0.0.1"
 			}
 			lcc[n].IP = true

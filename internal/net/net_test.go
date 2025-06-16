@@ -12,7 +12,12 @@ func TestProbeStackTimeout(t *testing.T) {
 	go func() {
 		defer close(done)
 		close(started)
-		supportIPv6(context.Background())
+		hasV6, port := supportIPv6(context.Background())
+		if hasV6 {
+			t.Logf("connect to port %s using ipv6: %v", port, hasV6)
+		} else {
+			t.Log("ipv6 is not available")
+		}
 	}()
 
 	<-started

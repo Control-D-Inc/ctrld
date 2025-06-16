@@ -9,15 +9,12 @@ import (
 	"strings"
 
 	"github.com/kardianos/service"
-	"tailscale.com/control/controlknobs"
-	"tailscale.com/health"
 
-	"github.com/Control-D-Inc/ctrld/internal/dns"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 func init() {
-	if r, err := dns.NewOSConfigurator(func(format string, args ...any) {}, &health.Tracker{}, &controlknobs.Knobs{}, "lo"); err == nil {
+	if r, err := newLoopbackOSConfigurator(); err == nil {
 		useSystemdResolved = r.Mode() == "systemd-resolved"
 	}
 	// Disable quic-go's ECN support by default, see https://github.com/quic-go/quic-go/issues/3911
