@@ -12,7 +12,7 @@ import (
 const resolvConfPath = "/etc/resolv.conf"
 
 // setResolvConf sets the content of resolv.conf file using the given nameservers list.
-func setResolvConf(iface *net.Interface, ns []netip.Addr) error {
+func (p *prog) setResolvConf(iface *net.Interface, ns []netip.Addr) error {
 	servers := make([]string, len(ns))
 	for i := range ns {
 		servers[i] = ns[i].String()

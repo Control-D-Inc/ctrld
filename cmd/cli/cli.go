@@ -211,6 +211,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		cfg:              &cfg,
 		appCallback:      appCallback,
 	}
+	p.logger.Store(mainLog.Load())
 	if homedir == "" {
 		if dir, err := userHomeDir(); err == nil {
 			homedir = dir
@@ -228,11 +229,11 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			p.logConn = lc
 		} else {
 			if !errors.Is(err, os.ErrNotExist) {
-				mainLog.Load().Warn().Err(err).Msg("unable to create log ipc connection")
+				p.Warn().Err(err).Msg("unable to create log ipc connection")
 			}
 		}
 	} else {
-		mainLog.Load().Warn().Err(err).Msgf("unable to resolve socket address: %s", sockPath)
+		p.Warn().Err(err).Msgf("unable to resolve socket address: %s", sockPath)
 	}
 	notifyExitToLogServer := func() {
 		if p.logConn != nil {
@@ -241,7 +242,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	if daemon && runtime.GOOS == "windows" {
-		mainLog.Load().Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
+		p.Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
 	}
 
 	if !daemon {
@@ -250,10 +251,10 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		go func() {
 			s, err := newService(p, svcConfig)
 			if err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed create new service")
+				p.Fatal().Err(err).Msg("failed create new service")
 			}
 			if err := s.Run(); err != nil {
-				mainLog.Load().Error().Err(err).Msg("failed to start service")
+				p.Error().Err(err).Msg("failed to start service")
 			}
 		}()
 	}
@@ -261,7 +262,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	tryReadingConfig(writeDefaultConfig)
 
 	if err := readBase64Config(configBase64); err != nil {
-		mainLog.Load().Fatal().Err(err).Msg("failed to read base64 config")
+		p.Fatal().Err(err).Msg("failed to read base64 config")
 	}
 	processNoConfigFlags(noConfigStart)
 
@@ -270,7 +271,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	p.mu.Lock()
 	if err := v.Unmarshal(&cfg); err != nil {
 		notifyExitToLogServer()
-		mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
+		p.Fatal().Msgf("failed to unmarshal config: %v", err)
 	}
 	p.mu.Unlock()
 
@@ -280,19 +281,19 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// so it's able to log information in processCDFlags.
 	p.initLogging(true)
 
-	mainLog.Load().Info().Msgf("starting ctrld %s", curVersion())
-	mainLog.Load().Info().Msgf("os: %s", osVersion())
+	p.Info().Msgf("starting ctrld %s", curVersion())
+	p.Info().Msgf("os: %s", osVersion())
 
 	// Wait for network up.
 	if !ctrldnet.Up() {
 		notifyExitToLogServer()
-		mainLog.Load().Fatal().Msg("network is not up yet")
+		p.Fatal().Msg("network is not up yet")
 	}
 
 	p.router = router.New(&cfg, cdUID != "")
 	cs, err := newControlServer(filepath.Join(sockDir, ControlSocketName()))
 	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not create control server")
+		p.Warn().Err(err).Msg("could not create control server")
 	}
 	p.cs = cs
 
@@ -301,7 +302,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// to set the current time, so this check must happen before processCDFlags.
 	if err := p.router.PreRun(); err != nil {
 		notifyExitToLogServer()
-		mainLog.Load().Fatal().Err(err).Msg("failed to perform router pre-run check")
+		p.Fatal().Err(err).Msg("failed to perform router pre-run check")
 	}
 
 	oldLogPath := cfg.Service.LogPath
@@ -316,7 +317,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				return
 			}
 
-			cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
+			cdLogger := p.logger.Load().With().Str("mode", "cd").Logger()
 			// Performs self-uninstallation if the ControlD device does not exist.
 			var uer *controld.ErrorResponse
 			if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
@@ -340,9 +341,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	if updated {
 		if err := writeConfigFile(&cfg); err != nil {
 			notifyExitToLogServer()
-			mainLog.Load().Fatal().Err(err).Msg("failed to write config file")
+			p.Fatal().Err(err).Msg("failed to write config file")
 		} else {
-			mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
+			p.Info().Msg("writing config file to: " + defaultConfigFile)
 		}
 	}
 
@@ -354,10 +355,11 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		// Copy logs written so far to new log file if possible.
 		if buf, err := os.ReadFile(oldLogPath); err == nil {
 			if err := os.WriteFile(newLogPath, buf, os.FileMode(0o600)); err != nil {
-				mainLog.Load().Warn().Err(err).Msg("could not copy old log file")
+				p.Warn().Err(err).Msg("could not copy old log file")
 			}
 		}
 		initLoggingWithBackup(false)
+		p.logger.Store(mainLog.Load())
 	}
 
 	if err := validateConfig(&cfg); err != nil {
@@ -369,13 +371,13 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	if daemon {
 		exe, err := os.Executable()
 		if err != nil {
-			mainLog.Load().Error().Err(err).Msg("failed to find the binary")
+			p.Error().Err(err).Msg("failed to find the binary")
 			notifyExitToLogServer()
 			os.Exit(1)
 		}
 		curDir, err := os.Getwd()
 		if err != nil {
-			mainLog.Load().Error().Err(err).Msg("failed to get current working directory")
+			p.Error().Err(err).Msg("failed to get current working directory")
 			notifyExitToLogServer()
 			os.Exit(1)
 		}
@@ -383,11 +385,11 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		cmd := exec.Command(exe, append(os.Args[1:], "-d=false")...)
 		cmd.Dir = curDir
 		if err := cmd.Start(); err != nil {
-			mainLog.Load().Error().Err(err).Msg("failed to start process as daemon")
+			p.Error().Err(err).Msg("failed to start process as daemon")
 			notifyExitToLogServer()
 			os.Exit(1)
 		}
-		mainLog.Load().Info().Int("pid", cmd.Process.Pid).Msg("DNS proxy started")
+		p.Info().Int("pid", cmd.Process.Pid).Msg("DNS proxy started")
 		os.Exit(0)
 	}
 
@@ -395,7 +397,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		for _, lc := range p.cfg.Listener {
 			if shouldAllocateLoopbackIP(lc.IP) {
 				if err := allocateIP(lc.IP); err != nil {
-					mainLog.Load().Error().Err(err).Msgf("could not allocate IP: %s", lc.IP)
+					p.Error().Err(err).Msgf("could not allocate IP: %s", lc.IP)
 				}
 			}
 		}
@@ -406,7 +408,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		for _, lc := range p.cfg.Listener {
 			if shouldAllocateLoopbackIP(lc.IP) {
 				if err := deAllocateIP(lc.IP); err != nil {
-					mainLog.Load().Error().Err(err).Msgf("could not de-allocate IP: %s", lc.IP)
+					p.Error().Err(err).Msgf("could not de-allocate IP: %s", lc.IP)
 				}
 			}
 		}
@@ -417,15 +419,15 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		}
 		if iface != "" {
 			p.onStarted = append(p.onStarted, func() {
-				mainLog.Load().Debug().Msg("router setup on start")
+				p.Debug().Msg("router setup on start")
 				if err := p.router.Setup(); err != nil {
-					mainLog.Load().Error().Err(err).Msg("could not configure router")
+					p.Error().Err(err).Msg("could not configure router")
 				}
 			})
 			p.onStopped = append(p.onStopped, func() {
-				mainLog.Load().Debug().Msg("router cleanup on stop")
+				p.Debug().Msg("router cleanup on stop")
 				if err := p.router.Cleanup(); err != nil {
-					mainLog.Load().Error().Err(err).Msg("could not cleanup router")
+					p.Error().Err(err).Msg("could not cleanup router")
 				}
 			})
 		}
@@ -438,9 +440,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			file := ctrld.SavedStaticDnsSettingsFilePath(i)
 			if _, err := os.Stat(file); err == nil {
 				if err := restoreDNS(i); err != nil {
-					mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
+					p.Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
 				} else {
-					mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
+					p.Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
 				}
 			}
 			return nil

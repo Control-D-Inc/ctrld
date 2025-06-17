@@ -77,7 +77,8 @@ func Test_prog_upstreamFor(t *testing.T) {
 	cfg := testhelper.SampleConfig(t)
 	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(false)
 	p := &prog{cfg: cfg}
-	p.um = newUpstreamMonitor(p.cfg)
+	p.logger.Store(mainLog.Load())
+	p.um = newUpstreamMonitor(p.cfg, mainLog.Load())
 	p.lanLoopGuard = newLoopGuard()
 	p.ptrLoopGuard = newLoopGuard()
 	for _, nc := range p.cfg.Network {
@@ -145,6 +146,7 @@ func Test_prog_upstreamFor(t *testing.T) {
 func TestCache(t *testing.T) {
 	cfg := testhelper.SampleConfig(t)
 	prog := &prog{cfg: cfg}
+	prog.logger.Store(mainLog.Load())
 	for _, nc := range prog.cfg.Network {
 		for _, cidr := range nc.Cidrs {
 			_, ipNet, err := net.ParseCIDR(cidr)

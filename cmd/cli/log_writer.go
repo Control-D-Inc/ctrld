@@ -100,6 +100,7 @@ func (p *prog) initLogging(backup bool) {
 
 	// Initializing internal logging after global logging.
 	p.initInternalLogging(logWriters)
+	p.logger.Store(mainLog.Load())
 }
 
 // initInternalLogging performs internal logging if there's no log enabled.
@@ -108,7 +109,7 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 		return
 	}
 	p.initInternalLogWriterOnce.Do(func() {
-		mainLog.Load().Notice().Msg("internal logging enabled")
+		p.Notice().Msg("internal logging enabled")
 		p.internalLogWriter = newLogWriter()
 		p.internalLogSent = time.Now().Add(-logWriterSentInterval)
 		p.internalWarnLogWriter = newSmallLogWriter()
