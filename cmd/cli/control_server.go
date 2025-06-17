@@ -79,21 +79,21 @@ func (s *controlServer) register(pattern string, handler http.Handler) {
 
 func (p *prog) registerControlServerHandler() {
 	p.cs.register(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		mainLog.Load().Debug().Msg("handling list clients request")
+		p.Debug().Msg("handling list clients request")
 
 		clients := p.ciTable.ListClients()
-		mainLog.Load().Debug().Int("client_count", len(clients)).Msg("retrieved clients list")
+		p.Debug().Int("client_count", len(clients)).Msg("retrieved clients list")
 
 		sort.Slice(clients, func(i, j int) bool {
 			return clients[i].IP.Less(clients[j].IP)
 		})
-		mainLog.Load().Debug().Msg("sorted clients by IP address")
+		p.Debug().Msg("sorted clients by IP address")
 
 		if p.metricsQueryStats.Load() {
-			mainLog.Load().Debug().Msg("metrics query stats enabled, collecting query counts")
+			p.Debug().Msg("metrics query stats enabled, collecting query counts")
 
 			for idx, client := range clients {
-				mainLog.Load().Debug().
+				p.Debug().
 					Int("index", idx).
 					Str("ip", client.IP.String()).
 					Str("mac", client.Mac).
@@ -104,7 +104,7 @@ func (p *prog) registerControlServerHandler() {
 				dm := &dto.Metric{}
 
 				if statsClientQueriesCount.MetricVec == nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Str("client_ip", client.IP.String()).
 						Msg("skipping metrics collection: MetricVec is nil")
 					continue
@@ -116,7 +116,7 @@ func (p *prog) registerControlServerHandler() {
 					client.Hostname,
 				)
 				if err != nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Err(err).
 						Str("client_ip", client.IP.String()).
 						Str("mac", client.Mac).
@@ -127,23 +127,23 @@ func (p *prog) registerControlServerHandler() {
 
 				if err := m.Write(dm); err == nil && dm.Counter != nil {
 					client.QueryCount = int64(dm.Counter.GetValue())
-					mainLog.Load().Debug().
+					p.Debug().
 						Str("client_ip", client.IP.String()).
 						Int64("query_count", client.QueryCount).
 						Msg("successfully collected query count")
 				} else if err != nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Err(err).
 						Str("client_ip", client.IP.String()).
 						Msg("failed to write metric")
 				}
 			}
 		} else {
-			mainLog.Load().Debug().Msg("metrics query stats disabled, skipping query counts")
+			p.Debug().Msg("metrics query stats disabled, skipping query counts")
 		}
 
 		if err := json.NewEncoder(w).Encode(&clients); err != nil {
-			mainLog.Load().Error().
+			p.Error().
 				Err(err).
 				Int("client_count", len(clients)).
 				Msg("failed to encode clients response")
@@ -151,7 +151,7 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 
-		mainLog.Load().Debug().
+		p.Debug().
 			Int("client_count", len(clients)).
 			Msg("successfully sent clients list response")
 	}))
@@ -175,7 +175,7 @@ func (p *prog) registerControlServerHandler() {
 		oldSvc := p.cfg.Service
 		p.mu.Unlock()
 		if err := p.sendReloadSignal(); err != nil {
-			mainLog.Load().Err(err).Msg("could not send reload signal")
+			p.Error().Err(err).Msg("could not send reload signal")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -216,7 +216,7 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 
-		loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 		// Re-fetch pin code from API.
 		if rc, err := controld.FetchResolverConfig(loggerCtx, cdUID, rootCmd.Version, cdDev); rc != nil {
 			if rc.DeactivationPin != nil {
@@ -225,7 +225,7 @@ func (p *prog) registerControlServerHandler() {
 				cdDeactivationPin.Store(defaultDeactivationPin)
 			}
 		} else {
-			mainLog.Load().Warn().Err(err).Msg("could not re-fetch deactivation pin code")
+			p.Warn().Err(err).Msg("could not re-fetch deactivation pin code")
 		}
 
 		// If pin code not set, allowing deactivation.
@@ -237,7 +237,7 @@ func (p *prog) registerControlServerHandler() {
 		var req deactivationRequest
 		if err := json.NewDecoder(request.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusPreconditionFailed)
-			mainLog.Load().Err(err).Msg("invalid deactivation request")
+			p.Error().Err(err).Msg("invalid deactivation request")
 			return
 		}
 
@@ -320,15 +320,15 @@ func (p *prog) registerControlServerHandler() {
 			UID:  cdUID,
 			Data: r.r,
 		}
-		mainLog.Load().Debug().Msg("sending log file to ControlD server")
+		p.Debug().Msg("sending log file to ControlD server")
 		resp := logSentResponse{Size: r.size}
-		loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 		if err := controld.SendLogs(loggerCtx, req, cdDev); err != nil {
-			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
+			p.Error().Msgf("could not send log file to ControlD server: %v", err)
 			resp.Error = err.Error()
 			w.WriteHeader(http.StatusInternalServerError)
 		} else {
-			mainLog.Load().Debug().Msg("sending log file successfully")
+			p.Debug().Msg("sending log file successfully")
 			w.WriteHeader(http.StatusOK)
 		}
 		if err := json.NewEncoder(w).Encode(&resp); err != nil {
