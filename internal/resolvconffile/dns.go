@@ -1,5 +1,3 @@
-//go:build !js && !windows
-
 package resolvconffile
 
 import (
@@ -24,15 +22,20 @@ func NameServersWithPort() []string {
 }
 
 func NameServers() []string {
-	c, err := resolvconffile.ParseFile(resolvconfPath)
+	nss, _ := NameserversFromFile(resolvconfPath)
+	return nss
+}
+
+func NameserversFromFile(path string) ([]string, error) {
+	c, err := resolvconffile.ParseFile(path)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	ns := make([]string, 0, len(c.Nameservers))
 	for _, nameserver := range c.Nameservers {
 		ns = append(ns, nameserver.String())
 	}
-	return ns
+	return ns, nil
 }
 
 // SearchDomains returns the current search domains config in /etc/resolv.conf file.

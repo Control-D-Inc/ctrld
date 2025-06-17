@@ -3,36 +3,18 @@ package cli
 import (
 	"net"
 	"net/netip"
-	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
 // parseResolvConfNameservers reads the resolv.conf file and returns the nameservers found.
 // Returns nil if no nameservers are found.
 func (p *prog) parseResolvConfNameservers(path string) ([]string, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the file for "nameserver" lines
-	var currentNS []string
-	lines := strings.Split(string(content), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "nameserver") {
-			parts := strings.Fields(trimmed)
-			if len(parts) >= 2 {
-				currentNS = append(currentNS, parts[1])
-			}
-		}
-	}
-
-	return currentNS, nil
+	return resolvconffile.NameserversFromFile(path)
 }
 
 // watchResolvConf watches any changes to /etc/resolv.conf file,
