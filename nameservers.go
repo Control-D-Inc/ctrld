@@ -1,6 +1,10 @@
 package ctrld
 
-import "context"
+import (
+	"context"
+
+	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
+)
 
 type dnsFn func(ctx context.Context) []string
 
@@ -27,4 +31,9 @@ func nameservers(ctx context.Context) []string {
 	}
 
 	return dns
+}
+
+// CurrentNameserversFromResolvconf returns the current nameservers set from /etc/resolv.conf file.
+func CurrentNameserversFromResolvconf() []string {
+	return resolvconffile.NameServers()
 }

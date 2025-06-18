@@ -9,6 +9,7 @@ import (
 
 const resolvconfPath = "/etc/resolv.conf"
 
+// NameServersWithPort retrieves a list of nameservers with the default DNS port 53 appended to each address.
 func NameServersWithPort() []string {
 	c, err := resolvconffile.ParseFile(resolvconfPath)
 	if err != nil {
@@ -21,11 +22,17 @@ func NameServersWithPort() []string {
 	return ns
 }
 
+// NameServers retrieves a list of nameservers from the /etc/resolv.conf file
+// Returns an empty slice if reading fails.
 func NameServers() []string {
 	nss, _ := NameserversFromFile(resolvconfPath)
 	return nss
 }
 
+// NameserversFromFile reads nameserver addresses from the specified resolv.conf file
+// and returns them as a slice of strings.
+//
+// Returns an error if the file cannot be parsed.
 func NameserversFromFile(path string) ([]string, error) {
 	c, err := resolvconffile.ParseFile(path)
 	if err != nil {

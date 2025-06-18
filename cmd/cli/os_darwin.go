@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/Control-D-Inc/ctrld"
-	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
 // allocate loopback ip
@@ -92,7 +91,7 @@ func restoreDNS(iface *net.Interface) (err error) {
 }
 
 func currentDNS(_ *net.Interface) []string {
-	return resolvconffile.NameServers()
+	return ctrld.CurrentNameserversFromResolvconf()
 }
 
 // currentStaticDNS returns the current static DNS settings of given interface.
