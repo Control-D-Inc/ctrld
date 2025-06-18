@@ -21,9 +21,9 @@ import (
 	"tailscale.com/health"
 	"tailscale.com/util/dnsname"
 
+	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dns"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
-	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
 const resolvConfBackupFailedMsg = "open /etc/resolv.pre-ctrld-backup.conf: read-only file system"
@@ -201,7 +201,7 @@ func restoreDNS(iface *net.Interface) (err error) {
 }
 
 func currentDNS(iface *net.Interface) []string {
-	resolvconfFunc := func(_ string) []string { return resolvconffile.NameServers() }
+	resolvconfFunc := func(_ string) []string { return ctrld.CurrentNameserversFromResolvconf() }
 	for _, fn := range []getDNS{getDNSByResolvectl, getDNSBySystemdResolved, getDNSByNmcli, resolvconfFunc} {
 		if ns := fn(iface.Name); len(ns) > 0 {
 			return ns

@@ -297,7 +297,7 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 	return ns, nil
 }
 
-// currentNameserversFromResolvconf returns a nil slice of strings.
+// CurrentNameserversFromResolvconf returns a nil slice of strings.
 func currentNameserversFromResolvconf() []string {
 	return nil
 }

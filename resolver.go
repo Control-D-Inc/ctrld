@@ -647,7 +647,7 @@ func lookupIP(ctx context.Context, domain string, timeout int, bootstrapDNS []st
 // This is useful for doing PTR lookup in LAN network.
 func NewPrivateResolver(ctx context.Context) Resolver {
 	nss := initDefaultOsResolver(ctx)
-	resolveConfNss := currentNameserversFromResolvconf()
+	resolveConfNss := CurrentNameserversFromResolvconf()
 	localRfc1918Addrs := Rfc1918Addresses()
 	n := 0
 	for _, ns := range nss {
