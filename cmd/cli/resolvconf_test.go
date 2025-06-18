@@ -33,6 +33,11 @@ func oldParseResolvConfNameservers(path string) ([]string, error) {
 	return currentNS, nil
 }
 
+// Test_prog_parseResolvConfNameservers tests the parsing of nameservers from resolv.conf content.
+// Note: The previous implementation was removed to reduce code duplication and consolidate
+// the resolv.conf handling logic into a single unified approach. All resolv.conf parsing
+// is now handled by the resolvconffile package, which provides a consistent interface
+// for both reading and modifying resolv.conf files across different platforms.
 func Test_prog_parseResolvConfNameservers(t *testing.T) {
 	oldNss, _ := oldParseResolvConfNameservers(resolvconffile.Path)
 	p := &prog{}
