@@ -28,6 +28,8 @@ import (
 
 const resolvConfBackupFailedMsg = "open /etc/resolv.pre-ctrld-backup.conf: read-only file system"
 
+type getDNS func(iface string) []string
+
 // allocate loopback ip
 // sudo ip a add 127.0.0.2/24 dev lo
 func allocateIP(ip string) error {
