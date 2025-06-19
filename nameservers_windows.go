@@ -210,7 +210,7 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 		}
 	}
 
-	validInterfacesMap := validInterfaces(ctx)
+	validInterfacesMap := ValidInterfaces(ctx)
 
 	// Collect DNS servers
 	for _, aa := range aas {
@@ -377,10 +377,9 @@ func getLocalADDomain() (string, error) {
 	return domainName, nil
 }
 
-// validInterfaces returns a list of all physical interfaces.
-// this is a duplicate of what is in net_windows.go, we should
-// clean this up so there is only one version
-func validInterfaces(ctx context.Context) map[string]struct{} {
+// ValidInterfaces returns a map of valid network interface names as keys with empty struct values.
+// It filters interfaces to include only physical, hardware-based adapters using WMI queries.
+func ValidInterfaces(ctx context.Context) map[string]struct{} {
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
 

@@ -3,18 +3,23 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Control-D-Inc/ctrld"
 )
 
 func Test_validInterfaces(t *testing.T) {
 	verbose = 3
 	initConsoleLogging()
 	start := time.Now()
-	ifaces := validInterfaces()
+	im := ctrld.ValidInterfaces(ctrld.LoggerCtx(context.Background(), mainLog.Load()))
 	t.Logf("Using Windows API takes: %d", time.Since(start).Milliseconds())
+	ifaces := slices.Collect(maps.Keys(im))
 
 	start = time.Now()
 	ifacesPowershell := validInterfacesPowershell()

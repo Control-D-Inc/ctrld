@@ -1320,8 +1320,8 @@ func canBeLocalUpstream(addr string) bool {
 // withEachPhysicalInterfaces runs the function f with each physical interfaces, excluding
 // the interface that matches excludeIfaceName. The context is used to clarify the
 // log message when error happens.
-func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.Interface) error) {
-	validIfacesMap := validInterfacesMap()
+func withEachPhysicalInterfaces(excludeIfaceName, contextStr string, f func(i *net.Interface) error) {
+	validIfacesMap := validInterfacesMap(ctrld.LoggerCtx(context.Background(), mainLog.Load()))
 	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		// Skip loopback/virtual/down interface.
 		if i.IsLoopback() || len(i.HardwareAddr) == 0 {
@@ -1345,11 +1345,11 @@ func withEachPhysicalInterfaces(excludeIfaceName, context string, f func(i *net.
 		}
 		// TODO: investigate whether we should report this error?
 		if err := f(netIface); err == nil {
-			if context != "" {
-				mainLog.Load().Debug().Msgf("Ran %s for interface %q successfully", context, i.Name)
+			if contextStr != "" {
+				mainLog.Load().Debug().Msgf("Ran %s for interface %q successfully", contextStr, i.Name)
 			}
 		} else if !errors.Is(err, errSaveCurrentStaticDNSNotSupported) {
-			mainLog.Load().Err(err).Msgf("%s for interface %q failed", context, i.Name)
+			mainLog.Load().Err(err).Msgf("%s for interface %q failed", contextStr, i.Name)
 		}
 	})
 }
