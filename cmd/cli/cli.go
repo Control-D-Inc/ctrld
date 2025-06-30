@@ -40,7 +40,6 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
-	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 // selfCheckInternalTestDomain is used for testing ctrld self response to clients.
@@ -290,20 +289,11 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		p.Fatal().Msg("network is not up yet")
 	}
 
-	p.router = router.New(&cfg, cdUID != "")
 	cs, err := newControlServer(filepath.Join(sockDir, ControlSocketName()))
 	if err != nil {
 		p.Warn().Err(err).Msg("could not create control server")
 	}
 	p.cs = cs
-
-	// Processing --cd flag require connecting to ControlD API, which needs valid
-	// time for validating server certificate. Some routers need NTP synchronization
-	// to set the current time, so this check must happen before processCDFlags.
-	if err := p.router.PreRun(); err != nil {
-		notifyExitToLogServer()
-		p.Fatal().Err(err).Msg("failed to perform router pre-run check")
-	}
 
 	oldLogPath := cfg.Service.LogPath
 	if uid := cdUIDFromProvToken(); uid != "" {
@@ -413,25 +403,6 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			}
 		}
 	})
-	if platform := router.Name(); platform != "" {
-		if cp := router.CertPool(); cp != nil {
-			rootCertPool = cp
-		}
-		if iface != "" {
-			p.onStarted = append(p.onStarted, func() {
-				p.Debug().Msg("router setup on start")
-				if err := p.router.Setup(); err != nil {
-					p.Error().Err(err).Msg("could not configure router")
-				}
-			})
-			p.onStopped = append(p.onStopped, func() {
-				p.Debug().Msg("router cleanup on stop")
-				if err := p.router.Cleanup(); err != nil {
-					p.Error().Err(err).Msg("could not cleanup router")
-				}
-			})
-		}
-	}
 	p.onStopped = append(p.onStopped, func() {
 		// restore static DNS settings or DHCP
 		p.resetDNS(false, true)
@@ -809,9 +780,6 @@ func netInterface(ifaceName string) (*net.Interface, error) {
 }
 
 func defaultIfaceName() string {
-	if ifaceName := router.DefaultInterfaceName(); ifaceName != "" {
-		return ifaceName
-	}
 	dri, err := netmon.DefaultRouteInterface()
 	if err != nil {
 		// On WSL 1, the route table does not have any default route. But the fact that
@@ -962,13 +930,6 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 }
 
 func userHomeDir() (string, error) {
-	dir, err := router.HomeDir()
-	if err != nil {
-		return "", err
-	}
-	if dir != "" {
-		return dir, nil
-	}
 	// Mobile platform should provide a rw dir path for this.
 	if isMobile() {
 		return homedir, nil
@@ -1051,13 +1012,6 @@ func uninstall(p *prog, s service.Service) {
 	}
 	initInteractiveLogging()
 	if doTasks(tasks) {
-		if err := p.router.ConfigureService(svcConfig); err != nil {
-			mainLog.Load().Fatal().Err(err).Msg("could not configure service")
-		}
-		if err := p.router.Uninstall(svcConfig); err != nil {
-			mainLog.Load().Warn().Err(err).Msg("post uninstallation failed, please check system/service log for details error")
-			return
-		}
 		// restore static DNS settings or DHCP
 		p.resetDNS(false, true)
 
@@ -1078,12 +1032,6 @@ func uninstall(p *prog, s service.Service) {
 			return nil
 		})
 
-		if router.Name() != "" {
-			mainLog.Load().Debug().Msg("Router cleanup")
-		}
-		// Stop already did router.Cleanup and report any error if happens,
-		// ignoring error here to prevent false positive.
-		_ = p.router.Cleanup()
 		mainLog.Load().Notice().Msg("Service uninstalled")
 		return
 	}
@@ -1201,7 +1149,6 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 	nextdnsMode := nextdns != ""
 	// For Windows server with local Dns server running, we can only try on random local IP.
 	hasLocalDnsServer := hasLocalDnsServerRunning()
-	notRouter := router.Name() == ""
 	isDesktop := ctrld.IsDesktopPlatform()
 	for n, listener := range cfg.Listener {
 		lcc[n] = &listenerConfigCheck{}
@@ -1309,21 +1256,19 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 
 		// On firewalla, we don't need to check localhost, because the lo interface is excluded in dnsmasq
 		// config, so we can always listen on localhost port 53, but no traffic could be routed there.
-		tryLocalhost := !isLoopback(listener.IP) && router.CanListenLocalhost()
+		tryLocalhost := !isLoopback(listener.IP)
 		tryAllPort53 := true
-		tryOldIPPort5354 := true
-		tryPort5354 := true
+		// We should not try to listen on any port other than 53,
+		// if we do, this will break the dns resolution for the system.
+		// TODO: cleanup these codes when refactoring this function.
+		tryOldIPPort5354 := false
+		tryPort5354 := false
 		if hasLocalDnsServer {
 			tryAllPort53 = false
 			tryOldIPPort5354 = false
 			tryPort5354 = false
 		}
-		// if not running on a router, we should not try to listen on any port other than 53
-		// if we do, this will break the dns resolution for the system.
-		if notRouter {
-			tryOldIPPort5354 = false
-			tryPort5354 = false
-		}
+
 		attempts := 0
 		maxAttempts := 10
 		for {
@@ -1400,9 +1345,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 			} else {
 				listener.IP = oldIP
 			}
-			// if we are not running on a router, we should not try to listen on any port other than 53
-			// if we do, this will break the dns resolution for the system.
-			if check.Port && !notRouter {
+			if check.Port {
 				listener.Port = randomPort()
 			} else {
 				listener.Port = oldPort
@@ -1736,11 +1679,6 @@ func exchangeContextWithTimeout(c *dns.Client, timeout time.Duration, msg *dns.M
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return c.ExchangeContext(ctx, msg, addr)
-}
-
-// runInCdMode reports whether ctrld service is running in cd mode.
-func runInCdMode() bool {
-	return curCdUID() != ""
 }
 
 // curCdUID returns the current ControlD UID used by running ctrld process.

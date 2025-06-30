@@ -34,8 +34,6 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
-	"github.com/Control-D-Inc/ctrld/internal/router"
-	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
 
 const (
@@ -120,7 +118,6 @@ type prog struct {
 	sema                      semaphore
 	ciTable                   *clientinfo.Table
 	um                        *upstreamMonitor
-	router                    router.Router
 	ptrLoopGuard              *loopGuard
 	lanLoopGuard              *loopGuard
 	metricsQueryStats         atomic.Bool
@@ -612,12 +609,6 @@ func (p *prog) setupClientInfoDiscover() {
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
 		p.ciTable.AddLeaseFile(leaseFile, format)
 	}
-	if leaseFiles := dnsmasq.AdditionalLeaseFiles(); len(leaseFiles) > 0 {
-		mainLog.Load().Debug().Msgf("watching additional lease files: %v", leaseFiles)
-		for _, leaseFile := range leaseFiles {
-			p.ciTable.AddLeaseFile(leaseFile, ctrld.Dnsmasq)
-		}
-	}
 }
 
 // runClientInfoDiscover runs the client info discover.
@@ -724,9 +715,6 @@ func (p *prog) setDNS() {
 		ns = "127.0.0.1"
 	case lc.Port != 53:
 		ns = "127.0.0.1"
-		if resolver := router.LocalResolverIP(); resolver != "" {
-			ns = resolver
-		}
 	default:
 		// If we ever reach here, it means ctrld is running on lc.IP port 53,
 		// so we could just use lc.IP as nameserver.
@@ -1493,10 +1481,7 @@ func (p *prog) leakOnUpstreamFailure() bool {
 	if ptr := p.cfg.Service.LeakOnUpstreamFailure; ptr != nil {
 		return *ptr
 	}
-	// Default is false on routers, since this leaking is only useful for devices that move between networks.
-	if router.Name() != "" {
-		return false
-	}
+
 	// if we are running on ADDC, we should not leak on upstream failure
 	if p.runningOnDomainController {
 		return false

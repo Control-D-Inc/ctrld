@@ -11,7 +11,6 @@ A highly configurable DNS forwarding proxy with support for:
 - Multiple upstreams with fallbacks
 - Multiple network policy driven DNS query steering (via network cidr, MAC address or FQDN)
 - Policy driven domain based "split horizon" DNS with wildcard support
-- Integrations with common router vendors and firmware
 - LAN client discovery via DHCP, mDNS, ARP, NDP, hosts file parsing
 - Prometheus metrics exporter 
 
@@ -26,11 +25,10 @@ All DNS protocols are supported, including:
 - `DNS-over-QUIC`
 
 # Use Cases
-1. Use secure DNS protocols on networks and devices that don't natively support them (legacy routers, legacy OSes, TVs, smart toasters).
+1. Use secure DNS protocols on networks and devices that don't natively support them (legacy OSes, TVs, smart toasters).
 2. Create source IP based DNS routing policies with variable secure DNS upstreams. Subnet 1 (admin) uses upstream resolver A, while Subnet 2 (employee) uses upstream resolver B.
 3. Create destination IP based DNS routing policies with variable secure DNS upstreams. Listener 1 uses upstream resolver C, while Listener 2 uses upstream resolver D.
 4. Create domain level "split horizon" DNS routing policies to send internal domains (*.company.int) to a local DNS server, while everything else goes to another upstream.
-5. Deploy on a router and create LAN client specific DNS routing policies from a web GUI (When using ControlD.com).
 
 
 ## OS Support
@@ -39,22 +37,6 @@ All DNS protocols are supported, including:
 - MacOS (amd64, arm64)
 - Linux (386, amd64, arm, mips)
 - FreeBSD (386, amd64, arm)
-- Common routers (See below)
-
-
-### Supported Routers
-You can run `ctrld` on any supported router. The list of supported routers and firmware includes:
-- Asus Merlin
-- DD-WRT
-- Firewalla
-- FreshTomato
-- GL.iNet
-- OpenWRT
-- pfSense / OPNsense
-- Synology 
-- Ubiquiti (UniFi, EdgeOS)
-
-`ctrld` will attempt to interface with dnsmasq (or Windows Server) whenever possible and set itself as the upstream, while running on port 5354. On FreeBSD based OSes, `ctrld` will terminate dnsmasq and unbound in order to be able to listen on port 53 directly.  
 
 # Install
 There are several ways to download and install `ctrld`.
@@ -161,9 +143,7 @@ You can then run a test query using a DNS client, for example, `dig`:
 If `verify.controld.com` resolves, you're successfully using the default Control D upstream. From here, you can start editing the config file that was generated. To enforce a new config, restart the server. 
 
 ## Service Mode
-This mode will run the application as a background system service on any Windows, MacOS, Linux, FreeBSD distribution or supported router. This will create a generic `ctrld.toml` file in the **C:\ControlD** directory (on Windows) or `/etc/controld/` (almost everywhere else), start the system service, and **configure the listener on all physical network interface**. Service will start on OS boot.
-
-When Control D upstreams are used on a router type device, `ctrld` will [relay your network topology](https://docs.controld.com/docs/device-clients) to Control D (LAN IPs, MAC addresses, and hostnames), and you will be able to see your LAN devices in the web panel, view analytics and apply unique profiles to them. 
+This mode will run the application as a background system service on any Windows, MacOS, Linux or FreeBSD distribution. This will create a generic `ctrld.toml` file in the **C:\ControlD** directory (on Windows) or `/etc/controld/` (almost everywhere else), start the system service, and **configure the listener on all physical network interface**. Service will start on OS boot.
 
 ### Command
 
