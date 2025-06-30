@@ -35,6 +35,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/internal/router"
+	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
 
 const (
@@ -610,6 +611,12 @@ func (p *prog) setupClientInfoDiscover() {
 		p.Debug().Msgf("watching custom lease file: %s", leaseFile)
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
 		p.ciTable.AddLeaseFile(leaseFile, format)
+	}
+	if leaseFiles := dnsmasq.AdditionalLeaseFiles(); len(leaseFiles) > 0 {
+		mainLog.Load().Debug().Msgf("watching additional lease files: %v", leaseFiles)
+		for _, leaseFile := range leaseFiles {
+			p.ciTable.AddLeaseFile(leaseFile, ctrld.Dnsmasq)
+		}
 	}
 }
 
