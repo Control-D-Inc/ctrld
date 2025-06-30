@@ -23,11 +23,9 @@ import (
 	"github.com/minio/selfupdate"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
-	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 // dialSocketControlServerTimeout is the default timeout to wait when ping control server.
@@ -47,7 +45,7 @@ func initLogCmd() *cobra.Command {
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 
-			p := &prog{router: router.New(&cfg, false)}
+			p := &prog{}
 			s, _ := newService(p, svcConfig)
 
 			status, err := s.Status()
@@ -100,7 +98,7 @@ func initLogCmd() *cobra.Command {
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 
-			p := &prog{router: router.New(&cfg, false)}
+			p := &prog{}
 			s, _ := newService(p, svcConfig)
 
 			status, err := s.Status()
@@ -225,10 +223,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			setDependencies(sc)
 			sc.Arguments = append([]string{"run"}, osArgs...)
 
-			p := &prog{
-				router: router.New(&cfg, cdUID != ""),
-				cfg:    &cfg,
-			}
+			p := &prog{cfg: &cfg}
 			s, err := newService(p, sc)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
@@ -400,10 +395,6 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				validateCdUpstreamProtocol()
 			}
 
-			if err := p.router.ConfigureService(sc); err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to configure service on router")
-			}
-
 			if configPath != "" {
 				v.SetConfigFile(configPath)
 			}
@@ -425,11 +416,6 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			// the expected config file.
 			if configPath == "" {
 				sc.Arguments = append(sc.Arguments, "--config="+defaultConfigFile)
-			}
-
-			if router.Name() != "" && iface != "" {
-				mainLog.Load().Debug().Msg("cleaning up router before installing")
-				_ = p.router.Cleanup()
 			}
 
 			tasks := []task{
@@ -458,11 +444,6 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			}
 			mainLog.Load().Notice().Msg("Starting service")
 			if doTasks(tasks) {
-				if err := p.router.Install(sc); err != nil {
-					mainLog.Load().Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
-					return
-				}
-
 				// add a small delay to ensure the service is started and did not crash
 				time.Sleep(1 * time.Second)
 
@@ -529,33 +510,6 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmd.Flags().BoolVarP(&startOnly, "start_only", "", false, "Do not install new service")
 	_ = startCmd.Flags().MarkHidden("start_only")
 
-	routerCmd := &cobra.Command{
-		Use: "setup",
-		Run: func(cmd *cobra.Command, _ []string) {
-			exe, err := os.Executable()
-			if err != nil {
-				mainLog.Load().Fatal().Msgf("could not find executable path: %v", err)
-				os.Exit(1)
-			}
-			flags := make([]string, 0)
-			cmd.Flags().Visit(func(flag *pflag.Flag) {
-				flags = append(flags, fmt.Sprintf("--%s=%s", flag.Name, flag.Value))
-			})
-			cmdArgs := []string{"start"}
-			cmdArgs = append(cmdArgs, flags...)
-			command := exec.Command(exe, cmdArgs...)
-			command.Stdout = os.Stdout
-			command.Stderr = os.Stderr
-			command.Stdin = os.Stdin
-			if err := command.Run(); err != nil {
-				mainLog.Load().Fatal().Msg(err.Error())
-			}
-		},
-	}
-	routerCmd.Flags().AddFlagSet(startCmd.Flags())
-	routerCmd.Hidden = true
-	rootCmd.AddCommand(routerCmd)
-
 	startCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
 			checkHasElevatedPrivilege()
@@ -601,7 +555,7 @@ func initStopCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg, runInCdMode())}
+			p := &prog{}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
@@ -629,23 +583,6 @@ func initStopCmd() *cobra.Command {
 				os.Exit(deactivationPinInvalidExitCode)
 			}
 			if doTasks([]task{{s.Stop, true, "Stop"}}) {
-				if router.WaitProcessExited() {
-					ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-					defer cancel()
-
-					for {
-						select {
-						case <-ctx.Done():
-							mainLog.Load().Error().Msg("timeout while waiting for service to stop")
-							return
-						default:
-						}
-						time.Sleep(time.Second)
-						if status, _ := s.Status(); status == service.StatusStopped {
-							break
-						}
-					}
-				}
 				mainLog.Load().Notice().Msg("Service stopped")
 			}
 		},
@@ -689,7 +626,7 @@ func initRestartCmd() *cobra.Command {
 			cdUID = curCdUID()
 			cdMode := cdUID != ""
 
-			p := &prog{router: router.New(&cfg, cdMode)}
+			p := &prog{}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
@@ -723,7 +660,6 @@ func initRestartCmd() *cobra.Command {
 				tasks := []task{
 					{s.Stop, true, "Stop"},
 					{func() error {
-						p.router.Cleanup()
 						// restore static DNS settings or DHCP
 						p.resetDNS(false, true)
 						return nil
@@ -733,27 +669,7 @@ func initRestartCmd() *cobra.Command {
 						return nil
 					}, false, "Waiting for service to stop"},
 				}
-				if doTasks(tasks) {
-
-					if router.WaitProcessExited() {
-						ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-						defer cancel()
-
-					loop:
-						for {
-							select {
-							case <-ctx.Done():
-								mainLog.Load().Error().Msg("timeout while waiting for service to stop")
-								break loop
-							default:
-							}
-							time.Sleep(time.Second)
-							if status, _ := s.Status(); status == service.StatusStopped {
-								break
-							}
-						}
-					}
-				} else {
+				if !doTasks(tasks) {
 					return false
 				}
 
@@ -814,7 +730,7 @@ func initReloadCmd(restartCmd *cobra.Command) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 
-			p := &prog{router: router.New(&cfg, false)}
+			p := &prog{}
 			s, _ := newService(p, svcConfig)
 
 			status, err := s.Status()
@@ -939,7 +855,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg, runInCdMode())}
+			p := &prog{}
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
@@ -1115,7 +1031,7 @@ func initClientsCmd() *cobra.Command {
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 
-			p := &prog{router: router.New(&cfg, false)}
+			p := &prog{}
 			s, _ := newService(p, svcConfig)
 
 			status, err := s.Status()
@@ -1228,7 +1144,7 @@ func initUpgradeCmd() *cobra.Command {
 			sc.Executable = bin
 			readConfig(false)
 			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg, runInCdMode())}
+			p := &prog{}
 			s, err := newService(p, sc)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
@@ -1285,7 +1201,6 @@ func initUpgradeCmd() *cobra.Command {
 				tasks := []task{
 					{s.Stop, true, "Stop"},
 					{func() error {
-						p.router.Cleanup()
 						// restore static DNS settings or DHCP
 						p.resetDNS(false, true)
 						return nil
@@ -1295,27 +1210,7 @@ func initUpgradeCmd() *cobra.Command {
 						return nil
 					}, false, "Waiting for service to stop"},
 				}
-				if doTasks(tasks) {
-
-					if router.WaitProcessExited() {
-						ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-						defer cancel()
-
-					loop:
-						for {
-							select {
-							case <-ctx.Done():
-								mainLog.Load().Error().Msg("timeout while waiting for service to stop")
-								break loop
-							default:
-							}
-							time.Sleep(time.Second)
-							if status, _ := s.Status(); status == service.StatusStopped {
-								break
-							}
-						}
-					}
-				}
+				doTasks(tasks)
 
 				tasks = []task{
 					{s.Start, true, "Start"},

@@ -18,7 +18,6 @@ import (
 	"tailscale.com/util/lineread"
 
 	"github.com/Control-D-Inc/ctrld"
-	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 type dhcp struct {
@@ -39,10 +38,6 @@ func (d *dhcp) init() error {
 	}
 	d.addSelf()
 	d.watcher = watcher
-	for file, format := range clientInfoFiles {
-		// Ignore errors for default lease files.
-		_ = d.addLeaseFile(file, format)
-	}
 	return nil
 }
 
@@ -50,11 +45,7 @@ func (d *dhcp) watchChanges() {
 	if d.watcher == nil {
 		return
 	}
-	if dir := router.LeaseFilesDir(); dir != "" {
-		if err := d.watcher.Add(dir); err != nil {
-			d.logger.Err(err).Str("dir", dir).Msg("could not watch lease dir")
-		}
-	}
+
 	for {
 		select {
 		case event, ok := <-d.watcher.Events:
@@ -390,22 +381,4 @@ func (d *dhcp) addSelf() {
 			}
 		}
 	})
-	for _, netIface := range router.SelfInterfaces() {
-		mac := netIface.HardwareAddr.String()
-		if mac == "" {
-			return
-		}
-		d.mac2name.Store(mac, hostname)
-		addrs, _ := netIface.Addrs()
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			ip := ipNet.IP
-			d.mac.LoadOrStore(ip.String(), mac)
-			d.ip.LoadOrStore(mac, ip.String())
-			d.ip2name.Store(ip.String(), hostname)
-		}
-	}
 }

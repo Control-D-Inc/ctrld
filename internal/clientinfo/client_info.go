@@ -82,8 +82,6 @@ type Table struct {
 	logger            *ctrld.Logger
 
 	dhcp           *dhcp
-	merlin         *merlinDiscover
-	ubios          *ubiosDiscover
 	arp            *arpDiscover
 	ndp            *ndpDiscover
 	ptr            *ptrDiscover
@@ -206,30 +204,6 @@ func (t *Table) init() {
 		return
 	}
 
-	// Otherwise, process all possible sources in order, that means
-	// the first result of IP/MAC/Hostname lookup will be used.
-	//
-	// Routers custom clients:
-	//  - Merlin
-	//  - Ubios
-	if t.discoverDHCP() || t.discoverARP() {
-		t.merlin = &merlinDiscover{logger: t.logger}
-		t.ubios = &ubiosDiscover{}
-		discovers := map[string]interface {
-			refresher
-			HostnameResolver
-		}{
-			"Merlin": t.merlin,
-			"Ubios":  t.ubios,
-		}
-		for platform, discover := range discovers {
-			if err := discover.refresh(); err != nil {
-				t.logger.Warn().Err(err).Msgf("failed to init %s discover", platform)
-			}
-			t.hostnameResolvers = append(t.hostnameResolvers, discover)
-			t.refreshers = append(t.refreshers, discover)
-		}
-	}
 	// Hosts file mapping.
 	if t.discoverHosts() {
 		t.hf = &hostsFile{logger: t.logger}

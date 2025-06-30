@@ -18,8 +18,6 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/certs"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
-	"github.com/Control-D-Inc/ctrld/internal/router"
-	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
 )
 
 const (
@@ -271,7 +269,7 @@ func apiTransport(loggerCtx context.Context, cdDev bool) *http.Transport {
 		// Fallback to direct IPv6
 		return dial(ctx, "tcp6", addrsFromPort(apiIpsV6, port))
 	}
-	if router.Name() == ddwrt.Name || runtime.GOOS == "android" {
+	if runtime.GOOS == "android" {
 		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
 	}
 	return transport

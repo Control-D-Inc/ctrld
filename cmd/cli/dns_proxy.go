@@ -25,7 +25,6 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
-	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 const (
@@ -1405,10 +1404,7 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		}
 		p.Debug().Msgf("Set default local IPv4: %s, IPv6: %s", selfIP, ipv6)
 
-		// we only trigger recovery flow for network changes on non router devices
-		if router.Name() == "" {
-			p.handleRecovery(RecoveryReasonNetworkChange)
-		}
+		p.handleRecovery(RecoveryReasonNetworkChange)
 	})
 
 	mon.Start()

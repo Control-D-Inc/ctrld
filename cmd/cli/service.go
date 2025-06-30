@@ -11,9 +11,6 @@ import (
 
 	"github.com/coreos/go-systemd/v22/unit"
 	"github.com/kardianos/service"
-
-	"github.com/Control-D-Inc/ctrld/internal/router"
-	"github.com/Control-D-Inc/ctrld/internal/router/openwrt"
 )
 
 // newService wraps service.New call to return service.Service
@@ -24,10 +21,6 @@ func newService(i service.Interface, c *service.Config) (service.Service, error)
 		return nil, err
 	}
 	switch {
-	case router.IsOldOpenwrt(), router.IsNetGearOrbi():
-		return &procd{sysV: &sysV{s}, svcConfig: c}, nil
-	case router.IsGLiNet():
-		return &sysV{s}, nil
 	case s.Platform() == "unix-systemv":
 		return &sysV{s}, nil
 	case s.Platform() == "linux-systemd":
@@ -42,7 +35,7 @@ func newService(i service.Interface, c *service.Config) (service.Service, error)
 // sysV wraps a service.Service, and provide start/stop/status command
 // base on "/etc/init.d/<service_name>".
 //
-// Use this on system where "service" command is not available, like GL.iNET router.
+// Use this on system where "service" command is not available.
 type sysV struct {
 	service.Service
 }
@@ -87,37 +80,6 @@ func (s *sysV) Status() (service.Status, error) {
 		return service.StatusUnknown, service.ErrNotInstalled
 	}
 	return unixSystemVServiceStatus()
-}
-
-// procd wraps a service.Service, and provide start/stop command
-// base on "/etc/init.d/<service_name>", status command base on parsing "ps" command output.
-//
-// Use this on system where "/etc/init.d/<service_name> status" command is not available,
-// like old GL.iNET Opal router.
-type procd struct {
-	*sysV
-	svcConfig *service.Config
-}
-
-func (s *procd) Status() (service.Status, error) {
-	if !s.installed() {
-		return service.StatusUnknown, service.ErrNotInstalled
-	}
-	bin := s.svcConfig.Executable
-	if bin == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return service.StatusUnknown, nil
-		}
-		bin = exe
-	}
-
-	// Looking for something like "/sbin/ctrld run ".
-	shellCmd := fmt.Sprintf("ps | grep -q %q", bin+" [r]un ")
-	if err := exec.Command("sh", "-c", shellCmd).Run(); err != nil {
-		return service.StatusStopped, nil
-	}
-	return service.StatusRunning, nil
 }
 
 // systemd wraps a service.Service, and provide status command to
@@ -249,13 +211,6 @@ func checkHasElevatedPrivilege() {
 func unixSystemVServiceStatus() (service.Status, error) {
 	out, err := exec.Command("/etc/init.d/ctrld", "status").CombinedOutput()
 	if err != nil {
-		// Specific case for openwrt >= 24.10, it returns non-success code
-		// for above status command, which may not right.
-		if router.Name() == openwrt.Name {
-			if string(bytes.ToLower(bytes.TrimSpace(out))) == "inactive" {
-				return service.StatusStopped, nil
-			}
-		}
 		return service.StatusUnknown, nil
 	}
 

@@ -9,8 +9,6 @@ import (
 	"strings"
 
 	"github.com/kardianos/service"
-
-	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 func init() {
@@ -36,9 +34,6 @@ func setDependencies(svc *service.Config) {
 		if wantsSystemDNetworkdWaitOnline(bytes.NewReader(out)) {
 			svc.Dependencies = append(svc.Dependencies, "Wants=systemd-networkd-wait-online.service")
 		}
-	}
-	if routerDeps := router.ServiceDependencies(); len(routerDeps) > 0 {
-		svc.Dependencies = append(svc.Dependencies, routerDeps...)
 	}
 }
 
