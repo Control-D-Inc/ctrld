@@ -14,6 +14,9 @@ import (
 )
 
 func init() {
+	if isAndroid() {
+		return
+	}
 	if r, err := newLoopbackOSConfigurator(); err == nil {
 		useSystemdResolved = r.Mode() == "systemd-resolved"
 	}
