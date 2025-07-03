@@ -2,18 +2,11 @@ package cli
 
 import (
 	"os"
-	"reflect"
 	"runtime"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 	"unsafe"
 
-	"github.com/microsoft/wmi/pkg/base/host"
-	"github.com/microsoft/wmi/pkg/base/instance"
-	"github.com/microsoft/wmi/pkg/base/query"
-	"github.com/microsoft/wmi/pkg/constant"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -150,78 +143,4 @@ func openLogFile(path string, mode int) (*os.File, error) {
 	}
 
 	return os.NewFile(uintptr(handle), path), nil
-}
-
-const processEntrySize = uint32(unsafe.Sizeof(windows.ProcessEntry32{}))
-
-// hasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.
-func hasLocalDnsServerRunning() bool {
-	h, e := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
-	if e != nil {
-		return false
-	}
-	p := windows.ProcessEntry32{Size: processEntrySize}
-	for {
-		e := windows.Process32Next(h, &p)
-		if e != nil {
-			return false
-		}
-		if strings.ToLower(windows.UTF16ToString(p.ExeFile[:])) == "dns.exe" {
-			return true
-		}
-	}
-}
-
-func isRunningOnDomainControllerWindows() (bool, int) {
-	whost := host.NewWmiLocalHost()
-	q := query.NewWmiQuery("Win32_ComputerSystem")
-	instances, err := instance.GetWmiInstancesFromHost(whost, string(constant.CimV2), q)
-	if err != nil {
-		mainLog.Load().Debug().Err(err).Msg("WMI query failed")
-		return false, 0
-	}
-	if instances == nil {
-		mainLog.Load().Debug().Msg("WMI query returned nil instances")
-		return false, 0
-	}
-	defer instances.Close()
-
-	if len(instances) == 0 {
-		mainLog.Load().Debug().Msg("no rows returned from Win32_ComputerSystem")
-		return false, 0
-	}
-
-	val, err := instances[0].GetProperty("DomainRole")
-	if err != nil {
-		mainLog.Load().Debug().Err(err).Msg("failed to get DomainRole property")
-		return false, 0
-	}
-	if val == nil {
-		mainLog.Load().Debug().Msg("DomainRole property is nil")
-		return false, 0
-	}
-
-	// Safely handle varied types: string or integer
-	var roleInt int
-	switch v := val.(type) {
-	case string:
-		// "4", "5", etc.
-		parsed, parseErr := strconv.Atoi(v)
-		if parseErr != nil {
-			mainLog.Load().Debug().Err(parseErr).Msgf("failed to parse DomainRole value %q", v)
-			return false, 0
-		}
-		roleInt = parsed
-	case int8, int16, int32, int64:
-		roleInt = int(reflect.ValueOf(v).Int())
-	case uint8, uint16, uint32, uint64:
-		roleInt = int(reflect.ValueOf(v).Uint())
-	default:
-		mainLog.Load().Debug().Msgf("unexpected DomainRole type: %T value=%v", v, v)
-		return false, 0
-	}
-
-	// Check if role indicates a domain controller
-	isDC := roleInt == BackupDomainController || roleInt == PrimaryDomainController
-	return isDC, roleInt
 }

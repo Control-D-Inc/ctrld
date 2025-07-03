@@ -899,10 +899,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 					}
 					return nil
 				})
-				// Windows forwarders file.
-				if hasLocalDnsServerRunning() {
-					files = append(files, ctrld.AbsHomeDir(windowsForwardersFilename))
-				}
+
 				// Binary itself.
 				bin, _ := os.Executable()
 				if bin != "" && supportedSelfDelete {

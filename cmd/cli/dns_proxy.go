@@ -51,12 +51,6 @@ var privateUpstreamConfig = &ctrld.UpstreamConfig{
 	Timeout: 2000,
 }
 
-var localUpstreamConfig = &ctrld.UpstreamConfig{
-	Name:    "Local resolver",
-	Type:    ctrld.ResolverTypeLocal,
-	Timeout: 2000,
-}
-
 // proxyRequest contains data for proxying a DNS query to upstream.
 type proxyRequest struct {
 	msg            *dns.Msg
@@ -500,17 +494,6 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 		upstreams = []string{upstreamOS}
-		// For OS resolver, local addresses are ignored to prevent possible looping.
-		// However, on Active Directory Domain Controller, where it has local DNS server
-		// running and listening on local addresses, these local addresses must be used
-		// as nameservers, so queries for ADDC could be resolved as expected.
-		if p.isAdDomainQuery(req.msg) {
-			ctrld.Log(ctx, p.Debug(),
-				"AD domain query detected for %s in domain %s",
-				req.msg.Question[0].Name, p.adDomain)
-			upstreamConfigs = []*ctrld.UpstreamConfig{localUpstreamConfig}
-			upstreams = []string{upstreamOSLocal}
-		}
 	}
 
 	res := &proxyResponse{}
@@ -631,7 +614,6 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		logger := p.Debug().
 			Str("upstream", upstreamConfig.String()).
 			Str("query", req.msg.Question[0].Name).
-			Bool("is_ad_query", p.isAdDomainQuery(req.msg)).
 			Bool("is_lan_query", isLanOrPtrQuery)
 
 		if p.isLoop(upstreamConfig) {
@@ -745,14 +727,6 @@ func (p *prog) upstreamConfigsFromUpstreamNumbers(upstreams []string) []*ctrld.U
 		upstreamConfigs = append(upstreamConfigs, p.cfg.Upstream[upstreamNum])
 	}
 	return upstreamConfigs
-}
-
-func (p *prog) isAdDomainQuery(msg *dns.Msg) bool {
-	if p.adDomain == "" {
-		return false
-	}
-	cDomainName := canonicalName(msg.Question[0].Name)
-	return dns.IsSubDomain(p.adDomain, cDomainName)
 }
 
 // canonicalName returns canonical name from FQDN with "." trimmed.

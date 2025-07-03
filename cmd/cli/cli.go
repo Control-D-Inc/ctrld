@@ -1147,20 +1147,15 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 	lcc := make(map[string]*listenerConfigCheck)
 	cdMode := cdUID != ""
 	nextdnsMode := nextdns != ""
-	// For Windows server with local Dns server running, we can only try on random local IP.
-	hasLocalDnsServer := hasLocalDnsServerRunning()
 	isDesktop := ctrld.IsDesktopPlatform()
 	for n, listener := range cfg.Listener {
 		lcc[n] = &listenerConfigCheck{}
 		if listener.IP == "" {
 			listener.IP = "0.0.0.0"
-			// Windows Server lies to us that we could listen on 0.0.0.0:53
-			// even there's a process already done that, stick to local IP only.
-			//
 			// For desktop clients, also stick the listener to the local IP only.
 			// Listening on 0.0.0.0 would expose it to the entire local network, potentially
 			// creating security vulnerabilities (such as DNS amplification or abusing).
-			if hasLocalDnsServer || isDesktop {
+			if isDesktop {
 				listener.IP = "127.0.0.1"
 			}
 			lcc[n].IP = true
@@ -1171,15 +1166,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 		}
 		// In cd mode, we always try to pick an ip:port pair to work.
 		// Same if nextdns resolver is used.
-		//
-		// Except on Windows Server with local Dns running,
-		// we could only listen on random local IP port 53.
 		if cdMode || nextdnsMode {
 			lcc[n].IP = true
 			lcc[n].Port = true
-			if hasLocalDnsServer {
-				lcc[n].Port = false
-			}
 		}
 		updated = updated || lcc[n].IP || lcc[n].Port
 	}
@@ -1258,16 +1247,6 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 		// config, so we can always listen on localhost port 53, but no traffic could be routed there.
 		tryLocalhost := !isLoopback(listener.IP)
 		tryAllPort53 := true
-		// We should not try to listen on any port other than 53,
-		// if we do, this will break the dns resolution for the system.
-		// TODO: cleanup these codes when refactoring this function.
-		tryOldIPPort5354 := false
-		tryPort5354 := false
-		if hasLocalDnsServer {
-			tryAllPort53 = false
-			tryOldIPPort5354 = false
-			tryPort5354 = false
-		}
 
 		attempts := 0
 		maxAttempts := 10
@@ -1316,28 +1295,6 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 				if check.IP {
 					logMsg(il.Info(), n, "could not listen on address: %s, trying localhost: %s", addr, net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)))
 				}
-				continue
-			}
-			if tryOldIPPort5354 {
-				tryOldIPPort5354 = false
-				if check.IP {
-					listener.IP = oldIP
-				}
-				if check.Port {
-					listener.Port = 5354
-				}
-				logMsg(il.Info(), n, "could not listen on address: %s, trying current ip with port 5354", addr)
-				continue
-			}
-			if tryPort5354 {
-				tryPort5354 = false
-				if check.IP {
-					listener.IP = "0.0.0.0"
-				}
-				if check.Port {
-					listener.Port = 5354
-				}
-				logMsg(il.Info(), n, "could not listen on address: %s, trying 0.0.0.0:5354", addr)
 				continue
 			}
 			if check.IP && !isZeroIP { // for "0.0.0.0" or "::", we only need to try new port.
