@@ -128,8 +128,6 @@ type prog struct {
 	internalLogSent           time.Time
 	runningIface              string
 	requiredMultiNICsConfig   bool
-	adDomain                  string
-	runningOnDomainController bool
 
 	selfUninstallMu       sync.Mutex
 	refusedQueryCount     int
@@ -279,11 +277,6 @@ func (p *prog) preRun() {
 
 func (p *prog) postRun() {
 	if !service.Interactive() {
-		if runtime.GOOS == "windows" {
-			isDC, roleInt := isRunningOnDomainController()
-			p.runningOnDomainController = isDC
-			p.Debug().Msgf("running on domain controller: %t, role: %d", p.runningOnDomainController, roleInt)
-		}
 		p.resetDNS(false, false)
 		ns := ctrld.InitializeOsResolver(ctrld.LoggerCtx(context.Background(), p.logger.Load()), false)
 		p.Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
@@ -480,10 +473,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				p.cacheFlushDomainsMap[canonicalName(domain)] = struct{}{}
 			}
 		}
-	}
-	if domain, err := getActiveDirectoryDomain(); err == nil && domain != "" && hasLocalDnsServerRunning() {
-		p.Debug().Msgf("active directory domain: %s", domain)
-		p.adDomain = domain
 	}
 
 	var wg sync.WaitGroup
@@ -1481,26 +1470,5 @@ func (p *prog) leakOnUpstreamFailure() bool {
 	if ptr := p.cfg.Service.LeakOnUpstreamFailure; ptr != nil {
 		return *ptr
 	}
-
-	// if we are running on ADDC, we should not leak on upstream failure
-	if p.runningOnDomainController {
-		return false
-	}
 	return true
-}
-
-// Domain controller role values from Win32_ComputerSystem
-// https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-computersystem
-const (
-	BackupDomainController  = 4
-	PrimaryDomainController = 5
-)
-
-// isRunningOnDomainController checks if the current machine is a domain controller
-// by querying the DomainRole property from Win32_ComputerSystem via WMI.
-func isRunningOnDomainController() (bool, int) {
-	if runtime.GOOS != "windows" {
-		return false, 0
-	}
-	return isRunningOnDomainControllerWindows()
 }

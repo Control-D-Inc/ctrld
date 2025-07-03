@@ -32,8 +32,7 @@ All DNS protocols are supported, including:
 
 
 ## OS Support
-- Windows (386, amd64, arm)
-- Windows Server (386, amd64)
+- Windows Desktop (386, amd64, arm)
 - MacOS (amd64, arm64)
 - Linux (386, amd64, arm, mips)
 - FreeBSD (386, amd64, arm)

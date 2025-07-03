@@ -34,8 +34,6 @@ const (
 	ResolverTypeLegacy = "legacy"
 	// ResolverTypePrivate is like ResolverTypeOS, but use for private resolver only.
 	ResolverTypePrivate = "private"
-	// ResolverTypeLocal is like ResolverTypeOS, but use for local resolver only.
-	ResolverTypeLocal = "local"
 	// ResolverTypeSDNS specifies resolver with information encoded using DNS Stamps.
 	// See: https://dnscrypt.info/stamps-specifications/
 	ResolverTypeSDNS = "sdns"
@@ -45,26 +43,12 @@ const controldPublicDns = "76.76.2.0"
 
 var controldPublicDnsWithPort = net.JoinHostPort(controldPublicDns, "53")
 
-var localResolver Resolver
-
-func init() {
-	localResolver = newLocalResolver()
-}
-
 var (
 	resolverMutex    sync.Mutex
 	or               *osResolver
 	defaultLocalIPv4 atomic.Value // holds net.IP (IPv4)
 	defaultLocalIPv6 atomic.Value // holds net.IP (IPv6)
 )
-
-func newLocalResolver() Resolver {
-	var nss []string
-	for _, addr := range Rfc1918Addresses() {
-		nss = append(nss, net.JoinHostPort(addr, "53"))
-	}
-	return NewResolverWithNameserver(nss)
-}
 
 // LanQueryCtxKey is the context.Context key to indicate that the request is for LAN network.
 type LanQueryCtxKey struct{}
@@ -198,8 +182,6 @@ func NewResolver(ctx context.Context, uc *UpstreamConfig) (Resolver, error) {
 		return &legacyResolver{uc: uc}, nil
 	case ResolverTypePrivate:
 		return NewPrivateResolver(ctx), nil
-	case ResolverTypeLocal:
-		return localResolver, nil
 	}
 	return nil, fmt.Errorf("%w: %s", errUnknownResolver, typ)
 }
