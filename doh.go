@@ -165,7 +165,7 @@ func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 	}
 	if printed {
 		logger := LoggerFromCtx(ctx)
-		logger.Debug().Msgf("sending request header: %v", dohHeader)
+		Log(ctx, logger.Debug(), "sending request header: %v", dohHeader)
 	}
 	dohHeader.Set("Content-Type", headerApplicationDNS)
 	dohHeader.Set("Accept", headerApplicationDNS)

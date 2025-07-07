@@ -552,7 +552,7 @@ func (uc *UpstreamConfig) newDOHTransport(ctx context.Context, addrs []string) *
 		if uc.BootstrapIP != "" {
 			dialer := net.Dialer{Timeout: dialerTimeout, KeepAlive: dialerTimeout}
 			addr := net.JoinHostPort(uc.BootstrapIP, port)
-			logger.Debug().Msgf("sending doh request to: %s", addr)
+			Log(ctx, logger.Debug(), "sending doh request to: %s", addr)
 			return dialer.DialContext(ctx, network, addr)
 		}
 		pd := &ctrldnet.ParallelDialer{}
@@ -566,7 +566,7 @@ func (uc *UpstreamConfig) newDOHTransport(ctx context.Context, addrs []string) *
 		if err != nil {
 			return nil, err
 		}
-		logger.Debug().Msgf("sending doh request to: %s", conn.RemoteAddr())
+		Log(ctx, logger.Debug(), "sending doh request to: %s", conn.RemoteAddr())
 		return conn, nil
 	}
 	runtime.SetFinalizer(transport, func(transport *http.Transport) {
