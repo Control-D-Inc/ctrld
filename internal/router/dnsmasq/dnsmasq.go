@@ -4,6 +4,7 @@ import (
 	"errors"
 	"html/template"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -162,4 +163,28 @@ func FirewallaSelfInterfaces() []*net.Interface {
 		}
 	}
 	return ifaces
+}
+
+const (
+	ubios43ConfPath = "/run/dnsmasq.dhcp.conf.d"
+	ubios42ConfPath = "/run/dnsmasq.conf.d"
+	ubios43PidFile  = "/run/dnsmasq-main.pid"
+	ubios42PidFile  = "/run/dnsmasq.pid"
+	UbiosConfName   = "zzzctrld.conf"
+)
+
+// UbiosConfPath returns the appropriate configuration path based on the system's directory structure.
+func UbiosConfPath() string {
+	if st, _ := os.Stat(ubios43ConfPath); st != nil && st.IsDir() {
+		return ubios43ConfPath
+	}
+	return ubios42ConfPath
+}
+
+// UbiosPidFile returns the appropriate dnsmasq pid file based on the system's directory structure.
+func UbiosPidFile() string {
+	if st, _ := os.Stat(ubios43PidFile); st != nil && !st.IsDir() {
+		return ubios43PidFile
+	}
+	return ubios42PidFile
 }
