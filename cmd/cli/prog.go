@@ -321,7 +321,7 @@ func (p *prog) apiConfigReload() {
 
 		// Performing self-upgrade check for production version.
 		if isStable {
-			selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, &logger)
+			_ = selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, &logger)
 		}
 
 		if resolverConfig.DeactivationPin != nil {
@@ -1424,14 +1424,15 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 	}
 }
 
-// selfUpgradeCheck checks if the version target vt is greater
-// than the current one cv, perform self-upgrade then.
+// shouldUpgrade checks if the version target vt is greater than the current one cv.
+// Major version upgrades are not allowed to prevent breaking changes.
 //
 // The callers must ensure curVer and logger are non-nil.
-func selfUpgradeCheck(vt string, cv *semver.Version, logger *zerolog.Logger) {
+// Returns true if upgrade is allowed, false otherwise.
+func shouldUpgrade(vt string, cv *semver.Version, logger *zerolog.Logger) bool {
 	if vt == "" {
 		logger.Debug().Msg("no version target set, skipped checking self-upgrade")
-		return
+		return false
 	}
 	vts := vt
 	if !strings.HasPrefix(vts, "v") {
@@ -1440,28 +1441,58 @@ func selfUpgradeCheck(vt string, cv *semver.Version, logger *zerolog.Logger) {
 	targetVer, err := semver.NewVersion(vts)
 	if err != nil {
 		logger.Warn().Err(err).Msgf("invalid target version, skipped self-upgrade: %s", vt)
-		return
+		return false
 	}
+
+	// Prevent major version upgrades to avoid breaking changes
+	if targetVer.Major() != cv.Major() {
+		logger.Warn().
+			Str("target", vt).
+			Str("current", cv.String()).
+			Msgf("major version upgrade not allowed (target: %d, current: %d), skipped self-upgrade", targetVer.Major(), cv.Major())
+		return false
+	}
+
 	if !targetVer.GreaterThan(cv) {
 		logger.Debug().
 			Str("target", vt).
 			Str("current", cv.String()).
 			Msgf("target version is not greater than current one, skipped self-upgrade")
-		return
+		return false
 	}
 
+	return true
+}
+
+// performUpgrade executes the self-upgrade command.
+// Returns true if upgrade was initiated successfully, false otherwise.
+func performUpgrade(vt string, logger *zerolog.Logger) bool {
 	exe, err := os.Executable()
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to get executable path, skipped self-upgrade")
-		return
+		return false
 	}
 	cmd := exec.Command(exe, "upgrade", "prod", "-vv")
 	cmd.SysProcAttr = sysProcAttrForDetachedChildProcess()
 	if err := cmd.Start(); err != nil {
 		logger.Error().Err(err).Msg("failed to start self-upgrade")
-		return
+		return false
 	}
-	logger.Debug().Msgf("self-upgrade triggered, version target: %s", vts)
+	mainLog.Load().Debug().Msgf("self-upgrade triggered, version target: %s", vt)
+	return true
+}
+
+// selfUpgradeCheck checks if the version target vt is greater
+// than the current one cv, perform self-upgrade then.
+// Major version upgrades are not allowed to prevent breaking changes.
+//
+// The callers must ensure curVer and logger are non-nil.
+// Returns true if upgrade is allowed and should proceed, false otherwise.
+func selfUpgradeCheck(vt string, cv *semver.Version, logger *zerolog.Logger) bool {
+	if shouldUpgrade(vt, cv, logger) {
+		return performUpgrade(vt, logger)
+	}
+	return false
 }
 
 // leakOnUpstreamFailure reports whether ctrld should initiate a recovery flow
