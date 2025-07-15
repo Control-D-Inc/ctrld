@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -185,6 +186,10 @@ func Test_shouldUpgrade(t *testing.T) {
 }
 
 func Test_selfUpgradeCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipped due to Windows file locking issue on Github Action runners")
+	}
+
 	// Helper function to create a version
 	makeVersion := func(v string) *semver.Version {
 		ver, err := semver.NewVersion(v)
@@ -233,6 +238,10 @@ func Test_selfUpgradeCheck(t *testing.T) {
 }
 
 func Test_performUpgrade(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipped due to Windows file locking issue on Github Action runners")
+	}
+
 	tests := []struct {
 		name           string
 		versionTarget  string
