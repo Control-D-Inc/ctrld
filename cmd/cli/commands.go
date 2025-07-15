@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -204,6 +205,9 @@ func initStartCmd() *cobra.Command {
 
 NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
 		Args: func(cmd *cobra.Command, args []string) error {
+			args = slices.DeleteFunc(args, func(arg string) bool {
+				return arg == ""
+			})
 			if len(args) > 0 {
 				return fmt.Errorf("'ctrld start' doesn't accept positional arguments\n" +
 					"Use flags instead (e.g. --cd, --iface) or see 'ctrld start --help' for all options")
@@ -520,6 +524,9 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 
 NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
 		Args: func(cmd *cobra.Command, args []string) error {
+			args = slices.DeleteFunc(args, func(arg string) bool {
+				return arg == ""
+			})
 			if len(args) > 0 {
 				return fmt.Errorf("'ctrld start' doesn't accept positional arguments\n" +
 					"Use flags instead (e.g. --cd, --iface) or see 'ctrld start --help' for all options")
