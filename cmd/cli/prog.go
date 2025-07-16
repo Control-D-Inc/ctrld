@@ -1042,12 +1042,14 @@ func (p *prog) findWorkingInterface() string {
 	}
 
 	// Get default route interface
+	foundDefaultRoute := false
 	defaultRoute, err := netmon.DefaultRoute()
 	if err != nil {
 		p.Debug().
 			Err(err).
 			Msg("failed to get default route")
 	} else {
+		foundDefaultRoute = true
 		p.Debug().
 			Str("default_route_iface", defaultRoute.InterfaceName).
 			Msg("found default route")
@@ -1084,7 +1086,7 @@ func (p *prog) findWorkingInterface() string {
 		}
 
 		// Found working physical interface
-		if err == nil && defaultRoute.InterfaceName == iface.Name {
+		if foundDefaultRoute && defaultRoute.InterfaceName == iface.Name {
 			// Found interface with default route - use it immediately
 			p.Info().
 				Str("old_iface", currentIface).
