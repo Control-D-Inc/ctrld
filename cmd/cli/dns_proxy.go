@@ -1574,83 +1574,131 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 	return err
 }
 
-// handleRecovery performs a unified recovery by removing DNS settings,
-// canceling existing recovery checks for network changes, but coalescing duplicate
-// upstream failure recoveries, waiting for recovery to complete (using a cancellable context without timeout),
-// and then re-applying the DNS settings.
+// handleRecovery orchestrates the recovery process by coordinating multiple smaller methods.
+// It handles recovery cancellation logic, creates recovery context, prepares the system,
+// waits for upstream recovery with timeout, and completes the recovery process.
+// The method is designed to be called from a goroutine and handles different recovery reasons
+// (network changes, regular failures, OS failures) with appropriate logic for each.
 func (p *prog) handleRecovery(reason RecoveryReason) {
 	p.Debug().Msg("Starting recovery process: removing DNS settings")
 
-	// For network changes, cancel any existing recovery check because the network state has changed.
+	// Handle recovery cancellation based on reason
+	if !p.shouldStartRecovery(reason) {
+		return
+	}
+
+	// Create recovery context and cleanup function
+	recoveryCtx, cleanup := p.createRecoveryContext()
+	defer cleanup()
+
+	// Remove DNS settings and prepare for recovery
+	if err := p.prepareForRecovery(reason); err != nil {
+		p.Error().Err(err).Msg("Failed to prepare for recovery")
+		return
+	}
+
+	// Build upstream map based on the recovery reason
+	upstreams := p.buildRecoveryUpstreams(reason)
+
+	// Wait for upstream recovery
+	recovered, err := p.waitForUpstreamRecovery(recoveryCtx, upstreams)
+	if err != nil {
+		p.Error().Err(err).Msg("Recovery failed; DNS settings remain removed")
+		return
+	}
+
+	// Complete recovery process
+	if err := p.completeRecovery(reason, recovered); err != nil {
+		p.Error().Err(err).Msg("Failed to complete recovery")
+		return
+	}
+
+	p.Info().Msgf("Recovery completed successfully for upstream %q", recovered)
+}
+
+// shouldStartRecovery determines if recovery should start based on the reason and current state.
+// Returns true if recovery should proceed, false otherwise.
+func (p *prog) shouldStartRecovery(reason RecoveryReason) bool {
+	p.recoveryCancelMu.Lock()
+	defer p.recoveryCancelMu.Unlock()
+
 	if reason == RecoveryReasonNetworkChange {
-		p.recoveryCancelMu.Lock()
+		// For network changes, cancel any existing recovery check because the network state has changed.
 		if p.recoveryCancel != nil {
 			p.Debug().Msg("Cancelling existing recovery check (network change)")
 			p.recoveryCancel()
 			p.recoveryCancel = nil
 		}
-		p.recoveryCancelMu.Unlock()
-	} else {
-		// For upstream failures, if a recovery is already in progress, do nothing new.
-		p.recoveryCancelMu.Lock()
-		if p.recoveryCancel != nil {
-			p.Debug().Msg("Upstream recovery already in progress; skipping duplicate trigger")
-			p.recoveryCancelMu.Unlock()
-			return
-		}
-		p.recoveryCancelMu.Unlock()
+		return true
 	}
 
-	// Create a new recovery context without a fixed timeout.
+	// For upstream failures, if a recovery is already in progress, do nothing new.
+	if p.recoveryCancel != nil {
+		p.Debug().Msg("Upstream recovery already in progress; skipping duplicate trigger")
+		return false
+	}
+
+	return true
+}
+
+// createRecoveryContext creates a new recovery context and returns it along with a cleanup function.
+func (p *prog) createRecoveryContext() (context.Context, func()) {
 	p.recoveryCancelMu.Lock()
 	recoveryCtx, cancel := context.WithCancel(context.Background())
 	p.recoveryCancel = cancel
 	p.recoveryCancelMu.Unlock()
 
-	// Immediately remove our DNS settings from the interface.
-	// set recoveryRunning to true to prevent watchdogs from putting the listener back on the interface
+	cleanup := func() {
+		p.recoveryCancelMu.Lock()
+		p.recoveryCancel = nil
+		p.recoveryCancelMu.Unlock()
+	}
+
+	return recoveryCtx, cleanup
+}
+
+// prepareForRecovery removes DNS settings and initializes OS resolver if needed.
+func (p *prog) prepareForRecovery(reason RecoveryReason) error {
+	// Set recoveryRunning to true to prevent watchdogs from putting the listener back on the interface
 	p.recoveryRunning.Store(true)
-	// we do not want to restore any static DNS settings
+
+	// Remove DNS settings - we do not want to restore any static DNS settings
 	// we must try to get the DHCP values, any static DNS settings
 	// will be appended to nameservers from the saved interface values
 	p.resetDNS(false, false)
 
-	loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 	// For an OS failure, reinitialize OS resolver nameservers immediately.
 	if reason == RecoveryReasonOSFailure {
-		p.Debug().Msg("OS resolver failure detected; reinitializing OS resolver nameservers")
-		ns := ctrld.InitializeOsResolver(loggerCtx, true)
-		if len(ns) == 0 {
-			p.Warn().Msg("No nameservers found for OS resolver; using existing values")
-		} else {
-			p.Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+		if err := p.reinitializeOSResolver("OS resolver failure detected"); err != nil {
+			return fmt.Errorf("failed to reinitialize OS resolver: %w", err)
 		}
 	}
 
-	// Build upstream map based on the recovery reason.
-	upstreams := p.buildRecoveryUpstreams(reason)
+	return nil
+}
 
-	// Wait indefinitely until one of the upstreams recovers.
-	recovered, err := p.waitForUpstreamRecovery(recoveryCtx, upstreams)
-	if err != nil {
-		p.Error().Err(err).Msg("Recovery canceled; DNS settings remain removed")
-		p.recoveryCancelMu.Lock()
-		p.recoveryCancel = nil
-		p.recoveryCancelMu.Unlock()
-		return
+// reinitializeOSResolver reinitializes the OS resolver and logs the results.
+func (p *prog) reinitializeOSResolver(message string) error {
+	p.Debug().Msg(message)
+	loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
+	ns := ctrld.InitializeOsResolver(loggerCtx, true)
+	if len(ns) == 0 {
+		p.Warn().Msg("No nameservers found for OS resolver; using existing values")
+	} else {
+		p.Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
 	}
-	p.Info().Msgf("Upstream %q recovered; re-applying DNS settings", recovered)
+	return nil
+}
 
-	// reset the upstream failure count and down state
+// completeRecovery completes the recovery process by resetting upstream state and reapplying DNS settings.
+func (p *prog) completeRecovery(reason RecoveryReason, recovered string) error {
+	// Reset the upstream failure count and down state
 	p.um.reset(recovered)
 
 	// For network changes we also reinitialize the OS resolver.
 	if reason == RecoveryReasonNetworkChange {
-		ns := ctrld.InitializeOsResolver(loggerCtx, true)
-		if len(ns) == 0 {
-			p.Warn().Msg("No nameservers found for OS resolver during network-change recovery; using existing values")
-		} else {
-			p.Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+		if err := p.reinitializeOSResolver("Network change detected during recovery"); err != nil {
+			return fmt.Errorf("failed to reinitialize OS resolver during network change: %w", err)
 		}
 	}
 
@@ -1658,13 +1706,10 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 	p.setDNS()
 	p.logInterfacesState()
 
-	// allow watchdogs to put the listener back on the interface if its changed for any reason
+	// Allow watchdogs to put the listener back on the interface if it's changed for any reason
 	p.recoveryRunning.Store(false)
 
-	// Clear the recovery cancellation for a clean slate.
-	p.recoveryCancelMu.Lock()
-	p.recoveryCancel = nil
-	p.recoveryCancelMu.Unlock()
+	return nil
 }
 
 // waitForUpstreamRecovery checks the provided upstreams concurrently until one recovers.
