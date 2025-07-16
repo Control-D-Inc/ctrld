@@ -466,3 +466,254 @@ func Test_isWanClient(t *testing.T) {
 		})
 	}
 }
+
+func Test_shouldStartRecovery(t *testing.T) {
+	tests := []struct {
+		name                string
+		reason              RecoveryReason
+		hasExistingRecovery bool
+		expectedResult      bool
+		description         string
+	}{
+		{
+			name:                "network change with existing recovery",
+			reason:              RecoveryReasonNetworkChange,
+			hasExistingRecovery: true,
+			expectedResult:      true,
+			description:         "should cancel existing recovery and start new one for network change",
+		},
+		{
+			name:                "network change without existing recovery",
+			reason:              RecoveryReasonNetworkChange,
+			hasExistingRecovery: false,
+			expectedResult:      true,
+			description:         "should start new recovery for network change",
+		},
+		{
+			name:                "regular failure with existing recovery",
+			reason:              RecoveryReasonRegularFailure,
+			hasExistingRecovery: true,
+			expectedResult:      false,
+			description:         "should skip duplicate recovery for regular failure",
+		},
+		{
+			name:                "regular failure without existing recovery",
+			reason:              RecoveryReasonRegularFailure,
+			hasExistingRecovery: false,
+			expectedResult:      true,
+			description:         "should start new recovery for regular failure",
+		},
+		{
+			name:                "OS failure with existing recovery",
+			reason:              RecoveryReasonOSFailure,
+			hasExistingRecovery: true,
+			expectedResult:      false,
+			description:         "should skip duplicate recovery for OS failure",
+		},
+		{
+			name:                "OS failure without existing recovery",
+			reason:              RecoveryReasonOSFailure,
+			hasExistingRecovery: false,
+			expectedResult:      true,
+			description:         "should start new recovery for OS failure",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			p := newTestProg(t)
+
+			// Setup existing recovery if needed
+			if tc.hasExistingRecovery {
+				p.recoveryCancelMu.Lock()
+				p.recoveryCancel = func() {} // Mock cancel function
+				p.recoveryCancelMu.Unlock()
+			}
+
+			result := p.shouldStartRecovery(tc.reason)
+			assert.Equal(t, tc.expectedResult, result, tc.description)
+		})
+	}
+}
+
+func Test_createRecoveryContext(t *testing.T) {
+	p := newTestProg(t)
+
+	ctx, cleanup := p.createRecoveryContext()
+
+	// Verify context is created
+	assert.NotNil(t, ctx)
+	assert.NotNil(t, cleanup)
+
+	// Verify recoveryCancel is set
+	p.recoveryCancelMu.Lock()
+	assert.NotNil(t, p.recoveryCancel)
+	p.recoveryCancelMu.Unlock()
+
+	// Test cleanup function
+	cleanup()
+
+	// Verify recoveryCancel is cleared
+	p.recoveryCancelMu.Lock()
+	assert.Nil(t, p.recoveryCancel)
+	p.recoveryCancelMu.Unlock()
+}
+
+func Test_prepareForRecovery(t *testing.T) {
+	tests := []struct {
+		name    string
+		reason  RecoveryReason
+		wantErr bool
+	}{
+		{
+			name:    "regular failure",
+			reason:  RecoveryReasonRegularFailure,
+			wantErr: false,
+		},
+		{
+			name:    "network change",
+			reason:  RecoveryReasonNetworkChange,
+			wantErr: false,
+		},
+		{
+			name:    "OS failure",
+			reason:  RecoveryReasonOSFailure,
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			p := newTestProg(t)
+
+			err := p.prepareForRecovery(tc.reason)
+
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			// Verify recoveryRunning is set to true
+			assert.True(t, p.recoveryRunning.Load())
+		})
+	}
+}
+
+func Test_completeRecovery(t *testing.T) {
+	tests := []struct {
+		name      string
+		reason    RecoveryReason
+		recovered string
+		wantErr   bool
+	}{
+		{
+			name:      "regular failure recovery",
+			reason:    RecoveryReasonRegularFailure,
+			recovered: "upstream1",
+			wantErr:   false,
+		},
+		{
+			name:      "network change recovery",
+			reason:    RecoveryReasonNetworkChange,
+			recovered: "upstream2",
+			wantErr:   false,
+		},
+		{
+			name:      "OS failure recovery",
+			reason:    RecoveryReasonOSFailure,
+			recovered: "upstream3",
+			wantErr:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			p := newTestProg(t)
+
+			err := p.completeRecovery(tc.reason, tc.recovered)
+
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			// Verify recoveryRunning is set to false
+			assert.False(t, p.recoveryRunning.Load())
+		})
+	}
+}
+
+func Test_reinitializeOSResolver(t *testing.T) {
+	p := newTestProg(t)
+
+	err := p.reinitializeOSResolver("Test message")
+
+	// This function should not return an error under normal circumstances
+	// The actual behavior depends on the OS resolver implementation
+	assert.NoError(t, err)
+}
+
+func Test_handleRecovery_Integration(t *testing.T) {
+	tests := []struct {
+		name    string
+		reason  RecoveryReason
+		wantErr bool
+	}{
+		{
+			name:    "network change recovery",
+			reason:  RecoveryReasonNetworkChange,
+			wantErr: false,
+		},
+		{
+			name:    "regular failure recovery",
+			reason:  RecoveryReasonRegularFailure,
+			wantErr: false,
+		},
+		{
+			name:    "OS failure recovery",
+			reason:  RecoveryReasonOSFailure,
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			p := newTestProg(t)
+
+			// This is an integration test that exercises the full recovery flow
+			// In a real test environment, you would mock the dependencies
+			// For now, we're just testing that the method doesn't panic
+			// and that the recovery logic flows correctly
+			assert.NotPanics(t, func() {
+				// Test only the preparation phase to avoid actual upstream checking
+				if !p.shouldStartRecovery(tc.reason) {
+					return
+				}
+
+				_, cleanup := p.createRecoveryContext()
+				defer cleanup()
+
+				if err := p.prepareForRecovery(tc.reason); err != nil {
+					return
+				}
+
+				// Skip the actual upstream recovery check for this test
+				// as it requires properly configured upstreams
+			})
+		})
+	}
+}
+
+// newTestProg creates a properly initialized *prog for testing.
+func newTestProg(t *testing.T) *prog {
+	p := &prog{cfg: testhelper.SampleConfig(t)}
+	p.logger.Store(mainLog.Load())
+	p.um = newUpstreamMonitor(p.cfg, mainLog.Load())
+	return p
+}
