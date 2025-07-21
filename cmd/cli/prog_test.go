@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -173,10 +173,10 @@ func Test_shouldUpgrade(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			// Create test logger
-			testLogger := zerolog.New(zerolog.NewTestWriter(t)).With().Logger()
+			testLogger := &ctrld.Logger{Logger: zap.NewNop()}
 
 			// Call the function and capture the result
-			result := shouldUpgrade(tc.versionTarget, tc.currentVersion, &testLogger)
+			result := shouldUpgrade(tc.versionTarget, tc.currentVersion, testLogger)
 
 			// Assert the expected result
 			assert.Equal(t, tc.shouldUpgrade, result, tc.description)
@@ -221,10 +221,10 @@ func Test_selfUpgradeCheck(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			// Create test logger
-			testLogger := zerolog.New(zerolog.NewTestWriter(t)).With().Logger()
+			testLogger := &ctrld.Logger{Logger: zap.NewNop()}
 
 			// Call the function and capture the result
-			result := selfUpgradeCheck(tc.versionTarget, tc.currentVersion, &testLogger)
+			result := selfUpgradeCheck(tc.versionTarget, tc.currentVersion, testLogger)
 
 			// Assert the expected result
 			assert.Equal(t, tc.shouldUpgrade, result, tc.description)
@@ -256,8 +256,10 @@ func Test_performUpgrade(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			// Create test logger
+			testLogger := &ctrld.Logger{Logger: zap.NewNop()}
 			// Call the function and capture the result
-			result := performUpgrade(tc.versionTarget)
+			result := performUpgrade(tc.versionTarget, testLogger)
 			assert.Equal(t, tc.expectedResult, result, tc.description)
 		})
 	}

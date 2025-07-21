@@ -31,9 +31,9 @@ import (
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
 	"github.com/pelletier/go-toml/v2"
-	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 	"tailscale.com/logtail/backoff"
 	"tailscale.com/net/netmon"
 
@@ -224,7 +224,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	if addr, err := net.ResolveUnixAddr("unix", sockPath); err == nil {
 		if conn, err := net.Dial(addr.Network(), addr.String()); err == nil {
 			lc := &logConn{conn: conn}
-			consoleWriter.Out = io.MultiWriter(os.Stdout, lc)
+			consoleWriter = newHumanReadableZapCore(io.MultiWriter(os.Stdout, lc), consoleWriterLevel)
 			p.logConn = lc
 		} else {
 			if !errors.Is(err, os.ErrNotExist) {
@@ -307,7 +307,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				return
 			}
 
-			cdLogger := p.logger.Load().With().Str("mode", "cd").Logger()
+			cdLogger := p.logger.Load().With().Str("mode", "cd")
 			// Performs self-uninstallation if the ControlD device does not exist.
 			var uer *controld.ErrorResponse
 			if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
@@ -339,8 +339,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
 		// After processCDFlags, log config may change, so reset mainLog and re-init logging.
-		l := zerolog.New(io.Discard)
-		mainLog.Store(&ctrld.Logger{Logger: &l})
+		l := zap.NewNop()
+		mainLog.Store(&ctrld.Logger{Logger: l})
 
 		// Copy logs written so far to new log file if possible.
 		if buf, err := os.ReadFile(oldLogPath); err == nil {
@@ -603,11 +603,11 @@ func deactivationPinSet() bool {
 }
 
 func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
-	logger := mainLog.Load().With().Str("mode", "cd").Logger()
+	logger := mainLog.Load().With().Str("mode", "cd")
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
 	bo.LogLongerThan = 30 * time.Second
-	ctx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+	ctx := ctrld.LoggerCtx(context.Background(), logger)
 	resolverConfig, err := controld.FetchResolverConfig(ctx, cdUID, rootCmd.Version, cdDev)
 	for {
 		if errUrlNetworkError(err) {
@@ -1210,7 +1210,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 		return errors.Join(udpErr, tcpErr)
 	}
 
-	logMsg := func(e *zerolog.Event, listenerNum int, format string, v ...any) {
+	logMsg := func(e *ctrld.LogEvent, listenerNum int, format string, v ...any) {
 		e.MsgFunc(func() string {
 			return fmt.Sprintf("listener.%d %s", listenerNum, fmt.Sprintf(format, v...))
 		})
@@ -1773,7 +1773,7 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 }
 
 // uninstallInvalidCdUID performs self-uninstallation because the ControlD device does not exist.
-func uninstallInvalidCdUID(p *prog, logger zerolog.Logger, doStop bool) bool {
+func uninstallInvalidCdUID(p *prog, logger *ctrld.Logger, doStop bool) bool {
 	s, err := newService(p, svcConfig)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to create new service")

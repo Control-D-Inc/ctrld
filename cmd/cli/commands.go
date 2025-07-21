@@ -270,7 +270,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 								_, _ = patchNetIfaceName(iff)
 								name = iff.Name
 							}
-							logger := mainLog.Load().With().Str("iface", name).Logger()
+							logger := mainLog.Load().With().Str("iface", name)
 							logger.Debug().Msg("setting DNS successfully")
 							if res.All {
 								// Log that DNS is set for other interfaces.

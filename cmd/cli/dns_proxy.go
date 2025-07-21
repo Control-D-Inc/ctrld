@@ -1099,7 +1099,7 @@ func (p *prog) doSelfUninstall(pr *proxyResponse) {
 		return
 	}
 
-	logger := p.logger.Load().With().Str("mode", "self-uninstall").Logger()
+	logger := p.logger.Load().With().Str("mode", "self-uninstall")
 	if p.refusedQueryCount > selfUninstallMaxQueries {
 		p.checkingSelfUninstall = true
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())

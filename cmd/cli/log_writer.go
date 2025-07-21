@@ -10,7 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rs/zerolog"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -95,16 +96,15 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 
 // initLogging initializes global logging setup.
 func (p *prog) initLogging(backup bool) {
-	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
-	logWriters := initLoggingWithBackup(backup)
+	logCores := initLoggingWithBackup(backup)
 
 	// Initializing internal logging after global logging.
-	p.initInternalLogging(logWriters)
+	p.initInternalLogging(logCores)
 	p.logger.Store(mainLog.Load())
 }
 
 // initInternalLogging performs internal logging if there's no log enabled.
-func (p *prog) initInternalLogging(writers []io.Writer) {
+func (p *prog) initInternalLogging(externalCores []zapcore.Core) {
 	if !p.needInternalLogging() {
 		return
 	}
@@ -118,27 +118,25 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 	lw := p.internalLogWriter
 	wlw := p.internalWarnLogWriter
 	p.mu.Unlock()
-	// If ctrld was run without explicit verbose level,
-	// run the internal logging at debug level, so we could
+
+	// Create zap cores for different writers
+	var cores []zapcore.Core
+	cores = append(cores, externalCores...)
+
+	// Add core for internal log writer.
+	// Run the internal logging at debug level, so we could
 	// have enough information for troubleshooting.
-	if verbose == 0 {
-		for i := range writers {
-			w := &zerolog.FilteredLevelWriter{
-				Writer: zerolog.LevelWriterAdapter{Writer: writers[i]},
-				Level:  zerolog.NoticeLevel,
-			}
-			writers[i] = w
-		}
-		zerolog.SetGlobalLevel(zerolog.DebugLevel)
-	}
-	writers = append(writers, lw)
-	writers = append(writers, &zerolog.FilteredLevelWriter{
-		Writer: zerolog.LevelWriterAdapter{Writer: wlw},
-		Level:  zerolog.WarnLevel,
-	})
-	multi := zerolog.MultiLevelWriter(writers...)
-	l := mainLog.Load().Output(multi).With().Logger()
-	mainLog.Store(&ctrld.Logger{Logger: &l})
+	internalCore := newHumanReadableZapCore(lw, zapcore.DebugLevel)
+	cores = append(cores, internalCore)
+
+	// Add core for internal warn log writer
+	warnCore := newHumanReadableZapCore(wlw, zapcore.WarnLevel)
+	cores = append(cores, warnCore)
+
+	// Create a multi-core logger
+	multiCore := zapcore.NewTee(cores...)
+	logger := zap.New(multiCore)
+	mainLog.Store(&ctrld.Logger{Logger: logger})
 }
 
 // needInternalLogging reports whether prog needs to run internal logging.
@@ -201,4 +199,50 @@ func (p *prog) logReader() (*logReader, error) {
 		return nil, errors.New("log file is empty")
 	}
 	return lr, nil
+}
+
+// newHumanReadableZapCore creates a zap core optimized for human-readable log output.
+//
+// Features:
+// - Uses development encoder configuration for enhanced readability
+// - Console encoding with colored log levels for easy visual scanning
+// - Millisecond precision timestamps in human-friendly format
+// - Structured field output with clear key-value pairs
+// - Ideal for development, debugging, and interactive terminal sessions
+//
+// Parameters:
+//   - w: The output writer (e.g., os.Stdout, file, buffer)
+//   - level: Minimum log level to capture (e.g., Debug, Info, Warn, Error)
+//
+// Returns a zapcore.Core configured for human consumption.
+func newHumanReadableZapCore(w io.Writer, level zapcore.Level) zapcore.Core {
+	encoderConfig := zap.NewDevelopmentEncoderConfig()
+	encoderConfig.TimeKey = "time"
+	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.StampMilli)
+	encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	encoder := zapcore.NewConsoleEncoder(encoderConfig)
+	return zapcore.NewCore(encoder, zapcore.AddSync(w), level)
+}
+
+// newMachineFriendlyZapCore creates a zap core optimized for machine processing and log aggregation.
+//
+// Features:
+// - Uses production encoder configuration for consistent, parseable output
+// - Console encoding with non-colored log levels for log parsing tools
+// - Millisecond precision timestamps in ISO-like format
+// - Structured field output optimized for log aggregation systems
+// - Ideal for production environments, log shipping, and automated analysis
+//
+// Parameters:
+//   - w: The output writer (e.g., os.Stdout, file, buffer)
+//   - level: Minimum log level to capture (e.g., Debug, Info, Warn, Error)
+//
+// Returns a zapcore.Core configured for machine consumption and log aggregation.
+func newMachineFriendlyZapCore(w io.Writer, level zapcore.Level) zapcore.Core {
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "time"
+	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.StampMilli)
+	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+	encoder := zapcore.NewConsoleEncoder(encoderConfig)
+	return zapcore.NewCore(encoder, zapcore.AddSync(w), level)
 }

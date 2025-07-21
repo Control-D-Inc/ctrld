@@ -9,10 +9,10 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/rs/zerolog"
+	"github.com/Control-D-Inc/ctrld"
 )
 
-func selfUninstall(p *prog, logger zerolog.Logger) {
+func selfUninstall(p *prog, logger *ctrld.Logger) {
 	if runtime.GOOS == "linux" {
 		selfUninstallLinux(p, logger)
 	}
@@ -37,7 +37,7 @@ func selfUninstall(p *prog, logger zerolog.Logger) {
 	os.Exit(0)
 }
 
-func selfUninstallLinux(p *prog, logger zerolog.Logger) {
+func selfUninstallLinux(p *prog, logger *ctrld.Logger) {
 	if uninstallInvalidCdUID(p, logger, true) {
 		logger.Warn().Msgf("service was uninstalled because device %q does not exist", cdUID)
 		os.Exit(0)
