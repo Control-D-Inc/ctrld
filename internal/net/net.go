@@ -3,7 +3,6 @@ package net
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -12,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rs/zerolog"
+	"go.uber.org/zap"
 	"tailscale.com/logtail/backoff"
 )
 
@@ -34,8 +33,8 @@ var Dialer = &net.Dialer{
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 			d := ParallelDialer{}
 			d.Timeout = 10 * time.Second
-			l := zerolog.New(io.Discard)
-			return d.DialContext(ctx, "udp", []string{v4BootstrapDNS, v6BootstrapDNS}, &l)
+			l := zap.NewNop()
+			return d.DialContext(ctx, "udp", []string{v4BootstrapDNS, v6BootstrapDNS}, l)
 		},
 	},
 }
@@ -161,7 +160,7 @@ type ParallelDialer struct {
 	net.Dialer
 }
 
-func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs []string, logger *zerolog.Logger) (net.Conn, error) {
+func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs []string, logger *zap.Logger) (net.Conn, error) {
 	if len(addrs) == 0 {
 		return nil, errors.New("empty addresses")
 	}
@@ -181,16 +180,16 @@ func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs 
 	for _, addr := range addrs {
 		go func(addr string) {
 			defer wg.Done()
-			logger.Debug().Msgf("dialing to %s", addr)
+			logger.Debug("dialing to", zap.String("address", addr))
 			conn, err := d.Dialer.DialContext(ctx, network, addr)
 			if err != nil {
-				logger.Debug().Msgf("failed to dial %s: %v", addr, err)
+				logger.Debug("failed to dial", zap.String("address", addr), zap.Error(err))
 			}
 			select {
 			case ch <- &parallelDialerResult{conn: conn, err: err}:
 			case <-done:
 				if conn != nil {
-					logger.Debug().Msgf("connection closed: %s", conn.RemoteAddr())
+					logger.Debug("connection closed", zap.String("remote_address", conn.RemoteAddr().String()))
 					conn.Close()
 				}
 			}
@@ -201,7 +200,7 @@ func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs 
 	for res := range ch {
 		if res.err == nil {
 			cancel()
-			logger.Debug().Msgf("connected to %s", res.conn.RemoteAddr())
+			logger.Debug("connected to", zap.String("remote_address", res.conn.RemoteAddr().String()))
 			return res.conn, res.err
 		}
 		errs = append(errs, res.err)

@@ -24,7 +24,6 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/kardianos/service"
-	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 	"golang.org/x/sync/singleflight"
 	"tailscale.com/net/netmon"
@@ -296,7 +295,7 @@ func (p *prog) apiConfigReload() {
 	ticker := time.NewTicker(timeDurationOrDefault(p.cfg.Service.RefetchTime, 3600) * time.Second)
 	defer ticker.Stop()
 
-	logger := p.logger.Load().With().Str("mode", "api-reload").Logger()
+	logger := p.logger.Load().With().Str("mode", "api-reload")
 	logger.Debug().Msg("starting custom config reload timer")
 	lastUpdated := time.Now().Unix()
 	curVerStr := curVersion()
@@ -310,7 +309,7 @@ func (p *prog) apiConfigReload() {
 		l.Msgf("current version is not stable, skipping self-upgrade: %s", curVerStr)
 	}
 
-	doReloadApiConfig := func(forced bool, logger zerolog.Logger) {
+	doReloadApiConfig := func(forced bool, logger *ctrld.Logger) {
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 		resolverConfig, err := controld.FetchResolverConfig(loggerCtx, cdUID, rootCmd.Version, cdDev)
 		selfUninstallCheck(err, p, logger)
@@ -321,7 +320,7 @@ func (p *prog) apiConfigReload() {
 
 		// Performing self-upgrade check for production version.
 		if isStable {
-			_ = selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, &logger)
+			_ = selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, logger)
 		}
 
 		if resolverConfig.DeactivationPin != nil {
@@ -384,7 +383,7 @@ func (p *prog) apiConfigReload() {
 	for {
 		select {
 		case <-p.apiForceReloadCh:
-			doReloadApiConfig(true, logger.With().Bool("forced", true).Logger())
+			doReloadApiConfig(true, logger.With().Bool("forced", true))
 		case <-ticker.C:
 			doReloadApiConfig(false, logger)
 		case <-p.stopCh:
@@ -578,7 +577,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	if !reload {
 		// Stop writing log to unix socket.
-		consoleWriter.Out = os.Stdout
+		consoleWriter = newHumanReadableZapCore(os.Stdout, consoleWriterLevel)
 		p.initLogging(false)
 		if p.logConn != nil {
 			_ = p.logConn.Close()
@@ -758,7 +757,7 @@ func (p *prog) setDnsForRunningIface(nameservers []string) (runningIface *net.In
 		return
 	}
 
-	logger := p.logger.Load().With().Str("iface", p.runningIface).Logger()
+	logger := p.logger.Load().With().Str("iface", p.runningIface)
 
 	const maxDNSRetryAttempts = 3
 	const retryDelay = 1 * time.Second
@@ -774,7 +773,7 @@ func (p *prog) setDnsForRunningIface(nameservers []string) (runningIface *net.In
 			newIface := p.findWorkingInterface()
 			if newIface != p.runningIface {
 				p.runningIface = newIface
-				logger = p.logger.Load().With().Str("iface", p.runningIface).Logger()
+				logger = p.logger.Load().With().Str("iface", p.runningIface)
 				logger.Info().Msg("switched to new interface")
 				continue
 			}
@@ -930,7 +929,7 @@ func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runnin
 		p.Debug().Msg("no running interface, skipping resetDNS")
 		return
 	}
-	logger := p.logger.Load().With().Str("iface", p.runningIface).Logger()
+	logger := p.logger.Load().With().Str("iface", p.runningIface)
 	netIface, err := netInterface(p.runningIface)
 	if err != nil {
 		logger.Error().Err(err).Msg("could not get interface")
@@ -1416,7 +1415,7 @@ func (p *prog) dnsChanged(iface *net.Interface, nameservers []string) bool {
 }
 
 // selfUninstallCheck checks if the error dues to controld.InvalidConfigCode, perform self-uninstall then.
-func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
+func selfUninstallCheck(uninstallErr error, p *prog, logger *ctrld.Logger) {
 	var uer *controld.ErrorResponse
 	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		p.stopDnsWatchers()
@@ -1431,7 +1430,7 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 //
 // The callers must ensure curVer and logger are non-nil.
 // Returns true if upgrade is allowed, false otherwise.
-func shouldUpgrade(vt string, cv *semver.Version, logger *zerolog.Logger) bool {
+func shouldUpgrade(vt string, cv *semver.Version, logger *ctrld.Logger) bool {
 	if vt == "" {
 		logger.Debug().Msg("no version target set, skipped checking self-upgrade")
 		return false
@@ -1468,7 +1467,7 @@ func shouldUpgrade(vt string, cv *semver.Version, logger *zerolog.Logger) bool {
 
 // performUpgrade executes the self-upgrade command.
 // Returns true if upgrade was initiated successfully, false otherwise.
-func performUpgrade(vt string, logger *zerolog.Logger) bool {
+func performUpgrade(vt string, logger *ctrld.Logger) bool {
 	exe, err := os.Executable()
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to get executable path, skipped self-upgrade")
@@ -1490,7 +1489,7 @@ func performUpgrade(vt string, logger *zerolog.Logger) bool {
 //
 // The callers must ensure curVer and logger are non-nil.
 // Returns true if upgrade is allowed and should proceed, false otherwise.
-func selfUpgradeCheck(vt string, cv *semver.Version, logger *zerolog.Logger) bool {
+func selfUpgradeCheck(vt string, cv *semver.Version, logger *ctrld.Logger) bool {
 	if shouldUpgrade(vt, cv, logger) {
 		return performUpgrade(vt, logger)
 	}
