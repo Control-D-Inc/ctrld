@@ -83,19 +83,18 @@ func normalizeLogFilePath(logFilePath string) string {
 
 // initConsoleLogging initializes console logging, then storing to mainLog.
 func initConsoleLogging() {
-	consoleWriterLevel = zapcore.InfoLevel
+	consoleWriterLevel = ctrld.NoticeLevel
 	switch {
 	case silent:
 		// For silent mode, use a no-op logger
 		l := zap.NewNop()
 		mainLog.Store(&ctrld.Logger{Logger: l})
 	case verbose == 1:
-		// Info level is default
+		// Info level
+		consoleWriterLevel = zapcore.InfoLevel
 	case verbose > 1:
 		// Debug level
 		consoleWriterLevel = zapcore.DebugLevel
-	default:
-		// Notice level maps to Info in zap
 	}
 	consoleWriter = newHumanReadableZapCore(os.Stdout, consoleWriterLevel)
 	l := zap.New(consoleWriter)
@@ -172,6 +171,8 @@ func initLoggingWithBackup(doBackup bool) []zapcore.Core {
 		level = zapcore.DebugLevel
 	case "info":
 		level = zapcore.InfoLevel
+	case "notice":
+		level = ctrld.NoticeLevel
 	case "warn":
 		level = zapcore.WarnLevel
 	case "error":

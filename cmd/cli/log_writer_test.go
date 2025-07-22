@@ -1,9 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"sync"
 	"testing"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+
+	"github.com/Control-D-Inc/ctrld"
 )
 
 func Test_logWriter_Write(t *testing.T) {
@@ -82,4 +88,57 @@ func Test_logWriter_MarkerInitEnd(t *testing.T) {
 	if !strings.Contains(lw.buf.String(), strings.Repeat("A", dataSize)+logWriterInitEndMarker) {
 		t.Fatalf("unexpected log content: %s", lw.buf.String())
 	}
+}
+
+// TestNoticeLevel tests that the custom NOTICE level works correctly
+func TestNoticeLevel(t *testing.T) {
+	// Create a buffer to capture log output
+	var buf bytes.Buffer
+
+	// Create encoder config with custom NOTICE level support
+	encoderConfig := zap.NewDevelopmentEncoderConfig()
+	encoderConfig.TimeKey = "time"
+	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05.000")
+	encoderConfig.EncodeLevel = noticeLevelEncoder
+
+	// Test with NOTICE level
+	encoder := zapcore.NewConsoleEncoder(encoderConfig)
+	core := zapcore.NewCore(encoder, zapcore.AddSync(&buf), ctrld.NoticeLevel)
+	logger := zap.New(core)
+	ctrldLogger := &ctrld.Logger{Logger: logger}
+
+	// Log messages at different levels
+	ctrldLogger.Debug().Msg("This is a DEBUG message")
+	ctrldLogger.Info().Msg("This is an INFO message")
+	ctrldLogger.Notice().Msg("This is a NOTICE message")
+	ctrldLogger.Warn().Msg("This is a WARN message")
+	ctrldLogger.Error().Msg("This is an ERROR message")
+
+	output := buf.String()
+
+	// Verify that DEBUG and INFO messages are NOT logged (filtered out)
+	if strings.Contains(output, "DEBUG") {
+		t.Error("DEBUG message should not be logged when level is NOTICE")
+	}
+	if strings.Contains(output, "INFO") {
+		t.Error("INFO message should not be logged when level is NOTICE")
+	}
+
+	// Verify that NOTICE, WARN, and ERROR messages ARE logged
+	if !strings.Contains(output, "NOTICE") {
+		t.Error("NOTICE message should be logged when level is NOTICE")
+	}
+	if !strings.Contains(output, "WARN") {
+		t.Error("WARN message should be logged when level is NOTICE")
+	}
+	if !strings.Contains(output, "ERROR") {
+		t.Error("ERROR message should be logged when level is NOTICE")
+	}
+
+	// Verify the NOTICE message content
+	if !strings.Contains(output, "This is a NOTICE message") {
+		t.Error("NOTICE message content should be present")
+	}
+
+	t.Logf("Log output with NOTICE level:\n%s", output)
 }

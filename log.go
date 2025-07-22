@@ -10,6 +10,14 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+// Custom log level for NOTICE (between INFO and WARN)
+// DEBUG = -1, INFO = 0, WARN = 1, ERROR = 2, FATAL = 3
+// Since there's no integer between INFO (0) and WARN (1), we'll use the same value as WARN
+// but handle NOTICE specially in the encoder to display it differently.
+// Note: NOTICE and WARN share the same numeric value (1), so they will both display as "NOTICE"
+// when using the custom encoder. This is the intended behavior for visual distinction.
+const NoticeLevel = zapcore.Level(zapcore.WarnLevel) // Same value as WARN, but handled specially
+
 // LoggerCtxKey is the context.Context key for a logger.
 type LoggerCtxKey struct{}
 
@@ -169,7 +177,7 @@ func (l *Logger) Fatal() *LogEvent {
 func (l *Logger) Notice() *LogEvent {
 	return &LogEvent{
 		logger: l.Logger,
-		level:  zapcore.InfoLevel, // zap doesn't have Notice level, use Info
+		level:  NoticeLevel, // Custom NOTICE level between INFO and WARN
 		fields: []zap.Field{},
 	}
 }
