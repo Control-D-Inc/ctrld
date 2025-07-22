@@ -1247,6 +1247,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 		// config, so we can always listen on localhost port 53, but no traffic could be routed there.
 		tryLocalhost := !isLoopback(listener.IP)
 		tryAllPort53 := true
+		if isZeroIP && listener.Port == 53 {
+			tryAllPort53 = false
+		}
 
 		attempts := 0
 		maxAttempts := 10
@@ -1261,7 +1264,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 				break
 			}
 
-			logMsg(il.Info(), n, "error listening on address: %s, error: %v", addr, err)
+			logMsg(il.Info().Err(err), n, "error listening on address: %s", addr)
 
 			if !check.IP && !check.Port {
 				if fatal {
