@@ -25,6 +25,30 @@ const (
 	logWriterLogEndMarker  = "\n\n=== LOG_END ===\n\n"
 )
 
+// Custom level encoders that handle NOTICE level
+// Since NOTICE and WARN share the same numeric value (1), we handle them specially
+// in the encoder to display NOTICE messages with the "NOTICE" prefix.
+// Note: WARN messages will also display as "NOTICE" because they share the same level value.
+// This is the intended behavior for visual distinction.
+
+func noticeLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+	switch l {
+	case ctrld.NoticeLevel:
+		enc.AppendString("NOTICE")
+	default:
+		zapcore.CapitalLevelEncoder(l, enc)
+	}
+}
+
+func noticeColorLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+	switch l {
+	case ctrld.NoticeLevel:
+		enc.AppendString("\x1b[36mNOTICE\x1b[0m") // Cyan color for NOTICE
+	default:
+		zapcore.CapitalColorLevelEncoder(l, enc)
+	}
+}
+
 type logViewResponse struct {
 	Data string `json:"data"`
 }
@@ -136,6 +160,7 @@ func (p *prog) initInternalLogging(externalCores []zapcore.Core) {
 	// Create a multi-core logger
 	multiCore := zapcore.NewTee(cores...)
 	logger := zap.New(multiCore)
+
 	mainLog.Store(&ctrld.Logger{Logger: logger})
 }
 
@@ -219,7 +244,7 @@ func newHumanReadableZapCore(w io.Writer, level zapcore.Level) zapcore.Core {
 	encoderConfig := zap.NewDevelopmentEncoderConfig()
 	encoderConfig.TimeKey = "time"
 	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.StampMilli)
-	encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	encoderConfig.EncodeLevel = noticeColorLevelEncoder
 	encoder := zapcore.NewConsoleEncoder(encoderConfig)
 	return zapcore.NewCore(encoder, zapcore.AddSync(w), level)
 }
@@ -242,7 +267,7 @@ func newMachineFriendlyZapCore(w io.Writer, level zapcore.Level) zapcore.Core {
 	encoderConfig := zap.NewProductionEncoderConfig()
 	encoderConfig.TimeKey = "time"
 	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.StampMilli)
-	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+	encoderConfig.EncodeLevel = noticeLevelEncoder
 	encoder := zapcore.NewConsoleEncoder(encoderConfig)
 	return zapcore.NewCore(encoder, zapcore.AddSync(w), level)
 }
