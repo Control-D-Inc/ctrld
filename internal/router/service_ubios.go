@@ -13,13 +13,12 @@ import (
 	"time"
 
 	"github.com/kardianos/service"
+
+	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
 
 // This is a copy of https://github.com/kardianos/service/blob/v1.2.1/service_sysv_linux.go,
 // with modification for supporting ubios v1 init system.
-
-// Keep in sync with ubios.ubiosDNSMasqConfigPath
-const ubiosDNSMasqConfigPath = "/run/dnsmasq.conf.d/zzzctrld.conf"
 
 type ubiosSvc struct {
 	i        service.Interface
@@ -86,7 +85,7 @@ func (s *ubiosSvc) Install() error {
 	}{
 		s.Config,
 		path,
-		ubiosDNSMasqConfigPath,
+		filepath.Join(dnsmasq.UbiosConfPath(), dnsmasq.UbiosConfName),
 	}
 
 	if err := s.template().Execute(f, to); err != nil {

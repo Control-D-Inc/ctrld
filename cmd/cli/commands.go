@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -206,6 +207,7 @@ func initStartCmd() *cobra.Command {
 
 NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
 		Args: func(cmd *cobra.Command, args []string) error {
+			args = filterEmptyStrings(args)
 			if len(args) > 0 {
 				return fmt.Errorf("'ctrld start' doesn't accept positional arguments\n" +
 					"Use flags instead (e.g. --cd, --iface) or see 'ctrld start --help' for all options")
@@ -219,6 +221,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			sc := &service.Config{}
 			*sc = *svcConfig
 			osArgs := os.Args[2:]
+			osArgs = filterEmptyStrings(osArgs)
 			if os.Args[1] == "service" {
 				osArgs = os.Args[3:]
 			}
@@ -566,6 +569,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 
 NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
 		Args: func(cmd *cobra.Command, args []string) error {
+			args = filterEmptyStrings(args)
 			if len(args) > 0 {
 				return fmt.Errorf("'ctrld start' doesn't accept positional arguments\n" +
 					"Use flags instead (e.g. --cd, --iface) or see 'ctrld start --help' for all options")
@@ -1380,4 +1384,12 @@ func initServicesCmd(commands ...*cobra.Command) *cobra.Command {
 	rootCmd.AddCommand(serviceCmd)
 
 	return serviceCmd
+}
+
+// filterEmptyStrings removes empty strings from a slice of strings.
+// It returns a new slice containing only non-empty strings.
+func filterEmptyStrings(slice []string) []string {
+	return slices.DeleteFunc(slice, func(s string) bool {
+		return s == ""
+	})
 }
