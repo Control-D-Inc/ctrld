@@ -128,14 +128,7 @@ func initCLI() {
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true
 
 	initRunCmd()
-	startCmd := initStartCmd()
-	stopCmd := initStopCmd()
-	restartCmd := initRestartCmd()
-	reloadCmd := initReloadCmd(restartCmd)
-	statusCmd := initStatusCmd()
-	uninstallCmd := initUninstallCmd()
-	interfacesCmd := initInterfacesCmd()
-	initServicesCmd(startCmd, stopCmd, restartCmd, reloadCmd, statusCmd, uninstallCmd, interfacesCmd)
+	InitServiceCmd()
 	initClientsCmd()
 	initUpgradeCmd()
 	InitLogCmd()

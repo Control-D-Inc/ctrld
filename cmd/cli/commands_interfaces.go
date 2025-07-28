@@ -82,7 +82,6 @@ func InitInterfacesCmd() *cobra.Command {
 		},
 	}
 	interfacesCmd.AddCommand(listInterfacesCmd)
-	rootCmd.AddCommand(interfacesCmd)
 
 	return interfacesCmd
 }
