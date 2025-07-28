@@ -19,7 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/go-units"
 	"github.com/kardianos/service"
 	"github.com/minio/selfupdate"
 	"github.com/olekukonko/tablewriter"
@@ -72,132 +71,7 @@ func (sm *ServiceManager) Status() (service.Status, error) {
 	return sm.svc.Status()
 }
 
-func initLogCmd() *cobra.Command {
-	warnRuntimeLoggingNotEnabled := func() {
-		mainLog.Load().Warn().Msg("runtime debug logging is not enabled")
-		mainLog.Load().Warn().Msg(`ctrld may be running without "--cd" flag or logging is already enabled`)
-	}
-	logSendCmd := &cobra.Command{
-		Use:   "send",
-		Short: "Send runtime debug logs to ControlD",
-		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			checkHasElevatedPrivilege()
-		},
-		Run: func(cmd *cobra.Command, args []string) {
-
-			p := &prog{}
-			s, _ := newService(p, svcConfig)
-
-			status, err := s.Status()
-			if errors.Is(err, service.ErrNotInstalled) {
-				mainLog.Load().Warn().Msg("service not installed")
-				return
-			}
-			if status == service.StatusStopped {
-				mainLog.Load().Warn().Msg("service is not running")
-				return
-			}
-
-			dir, err := socketDir()
-			if err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
-			}
-			cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
-			resp, err := cc.post(sendLogsPath, nil)
-			if err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to send logs")
-			}
-			defer resp.Body.Close()
-			switch resp.StatusCode {
-			case http.StatusServiceUnavailable:
-				mainLog.Load().Warn().Msg("runtime logs could only be sent once per minute")
-				return
-			case http.StatusMovedPermanently:
-				warnRuntimeLoggingNotEnabled()
-				return
-			}
-			var logs logSentResponse
-			if err := json.NewDecoder(resp.Body).Decode(&logs); err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to decode sent logs result")
-			}
-			size := units.BytesSize(float64(logs.Size))
-			if logs.Error == "" {
-				mainLog.Load().Notice().Msgf("runtime logs sent successfully (%s)", size)
-			} else {
-				mainLog.Load().Error().Msgf("failed to send logs (%s)", size)
-				mainLog.Load().Error().Msg(logs.Error)
-			}
-		},
-	}
-	logViewCmd := &cobra.Command{
-		Use:   "view",
-		Short: "View current runtime debug logs",
-		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			checkHasElevatedPrivilege()
-		},
-		Run: func(cmd *cobra.Command, args []string) {
-
-			p := &prog{}
-			s, _ := newService(p, svcConfig)
-
-			status, err := s.Status()
-			if errors.Is(err, service.ErrNotInstalled) {
-				mainLog.Load().Warn().Msg("service not installed")
-				return
-			}
-			if status == service.StatusStopped {
-				mainLog.Load().Warn().Msg("service is not running")
-				return
-			}
-
-			dir, err := socketDir()
-			if err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
-			}
-			cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
-			resp, err := cc.post(viewLogsPath, nil)
-			if err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to get logs")
-			}
-			defer resp.Body.Close()
-
-			switch resp.StatusCode {
-			case http.StatusMovedPermanently:
-				warnRuntimeLoggingNotEnabled()
-				return
-			case http.StatusBadRequest:
-				mainLog.Load().Warn().Msg("runtime debugs log is not available")
-				buf, err := io.ReadAll(resp.Body)
-				if err != nil {
-					mainLog.Load().Fatal().Err(err).Msg("failed to read response body")
-				}
-				mainLog.Load().Warn().Msgf("ctrld process response:\n\n%s\n", string(buf))
-				return
-			case http.StatusOK:
-			}
-			var logs logViewResponse
-			if err := json.NewDecoder(resp.Body).Decode(&logs); err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to decode view logs result")
-			}
-			fmt.Println(logs.Data)
-		},
-	}
-	logCmd := &cobra.Command{
-		Use:   "log",
-		Short: "Manage runtime debug logs",
-		Args:  cobra.OnlyValidArgs,
-		ValidArgs: []string{
-			logSendCmd.Use,
-		},
-	}
-	logCmd.AddCommand(logSendCmd)
-	logCmd.AddCommand(logViewCmd)
-	rootCmd.AddCommand(logCmd)
-
-	return logCmd
-}
+// initLogCmd is now implemented in commands_log.go as InitLogCmd
 
 func initRunCmd() *cobra.Command {
 	runCmd := &cobra.Command{
