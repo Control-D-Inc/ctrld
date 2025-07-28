@@ -138,7 +138,7 @@ func initCLI() {
 	initServicesCmd(startCmd, stopCmd, restartCmd, reloadCmd, statusCmd, uninstallCmd, interfacesCmd)
 	initClientsCmd()
 	initUpgradeCmd()
-	initLogCmd()
+	InitLogCmd()
 }
 
 // isMobile reports whether the current OS is a mobile platform.

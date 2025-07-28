@@ -120,3 +120,46 @@ func (lc *LogCommand) ViewLogs(cmd *cobra.Command, args []string) error {
 	fmt.Print(logs.Data)
 	return nil
 }
+
+// InitLogCmd creates the log command with proper logic
+func InitLogCmd() *cobra.Command {
+	lc, err := NewLogCommand()
+	if err != nil {
+		panic(fmt.Sprintf("failed to create log command: %v", err))
+	}
+
+	logSendCmd := &cobra.Command{
+		Use:   "send",
+		Short: "Send runtime debug logs to ControlD",
+		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			checkHasElevatedPrivilege()
+		},
+		RunE: lc.SendLogs,
+	}
+
+	logViewCmd := &cobra.Command{
+		Use:   "view",
+		Short: "View current runtime debug logs",
+		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			checkHasElevatedPrivilege()
+		},
+		RunE: lc.ViewLogs,
+	}
+
+	logCmd := &cobra.Command{
+		Use:   "log",
+		Short: "Manage runtime debug logs",
+		Args:  cobra.OnlyValidArgs,
+		ValidArgs: []string{
+			logSendCmd.Use,
+			logViewCmd.Use,
+		},
+	}
+	logCmd.AddCommand(logSendCmd)
+	logCmd.AddCommand(logViewCmd)
+	rootCmd.AddCommand(logCmd)
+
+	return logCmd
+}
