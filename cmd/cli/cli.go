@@ -129,8 +129,8 @@ func initCLI() {
 
 	initRunCmd()
 	InitServiceCmd()
-	initClientsCmd()
-	initUpgradeCmd()
+	InitClientsCmd()
+	InitUpgradeCmd()
 	InitLogCmd()
 }
 
