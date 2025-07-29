@@ -6,8 +6,6 @@ import (
 
 	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
-
-	"github.com/Control-D-Inc/ctrld"
 )
 
 // dialSocketControlServerTimeout is the default timeout to wait when ping control server.
@@ -54,41 +52,7 @@ func (sm *ServiceManager) Status() (service.Status, error) {
 }
 
 // initLogCmd is now implemented in commands_log.go as InitLogCmd
-
-func initRunCmd() *cobra.Command {
-	runCmd := &cobra.Command{
-		Use:   "run",
-		Short: "Run the DNS proxy server",
-		Args:  cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
-			RunCobraCommand(cmd)
-		},
-	}
-	runCmd.Flags().BoolVarP(&daemon, "daemon", "d", false, "Run as daemon")
-	runCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
-	runCmd.Flags().StringVarP(&configBase64, "base64_config", "", "", "Base64 encoded config")
-	runCmd.Flags().StringVarP(&listenAddress, "listen", "", "", "Listener address and port, in format: address:port")
-	runCmd.Flags().StringVarP(&primaryUpstream, "primary_upstream", "", "", "Primary upstream endpoint")
-	runCmd.Flags().StringVarP(&secondaryUpstream, "secondary_upstream", "", "", "Secondary upstream endpoint")
-	runCmd.Flags().StringSliceVarP(&domains, "domains", "", nil, "List of domain to apply in a split DNS policy")
-	runCmd.Flags().StringVarP(&logPath, "log", "", "", "Path to log file")
-	runCmd.Flags().IntVarP(&cacheSize, "cache_size", "", 0, "Enable cache with size items")
-	runCmd.Flags().StringVarP(&cdUID, cdUidFlagName, "", "", "Control D resolver uid")
-	runCmd.Flags().StringVarP(&cdOrg, cdOrgFlagName, "", "", "Control D provision token")
-	runCmd.Flags().StringVarP(&customHostname, customHostnameFlagName, "", "", "Custom hostname passed to ControlD API")
-	runCmd.Flags().BoolVarP(&cdDev, "dev", "", false, "Use Control D dev resolver/domain")
-	_ = runCmd.Flags().MarkHidden("dev")
-	runCmd.Flags().StringVarP(&homedir, "homedir", "", "", "")
-	_ = runCmd.Flags().MarkHidden("homedir")
-	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
-	_ = runCmd.Flags().MarkHidden("iface")
-	runCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
-
-	runCmd.FParseErrWhitelist = cobra.FParseErrWhitelist{UnknownFlags: true}
-	rootCmd.AddCommand(runCmd)
-
-	return runCmd
-}
+// initRunCmd is now implemented in commands_run.go as InitRunCmd
 
 // filterEmptyStrings removes empty strings from a slice
 func filterEmptyStrings(slice []string) []string {
