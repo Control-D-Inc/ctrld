@@ -127,7 +127,7 @@ func initCLI() {
 	rootCmd.SetHelpCommand(&cobra.Command{Hidden: true})
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true
 
-	initRunCmd()
+	InitRunCmd()
 	InitServiceCmd()
 	InitClientsCmd()
 	InitUpgradeCmd()
