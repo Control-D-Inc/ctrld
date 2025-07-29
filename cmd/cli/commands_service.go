@@ -551,12 +551,32 @@ func (sc *ServiceCommand) Uninstall(cmd *cobra.Command, args []string) error {
 			files = append(files, file)
 			return nil
 		})
+		bin, err := os.Executable()
+		if err != nil {
+			mainLog.Load().Warn().Err(err).Msg("failed to get executable path")
+		}
+		if bin != "" && supportedSelfDelete {
+			files = append(files, bin)
+		}
+		// Backup file after upgrading.
+		oldBin := bin + oldBinSuffix
+		if _, err := os.Stat(oldBin); err == nil {
+			files = append(files, oldBin)
+		}
 		for _, file := range files {
 			if file == "" {
 				continue
 			}
 			if err := os.Remove(file); err == nil {
 				mainLog.Load().Notice().Msgf("removed %s", file)
+			}
+		}
+		// Self-delete the ctrld binary if supported
+		if err := selfDeleteExe(); err != nil {
+			mainLog.Load().Warn().Err(err).Msg("failed to delete ctrld binary")
+		} else {
+			if !supportedSelfDelete {
+				mainLog.Load().Debug().Msgf("file removed: %s", bin)
 			}
 		}
 	}
