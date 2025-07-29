@@ -55,20 +55,6 @@ func InitServiceCmd() *cobra.Command {
 		panic(fmt.Sprintf("failed to create service command: %v", err))
 	}
 
-	// Uninstall command
-	uninstallCmd := &cobra.Command{
-		Use:   "uninstall",
-		Short: "Stop and uninstall the ctrld service",
-		Long: `Stop and uninstall the ctrld service.
-
-NOTE: Uninstalling will set DNS to values provided by DHCP.`,
-		Args: cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
-			checkHasElevatedPrivilege()
-		},
-		RunE: sc.Uninstall,
-	}
-
 	startCmd, startCmdAlias := createStartCommands(sc)
 	rootCmd.AddCommand(startCmdAlias)
 
@@ -120,6 +106,20 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			checkHasElevatedPrivilege()
 		},
 		RunE: sc.Reload,
+	}
+
+	// Uninstall command
+	uninstallCmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Stop and uninstall the ctrld service",
+		Long: `Stop and uninstall the ctrld service.
+
+NOTE: Uninstalling will set DNS to values provided by DHCP.`,
+		Args: cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			checkHasElevatedPrivilege()
+		},
+		RunE: sc.Uninstall,
 	}
 
 	// Interfaces command - use the existing InitInterfacesCmd function
