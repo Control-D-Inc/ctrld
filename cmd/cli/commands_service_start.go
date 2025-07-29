@@ -373,7 +373,6 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	}
 	startCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmdAlias.Flags().AddFlagSet(startCmd.Flags())
-	rootCmd.AddCommand(startCmdAlias)
 
 	return startCmd, startCmdAlias
 }
