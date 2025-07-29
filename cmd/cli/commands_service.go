@@ -21,6 +21,17 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 )
 
+// filterEmptyStrings removes empty strings from a slice
+func filterEmptyStrings(slice []string) []string {
+	var result []string
+	for _, s := range slice {
+		if s != "" {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
 // ServiceCommand handles service-related operations
 type ServiceCommand struct {
 	serviceManager *ServiceManager
