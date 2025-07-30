@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
 )
 
@@ -17,6 +19,11 @@ func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
 	s, p, err := sc.initializeServiceManager()
 	if err != nil {
 		return err
+	}
+
+	if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
+		mainLog.Load().Warn().Msg("service not installed")
+		return nil
 	}
 
 	p.cfg = &cfg

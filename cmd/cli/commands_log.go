@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 
@@ -110,16 +111,20 @@ func (lc *LogCommand) ViewLogs(cmd *cobra.Command, args []string) error {
 	case http.StatusMovedPermanently:
 		lc.warnRuntimeLoggingNotEnabled()
 		return nil
+	case http.StatusBadRequest:
+		mainLog.Load().Warn().Msg("runtime debugs log is not available")
+		buf, err := io.ReadAll(resp.Body)
+		if err != nil {
+			mainLog.Load().Fatal().Err(err).Msg("failed to read response body")
+		}
+		mainLog.Load().Warn().Msgf("ctrld process response:\n\n%s\n", string(buf))
+		return nil
+	case http.StatusOK:
 	}
 
 	var logs logViewResponse
 	if err := json.NewDecoder(resp.Body).Decode(&logs); err != nil {
 		return fmt.Errorf("failed to decode view logs result: %w", err)
-	}
-
-	if logs.Data == "" {
-		mainLog.Load().Notice().Msg("No runtime logs available")
-		return nil
 	}
 
 	fmt.Print(logs.Data)
