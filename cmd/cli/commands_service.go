@@ -139,6 +139,10 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 		},
 		RunE: sc.Uninstall,
 	}
+	uninstallCmd.Flags().StringVarP(&iface, "iface", "", "", `Reset DNS setting for iface, "auto" means the default interface gateway`)
+	uninstallCmd.Flags().Int64VarP(&deactivationPin, "pin", "", defaultDeactivationPin, `Pin code for stopping ctrld`)
+	_ = uninstallCmd.Flags().MarkHidden("pin")
+	uninstallCmd.Flags().BoolVarP(&cleanup, "cleanup", "", false, `Removing ctrld binary and config files`)
 
 	// Interfaces command - use the existing InitInterfacesCmd function
 	interfacesCmd := InitInterfacesCmd(rootCmd)
