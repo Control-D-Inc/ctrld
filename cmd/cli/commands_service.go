@@ -25,16 +25,28 @@ type ServiceCommand struct {
 	serviceManager *ServiceManager
 }
 
-// NewServiceCommand creates a new service command handler
-func NewServiceCommand() (*ServiceCommand, error) {
-	sm, err := NewServiceManager()
+// initializeServiceManager creates a service manager with default configuration
+func (sc *ServiceCommand) initializeServiceManager() (service.Service, *prog, error) {
+	svcConfig := sc.createServiceConfig()
+	return sc.initializeServiceManagerWithServiceConfig(svcConfig)
+}
+
+// initializeServiceManagerWithServiceConfig creates a service manager with the given configuration
+func (sc *ServiceCommand) initializeServiceManagerWithServiceConfig(svcConfig *service.Config) (service.Service, *prog, error) {
+	p := &prog{}
+
+	s, err := newService(p, svcConfig)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("failed to create service: %w", err)
 	}
 
-	return &ServiceCommand{
-		serviceManager: sm,
-	}, nil
+	sc.serviceManager = &ServiceManager{prog: p, svc: s}
+	return s, p, nil
+}
+
+// NewServiceCommand creates a new service command handler
+func NewServiceCommand() *ServiceCommand {
+	return &ServiceCommand{}
 }
 
 // createServiceConfig creates a properly initialized service configuration
@@ -50,10 +62,7 @@ func (sc *ServiceCommand) createServiceConfig() *service.Config {
 // InitServiceCmd creates the service command with proper logic and aliases
 func InitServiceCmd() *cobra.Command {
 	// Create service command handlers
-	sc, err := NewServiceCommand()
-	if err != nil {
-		panic(fmt.Sprintf("failed to create service command: %v", err))
-	}
+	sc := NewServiceCommand()
 
 	startCmd, startCmdAlias := createStartCommands(sc)
 	rootCmd.AddCommand(startCmdAlias)

@@ -12,7 +12,11 @@ import (
 
 // Reload implements the logic from cmdReload.Run
 func (sc *ServiceCommand) Reload(cmd *cobra.Command, args []string) error {
-	status, err := sc.serviceManager.svc.Status()
+	s, _, err := sc.initializeServiceManager()
+	if err != nil {
+		return err
+	}
+	status, err := s.Status()
 	if errors.Is(err, service.ErrNotInstalled) {
 		mainLog.Load().Warn().Msg("service not installed")
 		return nil
@@ -37,7 +41,7 @@ func (sc *ServiceCommand) Reload(cmd *cobra.Command, args []string) error {
 	case http.StatusCreated:
 		mainLog.Load().Warn().Msg("Service was reloaded, but new config requires service restart.")
 		mainLog.Load().Warn().Msg("Restarting service")
-		if _, err := sc.serviceManager.svc.Status(); errors.Is(err, service.ErrNotInstalled) {
+		if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
 			mainLog.Load().Warn().Msg("Service not installed")
 			return nil
 		}

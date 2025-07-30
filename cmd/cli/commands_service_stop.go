@@ -10,10 +10,14 @@ import (
 
 // Stop implements the logic from cmdStop.Run
 func (sc *ServiceCommand) Stop(cmd *cobra.Command, args []string) error {
-	s := sc.serviceManager.svc
-	p := sc.serviceManager.prog
 	readConfig(false)
 	v.Unmarshal(&cfg)
+
+	s, p, err := sc.initializeServiceManager()
+	if err != nil {
+		return err
+	}
+
 	p.cfg = &cfg
 	p.preRun()
 	if ir := runningIface(s); ir != nil {
