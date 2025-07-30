@@ -127,11 +127,11 @@ func initCLI() {
 	rootCmd.SetHelpCommand(&cobra.Command{Hidden: true})
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true
 
-	InitRunCmd()
-	InitServiceCmd()
-	InitClientsCmd()
-	InitUpgradeCmd()
-	InitLogCmd()
+	InitRunCmd(rootCmd)
+	InitServiceCmd(rootCmd)
+	InitClientsCmd(rootCmd)
+	InitUpgradeCmd(rootCmd)
+	InitLogCmd(rootCmd)
 }
 
 // isMobile reports whether the current OS is a mobile platform.

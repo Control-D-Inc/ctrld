@@ -69,7 +69,7 @@ func (sc *ServiceCommand) createServiceConfig() *service.Config {
 }
 
 // InitServiceCmd creates the service command with proper logic and aliases
-func InitServiceCmd() *cobra.Command {
+func InitServiceCmd(rootCmd *cobra.Command) *cobra.Command {
 	// Create service command handlers
 	sc := NewServiceCommand()
 
@@ -141,7 +141,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	}
 
 	// Interfaces command - use the existing InitInterfacesCmd function
-	interfacesCmd := InitInterfacesCmd()
+	interfacesCmd := InitInterfacesCmd(rootCmd)
 
 	stopCmdAlias := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {

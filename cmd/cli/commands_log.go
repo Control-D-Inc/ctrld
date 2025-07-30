@@ -127,7 +127,7 @@ func (lc *LogCommand) ViewLogs(cmd *cobra.Command, args []string) error {
 }
 
 // InitLogCmd creates the log command with proper logic
-func InitLogCmd() *cobra.Command {
+func InitLogCmd(rootCmd *cobra.Command) *cobra.Command {
 	lc, err := NewLogCommand()
 	if err != nil {
 		panic(fmt.Sprintf("failed to create log command: %v", err))

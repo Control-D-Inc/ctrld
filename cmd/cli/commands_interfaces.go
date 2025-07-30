@@ -56,7 +56,7 @@ func (ic *InterfacesCommand) ListInterfaces(cmd *cobra.Command, args []string) e
 }
 
 // InitInterfacesCmd creates the interfaces command with proper logic
-func InitInterfacesCmd() *cobra.Command {
+func InitInterfacesCmd(_ *cobra.Command) *cobra.Command {
 	listInterfacesCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List network interfaces",

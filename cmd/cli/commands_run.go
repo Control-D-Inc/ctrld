@@ -22,7 +22,7 @@ func (rc *RunCommand) Run(cmd *cobra.Command, args []string) {
 }
 
 // InitRunCmd creates the run command with proper logic
-func InitRunCmd() *cobra.Command {
+func InitRunCmd(rootCmd *cobra.Command) *cobra.Command {
 	rc := NewRunCommand()
 
 	runCmd := &cobra.Command{
