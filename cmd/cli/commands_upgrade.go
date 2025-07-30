@@ -22,19 +22,11 @@ const (
 
 // UpgradeCommand handles upgrade-related operations
 type UpgradeCommand struct {
-	serviceManager *ServiceManager
 }
 
 // NewUpgradeCommand creates a new upgrade command handler
 func NewUpgradeCommand() (*UpgradeCommand, error) {
-	sm, err := NewServiceManager()
-	if err != nil {
-		return nil, err
-	}
-
-	return &UpgradeCommand{
-		serviceManager: sm,
-	}, nil
+	return &UpgradeCommand{}, nil
 }
 
 // Upgrade performs the upgrade operation
@@ -53,19 +45,10 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 		mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
 	}
 
-	// Create service config with executable path
-	sc := &service.Config{
-		Name:        ctrldServiceName,
-		DisplayName: "Control-D Helper Service",
-		Description: "A highly configurable, multi-protocol DNS forwarding proxy",
-		Option:      service.KeyValue{},
-		Executable:  bin,
-	}
-
 	readConfig(false)
 	v.Unmarshal(&cfg)
-	p := &prog{}
-	s, err := newService(p, sc)
+	svcCmd := NewServiceCommand()
+	s, p, err := svcCmd.initializeServiceManager()
 	if err != nil {
 		mainLog.Load().Error().Msg(err.Error())
 		return nil

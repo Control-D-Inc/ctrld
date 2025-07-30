@@ -35,13 +35,22 @@ func (sc *ServiceCommand) initializeServiceManager() (service.Service, *prog, er
 func (sc *ServiceCommand) initializeServiceManagerWithServiceConfig(svcConfig *service.Config) (service.Service, *prog, error) {
 	p := &prog{}
 
-	s, err := newService(p, svcConfig)
+	s, err := sc.newService(p, svcConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create service: %w", err)
 	}
 
 	sc.serviceManager = &ServiceManager{prog: p, svc: s}
 	return s, p, nil
+}
+
+// newService creates a new service instance using the provided program and configuration.
+func (sc *ServiceCommand) newService(p *prog, svcConfig *service.Config) (service.Service, error) {
+	s, err := newService(p, svcConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service: %w", err)
+	}
+	return s, nil
 }
 
 // NewServiceCommand creates a new service command handler

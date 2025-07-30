@@ -241,7 +241,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		// We need to call s.Run() as soon as possible to response to the OS manager, so it
 		// can see ctrld is running and don't mark ctrld as failed service.
 		go func() {
-			s, err := newService(p, svcConfig)
+			svcCmd := NewServiceCommand()
+			svcConfig := svcCmd.createServiceConfig()
+			s, err := svcCmd.newService(p, svcConfig)
 			if err != nil {
 				p.Fatal().Err(err).Msg("failed create new service")
 			}
@@ -1636,7 +1638,8 @@ func exchangeContextWithTimeout(c *dns.Client, timeout time.Duration, msg *dns.M
 
 // curCdUID returns the current ControlD UID used by running ctrld process.
 func curCdUID() string {
-	if s, _ := newService(&prog{}, svcConfig); s != nil {
+	svcCmd := NewServiceCommand()
+	if s, _, _ := svcCmd.initializeServiceManager(); s != nil {
 		// Configure Windows service failure actions
 		if err := ConfigureWindowsServiceFailureActions(ctrldServiceName); err != nil {
 			mainLog.Load().Debug().Err(err).Msgf("failed to configure Windows service %s failure actions", ctrldServiceName)
@@ -1770,7 +1773,8 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 
 // uninstallInvalidCdUID performs self-uninstallation because the ControlD device does not exist.
 func uninstallInvalidCdUID(p *prog, logger *ctrld.Logger, doStop bool) bool {
-	s, err := newService(p, svcConfig)
+	svcCmd := NewServiceCommand()
+	s, _, err := svcCmd.initializeServiceManager()
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to create new service")
 		return false

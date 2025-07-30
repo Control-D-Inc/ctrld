@@ -14,17 +14,11 @@ import (
 
 // LogCommand handles log-related operations
 type LogCommand struct {
-	serviceManager *ServiceManager
-	controlClient  *controlClient
+	controlClient *controlClient
 }
 
 // NewLogCommand creates a new log command handler
 func NewLogCommand() (*LogCommand, error) {
-	sm, err := NewServiceManager()
-	if err != nil {
-		return nil, err
-	}
-
 	dir, err := socketDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to find ctrld home dir: %w", err)
@@ -32,8 +26,7 @@ func NewLogCommand() (*LogCommand, error) {
 
 	cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
 	return &LogCommand{
-		serviceManager: sm,
-		controlClient:  cc,
+		controlClient: cc,
 	}, nil
 }
 
@@ -45,7 +38,13 @@ func (lc *LogCommand) warnRuntimeLoggingNotEnabled() {
 
 // SendLogs sends runtime debug logs to ControlD
 func (lc *LogCommand) SendLogs(cmd *cobra.Command, args []string) error {
-	status, err := lc.serviceManager.Status()
+	sc := NewServiceCommand()
+	s, _, err := sc.initializeServiceManager()
+	if err != nil {
+		return err
+	}
+
+	status, err := s.Status()
 	if errors.Is(err, service.ErrNotInstalled) {
 		mainLog.Load().Warn().Msg("service not installed")
 		return nil
@@ -85,7 +84,13 @@ func (lc *LogCommand) SendLogs(cmd *cobra.Command, args []string) error {
 
 // ViewLogs views current runtime debug logs
 func (lc *LogCommand) ViewLogs(cmd *cobra.Command, args []string) error {
-	status, err := lc.serviceManager.Status()
+	sc := NewServiceCommand()
+	s, _, err := sc.initializeServiceManager()
+	if err != nil {
+		return err
+	}
+
+	status, err := s.Status()
 	if errors.Is(err, service.ErrNotInstalled) {
 		mainLog.Load().Warn().Msg("service not installed")
 		return nil

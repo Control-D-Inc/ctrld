@@ -79,13 +79,6 @@ var logf = func(format string, args ...any) {
 //lint:ignore U1000 use in newLoopbackOSConfigurator
 var noopLogf = func(format string, args ...any) {}
 
-var svcConfig = &service.Config{
-	Name:        ctrldServiceName,
-	DisplayName: "Control-D Helper Service",
-	Description: "A highly configurable, multi-protocol DNS forwarding proxy",
-	Option:      service.KeyValue{},
-}
-
 var useSystemdResolved = false
 
 type prog struct {
