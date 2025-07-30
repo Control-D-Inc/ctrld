@@ -230,12 +230,12 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	serviceCmd.ValidArgs[5] = uninstallCmd.Use
 	serviceCmd.ValidArgs[6] = interfacesCmd.Use
 
-	serviceCmd.AddCommand(uninstallCmd)
 	serviceCmd.AddCommand(startCmd)
 	serviceCmd.AddCommand(stopCmd)
 	serviceCmd.AddCommand(restartCmd)
 	serviceCmd.AddCommand(reloadCmd)
 	serviceCmd.AddCommand(statusCmd)
+	serviceCmd.AddCommand(uninstallCmd)
 	serviceCmd.AddCommand(interfacesCmd)
 
 	rootCmd.AddCommand(serviceCmd)
