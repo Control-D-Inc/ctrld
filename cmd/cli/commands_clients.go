@@ -38,12 +38,13 @@ func NewClientsCommand() (*ClientsCommand, error) {
 // ListClients lists all connected clients
 func (cc *ClientsCommand) ListClients(cmd *cobra.Command, args []string) error {
 	// Check service status first
-	sm, err := NewServiceManager()
+	sc := NewServiceCommand()
+	s, _, err := sc.initializeServiceManager()
 	if err != nil {
 		return err
 	}
 
-	status, err := sm.Status()
+	status, err := s.Status()
 	if errors.Is(err, service.ErrNotInstalled) {
 		mainLog.Load().Warn().Msg("service not installed")
 		return nil
