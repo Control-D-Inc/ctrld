@@ -12,10 +12,14 @@ import (
 
 // Uninstall implements the logic from cmdUninstall.Run
 func (sc *ServiceCommand) Uninstall(cmd *cobra.Command, args []string) error {
-	s := sc.serviceManager.svc
-	p := sc.serviceManager.prog
 	readConfig(false)
 	v.Unmarshal(&cfg)
+
+	s, p, err := sc.initializeServiceManager()
+	if err != nil {
+		return err
+	}
+
 	p.cfg = &cfg
 	if iface == "" {
 		iface = "auto"

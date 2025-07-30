@@ -9,7 +9,11 @@ import (
 
 // Status implements the logic from cmdStatus.Run
 func (sc *ServiceCommand) Status(cmd *cobra.Command, args []string) error {
-	status, err := sc.serviceManager.svc.Status()
+	s, _, err := sc.initializeServiceManager()
+	if err != nil {
+		return err
+	}
+	status, err := s.Status()
 	if err != nil {
 		mainLog.Load().Error().Msg(err.Error())
 		os.Exit(1)

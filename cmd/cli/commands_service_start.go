@@ -21,8 +21,6 @@ import (
 
 // Start implements the logic from cmdStart.Run
 func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
-	s := sc.serviceManager.svc
-	p := sc.serviceManager.prog
 	checkStrFlagEmpty(cmd, cdUidFlagName)
 	checkStrFlagEmpty(cmd, cdOrgFlagName)
 	validateCdAndNextDNSFlags()
@@ -35,6 +33,12 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	}
 	setDependencies(svcConfig)
 	svcConfig.Arguments = append([]string{"run"}, osArgs...)
+
+	// Initialize service manager with proper configuration
+	s, p, err := sc.initializeServiceManagerWithServiceConfig(svcConfig)
+	if err != nil {
+		return err
+	}
 
 	p.cfg = &cfg
 	p.preRun()

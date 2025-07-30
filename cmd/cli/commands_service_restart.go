@@ -9,12 +9,15 @@ import (
 
 // Restart implements the logic from cmdRestart.Run
 func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
-	s := sc.serviceManager.svc
-	p := sc.serviceManager.prog
 	readConfig(false)
 	v.Unmarshal(&cfg)
 	cdUID = curCdUID()
 	cdMode := cdUID != ""
+
+	s, p, err := sc.initializeServiceManager()
+	if err != nil {
+		return err
+	}
 
 	p.cfg = &cfg
 	if iface == "" {
