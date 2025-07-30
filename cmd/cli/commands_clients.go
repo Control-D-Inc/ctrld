@@ -109,7 +109,7 @@ func (cc *ClientsCommand) ListClients(cmd *cobra.Command, args []string) error {
 }
 
 // InitClientsCmd creates the clients command with proper logic
-func InitClientsCmd() *cobra.Command {
+func InitClientsCmd(rootCmd *cobra.Command) *cobra.Command {
 	listClientsCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List clients that ctrld discovered",

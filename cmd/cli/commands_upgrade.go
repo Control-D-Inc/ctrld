@@ -168,7 +168,7 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 }
 
 // InitUpgradeCmd creates the upgrade command with proper logic
-func InitUpgradeCmd() *cobra.Command {
+func InitUpgradeCmd(rootCmd *cobra.Command) *cobra.Command {
 	upgradeCmd := &cobra.Command{
 		Use:       "upgrade",
 		Short:     "Upgrading ctrld to latest version",
