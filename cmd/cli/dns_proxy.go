@@ -81,13 +81,7 @@ type upstreamForResult struct {
 	srcAddr        string
 }
 
-// serveDNS sets up and starts a DNS server on the specified listener, handling DNS queries and network monitoring.
 func (p *prog) serveDNS(mainCtx context.Context, listenerNum string) error {
-	if err := p.monitorNetworkChanges(mainCtx); err != nil {
-		p.Error().Err(err).Msg("Failed to start network monitoring")
-		// Don't return here as we still want DNS service to run
-	}
-
 	listenerConfig := p.cfg.Listener[listenerNum]
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
 		p.Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: failed to allocate listen ip")

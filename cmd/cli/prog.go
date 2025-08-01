@@ -514,6 +514,12 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()
 		if !reload {
+			go func() {
+				// Start network monitoring
+				if err := p.monitorNetworkChanges(ctx); err != nil {
+					mainLog.Load().Error().Err(err).Msg("Failed to start network monitoring")
+				}
+			}()
 			go func(listenerNum string) {
 				listenerConfig := p.cfg.Listener[listenerNum]
 				upstreamConfig := p.cfg.Upstream[listenerNum]
