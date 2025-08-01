@@ -23,20 +23,17 @@ import (
 )
 
 const (
-	maxDNSAdapterRetries                 = 5
-	retryDelayDNSAdapter                 = 1 * time.Second
-	defaultDNSAdapterTimeout             = 10 * time.Second
-	minDNSServers                        = 1 // Minimum number of DNS servers we want to find
-	NetSetupUnknown               uint32 = 0
-	NetSetupWorkgroup             uint32 = 1
-	NetSetupDomain                uint32 = 2
-	NetSetupCloudDomain           uint32 = 3
-	DS_FORCE_REDISCOVERY                 = 0x00000001
-	DS_DIRECTORY_SERVICE_REQUIRED        = 0x00000010
-	DS_BACKGROUND_ONLY                   = 0x00000100
-	DS_IP_REQUIRED                       = 0x00000200
-	DS_IS_DNS_NAME                       = 0x00020000
-	DS_RETURN_DNS_NAME                   = 0x40000000
+	maxDNSAdapterRetries     = 5
+	retryDelayDNSAdapter     = 1 * time.Second
+	defaultDNSAdapterTimeout = 10 * time.Second
+	minDNSServers            = 1 // Minimum number of DNS servers we want to find
+
+	DS_FORCE_REDISCOVERY          = 0x00000001
+	DS_DIRECTORY_SERVICE_REQUIRED = 0x00000010
+	DS_BACKGROUND_ONLY            = 0x00000100
+	DS_IP_REQUIRED                = 0x00000200
+	DS_IS_DNS_NAME                = 0x00020000
+	DS_RETURN_DNS_NAME            = 0x40000000
 )
 
 type DomainControllerInfo struct {
@@ -310,29 +307,28 @@ func checkDomainJoined(ctx context.Context) bool {
 	var domain *uint16
 	var status uint32
 
-	err := windows.NetGetJoinInformation(nil, &domain, &status)
-	if err != nil {
+	if err := windows.NetGetJoinInformation(nil, &domain, &status); err != nil {
 		logger.Debug().Msgf("Failed to get domain join status: %v", err)
 		return false
 	}
 	defer windows.NetApiBufferFree((*byte)(unsafe.Pointer(domain)))
 
+	// NETSETUP_JOIN_STATUS constants from Microsoft Windows API
+	// See: https://learn.microsoft.com/en-us/windows/win32/api/lmjoin/ne-lmjoin-netsetup_join_status
+	//
+	// NetSetupUnknownStatus         uint32 = 0 // The status is unknown
+	// NetSetupUnjoined              uint32 = 1 // The computer is not joined to a domain or workgroup
+	// NetSetupWorkgroupName         uint32 = 2 // The computer is joined to a workgroup
+	// NetSetupDomainName            uint32 = 3 // The computer is joined to a domain
+	//
+	// We only care about NetSetupDomainName.
 	domainName := windows.UTF16PtrToString(domain)
 	logger.Debug().Msgf(
-		"Domain join status: domain=%s status=%d (Unknown=0, Workgroup=1, Domain=2, CloudDomain=3)",
-		domainName,
-		status,
-	)
+		"Domain join status: domain=%s status=%d (UnknownStatus=0, Unjoined=1, WorkgroupName=2, DomainName=3)",
+		domainName, status)
 
-	// Consider domain or cloud domain as domain-joined
-	isDomain := status == NetSetupDomain || status == NetSetupCloudDomain
-	logger.Debug().Msgf(
-		"Is domain joined? status=%d, traditional=%v, cloud=%v, result=%v",
-		status,
-		status == NetSetupDomain,
-		status == NetSetupCloudDomain,
-		isDomain,
-	)
+	isDomain := status == syscall.NetSetupDomainName
+	logger.Debug().Msgf("Is domain joined? status=%d, result=%v", status, isDomain)
 
 	return isDomain
 }
