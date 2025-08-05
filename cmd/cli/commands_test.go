@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -10,20 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupTestCLI initializes the CLI for testing, ensuring it's only done once
-var cliInitOnce sync.Once
-
-func setupTestCLI() {
-	cliInitOnce.Do(func() {
-		initCLI()
-	})
-}
-
 // TestBasicCommandStructure tests the actual root command structure
 func TestBasicCommandStructure(t *testing.T) {
-	// Test the actual global rootCmd that's used in the application
-	// Initialize the CLI to set up the root command
-	setupTestCLI()
+	// Test the actual root command that's returned from initCLI()
+	rootCmd := initCLI()
 
 	// Test that root command has basic properties
 	assert.Equal(t, "ctrld", rootCmd.Use)
@@ -93,7 +82,7 @@ func TestServiceCommandSubCommands(t *testing.T) {
 // TestCommandHelp tests basic help functionality
 func TestCommandHelp(t *testing.T) {
 	// Initialize the CLI to set up the root command
-	setupTestCLI()
+	rootCmd := initCLI()
 
 	// Test help command execution
 	var buf bytes.Buffer
@@ -109,7 +98,7 @@ func TestCommandHelp(t *testing.T) {
 // TestCommandVersion tests version command
 func TestCommandVersion(t *testing.T) {
 	// Initialize the CLI to set up the root command
-	setupTestCLI()
+	rootCmd := initCLI()
 
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -125,7 +114,7 @@ func TestCommandVersion(t *testing.T) {
 // TestCommandErrorHandling tests error handling
 func TestCommandErrorHandling(t *testing.T) {
 	// Initialize the CLI to set up the root command
-	setupTestCLI()
+	rootCmd := initCLI()
 
 	// Test invalid flag instead of invalid command
 	rootCmd.SetArgs([]string{"--invalid-flag"})
@@ -136,7 +125,7 @@ func TestCommandErrorHandling(t *testing.T) {
 // TestCommandFlags tests flag functionality
 func TestCommandFlags(t *testing.T) {
 	// Initialize the CLI to set up the root command
-	setupTestCLI()
+	rootCmd := initCLI()
 
 	// Test that root command has expected flags
 	verboseFlag := rootCmd.PersistentFlags().Lookup("verbose")
@@ -151,7 +140,7 @@ func TestCommandFlags(t *testing.T) {
 // TestCommandExecution tests basic command execution
 func TestCommandExecution(t *testing.T) {
 	// Initialize the CLI to set up the root command
-	setupTestCLI()
+	rootCmd := initCLI()
 
 	// Test that root command can be executed (help command)
 	var buf bytes.Buffer
@@ -167,7 +156,7 @@ func TestCommandExecution(t *testing.T) {
 // TestCommandArgs tests argument handling
 func TestCommandArgs(t *testing.T) {
 	// Initialize the CLI to set up the root command
-	setupTestCLI()
+	rootCmd := initCLI()
 
 	// Test that root command can handle arguments properly
 	// Test with no args (should succeed)
@@ -183,7 +172,7 @@ func TestCommandArgs(t *testing.T) {
 // TestCommandSubcommands tests subcommand functionality
 func TestCommandSubcommands(t *testing.T) {
 	// Initialize the CLI to set up the root command
-	setupTestCLI()
+	rootCmd := initCLI()
 
 	// Test that root command has subcommands
 	commands := rootCmd.Commands()

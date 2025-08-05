@@ -304,7 +304,7 @@ func (p *prog) apiConfigReload() {
 
 	doReloadApiConfig := func(forced bool, logger *ctrld.Logger) {
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-		resolverConfig, err := controld.FetchResolverConfig(loggerCtx, cdUID, rootCmd.Version, cdDev)
+		resolverConfig, err := controld.FetchResolverConfig(loggerCtx, cdUID, appVersion, cdDev)
 		selfUninstallCheck(err, p, logger)
 		if err != nil {
 			logger.Warn().Err(err).Msg("could not fetch resolver config")
@@ -362,7 +362,7 @@ func (p *prog) apiConfigReload() {
 			}
 			if cfgErr != nil {
 				logger.Warn().Err(err).Msg("skipping invalid custom config")
-				if _, err := controld.UpdateCustomLastFailed(loggerCtx, cdUID, rootCmd.Version, cdDev, true); err != nil {
+				if _, err := controld.UpdateCustomLastFailed(loggerCtx, cdUID, appVersion, cdDev, true); err != nil {
 					logger.Error().Err(err).Msg("could not mark custom last update failed")
 				}
 				return
