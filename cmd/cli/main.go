@@ -60,7 +60,7 @@ func init() {
 
 func Main() {
 	ctrld.InitConfig(v, "ctrld")
-	initCLI()
+	rootCmd := initCLI()
 	if err := rootCmd.Execute(); err != nil {
 		mainLog.Load().Error().Msg(err.Error())
 		os.Exit(1)

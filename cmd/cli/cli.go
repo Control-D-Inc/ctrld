@@ -61,6 +61,8 @@ var (
 	defaultConfigFile    = "ctrld.toml"
 	rootCertPool         *x509.CertPool
 	errSelfCheckNoAnswer = errors.New("no response from ctrld listener. You can try to re-launch with flag --skip_self_checks")
+	// Store version once during init to avoid repeated calls to curVersion()
+	appVersion = curVersion()
 )
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains"}
@@ -83,15 +85,6 @@ _/ ___\   __\_  __ \  |   / __ |
      \/ dns forwarding proxy  \/
 `
 
-var rootCmd = &cobra.Command{
-	Use:     "ctrld",
-	Short:   strings.TrimLeft(rootShortDesc, "\n"),
-	Version: curVersion(),
-	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		initConsoleLogging()
-	},
-}
-
 func curVersion() string {
 	if version != "dev" && !strings.HasPrefix(version, "v") {
 		version = "v" + version
@@ -105,11 +98,20 @@ func curVersion() string {
 	return fmt.Sprintf("%s-%s", version, commit)
 }
 
-func initCLI() {
+func initCLI() *cobra.Command {
 	// Enable opening via explorer.exe on Windows.
 	// See: https://github.com/spf13/cobra/issues/844.
 	cobra.MousetrapHelpText = ""
 	cobra.EnableCommandSorting = false
+
+	rootCmd := &cobra.Command{
+		Use:     "ctrld",
+		Short:   strings.TrimLeft(rootShortDesc, "\n"),
+		Version: appVersion,
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			initConsoleLogging()
+		},
+	}
 
 	rootCmd.PersistentFlags().CountVarP(
 		&verbose,
@@ -132,6 +134,8 @@ func initCLI() {
 	InitClientsCmd(rootCmd)
 	InitUpgradeCmd(rootCmd)
 	InitLogCmd(rootCmd)
+
+	return rootCmd
 }
 
 // isMobile reports whether the current OS is a mobile platform.
@@ -603,12 +607,12 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
 	bo.LogLongerThan = 30 * time.Second
 	ctx := ctrld.LoggerCtx(context.Background(), logger)
-	resolverConfig, err := controld.FetchResolverConfig(ctx, cdUID, rootCmd.Version, cdDev)
+	resolverConfig, err := controld.FetchResolverConfig(ctx, cdUID, appVersion, cdDev)
 	for {
 		if errUrlNetworkError(err) {
 			bo.BackOff(ctx, err)
 			logger.Warn().Msg("could not fetch resolver using bootstrap DNS, retrying...")
-			resolverConfig, err = controld.FetchResolverConfig(ctx, cdUID, rootCmd.Version, cdDev)
+			resolverConfig, err = controld.FetchResolverConfig(ctx, cdUID, appVersion, cdDev)
 			continue
 		}
 		break
@@ -1391,7 +1395,7 @@ func cdUIDFromProvToken() string {
 	req := &controld.UtilityOrgRequest{ProvToken: cdOrg, Hostname: customHostname}
 	// Process provision token if provided.
 	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
-	resolverConfig, err := controld.FetchResolverUID(loggerCtx, req, rootCmd.Version, cdDev)
+	resolverConfig, err := controld.FetchResolverUID(loggerCtx, req, appVersion, cdDev)
 	if err != nil {
 		mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid with provision token: %s", cdOrg)
 	}
@@ -1715,7 +1719,7 @@ func runningIface(s service.Service) *ifaceResponse {
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
 func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
-	rc, err := controld.FetchResolverConfig(loggerCtx, cdUID, rootCmd.Version, cdDev)
+	rc, err := controld.FetchResolverConfig(loggerCtx, cdUID, appVersion, cdDev)
 	if err != nil {
 		logger := mainLog.Load().Fatal()
 		if !fatal {
