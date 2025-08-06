@@ -53,6 +53,9 @@ var EncodeArchNameMap = map[string]string{
 var DecodeArchNameMap = map[string]string{}
 
 func init() {
+	// Create reverse mappings for OS and architecture names
+	// This is needed because the API expects encoded values, but we need to decode
+	// them back to their original form for processing
 	for k, v := range EncodeOsNameMap {
 		DecodeOsNameMap[v] = k
 	}

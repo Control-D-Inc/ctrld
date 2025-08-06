@@ -126,10 +126,11 @@ func InitializeOsResolver(ctx context.Context, guardAgainstNoNameservers bool) [
 // - First available LAN servers are saved and store.
 // - Later calls, if no LAN servers available, the saved servers above will be used.
 func initializeOsResolver(servers []string) []string {
-
 	var lanNss, publicNss []string
 
-	// First categorize servers
+	// Categorize DNS servers into LAN and public servers
+	// This is needed because LAN servers should be tried first for better performance,
+	// while public servers serve as fallback for external queries
 	for _, ns := range servers {
 		addr, err := netip.ParseAddr(ns)
 		if err != nil {
@@ -143,6 +144,8 @@ func initializeOsResolver(servers []string) []string {
 		}
 	}
 
+	// Ensure we have at least one public DNS server as fallback
+	// This prevents DNS resolution failures when no public servers are configured
 	if len(publicNss) == 0 {
 		publicNss = []string{controldPublicDnsWithPort}
 	}

@@ -141,6 +141,9 @@ func (d *dhcp) lookupIPByHostname(name string, v6 bool) string {
 			return true
 		}
 		if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
+			// Categorize addresses into RFC1918 (private) and public
+			// RFC1918 addresses are prioritized because they're more likely to be
+			// the actual client IP in most network configurations
 			if addr.IsPrivate() {
 				rfc1918Addrs = append(rfc1918Addrs, addr)
 			} else {
@@ -264,6 +267,8 @@ func (d *dhcp) iscDHCPReadClientInfoReader(reader io.Reader) error {
 		}
 		switch fields[0] {
 		case "lease":
+			// Normalize IP address to lowercase for consistent comparison
+			// DHCP lease files may contain mixed-case IP addresses
 			ip = normalizeIP(strings.ToLower(fields[1]))
 			if net.ParseIP(ip) == nil {
 				d.logger.Warn().Msgf("invalid ip address entry: %q", ip)
@@ -271,6 +276,8 @@ func (d *dhcp) iscDHCPReadClientInfoReader(reader io.Reader) error {
 			}
 		case "hardware":
 			if len(fields) >= 3 {
+				// Convert MAC to lowercase and remove trailing semicolon
+				// DHCP lease files use semicolon-terminated MAC addresses
 				mac = strings.ToLower(strings.TrimRight(fields[2], ";"))
 				if _, err := net.ParseMAC(mac); err != nil {
 					// Invalid dhcp, skip.
@@ -278,6 +285,8 @@ func (d *dhcp) iscDHCPReadClientInfoReader(reader io.Reader) error {
 				}
 			}
 		case "client-hostname":
+			// Remove quotes and semicolons from hostname
+			// DHCP lease files may quote hostnames and add semicolons
 			hostname = strings.Trim(fields[1], `";`)
 		}
 	}

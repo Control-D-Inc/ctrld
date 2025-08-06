@@ -99,9 +99,13 @@ type Table struct {
 
 func NewTable(cfg *ctrld.Config, selfIP, cdUID string, ns []string, logger *ctrld.Logger) *Table {
 	refreshInterval := cfg.Service.DiscoverRefreshInterval
+	// Set default refresh interval if not configured
+	// This ensures client discovery continues to work even without explicit configuration
 	if refreshInterval <= 0 {
 		refreshInterval = 2 * 60 // 2 minutes
 	}
+	// Use no-op logger if none provided
+	// This prevents nil pointer dereferences when logging is not configured
 	if logger == nil {
 		logger = ctrld.NopLogger
 	}
@@ -274,6 +278,7 @@ func (t *Table) init() {
 					host, port = h, p
 				}
 				// Only use valid ip:port pair.
+				// Invalid nameservers can cause PTR discovery to fail silently
 				if _, portErr := strconv.Atoi(port); portErr == nil && port != "0" && net.ParseIP(host) != nil {
 					nss = append(nss, net.JoinHostPort(host, port))
 				} else {
@@ -465,6 +470,7 @@ func (t *Table) ListClients() []*Client {
 	for _, c := range ipMap {
 		// If we found a client with empty hostname, use hostname from
 		// an existed client which has the same MAC address.
+		// This helps fill in missing hostnames when multiple IPs share the same MAC
 		if cFromMac := clientsByMAC[c.Mac]; cFromMac != nil && c.Hostname == "" {
 			c.Hostname = cFromMac.Hostname
 		}

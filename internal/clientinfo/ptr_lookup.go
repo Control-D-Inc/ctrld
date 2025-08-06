@@ -105,11 +105,9 @@ func (p *ptrDiscover) lookupIPByHostname(name string, v6 bool) string {
 		if value == name {
 			if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
 				ip = addr.String()
-				//lint:ignore S1008 This is used for readable.
-				if addr.IsLoopback() { // Continue searching if this is loopback address.
-					return true
-				}
-				return false
+				// Continue searching if this is a loopback address
+				// We prefer non-loopback addresses as they're more likely to be the actual client IP
+				return addr.IsLoopback() // Continue searching if this is loopback address.
 			}
 		}
 		return true
