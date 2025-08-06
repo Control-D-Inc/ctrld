@@ -165,6 +165,9 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 
 					if info.DomainControllerAddress != nil {
 						dcAddr := windows.UTF16PtrToString(info.DomainControllerAddress)
+						// Remove "\\" prefix from domain controller address
+						// Windows domain controller addresses are returned with "\\" prefix,
+						// but we need just the IP address for DNS resolution
 						dcAddr = strings.TrimPrefix(dcAddr, "\\\\")
 						logger.Debug().Msgf("Found domain controller address: %s", dcAddr)
 						if ip := net.ParseIP(dcAddr); ip != nil {

@@ -351,6 +351,9 @@ func (uc *UpstreamConfig) Init(ctx context.Context) {
 		}
 	}
 	if uc.IPStack == "" {
+		// Set default IP stack based on upstream type
+		// Control-D upstreams use split stack for better IPv4/IPv6 handling,
+		// while other upstreams use both stacks for maximum compatibility
 		if uc.IsControlD() {
 			uc.IPStack = IpStackSplit
 		} else {

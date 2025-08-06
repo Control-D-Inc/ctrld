@@ -233,6 +233,8 @@ func apiTransport(loggerCtx context.Context, cdDev bool) *http.Transport {
 		}
 
 		// Separate IPv4 and IPv6 addresses
+		// This separation is needed because different network stacks may have different
+		// connectivity to IPv4 vs IPv6, so we try them separately for better reliability
 		var ipv4s, ipv6s []string
 		for _, ip := range ips {
 			if strings.Contains(ip, ":") {

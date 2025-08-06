@@ -219,6 +219,8 @@ func (m *mdns) probe(conns []*net.UDPConn, remoteAddr net.Addr) error {
 	for _, conn := range conns {
 		_ = conn.SetWriteDeadline(time.Now().Add(time.Second * 30))
 		if _, werr := conn.WriteTo(buf, remoteAddr); werr != nil {
+			// Capture the last write error for reporting
+			// Multiple connections may fail, but we only report the last error
 			err = werr
 		}
 	}

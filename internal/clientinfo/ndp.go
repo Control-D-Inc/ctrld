@@ -174,6 +174,9 @@ func (nd *ndpDiscover) scanUnix(r io.Reader) {
 		}
 		if mac := parseMAC(fields[1]); mac != "" {
 			ip := fields[0]
+			// Remove interface suffix from IPv6 addresses
+			// Unix systems append interface names to IPv6 addresses (e.g., "fe80::1%eth0")
+			// This suffix needs to be removed for proper IP parsing
 			if idx := strings.IndexByte(ip, '%'); idx != -1 {
 				ip = ip[:idx]
 			}
@@ -192,11 +195,15 @@ func normalizeMac(mac string) string {
 		return mac
 	}
 	// Windows use "-" instead of ":" as separator.
+	// This normalization is needed because different operating systems use different
+	// separators for MAC addresses, but net.ParseMAC expects ":" format
 	mac = strings.ReplaceAll(mac, "-", ":")
 	parts := strings.Split(mac, ":")
 	if len(parts) != 6 {
 		return ""
 	}
+	// Pad single-digit hex values with leading zero
+	// This ensures consistent formatting for MAC address parsing
 	for i, c := range parts {
 		if len(c) == 1 {
 			parts[i] = "0" + c

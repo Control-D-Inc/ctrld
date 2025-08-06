@@ -165,6 +165,8 @@ func parseHostEntriesConfFromReader(r io.Reader) map[string][]string {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if after, found := strings.CutPrefix(line, "local-zone:"); found {
+			// Extract local zone name for domain suffix removal
+			// This is needed because unbound appends the local zone to hostnames
 			after = strings.TrimSpace(after)
 			fields := strings.Fields(after)
 			if len(fields) > 1 {
@@ -177,6 +179,8 @@ func parseHostEntriesConfFromReader(r io.Reader) map[string][]string {
 		if !found {
 			continue
 		}
+		// Clean up the parsed data by removing whitespace and quotes
+		// This ensures consistent formatting for hostname processing
 		after = strings.TrimSpace(after)
 		after = strings.Trim(after, `"`)
 		fields := strings.Fields(after)
@@ -184,6 +188,8 @@ func parseHostEntriesConfFromReader(r io.Reader) map[string][]string {
 			continue
 		}
 		ip := fields[0]
+		// Remove local zone suffix from hostname for cleaner lookups
+		// Unbound adds the local zone to hostnames, but we want just the base name
 		name := strings.TrimSuffix(fields[1], "."+localZone)
 		hostsMap[ip] = append(hostsMap[ip], name)
 	}

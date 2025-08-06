@@ -86,12 +86,18 @@ _/ ___\   __\_  __ \  |   / __ |
 `
 
 func curVersion() string {
+	// Ensure version has proper "v" prefix for semantic versioning
+	// This is needed because some build systems may provide version without the "v" prefix
 	if version != "dev" && !strings.HasPrefix(version, "v") {
 		version = "v" + version
 	}
+	// Return version directly if it's not empty and not a dev build
+	// This avoids unnecessary commit hash concatenation for release versions
 	if version != "" && version != "dev" {
 		return version
 	}
+	// Truncate commit hash to 7 characters for readability
+	// Git commit hashes are typically 40 characters, but 7 is sufficient for identification
 	if len(commit) > 7 {
 		commit = commit[:7]
 	}
@@ -608,6 +614,10 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	bo.LogLongerThan = 30 * time.Second
 	ctx := ctrld.LoggerCtx(context.Background(), logger)
 	resolverConfig, err := controld.FetchResolverConfig(ctx, cdUID, appVersion, cdDev)
+
+	// Retry logic for network errors using bootstrap DNS
+	// This is needed because the initial DNS resolution might fail due to network issues
+	// or DNS server unavailability, but bootstrap DNS can provide alternative resolution
 	for {
 		if errUrlNetworkError(err) {
 			bo.BackOff(ctx, err)
@@ -632,6 +642,8 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
 
+	// Reset config to ensure clean state before applying Control-D settings
+	// This prevents mixing of old configuration with new Control-D settings
 	*cfg = ctrld.Config{}
 	// Fetch config, unmarshal to cfg.
 	if resolverConfig.Ctrld.CustomConfig != "" {
@@ -662,6 +674,8 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 		return ""
 	}
 
+	// Initialize upstream configuration with Control-D resolver settings
+	// This creates the primary DNS resolver configuration for the proxy
 	cfg.Upstream = make(map[string]*ctrld.UpstreamConfig)
 	cfg.Upstream["0"] = &ctrld.UpstreamConfig{
 		BootstrapIP: bootstrapIP(resolverConfig.DOH),
@@ -669,10 +683,16 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 		Type:        cdUpstreamProto,
 		Timeout:     5000,
 	}
+
+	// Create exclusion rules for domains that should bypass Control-D
+	// These domains will be resolved using the system's default DNS servers
 	rules := make([]ctrld.Rule, 0, len(resolverConfig.Exclude))
 	for _, domain := range resolverConfig.Exclude {
 		rules = append(rules, ctrld.Rule{domain: []string{}})
 	}
+
+	// Initialize listener configuration with policy rules
+	// This sets up the DNS proxy listener with the exclusion policy
 	cfg.Listener = make(map[string]*ctrld.ListenerConfig)
 	lc := &ctrld.ListenerConfig{
 		Policy: &ctrld.ListenerPolicyConfig{
@@ -1175,6 +1195,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 	il := mainLog.Load()
 	if isMobile() {
 		// On Mobile, only use first listener, ignore others.
+		// This is needed because mobile platforms have limited resources and
+		// multiple listeners can cause conflicts with system DNS services and
+		// likely don't work anyway.
 		firstLn := cfg.FirstListener()
 		for k := range cfg.Listener {
 			if cfg.Listener[k] != firstLn {
@@ -1182,6 +1205,8 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 			}
 		}
 		if cdMode {
+			// Use mobile-specific listener settings for Control-D mode
+			// Mobile platforms require specific IP/port combinations to avoid permission issues.
 			firstLn.IP = mobileListenerIp()
 			firstLn.Port = mobileListenerPort()
 			clear(lcc)
@@ -1273,6 +1298,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 				ok = false
 				break
 			}
+
+			// Try standard port 53 first for better compatibility
+			// This is the most common DNS port and has the highest chance of working
 			if tryAllPort53 {
 				tryAllPort53 = false
 				if check.IP {
@@ -1286,6 +1314,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 				}
 				continue
 			}
+
+			// Try localhost as fallback for security and compatibility
+			// Localhost is often available even when other addresses are blocked
 			if tryLocalhost {
 				tryLocalhost = false
 				if check.IP {
@@ -1299,6 +1330,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 				}
 				continue
 			}
+
+			// Try random IP/port combinations as last resort
+			// This ensures the service can start even in constrained environments
 			if check.IP && !isZeroIP { // for "0.0.0.0" or "::", we only need to try new port.
 				listener.IP = randomLocalIP()
 			} else {
@@ -1326,6 +1360,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 	}
 
 	// Specific case for systemd-resolved.
+	// systemd-resolved has specific requirements for DNS forwarding that we must handle
 	if useSystemdResolved {
 		if listener := cfg.FirstListener(); listener != nil && listener.Port == 53 {
 			n := listeners[0]
