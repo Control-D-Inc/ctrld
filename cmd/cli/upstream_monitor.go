@@ -30,6 +30,7 @@ type upstreamMonitor struct {
 	failureTimerActive map[string]bool
 }
 
+// newUpstreamMonitor creates a new upstream monitor instance
 func newUpstreamMonitor(cfg *ctrld.Config, logger *ctrld.Logger) *upstreamMonitor {
 	um := &upstreamMonitor{
 		cfg:                cfg,

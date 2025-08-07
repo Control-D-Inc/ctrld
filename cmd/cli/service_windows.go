@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
+// hasElevatedPrivilege checks if the current process has elevated privileges on Windows
 func hasElevatedPrivilege() (bool, error) {
 	var sid *windows.SID
 	if err := windows.AllocateAndInitializeSid(
@@ -93,6 +94,7 @@ func ConfigureWindowsServiceFailureActions(serviceName string) error {
 	return nil
 }
 
+// openLogFile opens a log file with the specified mode on Windows
 func openLogFile(path string, mode int) (*os.File, error) {
 	if len(path) == 0 {
 		return nil, &os.PathError{Path: path, Op: "open", Err: syscall.ERROR_FILE_NOT_FOUND}

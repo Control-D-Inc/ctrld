@@ -10,6 +10,7 @@ import (
 )
 
 // filterEmptyStrings removes empty strings from a slice
+// This is used to clean up command line arguments and configuration values
 func filterEmptyStrings(slice []string) []string {
 	var result []string
 	for _, s := range slice {
@@ -21,17 +22,20 @@ func filterEmptyStrings(slice []string) []string {
 }
 
 // ServiceCommand handles service-related operations
+// This encapsulates all service management functionality for the CLI
 type ServiceCommand struct {
 	serviceManager *ServiceManager
 }
 
 // initializeServiceManager creates a service manager with default configuration
+// This sets up the basic service infrastructure needed for all service operations
 func (sc *ServiceCommand) initializeServiceManager() (service.Service, *prog, error) {
 	svcConfig := sc.createServiceConfig()
 	return sc.initializeServiceManagerWithServiceConfig(svcConfig)
 }
 
 // initializeServiceManagerWithServiceConfig creates a service manager with the given configuration
+// This allows for custom service configuration while maintaining the same initialization pattern
 func (sc *ServiceCommand) initializeServiceManagerWithServiceConfig(svcConfig *service.Config) (service.Service, *prog, error) {
 	p := &prog{}
 
@@ -45,6 +49,7 @@ func (sc *ServiceCommand) initializeServiceManagerWithServiceConfig(svcConfig *s
 }
 
 // newService creates a new service instance using the provided program and configuration.
+// This abstracts the service creation process for different operating systems
 func (sc *ServiceCommand) newService(p *prog, svcConfig *service.Config) (service.Service, error) {
 	s, err := newService(p, svcConfig)
 	if err != nil {
@@ -54,11 +59,13 @@ func (sc *ServiceCommand) newService(p *prog, svcConfig *service.Config) (servic
 }
 
 // NewServiceCommand creates a new service command handler
+// This provides a clean factory method for creating service command instances
 func NewServiceCommand() *ServiceCommand {
 	return &ServiceCommand{}
 }
 
 // createServiceConfig creates a properly initialized service configuration
+// This ensures consistent service naming and description across all platforms
 func (sc *ServiceCommand) createServiceConfig() *service.Config {
 	return &service.Config{
 		Name:        ctrldServiceName,
@@ -69,6 +76,7 @@ func (sc *ServiceCommand) createServiceConfig() *service.Config {
 }
 
 // InitServiceCmd creates the service command with proper logic and aliases
+// This sets up all service-related subcommands with appropriate permissions and flags
 func InitServiceCmd(rootCmd *cobra.Command) *cobra.Command {
 	// Create service command handlers
 	sc := NewServiceCommand()

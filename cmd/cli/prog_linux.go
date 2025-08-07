@@ -21,6 +21,7 @@ func init() {
 	}
 }
 
+// setDependencies sets service dependencies for Linux
 func setDependencies(svc *service.Config) {
 	svc.Dependencies = []string{
 		"Wants=network-online.target",
@@ -37,6 +38,7 @@ func setDependencies(svc *service.Config) {
 	}
 }
 
+// setWorkingDirectory sets the working directory for the service
 func setWorkingDirectory(svc *service.Config, dir string) {
 	svc.WorkingDirectory = dir
 }

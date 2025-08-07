@@ -13,15 +13,18 @@ import (
 
 // parseResolvConfNameservers reads the resolv.conf file and returns the nameservers found.
 // Returns nil if no nameservers are found.
+// This function parses the system DNS configuration to understand current nameserver settings
 func (p *prog) parseResolvConfNameservers(path string) ([]string, error) {
 	return resolvconffile.NameserversFromFile(path)
 }
 
 // watchResolvConf watches any changes to /etc/resolv.conf file,
 // and reverting to the original config set by ctrld.
+// This ensures that DNS settings are not overridden by other applications or system processes
 func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn func(iface *net.Interface, ns []netip.Addr) error) {
 	resolvConfPath := "/etc/resolv.conf"
 	// Evaluating symbolics link to watch the target file that /etc/resolv.conf point to.
+	// This handles systems where resolv.conf is a symlink to another location
 	if rp, _ := filepath.EvalSymlinks(resolvConfPath); rp != "" {
 		resolvConfPath = rp
 	}
@@ -35,6 +38,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 
 	// We watch /etc instead of /etc/resolv.conf directly,
 	// see: https://github.com/fsnotify/fsnotify#watching-a-file-doesnt-work-well
+	// This is necessary because some systems don't properly notify on file changes
 	watchDir := filepath.Dir(resolvConfPath)
 	if err := watcher.Add(watchDir); err != nil {
 		p.Warn().Err(err).Msgf("could not add %s to watcher list", watchDir)
@@ -62,6 +66,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 				p.Debug().Msgf("/etc/resolv.conf changes detected, reading changes...")
 
 				// Convert expected nameservers to strings for comparison
+				// This allows us to detect when the resolv.conf has been modified
 				expectedNS := make([]string, len(ns))
 				for i, addr := range ns {
 					expectedNS[i] = addr.String()
@@ -79,11 +84,13 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 					}
 
 					// If we found nameservers, break out of retry loop
+					// This handles cases where the file is being written but not yet complete
 					if len(foundNS) > 0 {
 						break
 					}
 
 					// Only retry if we found no nameservers
+					// This handles temporary file states during updates
 					if retry < maxRetries-1 {
 						p.Debug().Msgf("resolv.conf has no nameserver entries, retry %d/%d in 2 seconds", retry+1, maxRetries)
 						select {

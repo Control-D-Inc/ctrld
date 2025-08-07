@@ -23,6 +23,7 @@ systemd-resolved=false
 var networkManagerCtrldConfFile = filepath.Join(nmConfDir, nmCtrldConfFilename)
 
 // hasNetworkManager reports whether NetworkManager executable found.
+// hasNetworkManager checks if NetworkManager is available on the system
 func hasNetworkManager() bool {
 	exe, _ := exec.LookPath("NetworkManager")
 	return exe != ""

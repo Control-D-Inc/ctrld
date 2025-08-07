@@ -149,6 +149,7 @@ func ensureSystemdKillMode(r io.Reader) (opts []*unit.UnitOption, change bool) {
 	return opts, change
 }
 
+// newLaunchd creates a new launchd service wrapper
 func newLaunchd(s service.Service) *launchd {
 	return &launchd{
 		Service:      s,
@@ -178,6 +179,7 @@ type task struct {
 	Name         string
 }
 
+// doTasks executes a list of tasks and returns success status
 func doTasks(tasks []task) bool {
 	for _, task := range tasks {
 		mainLog.Load().Debug().Msgf("Running task %s", task.Name)
@@ -196,6 +198,7 @@ func doTasks(tasks []task) bool {
 	return true
 }
 
+// checkHasElevatedPrivilege checks if the process has elevated privileges and exits if not
 func checkHasElevatedPrivilege() {
 	ok, err := hasElevatedPrivilege()
 	if err != nil {
@@ -208,6 +211,7 @@ func checkHasElevatedPrivilege() {
 	}
 }
 
+// unixSystemVServiceStatus checks the status of a Unix System V service
 func unixSystemVServiceStatus() (service.Status, error) {
 	out, err := exec.Command("/etc/init.d/ctrld", "status").CombinedOutput()
 	if err != nil {

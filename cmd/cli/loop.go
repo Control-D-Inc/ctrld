@@ -138,7 +138,7 @@ func (p *prog) checkDnsLoopTicker(ctx context.Context) {
 	}
 }
 
-// loopTestMsg generates DNS message for checking loop.
+// loopTestMsg creates a DNS test message for loop detection
 func loopTestMsg(uid string) *dns.Msg {
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(uid+loopTestDomain), loopTestQtype)

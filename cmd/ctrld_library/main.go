@@ -43,7 +43,7 @@ func (c *Controller) Start(CdUID string, HomeDir string, UpstreamProto string, l
 	}
 }
 
-// As workaround to avoid circular dependency between cli and ctrld_library module
+// mapCallback maps the AppCallback interface to cli.AppCallback to avoid circular dependency
 func mapCallback(callback AppCallback) cli.AppCallback {
 	return cli.AppCallback{
 		HostName: func() string {

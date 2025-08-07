@@ -8,6 +8,7 @@ import (
 
 const nextdnsURL = "https://dns.nextdns.io"
 
+// generateNextDNSConfig generates NextDNS configuration for the given UID
 func generateNextDNSConfig(uid string) {
 	if uid == "" {
 		return

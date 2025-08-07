@@ -37,12 +37,14 @@ type ifaceResponse struct {
 	OK   bool   `json:"ok"`
 }
 
+// controlServer represents an HTTP server for handling control requests
 type controlServer struct {
 	server *http.Server
 	mux    *http.ServeMux
 	addr   string
 }
 
+// newControlServer creates a new control server instance
 func newControlServer(addr string) (*controlServer, error) {
 	mux := http.NewServeMux()
 	s := &controlServer{
@@ -338,6 +340,7 @@ func (p *prog) registerControlServerHandler() {
 	}))
 }
 
+// jsonResponse wraps an HTTP handler to set JSON content type
 func jsonResponse(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
