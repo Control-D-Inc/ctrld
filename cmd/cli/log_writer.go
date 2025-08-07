@@ -16,12 +16,30 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 )
 
+// Log writer constants for buffer management and log formatting
 const (
+	// logWriterSize is the default buffer size for log writers
+	// This provides sufficient space for runtime logs without excessive memory usage
 	logWriterSize          = 1024 * 1024 * 5 // 5 MB
+
+	// logWriterSmallSize is used for memory-constrained environments
+	// This reduces memory footprint while still maintaining log functionality
 	logWriterSmallSize     = 1024 * 1024 * 1 // 1 MB
+
+	// logWriterInitialSize is the initial buffer allocation
+	// This provides immediate space for early log entries
 	logWriterInitialSize   = 32 * 1024       // 32 KB
+
+	// logWriterSentInterval controls how often logs are sent to external systems
+	// This balances real-time logging with system performance
 	logWriterSentInterval  = time.Minute
+
+	// logWriterInitEndMarker marks the end of initialization logs
+	// This helps separate startup logs from runtime logs
 	logWriterInitEndMarker = "\n\n=== INIT_END ===\n\n"
+
+	// logWriterLogEndMarker marks the end of log sections
+	// This provides clear boundaries for log parsing and analysis
 	logWriterLogEndMarker  = "\n\n=== LOG_END ===\n\n"
 )
 
@@ -31,6 +49,8 @@ const (
 // Note: WARN messages will also display as "NOTICE" because they share the same level value.
 // This is the intended behavior for visual distinction.
 
+// noticeLevelEncoder provides custom level encoding for NOTICE level
+// This ensures NOTICE messages are clearly distinguished from other log levels
 func noticeLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	switch l {
 	case ctrld.NoticeLevel:
@@ -40,6 +60,8 @@ func noticeLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	}
 }
 
+// noticeColorLevelEncoder provides colored level encoding for NOTICE level
+// This uses cyan color to make NOTICE messages visually distinct in terminal output
 func noticeColorLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	switch l {
 	case ctrld.NoticeLevel:
@@ -49,21 +71,28 @@ func noticeColorLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder)
 	}
 }
 
+// logViewResponse represents the response structure for log viewing requests
+// This provides a consistent JSON format for log data retrieval
 type logViewResponse struct {
 	Data string `json:"data"`
 }
 
+// logSentResponse represents the response structure for log sending operations
+// This includes size information and error details for debugging
 type logSentResponse struct {
 	Size  int64  `json:"size"`
 	Error string `json:"error"`
 }
 
+// logReader provides read access to log data with size information
+// This encapsulates the log reading functionality for external consumers
 type logReader struct {
 	r    io.ReadCloser
 	size int64
 }
 
 // logWriter is an internal buffer to keep track of runtime log when no logging is enabled.
+// This provides in-memory log storage for debugging and monitoring purposes
 type logWriter struct {
 	mu   sync.Mutex
 	buf  bytes.Buffer
@@ -71,30 +100,37 @@ type logWriter struct {
 }
 
 // newLogWriter creates an internal log writer.
+// This provides the default log writer with standard buffer size
 func newLogWriter() *logWriter {
 	return newLogWriterWithSize(logWriterSize)
 }
 
 // newSmallLogWriter creates an internal log writer with small buffer size.
+// This is used in memory-constrained environments or for temporary logging
 func newSmallLogWriter() *logWriter {
 	return newLogWriterWithSize(logWriterSmallSize)
 }
 
 // newLogWriterWithSize creates an internal log writer with a given buffer size.
+// This allows customization of log buffer size based on specific requirements
 func newLogWriterWithSize(size int) *logWriter {
 	lw := &logWriter{size: size}
 	return lw
 }
 
+// Write implements io.Writer interface for logWriter
+// This manages buffer overflow by discarding old data while preserving important markers
 func (lw *logWriter) Write(p []byte) (int, error) {
 	lw.mu.Lock()
 	defer lw.mu.Unlock()
 
 	// If writing p causes overflows, discard old data.
+	// This prevents unbounded memory growth while maintaining recent logs
 	if lw.buf.Len()+len(p) > lw.size {
 		buf := lw.buf.Bytes()
 		haveEndMarker := false
 		// If there's init end marker already, preserve the data til the marker.
+		// This ensures initialization logs are always available for debugging
 		if idx := bytes.LastIndex(buf, []byte(logWriterInitEndMarker)); idx >= 0 {
 			buf = buf[:idx+len(logWriterInitEndMarker)]
 			haveEndMarker = true

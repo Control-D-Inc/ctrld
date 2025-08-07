@@ -27,24 +27,37 @@ import (
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
+// DNS proxy constants for configuration and behavior control
 const (
+	// staleTTL is the TTL for stale cache entries
+	// This allows serving cached responses even when upstreams are temporarily unavailable
 	staleTTL = 60 * time.Second
+
+	// localTTL is the TTL for local network responses
+	// Longer TTL for local queries reduces unnecessary repeated lookups
 	localTTL = 3600 * time.Second
+
 	// EDNS0_OPTION_MAC is dnsmasq EDNS0 code for adding mac option.
 	// https://thekelleys.org.uk/gitweb/?p=dnsmasq.git;a=blob;f=src/dns-protocol.h;h=76ac66a8c28317e9c121a74ab5fd0e20f6237dc8;hb=HEAD#l81
 	// This is also dns.EDNS0LOCALSTART, but define our own constant here for clarification.
+	// This enables MAC address-based client identification for policy routing
 	EDNS0_OPTION_MAC = 0xFDE9
 
 	// selfUninstallMaxQueries is number of REFUSED queries seen before checking for self-uninstallation.
+	// This prevents premature self-uninstallation due to temporary network issues
 	selfUninstallMaxQueries = 32
 )
 
+// osUpstreamConfig defines the default OS resolver configuration
+// This is used as a fallback when all configured upstreams fail
 var osUpstreamConfig = &ctrld.UpstreamConfig{
 	Name:    "OS resolver",
 	Type:    ctrld.ResolverTypeOS,
 	Timeout: 3000,
 }
 
+// privateUpstreamConfig defines the default private resolver configuration
+// This is used for internal network queries that should not go to public resolvers
 var privateUpstreamConfig = &ctrld.UpstreamConfig{
 	Name:    "Private resolver",
 	Type:    ctrld.ResolverTypePrivate,
@@ -52,6 +65,7 @@ var privateUpstreamConfig = &ctrld.UpstreamConfig{
 }
 
 // proxyRequest contains data for proxying a DNS query to upstream.
+// This structure encapsulates all the information needed to process a DNS request
 type proxyRequest struct {
 	msg             *dns.Msg
 	ci              *ctrld.ClientInfo
@@ -63,6 +77,7 @@ type proxyRequest struct {
 }
 
 // proxyResponse contains data for proxying a DNS response from upstream.
+// This structure encapsulates the response and metadata for logging and metrics
 type proxyResponse struct {
 	answer     *dns.Msg
 	upstream   string
@@ -72,6 +87,7 @@ type proxyResponse struct {
 }
 
 // upstreamForResult represents the result of processing rules for a request.
+// This contains the matched policy information for logging and debugging
 type upstreamForResult struct {
 	upstreams      []string
 	matchedPolicy  string
@@ -81,7 +97,9 @@ type upstreamForResult struct {
 	srcAddr        string
 }
 
-func (p *prog) serveDNS(mainCtx context.Context, listenerNum string) error {
+// serveDNS sets up and starts a DNS server on the specified listener, handling DNS queries and network monitoring.
+// This is the main entry point for DNS server functionality
+func (p *prog) serveDNS(ctx context.Context, listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
 		p.Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: failed to allocate listen ip")
@@ -92,11 +110,12 @@ func (p *prog) serveDNS(mainCtx context.Context, listenerNum string) error {
 		p.handleDNSQuery(w, m, listenerNum, listenerConfig)
 	})
 
-	return p.startListeners(mainCtx, listenerConfig, handler)
+	return p.startListeners(ctx, listenerConfig, handler)
 }
 
 // startListeners starts DNS listeners on specified configurations, supporting UDP and TCP protocols.
 // It handles local IPv6, RFC 1918, and specified IP listeners, reacting to stop signals or errors.
+// This function manages the lifecycle of DNS server listeners
 func (p *prog) startListeners(ctx context.Context, cfg *ctrld.ListenerConfig, handler dns.Handler) error {
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -153,6 +172,7 @@ func (p *prog) startListeners(ctx context.Context, cfg *ctrld.ListenerConfig, ha
 }
 
 // handleDNSQuery processes incoming DNS queries, validates client access, and routes the query to appropriate handlers.
+// This is the main entry point for all DNS query processing
 func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum string, listenerConfig *ctrld.ListenerConfig) {
 	p.sema.acquire()
 	defer p.sema.release()
@@ -191,6 +211,7 @@ func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum stri
 }
 
 // handleSpecialDomains processes special domain queries, handles errors, purges cache if necessary, and returns a bool status.
+// This handles internal test domains and cache management commands
 func (p *prog) handleSpecialDomains(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, domain string) bool {
 	switch {
 	case domain == "":
@@ -211,6 +232,7 @@ func (p *prog) handleSpecialDomains(ctx context.Context, w dns.ResponseWriter, m
 }
 
 // standardQueryRequest represents a standard DNS query request with associated context and configuration.
+// This encapsulates all the data needed to process a standard DNS query
 type standardQueryRequest struct {
 	ctx            context.Context
 	writer         dns.ResponseWriter
@@ -221,6 +243,7 @@ type standardQueryRequest struct {
 }
 
 // processStandardQuery handles a standard DNS query by routing it through appropriate upstreams and writing a DNS response.
+// This is the main processing pipeline for normal DNS queries
 func (p *prog) processStandardQuery(req *standardQueryRequest) {
 	remoteIP, _, _ := net.SplitHostPort(req.writer.RemoteAddr().String())
 	ci := p.getClientInfo(remoteIP, req.msg)

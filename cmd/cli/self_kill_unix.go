@@ -12,6 +12,7 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 )
 
+// selfUninstall performs self-uninstallation on Unix platforms
 func selfUninstall(p *prog, logger *ctrld.Logger) {
 	if runtime.GOOS == "linux" {
 		selfUninstallLinux(p, logger)
@@ -37,6 +38,7 @@ func selfUninstall(p *prog, logger *ctrld.Logger) {
 	os.Exit(0)
 }
 
+// selfUninstallLinux performs self-uninstallation on Linux platforms
 func selfUninstallLinux(p *prog, logger *ctrld.Logger) {
 	if uninstallInvalidCdUID(p, logger, true) {
 		logger.Warn().Msgf("service was uninstalled because device %q does not exist", cdUID)

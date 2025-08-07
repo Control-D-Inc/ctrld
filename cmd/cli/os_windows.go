@@ -75,6 +75,7 @@ func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
 	return resetDNS(iface)
 }
 
+// resetDNS resets DNS servers for the specified interface
 func resetDNS(iface *net.Interface) error {
 	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {
@@ -136,6 +137,7 @@ func restoreDNS(iface *net.Interface) (err error) {
 	return err
 }
 
+// currentDNS returns the current DNS servers for the specified interface
 func currentDNS(iface *net.Interface) []string {
 	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {

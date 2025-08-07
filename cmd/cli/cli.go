@@ -67,6 +67,7 @@ var (
 
 var basicModeFlags = []string{"listen", "primary_upstream", "secondary_upstream", "domains"}
 
+// isNoConfigStart checks if the command is using no-config start mode
 func isNoConfigStart(cmd *cobra.Command) bool {
 	for _, flagName := range basicModeFlags {
 		if cmd.Flags().Lookup(flagName).Changed {
@@ -85,6 +86,7 @@ _/ ___\   __\_  __ \  |   / __ |
      \/ dns forwarding proxy  \/
 `
 
+// curVersion returns the current version string
 func curVersion() string {
 	// Ensure version has proper "v" prefix for semantic versioning
 	// This is needed because some build systems may provide version without the "v" prefix
@@ -429,6 +431,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	<-stopCh
 }
 
+// writeConfigFile writes the configuration to a file
 func writeConfigFile(cfg *ctrld.Config) error {
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
@@ -544,6 +547,7 @@ func readBase64Config(configBase64 string) error {
 	return v.ReadConfig(bytes.NewReader(configStr))
 }
 
+// processNoConfigFlags processes flags for no-config mode
 func processNoConfigFlags(noConfigStart bool) {
 	if !noConfigStart {
 		return
@@ -607,6 +611,7 @@ func deactivationPinSet() bool {
 	return cdDeactivationPin.Load() != defaultDeactivationPin
 }
 
+// processCDFlags processes Control D related flags
 func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	logger := mainLog.Load().With().Str("mode", "cd")
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
@@ -743,6 +748,7 @@ func validateCdRemoteConfig(rc *controld.ResolverConfig, cfg *ctrld.Config) erro
 	return v.Unmarshal(&cfg)
 }
 
+// processListenFlag processes the listen flag
 func processListenFlag() {
 	if listenAddress == "" {
 		return
@@ -764,6 +770,7 @@ func processListenFlag() {
 	})
 }
 
+// processLogAndCacheFlags processes log and cache related flags
 func processLogAndCacheFlags() {
 	if logPath != "" {
 		cfg.Service.LogPath = logPath
@@ -779,6 +786,7 @@ func processLogAndCacheFlags() {
 	v.Set("service", cfg.Service)
 }
 
+// netInterface returns the network interface by name
 func netInterface(ifaceName string) (*net.Interface, error) {
 	if ifaceName == "auto" {
 		ifaceName = defaultIfaceName()
@@ -798,6 +806,7 @@ func netInterface(ifaceName string) (*net.Interface, error) {
 	return iface, err
 }
 
+// defaultIfaceName returns the default interface name
 func defaultIfaceName() string {
 	dri, err := netmon.DefaultRouteInterface()
 	if err != nil {
@@ -948,6 +957,7 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 	return errSelfCheckNoAnswer
 }
 
+// userHomeDir returns the user's home directory
 func userHomeDir() (string, error) {
 	// Mobile platform should provide a rw dir path for this.
 	if isMobile() {
@@ -1394,6 +1404,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 	return
 }
 
+// dirWritable checks if a directory is writable
 func dirWritable(dir string) (bool, error) {
 	f, err := os.CreateTemp(dir, "")
 	if err != nil {
@@ -1403,6 +1414,7 @@ func dirWritable(dir string) (bool, error) {
 	return true, f.Close()
 }
 
+// osVersion returns the operating system version
 func osVersion() string {
 	oi := osinfo.New()
 	if runtime.GOOS == "freebsd" {
@@ -1544,6 +1556,7 @@ func checkStrFlagEmpty(cmd *cobra.Command, flagName string) {
 	}
 }
 
+// validateCdUpstreamProtocol validates the Control D upstream protocol
 func validateCdUpstreamProtocol() {
 	if cdUID == "" {
 		return
@@ -1555,6 +1568,7 @@ func validateCdUpstreamProtocol() {
 	}
 }
 
+// validateCdAndNextDNSFlags validates that Control D and NextDNS flags are not used together
 func validateCdAndNextDNSFlags() {
 	if (cdUID != "" || cdOrg != "") && nextdns != "" {
 		mainLog.Load().Fatal().Msgf("--%s/--%s could not be used with --%s", cdUidFlagName, cdOrgFlagName, nextdnsFlagName)
@@ -1595,6 +1609,7 @@ func doGenerateNextDNSConfig(uid string) error {
 	return writeConfigFile(&cfg)
 }
 
+// noticeWritingControlDConfig logs on notice level that a Control D config is being written
 func noticeWritingControlDConfig() error {
 	if cdUID != "" {
 		mainLog.Load().Notice().Msgf("Generating controld config: %s", defaultConfigFile)

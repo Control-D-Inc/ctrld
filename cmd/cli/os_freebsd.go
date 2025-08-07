@@ -13,7 +13,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/dns"
 )
 
-// allocate loopback ip
+// allocateIP allocates an IP address on the specified interface
 // sudo ifconfig lo0 127.0.0.53 alias
 func allocateIP(ip string) error {
 	cmd := exec.Command("ifconfig", "lo0", ip, "alias")
@@ -24,6 +24,7 @@ func allocateIP(ip string) error {
 	return nil
 }
 
+// deAllocateIP deallocates an IP address from the specified interface
 func deAllocateIP(ip string) error {
 	cmd := exec.Command("ifconfig", "lo0", ip, "-alias")
 	if err := cmd.Run(); err != nil {
@@ -73,6 +74,7 @@ func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
 	return resetDNS(iface)
 }
 
+// resetDNS resets DNS servers for the specified interface
 func resetDNS(iface *net.Interface) error {
 	r, err := dns.NewOSConfigurator(logf, &health.Tracker{}, &controlknobs.Knobs{}, iface.Name)
 	if err != nil {
@@ -93,6 +95,7 @@ func restoreDNS(iface *net.Interface) (err error) {
 	return err
 }
 
+// currentDNS returns the current DNS servers for the specified interface
 func currentDNS(_ *net.Interface) []string {
 	return ctrld.CurrentNameserversFromResolvconf()
 }
