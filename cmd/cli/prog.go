@@ -533,6 +533,12 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()
 		if !reload {
+			go func() {
+				// Start network monitoring
+				if err := p.monitorNetworkChanges(); err != nil {
+					mainLog.Load().Error().Err(err).Msg("Failed to start network monitoring")
+				}
+			}()
 			go func(listenerNum string) {
 				listenerConfig := p.cfg.Listener[listenerNum]
 				upstreamConfig := p.cfg.Upstream[listenerNum]
@@ -541,7 +547,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				}
 				addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 				mainLog.Load().Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
-				if err := p.serveDNS(ctx, listenerNum); err != nil {
+				if err := p.serveDNS(listenerNum); err != nil {
 					mainLog.Load().Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
 				}
 				mainLog.Load().Debug().Msgf("end of serveDNS listener.%s: %s", listenerNum, addr)
