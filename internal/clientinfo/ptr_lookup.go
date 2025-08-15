@@ -120,8 +120,7 @@ func (p *ptrDiscover) lookupIPByHostname(name string, v6 bool) string {
 // is reachable, set p.serverDown to false, so p.lookupHostname can continue working.
 func (p *ptrDiscover) checkServer() {
 	bo := backoff.NewBackoff("ptrDiscover", func(format string, args ...any) {}, time.Minute*5)
-	m := new(dns.Msg)
-	m.SetQuestion(".", dns.TypeNS)
+	m := (&ctrld.UpstreamConfig{}).VerifyMsg()
 	ping := func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

@@ -358,6 +358,15 @@ func (uc *UpstreamConfig) Init() {
 	}
 }
 
+// VerifyMsg creates and returns a new DNS message could be used for testing upstream health.
+func (uc *UpstreamConfig) VerifyMsg() *dns.Msg {
+	msg := new(dns.Msg)
+	msg.RecursionDesired = true
+	msg.SetQuestion(".", dns.TypeNS)
+	msg.SetEdns0(4096, false) // ensure handling of large DNS response
+	return msg
+}
+
 // VerifyDomain returns the domain name that could be resolved by the upstream endpoint.
 // It returns empty for non-ControlD upstream endpoint.
 func (uc *UpstreamConfig) VerifyDomain() string {
