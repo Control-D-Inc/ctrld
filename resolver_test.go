@@ -340,6 +340,35 @@ func Test_Edns0_CacheReply(t *testing.T) {
 	}
 }
 
+// https://github.com/Control-D-Inc/ctrld/issues/255
+func Test_legacyResolverWithBigExtraSection(t *testing.T) {
+	lanPC, err := net.ListenPacket("udp", "127.0.0.1:0") // 127.0.0.1 is considered LAN (loopback)
+	if err != nil {
+		t.Fatalf("failed to listen on LAN address: %v", err)
+	}
+	lanServer, lanAddr, err := runLocalPacketConnTestServer(t, lanPC, bigExtraSectionHandler())
+	if err != nil {
+		t.Fatalf("failed to run LAN test server: %v", err)
+	}
+	defer lanServer.Shutdown()
+
+	uc := &UpstreamConfig{
+		Name:     "Legacy",
+		Type:     ResolverTypeLegacy,
+		Endpoint: lanAddr,
+	}
+	uc.Init()
+	r, err := NewResolver(uc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = r.Resolve(context.Background(), uc.VerifyMsg())
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func Test_upstreamTypeFromEndpoint(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -425,6 +454,68 @@ func countHandler(call *atomic.Int64) dns.HandlerFunc {
 		}
 		w.WriteMsg(m)
 		call.Add(1)
+	}
+}
+
+func mustRR(s string) dns.RR {
+	r, err := dns.NewRR(s)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+func bigExtraSectionHandler() dns.HandlerFunc {
+	return func(w dns.ResponseWriter, msg *dns.Msg) {
+		m := &dns.Msg{
+			Answer: []dns.RR{
+				mustRR(".			7149	IN	NS	m.root-servers.net."),
+				mustRR(".			7149	IN	NS	c.root-servers.net."),
+				mustRR(".			7149	IN	NS	e.root-servers.net."),
+				mustRR(".			7149	IN	NS	j.root-servers.net."),
+				mustRR(".			7149	IN	NS	g.root-servers.net."),
+				mustRR(".			7149	IN	NS	k.root-servers.net."),
+				mustRR(".			7149	IN	NS	l.root-servers.net."),
+				mustRR(".			7149	IN	NS	d.root-servers.net."),
+				mustRR(".			7149	IN	NS	h.root-servers.net."),
+				mustRR(".			7149	IN	NS	b.root-servers.net."),
+				mustRR(".			7149	IN	NS	a.root-servers.net."),
+				mustRR(".			7149	IN	NS	f.root-servers.net."),
+				mustRR(".			7149	IN	NS	i.root-servers.net."),
+			},
+			Extra: []dns.RR{
+				mustRR("m.root-servers.net.	656	IN	A	202.12.27.33"),
+				mustRR("m.root-servers.net.	656	IN	AAAA	2001:dc3::35"),
+				mustRR("c.root-servers.net.	656	IN	A	192.33.4.12"),
+				mustRR("c.root-servers.net.	656	IN	AAAA	2001:500:2::c"),
+				mustRR("e.root-servers.net.	656	IN	A	192.203.230.10"),
+				mustRR("e.root-servers.net.	656	IN	AAAA	2001:500:a8::e"),
+				mustRR("j.root-servers.net.	656	IN	A	192.58.128.30"),
+				mustRR("j.root-servers.net.	656	IN	AAAA	2001:503:c27::2:30"),
+				mustRR("g.root-servers.net.	656	IN	A	192.112.36.4"),
+				mustRR("g.root-servers.net.	656	IN	AAAA	2001:500:12::d0d"),
+				mustRR("k.root-servers.net.	656	IN	A	193.0.14.129"),
+				mustRR("k.root-servers.net.	656	IN	AAAA	2001:7fd::1"),
+				mustRR("l.root-servers.net.	656	IN	A	199.7.83.42"),
+				mustRR("l.root-servers.net.	656	IN	AAAA	2001:500:9f::42"),
+				mustRR("d.root-servers.net.	656	IN	A	199.7.91.13"),
+				mustRR("d.root-servers.net.	656	IN	AAAA	2001:500:2d::d"),
+				mustRR("h.root-servers.net.	656	IN	A	198.97.190.53"),
+				mustRR("h.root-servers.net.	656	IN	AAAA	2001:500:1::53"),
+				mustRR("b.root-servers.net.	656	IN	A	170.247.170.2"),
+				mustRR("b.root-servers.net.	656	IN	AAAA	2801:1b8:10::b"),
+				mustRR("a.root-servers.net.	656	IN	A	198.41.0.4"),
+				mustRR("a.root-servers.net.	656	IN	AAAA	2001:503:ba3e::2:30"),
+				mustRR("f.root-servers.net.	656	IN	A	192.5.5.241"),
+				mustRR("f.root-servers.net.	656	IN	AAAA	2001:500:2f::f"),
+				mustRR("i.root-servers.net.	656	IN	A	192.36.148.17"),
+				mustRR("i.root-servers.net.	656	IN	AAAA	2001:7fe::53"),
+			},
+		}
+
+		m.Compress = true
+		m.SetReply(msg)
+		w.WriteMsg(m)
 	}
 }
 
