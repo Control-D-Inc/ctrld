@@ -1564,9 +1564,6 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 		return err
 	}
 
-	msg := new(dns.Msg)
-	msg.SetQuestion(".", dns.TypeNS)
-
 	timeout := 1000 * time.Millisecond
 	if uc.Timeout > 0 {
 		timeout = time.Millisecond * time.Duration(uc.Timeout)
@@ -1580,6 +1577,7 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 	p.Debug().Msgf("Rebootstrapping resolver for upstream: %s", upstream)
 
 	start := time.Now()
+	msg := uc.VerifyMsg()
 	_, err = resolver.Resolve(ctx, msg)
 	duration := time.Since(start)
 
