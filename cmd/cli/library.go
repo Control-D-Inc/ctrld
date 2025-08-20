@@ -20,11 +20,13 @@ type AppCallback struct {
 // AppConfig allows overwriting ctrld cli flags from mobile platforms.
 // This provides a clean interface for mobile apps to configure ctrld behavior
 type AppConfig struct {
-	CdUID         string
-	HomeDir       string
-	UpstreamProto string
-	Verbose       int
-	LogPath       string
+	CdUID          string
+	ProvisionID    string
+	CustomHostname string
+	HomeDir        string
+	UpstreamProto  string
+	Verbose        int
+	LogPath        string
 }
 
 // Network and HTTP configuration constants
