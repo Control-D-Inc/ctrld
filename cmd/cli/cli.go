@@ -182,7 +182,15 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 	noConfigStart = false
 	homedir = appConfig.HomeDir
 	verbose = appConfig.Verbose
-	cdUID = appConfig.CdUID
+	if appConfig.ProvisionID != "" {
+		cdOrg = appConfig.ProvisionID
+	}
+	if appConfig.CustomHostname != "" {
+		customHostname = appConfig.CustomHostname
+	}
+	if appConfig.CdUID != "" {
+		cdUID = appConfig.CdUID
+	}
 	cdUpstreamProto = appConfig.UpstreamProto
 	logPath = appConfig.LogPath
 	run(appCallback, stopCh)
