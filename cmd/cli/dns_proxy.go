@@ -84,13 +84,7 @@ type upstreamForResult struct {
 	srcAddr        string
 }
 
-func (p *prog) serveDNS(mainCtx context.Context, listenerNum string) error {
-	// Start network monitoring
-	if err := p.monitorNetworkChanges(mainCtx); err != nil {
-		mainLog.Load().Error().Err(err).Msg("Failed to start network monitoring")
-		// Don't return here as we still want DNS service to run
-	}
-
+func (p *prog) serveDNS(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
 	// make sure ip is allocated
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
@@ -1187,7 +1181,7 @@ func FlushDNSCache() error {
 }
 
 // monitorNetworkChanges starts monitoring for network interface changes
-func (p *prog) monitorNetworkChanges(ctx context.Context) error {
+func (p *prog) monitorNetworkChanges() error {
 	mon, err := netmon.New(func(format string, args ...any) {
 		// Always fetch the latest logger (and inject the prefix)
 		mainLog.Load().Printf("netmon: "+format, args...)
@@ -1406,9 +1400,6 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 		return err
 	}
 
-	msg := new(dns.Msg)
-	msg.SetQuestion(".", dns.TypeNS)
-
 	timeout := 1000 * time.Millisecond
 	if uc.Timeout > 0 {
 		timeout = time.Millisecond * time.Duration(uc.Timeout)
@@ -1422,6 +1413,7 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 	mainLog.Load().Debug().Msgf("Rebootstrapping resolver for upstream: %s", upstream)
 
 	start := time.Now()
+	msg := uc.VerifyMsg()
 	_, err = resolver.Resolve(ctx, msg)
 	duration := time.Since(start)
 
