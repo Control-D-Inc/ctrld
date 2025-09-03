@@ -10,15 +10,22 @@ import (
 
 // Stop implements the logic from cmdStop.Run
 func (sc *ServiceCommand) Stop(cmd *cobra.Command, args []string) error {
+	logger := mainLog.Load()
+	logger.Debug().Msg("Service stop command started")
+
 	readConfig(false)
 	v.Unmarshal(&cfg)
 
 	s, p, err := sc.initializeServiceManager()
 	if err != nil {
+		logger.Error().Err(err).Msg("Failed to initialize service manager")
 		return err
 	}
 
 	p.cfg = &cfg
+	if iface == "" {
+		iface = "auto"
+	}
 	p.preRun()
 	if ir := runningIface(s); ir != nil {
 		p.runningIface = ir.Name
@@ -29,19 +36,26 @@ func (sc *ServiceCommand) Stop(cmd *cobra.Command, args []string) error {
 
 	status, err := s.Status()
 	if errors.Is(err, service.ErrNotInstalled) {
-		mainLog.Load().Warn().Msg("service not installed")
+		logger.Warn().Msg("Service not installed")
 		return nil
 	}
 	if status == service.StatusStopped {
-		mainLog.Load().Warn().Msg("service is already stopped")
+		logger.Warn().Msg("Service is already stopped")
 		return nil
 	}
 
 	if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
+		logger.Error().Msg("Deactivation pin check failed")
 		os.Exit(deactivationPinInvalidExitCode)
 	}
+
+	logger.Debug().Msg("Stopping service")
 	if doTasks([]task{{s.Stop, true, "Stop"}}) {
-		mainLog.Load().Notice().Msg("Service stopped")
+		logger.Notice().Msg("Service stopped")
+	} else {
+		logger.Error().Msg("Service stop failed")
 	}
+
+	logger.Debug().Msg("Service stop command completed")
 	return nil
 }

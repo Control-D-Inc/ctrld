@@ -11,6 +11,9 @@ import (
 
 // Restart implements the logic from cmdRestart.Run
 func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
+	logger := mainLog.Load()
+	logger.Debug().Msg("Service restart command started")
+
 	readConfig(false)
 	v.Unmarshal(&cfg)
 	cdUID = curCdUID()
@@ -18,11 +21,12 @@ func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
 
 	s, p, err := sc.initializeServiceManager()
 	if err != nil {
+		logger.Error().Err(err).Msg("Failed to initialize service manager")
 		return err
 	}
 
 	if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
-		mainLog.Load().Warn().Msg("service not installed")
+		logger.Warn().Msg("Service not installed")
 		return nil
 	}
 
@@ -40,13 +44,20 @@ func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
 
 	var validateConfigErr error
 	if cdMode {
+		logger.Debug().Msg("Validating ControlD remote config")
 		validateConfigErr = doValidateCdRemoteConfig(cdUID, false)
+		if validateConfigErr != nil {
+			logger.Warn().Err(validateConfigErr).Msg("ControlD remote config validation failed")
+		}
 	}
 
 	if ir := runningIface(s); ir != nil {
 		iface = ir.Name
 	}
+
 	doRestart := func() bool {
+		logger.Debug().Msg("Starting service restart sequence")
+
 		tasks := []task{
 			{s.Stop, true, "Stop"},
 			{func() error {
@@ -60,12 +71,19 @@ func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
 			}, false, "Waiting for service to stop"},
 		}
 		if !doTasks(tasks) {
+			logger.Error().Msg("Service stop tasks failed")
 			return false
 		}
 		tasks = []task{
 			{s.Start, true, "Start"},
 		}
-		return doTasks(tasks)
+		success := doTasks(tasks)
+		if success {
+			logger.Debug().Msg("Service restart sequence completed successfully")
+		} else {
+			logger.Error().Msg("Service restart sequence failed")
+		}
+		return success
 	}
 
 	if doRestart() {
@@ -76,15 +94,18 @@ func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
 			}
 			if cc := newSocketControlClientWithTimeout(context.TODO(), s, dir, timeout); cc != nil {
 				_, _ = cc.post(ifacePath, nil)
+				logger.Debug().Msg("Control server ping successful")
 			} else {
-				mainLog.Load().Warn().Err(err).Msg("Service was restarted, but ctrld process may not be ready yet")
+				logger.Warn().Err(err).Msg("Service was restarted, but ctrld process may not be ready yet")
 			}
 		} else {
-			mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
+			logger.Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
 		}
-		mainLog.Load().Notice().Msg("Service restarted")
+		logger.Notice().Msg("Service restarted")
 	} else {
-		mainLog.Load().Error().Msg("Service restart failed")
+		logger.Error().Msg("Service restart failed")
 	}
+
+	logger.Debug().Msg("Service restart command completed")
 	return nil
 }
