@@ -21,6 +21,9 @@ import (
 
 // Start implements the logic from cmdStart.Run
 func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
+	logger := mainLog.Load()
+	logger.Debug().Msg("Service start command started")
+
 	checkStrFlagEmpty(cmd, cdUidFlagName)
 	checkStrFlagEmpty(cmd, cdOrgFlagName)
 	validateCdAndNextDNSFlags()
@@ -37,6 +40,7 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	// Initialize service manager with proper configuration
 	s, p, err := sc.initializeServiceManagerWithServiceConfig(svcConfig)
 	if err != nil {
+		logger.Error().Err(err).Msg("Failed to initialize service manager")
 		return err
 	}
 
@@ -53,10 +57,11 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	// If pin code was set, do not allow running start command.
 	if isCtrldRunning {
 		if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
+			logger.Error().Msg("Deactivation pin check failed")
 			os.Exit(deactivationPinInvalidExitCode)
 		}
 		currentIface = runningIface(s)
-		mainLog.Load().Debug().Msgf("current interface on start: %v", currentIface)
+		logger.Debug().Msgf("Current interface on start: %v", currentIface)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -70,7 +75,7 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 				}
 				res := &ifaceResponse{}
 				if err := json.NewDecoder(resp.Body).Decode(res); err != nil {
-					mainLog.Load().Warn().Err(err).Msg("failed to get iface info")
+					logger.Warn().Err(err).Msg("Failed to get iface info")
 					return
 				}
 				if res.OK {
@@ -79,8 +84,8 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 						_, _ = patchNetIfaceName(iff)
 						name = iff.Name
 					}
-					logger := mainLog.Load().With().Str("iface", name)
-					logger.Debug().Msg("setting DNS successfully")
+					logger := logger.With().Str("iface", name)
+					logger.Debug().Msg("Setting DNS successfully")
 					if res.All {
 						// Log that DNS is set for other interfaces.
 						withEachPhysicalInterfaces(
@@ -105,7 +110,8 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	ud, err := userHomeDir()
 	sockDir := ud
 	if err != nil {
-		mainLog.Load().Warn().Msg("log server did not start")
+		logger.Warn().Err(err).Msg("Failed to get user home directory")
+		logger.Warn().Msg("Log server did not start")
 		close(logServerStarted)
 	} else {
 		setWorkingDirectory(svcConfig, ud)
@@ -151,12 +157,12 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	if startOnly && isCtrldInstalled {
 		tryReadingConfigWithNotice(false, true)
 		if err := v.Unmarshal(&cfg); err != nil {
-			mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
+			logger.Fatal().Msgf("Failed to unmarshal config: %v", err)
 		}
 
 		// if already running, dont restart
 		if isCtrldRunning {
-			mainLog.Load().Notice().Msg("service is already running")
+			logger.Notice().Msg("Service is already running")
 			return nil
 		}
 
@@ -178,17 +184,17 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 			{s.Start, true, "Start"},
 			{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 		}
-		mainLog.Load().Notice().Msg("Starting existing ctrld service")
+		logger.Notice().Msg("Starting existing ctrld service")
 		if doTasks(tasks) {
-			mainLog.Load().Notice().Msg("Service started")
+			logger.Notice().Msg("Service started")
 			sockDir, err := socketDir()
 			if err != nil {
-				mainLog.Load().Warn().Err(err).Msg("Failed to get socket directory")
+				logger.Warn().Err(err).Msg("Failed to get socket directory")
 				os.Exit(1)
 			}
 			reportSetDnsOk(sockDir)
 		} else {
-			mainLog.Load().Error().Err(err).Msg("Failed to start existing ctrld service")
+			logger.Error().Err(err).Msg("Failed to start existing ctrld service")
 			os.Exit(1)
 		}
 		return nil
@@ -198,7 +204,7 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 		_ = doValidateCdRemoteConfig(cdUID, true)
 	} else if uid := cdUIDFromProvToken(); uid != "" {
 		cdUID = uid
-		mainLog.Load().Debug().Msg("using uid from provision token")
+		logger.Debug().Msg("Using uid from provision token")
 		removeOrgFlagsFromArgs(svcConfig)
 		// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
 		svcConfig.Arguments = append(svcConfig.Arguments, "--cd="+cdUID)
@@ -214,7 +220,7 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	tryReadingConfigWithNotice(writeDefaultConfig, true)
 
 	if err := v.Unmarshal(&cfg); err != nil {
-		mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
+		logger.Fatal().Msgf("Failed to unmarshal config: %v", err)
 	}
 
 	initInteractiveLogging()
@@ -254,7 +260,7 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 		// generated after s.Start, so we notice users here for consistent with nextdns mode.
 		{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 	}
-	mainLog.Load().Notice().Msg("Starting service")
+	logger.Notice().Msg("Starting service")
 	if doTasks(tasks) {
 		// add a small delay to ensure the service is started and did not crash
 		time.Sleep(1 * time.Second)
@@ -262,44 +268,45 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 		ok, status, err := selfCheckStatus(ctx, s, sockDir)
 		switch {
 		case ok && status == service.StatusRunning:
-			mainLog.Load().Notice().Msg("Service started")
+			logger.Notice().Msg("Service started")
 		default:
 			marker := bytes.Repeat([]byte("="), 32)
 			// If ctrld service is not running, emitting log obtained from ctrld process.
 			if status != service.StatusRunning || ctx.Err() != nil {
-				mainLog.Load().Error().Msg("ctrld service may not have started due to an error or misconfiguration, service log:")
-				_, _ = mainLog.Load().Write(marker)
+				logger.Error().Msg("Ctrld service may not have started due to an error or misconfiguration, service log:")
+				_, _ = logger.Write(marker)
 				haveLog := false
 				for msg := range runCmdLogCh {
-					_, _ = mainLog.Load().Write([]byte(strings.ReplaceAll(msg, msgExit, "")))
+					_, _ = logger.Write([]byte(strings.ReplaceAll(msg, msgExit, "")))
 					haveLog = true
 				}
 				// If we're unable to get log from "ctrld run", notice users about it.
 				if !haveLog {
-					mainLog.Load().Write([]byte(`<no log output is obtained from ctrld process>"`))
+					logger.Write([]byte(`<no log output is obtained from ctrld process>"`))
 				}
 			}
 			// Report any error if occurred.
 			if err != nil {
-				_, _ = mainLog.Load().Write(marker)
+				_, _ = logger.Write(marker)
 				msg := fmt.Sprintf("An error occurred while performing test query: %s", err)
-				mainLog.Load().Write([]byte(msg))
+				logger.Write([]byte(msg))
 			}
 			// If ctrld service is running but selfCheckStatus failed, it could be related
 			// to user's system firewall configuration, notice users about it.
 			if status == service.StatusRunning && err == nil {
-				_, _ = mainLog.Load().Write(marker)
-				mainLog.Load().Write([]byte(`ctrld service was running, but a DNS query could not be sent to its listener`))
-				mainLog.Load().Write([]byte(`Please check your system firewall if it is configured to block/intercept/redirect DNS queries`))
+				_, _ = logger.Write(marker)
+				logger.Write([]byte(`ctrld service was running, but a DNS query could not be sent to its listener`))
+				logger.Write([]byte(`Please check your system firewall if it is configured to block/intercept/redirect DNS queries`))
 			}
 
-			_, _ = mainLog.Load().Write(marker)
+			_, _ = logger.Write(marker)
 			uninstall(p, s)
 			os.Exit(1)
 		}
 		reportSetDnsOk(sockDir)
 	}
 
+	logger.Debug().Msg("Service start command completed")
 	return nil
 }
 

@@ -12,11 +12,15 @@ import (
 
 // Uninstall implements the logic from cmdUninstall.Run
 func (sc *ServiceCommand) Uninstall(cmd *cobra.Command, args []string) error {
+	logger := mainLog.Load()
+	logger.Debug().Msg("Service uninstall command started")
+
 	readConfig(false)
 	v.Unmarshal(&cfg)
 
 	s, p, err := sc.initializeServiceManager()
 	if err != nil {
+		logger.Error().Err(err).Msg("Failed to initialize service manager")
 		return err
 	}
 
@@ -29,11 +33,17 @@ func (sc *ServiceCommand) Uninstall(cmd *cobra.Command, args []string) error {
 		p.runningIface = ir.Name
 		p.requiredMultiNICsConfig = ir.All
 	}
+
 	if err := checkDeactivationPin(s, nil); isCheckDeactivationPinErr(err) {
+		logger.Error().Msg("Deactivation pin check failed")
 		os.Exit(deactivationPinInvalidExitCode)
 	}
+
+	logger.Debug().Msg("Starting service uninstall")
 	uninstall(p, s)
+
 	if cleanup {
+		logger.Debug().Msg("Performing cleanup operations")
 		var files []string
 		// Config file.
 		files = append(files, v.ConfigFileUsed())
@@ -59,7 +69,7 @@ func (sc *ServiceCommand) Uninstall(cmd *cobra.Command, args []string) error {
 		})
 		bin, err := os.Executable()
 		if err != nil {
-			mainLog.Load().Warn().Err(err).Msg("failed to get executable path")
+			logger.Warn().Err(err).Msg("Failed to get executable path")
 		}
 		if bin != "" && supportedSelfDelete {
 			files = append(files, bin)
@@ -74,17 +84,23 @@ func (sc *ServiceCommand) Uninstall(cmd *cobra.Command, args []string) error {
 				continue
 			}
 			if err := os.Remove(file); err == nil {
-				mainLog.Load().Notice().Msgf("removed %s", file)
+				logger.Notice().Str("file", file).Msg("File removed during cleanup")
+			} else {
+				logger.Debug().Err(err).Str("file", file).Msg("Failed to remove file during cleanup")
 			}
 		}
 		// Self-delete the ctrld binary if supported
 		if err := selfDeleteExe(); err != nil {
-			mainLog.Load().Warn().Err(err).Msg("failed to delete ctrld binary")
+			logger.Warn().Err(err).Msg("Failed to delete ctrld binary")
 		} else {
 			if !supportedSelfDelete {
-				mainLog.Load().Debug().Msgf("file removed: %s", bin)
+				logger.Debug().Msgf("File removed: %s", bin)
 			}
 		}
+
+		logger.Debug().Msg("Cleanup operations completed")
 	}
+
+	logger.Debug().Msg("Service uninstall command completed")
 	return nil
 }

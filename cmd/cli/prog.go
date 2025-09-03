@@ -253,6 +253,7 @@ func (p *prog) runWait() {
 
 		select {
 		case p.reloadDoneCh <- struct{}{}:
+			p.Debug().Msg("reload done signal sent")
 		default:
 		}
 	}
