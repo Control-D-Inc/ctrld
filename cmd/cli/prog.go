@@ -532,7 +532,10 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				}
 				addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 				p.Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
-				if err := p.serveDNS(ctx, listenerNum); err != nil {
+				// serveCtx uses Background() context so listeners survive between reloads.
+				// Changes to listeners config require a service restart, not just reload.
+				serveCtx := context.Background()
+				if err := p.serveDNS(serveCtx, listenerNum); err != nil {
 					p.Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
 				}
 				p.Debug().Msgf("end of serveDNS listener.%s: %s", listenerNum, addr)
