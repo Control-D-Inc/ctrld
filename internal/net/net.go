@@ -180,16 +180,16 @@ func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs 
 	for _, addr := range addrs {
 		go func(addr string) {
 			defer wg.Done()
-			logger.Debug("dialing to", zap.String("address", addr))
+			logger.Debug("Dialing to", zap.String("address", addr))
 			conn, err := d.Dialer.DialContext(ctx, network, addr)
 			if err != nil {
-				logger.Debug("failed to dial", zap.String("address", addr), zap.Error(err))
+				logger.Debug("Failed to dial", zap.String("address", addr), zap.Error(err))
 			}
 			select {
 			case ch <- &parallelDialerResult{conn: conn, err: err}:
 			case <-done:
 				if conn != nil {
-					logger.Debug("connection closed", zap.String("remote_address", conn.RemoteAddr().String()))
+					logger.Debug("Connection closed", zap.String("remote_address", conn.RemoteAddr().String()))
 					conn.Close()
 				}
 			}
@@ -200,7 +200,7 @@ func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs 
 	for res := range ch {
 		if res.err == nil {
 			cancel()
-			logger.Debug("connected to", zap.String("remote_address", res.conn.RemoteAddr().String()))
+			logger.Debug("Connected to", zap.String("remote_address", res.conn.RemoteAddr().String()))
 			return res.conn, res.err
 		}
 		errs = append(errs, res.err)

@@ -43,12 +43,12 @@ func (p *prog) setupNetworkManager() error {
 		return nil
 	}
 	if err != nil {
-		p.Debug().Err(err).Msg("could not write NetworkManager ctrld config file")
+		p.Debug().Err(err).Msg("Could not write NetworkManager ctrld config file")
 		return err
 	}
 
 	p.reloadNetworkManager()
-	p.Debug().Msg("setup NetworkManager done")
+			p.Debug().Msg("Setup NetworkManager done")
 	return nil
 }
 
@@ -62,12 +62,12 @@ func (p *prog) restoreNetworkManager() error {
 		return nil
 	}
 	if err != nil {
-		p.Debug().Err(err).Msg("could not remove NetworkManager ctrld config file")
+		p.Debug().Err(err).Msg("Could not remove NetworkManager ctrld config file")
 		return err
 	}
 
 	p.reloadNetworkManager()
-	p.Debug().Msg("restore NetworkManager done")
+			p.Debug().Msg("Restore NetworkManager done")
 	return nil
 }
 
@@ -76,14 +76,14 @@ func (p *prog) reloadNetworkManager() {
 	defer cancel()
 	conn, err := dbus.NewSystemConnectionContext(ctx)
 	if err != nil {
-		p.Error().Err(err).Msg("could not create new system connection")
+		p.Error().Err(err).Msg("Could not create new system connection")
 		return
 	}
 	defer conn.Close()
 
 	waitCh := make(chan string)
 	if _, err := conn.ReloadUnitContext(ctx, nmSystemdUnitName, "ignore-dependencies", waitCh); err != nil {
-		p.Debug().Err(err).Msg("could not reload NetworkManager")
+		p.Debug().Err(err).Msg("Could not reload NetworkManager")
 		return
 	}
 	<-waitCh

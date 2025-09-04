@@ -46,11 +46,11 @@ func (cc *ClientsCommand) ListClients(cmd *cobra.Command, args []string) error {
 
 	status, err := s.Status()
 	if errors.Is(err, service.ErrNotInstalled) {
-		mainLog.Load().Warn().Msg("service not installed")
+		mainLog.Load().Warn().Msg("Service not installed")
 		return nil
 	}
 	if status == service.StatusStopped {
-		mainLog.Load().Warn().Msg("service is not running")
+		mainLog.Load().Warn().Msg("Service is not running")
 		return nil
 	}
 

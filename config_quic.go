@@ -42,7 +42,7 @@ func (uc *UpstreamConfig) newDOH3Transport(ctx context.Context, addrs []string) 
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
 		if uc.BootstrapIP != "" {
 			addr = net.JoinHostPort(uc.BootstrapIP, port)
-			Log(ctx, logger.Debug(), "sending doh3 request to: %s", addr)
+			Log(ctx, logger.Debug(), "Sending doh3 request to: %s", addr)
 			udpConn, err := net.ListenUDP("udp", nil)
 			if err != nil {
 				return nil, err
@@ -62,7 +62,7 @@ func (uc *UpstreamConfig) newDOH3Transport(ctx context.Context, addrs []string) 
 		if err != nil {
 			return nil, err
 		}
-		Log(ctx, logger.Debug(), "sending doh3 request to: %s", conn.RemoteAddr())
+		Log(ctx, logger.Debug(), "Sending doh3 request to: %s", conn.RemoteAddr())
 		return conn, err
 	}
 	runtime.SetFinalizer(rt, func(rt *http3.Transport) {

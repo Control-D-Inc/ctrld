@@ -114,8 +114,9 @@ func SetConfigNameWithPath(v *viper.Viper, name, configPath string) {
 
 // InitConfig initializes default config values for given *viper.Viper instance.
 func InitConfig(v *viper.Viper, name string) {
-	logger := LoggerFromCtx(context.Background())
-	Log(context.Background(), logger.Debug(), "Config initialization started")
+	ctx := context.Background()
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "Config initialization started")
 
 	v.SetDefault("listener", map[string]*ListenerConfig{
 		"0": {
@@ -156,7 +157,7 @@ func InitConfig(v *viper.Viper, name string) {
 		},
 	})
 
-	Log(context.Background(), logger.Debug(), "Config initialization completed")
+	Log(ctx, logger.Debug(), "Config initialization completed")
 }
 
 // Config represents ctrld supported configuration.
@@ -333,7 +334,7 @@ type Rule map[string][]string
 func (uc *UpstreamConfig) Init(ctx context.Context) {
 	logger := LoggerFromCtx(ctx)
 	if err := uc.initDnsStamps(); err != nil {
-		logger.Fatal().Err(err).Msg("invalid DNS Stamps")
+		logger.Fatal().Err(err).Msg("Invalid dns stamps")
 	}
 	uc.initDoHScheme()
 	uc.uid = upstreamUID(ctx)
@@ -469,7 +470,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP(ctx context.Context) {
 			uc.bootstrapIPs = uc.bootstrapIPs[:n]
 			if len(uc.bootstrapIPs) == 0 {
 				uc.bootstrapIPs = bootstrapIPsFromControlDDomain(uc.Domain)
-				logger.Warn().Msgf("No record found for %q, lookup from direct IP table", uc.Domain)
+				logger.Warn().Msgf("No record found for %q, lookup from direct ip table", uc.Domain)
 			}
 		}
 		if len(uc.bootstrapIPs) == 0 {
@@ -480,7 +481,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP(ctx context.Context) {
 		if len(uc.bootstrapIPs) > 0 {
 			break
 		}
-		logger.Warn().Msg("Could not resolve bootstrap IPs, retrying...")
+		logger.Warn().Msg("Could not resolve bootstrap ips, retrying...")
 		b.BackOff(context.Background(), errors.New("no bootstrap IPs"))
 	}
 	for _, ip := range uc.bootstrapIPs {
@@ -490,7 +491,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP(ctx context.Context) {
 			uc.bootstrapIPs4 = append(uc.bootstrapIPs4, ip)
 		}
 	}
-	logger.Debug().Msgf("Bootstrap IPs: %v", uc.bootstrapIPs)
+	logger.Debug().Msgf("Bootstrap ips: %v", uc.bootstrapIPs)
 	Log(ctx, logger.Debug(), "Bootstrap IP setup completed for upstream: %s", uc.Name)
 }
 
@@ -566,7 +567,7 @@ func (uc *UpstreamConfig) newDOHTransport(ctx context.Context, addrs []string) *
 		if uc.BootstrapIP != "" {
 			dialer := net.Dialer{Timeout: dialerTimeout, KeepAlive: dialerTimeout}
 			addr := net.JoinHostPort(uc.BootstrapIP, port)
-			Log(ctx, logger.Debug(), "sending doh request to: %s", addr)
+			Log(ctx, logger.Debug(), "Sending doh request to: %s", addr)
 			return dialer.DialContext(ctx, network, addr)
 		}
 		pd := &ctrldnet.ParallelDialer{}
@@ -580,7 +581,7 @@ func (uc *UpstreamConfig) newDOHTransport(ctx context.Context, addrs []string) *
 		if err != nil {
 			return nil, err
 		}
-		Log(ctx, logger.Debug(), "sending doh request to: %s", conn.RemoteAddr())
+		Log(ctx, logger.Debug(), "Sending doh request to: %s", conn.RemoteAddr())
 		return conn, nil
 	}
 	runtime.SetFinalizer(transport, func(transport *http.Transport) {
@@ -593,7 +594,7 @@ func (uc *UpstreamConfig) newDOHTransport(ctx context.Context, addrs []string) *
 func (uc *UpstreamConfig) Ping(ctx context.Context) {
 	if err := uc.ping(ctx); err != nil {
 		logger := LoggerFromCtx(ctx)
-		logger.Debug().Err(err).Msgf("upstream ping failed: %s", uc.Endpoint)
+		logger.Debug().Err(err).Msgf("Upstream ping failed: %s", uc.Endpoint)
 		_ = uc.FallbackToDirectIP(ctx)
 	}
 }
@@ -973,7 +974,7 @@ func upstreamUID(ctx context.Context) string {
 	b := make([]byte, 4)
 	for {
 		if _, err := crand.Read(b); err != nil {
-			logger.Warn().Err(err).Msg("could not generate uid for upstream, retrying...")
+			logger.Warn().Err(err).Msg("Could not generate uid for upstream, retrying...")
 			continue
 		}
 		return hex.EncodeToString(b)

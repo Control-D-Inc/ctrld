@@ -136,7 +136,7 @@ func initLoggingWithBackup(doBackup bool) []zapcore.Core {
 		// Create parent directory if necessary.
 		// This ensures log files can be created even if the directory doesn't exist
 		if err := os.MkdirAll(filepath.Dir(logFilePath), 0750); err != nil {
-			mainLog.Load().Error().Msgf("failed to create log path: %v", err)
+			mainLog.Load().Error().Msgf("Failed to create log path: %v", err)
 			os.Exit(1)
 		}
 
@@ -147,7 +147,7 @@ func initLoggingWithBackup(doBackup bool) []zapcore.Core {
 			// Backup old log file with .1 suffix.
 			// This prevents log file corruption during rotation
 			if err := os.Rename(logFilePath, logFilePath+oldLogSuffix); err != nil && !os.IsNotExist(err) {
-				mainLog.Load().Error().Msgf("could not backup old log file: %v", err)
+				mainLog.Load().Error().Msgf("Could not backup old log file: %v", err)
 			} else {
 				// Backup was created, set flags for truncating old log file.
 				// This ensures a clean start for the new log file
@@ -156,7 +156,7 @@ func initLoggingWithBackup(doBackup bool) []zapcore.Core {
 		}
 		logFile, err := openLogFile(logFilePath, flags)
 		if err != nil {
-			mainLog.Load().Error().Msgf("failed to create log file: %v", err)
+			mainLog.Load().Error().Msgf("Failed to create log file: %v", err)
 			os.Exit(1)
 		}
 		writers = append(writers, logFile)

@@ -287,7 +287,7 @@ func apiTransport(loggerCtx context.Context, cdDev bool) *http.Transport {
 		ips := ctrld.LookupIP(loggerCtx, apiDomain)
 		if len(ips) == 0 {
 			logger := ctrld.LoggerFromCtx(loggerCtx)
-			logger.Warn().Msgf("No IPs found for %s, use direct IPs: %v", apiDomain, apiIPs)
+			logger.Warn().Msgf("No ips found for %s, use direct ips: %v", apiDomain, apiIPs)
 			ips = apiIPs
 		}
 
@@ -348,7 +348,7 @@ func doWithFallback(ctx context.Context, client *http.Client, req *http.Request,
 	resp, err := client.Do(req)
 	if err != nil {
 		logger := ctrld.LoggerFromCtx(ctx)
-		logger.Warn().Err(err).Msgf("failed to send request, fallback to direct IP: %s", apiIp)
+		logger.Warn().Err(err).Msgf("Failed to send request, fallback to direct ip: %s", apiIp)
 		ipReq := req.Clone(req.Context())
 		ipReq.Host = apiIp
 		ipReq.URL.Host = apiIp

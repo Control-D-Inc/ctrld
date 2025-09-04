@@ -16,11 +16,11 @@ import (
 func addExtraSplitDnsRule(cfg *ctrld.Config) bool {
 	domain, err := getActiveDirectoryDomain()
 	if err != nil {
-		mainLog.Load().Debug().Msgf("unable to get active directory domain: %v", err)
+		mainLog.Load().Debug().Msgf("Unable to get active directory domain: %v", err)
 		return false
 	}
 	if domain == "" {
-		mainLog.Load().Debug().Msg("no active directory domain found")
+		mainLog.Load().Debug().Msg("No active directory domain found")
 		return false
 	}
 	// Network rules are lowercase during toml config marshaling,
@@ -40,11 +40,11 @@ func addSplitDnsRule(cfg *ctrld.Config, domain string) bool {
 		}
 		for _, rule := range lc.Policy.Rules {
 			if _, ok := rule[domain]; ok {
-				mainLog.Load().Debug().Msgf("split-rule %q already existed for listener.%s", domain, n)
+				mainLog.Load().Debug().Msgf("Split-rule %q already existed for listener.%s", domain, n)
 				return false
 			}
 		}
-		mainLog.Load().Debug().Msgf("adding split-rule %q for listener.%s", domain, n)
+		mainLog.Load().Debug().Msgf("Adding split-rule %q for listener.%s", domain, n)
 		lc.Policy.Rules = append(lc.Policy.Rules, ctrld.Rule{domain: []string{}})
 	}
 	return true

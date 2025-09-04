@@ -27,7 +27,7 @@ func (p *prog) setResolvConf(iface *net.Interface, ns []netip.Addr) error {
 	if sds, err := searchDomains(); err == nil {
 		oc.SearchDomains = sds
 	} else {
-		p.Debug().Err(err).Msg("failed to get search domains list when reverting resolv.conf file")
+		p.Debug().Err(err).Msg("Failed to get search domains list when reverting resolv.conf file")
 	}
 	return r.SetDNS(oc)
 }

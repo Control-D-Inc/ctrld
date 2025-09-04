@@ -55,7 +55,7 @@ func virtualInterfaces(ctx context.Context) map[string]struct{} {
 	s := make(map[string]struct{})
 	entries, err := os.ReadDir("/sys/devices/virtual/net")
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to read /sys/devices/virtual/net")
+		logger.Error().Err(err).Msg("Failed to read /sys/devices/virtual/net")
 		return nil
 	}
 	for _, entry := range entries {

@@ -37,7 +37,7 @@ func (ic *InterfacesCommand) ListInterfaces(cmd *cobra.Command, args []string) e
 		}
 		nss, err := currentStaticDNS(i)
 		if err != nil {
-			mainLog.Load().Warn().Err(err).Msg("failed to get DNS")
+			mainLog.Load().Warn().Err(err).Msg("Failed to get DNS")
 		}
 		if len(nss) == 0 {
 			nss = currentDNS(i)

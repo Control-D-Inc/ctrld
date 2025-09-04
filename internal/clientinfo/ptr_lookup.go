@@ -74,14 +74,14 @@ func (p *ptrDiscover) lookupHostname(ip string) string {
 	msg := new(dns.Msg)
 	addr, err := dns.ReverseAddr(ip)
 	if err != nil {
-		p.logger.Info().Str("discovery", "ptr").Err(err).Msg("invalid ip address")
+		p.logger.Info().Str("discovery", "ptr").Err(err).Msg("Invalid ip address")
 		return ""
 	}
 	msg.SetQuestion(addr, dns.TypePTR)
 	ans, err := p.resolver.Resolve(ctx, msg)
 	if err != nil {
 		if p.serverDown.CompareAndSwap(false, true) {
-			p.logger.Info().Str("discovery", "ptr").Err(err).Msg("could not perform PTR lookup")
+			p.logger.Info().Str("discovery", "ptr").Err(err).Msg("Could not perform ptr lookup")
 			go p.checkServer()
 		}
 		return ""

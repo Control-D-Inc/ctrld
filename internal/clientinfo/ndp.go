@@ -98,7 +98,7 @@ func (nd *ndpDiscover) saveInfo(ip, mac string) {
 func (nd *ndpDiscover) listen(ctx context.Context) {
 	ifis, err := allInterfacesWithV6LinkLocal()
 	if err != nil {
-		nd.logger.Debug().Err(err).Msg("failed to find valid ipv6 interfaces")
+		nd.logger.Debug().Err(err).Msg("Failed to find valid ipv6 interfaces")
 		return
 	}
 	for _, ifi := range ifis {
@@ -111,11 +111,11 @@ func (nd *ndpDiscover) listen(ctx context.Context) {
 func (nd *ndpDiscover) listenOnInterface(ctx context.Context, ifi *net.Interface) {
 	c, ip, err := ndp.Listen(ifi, ndp.Unspecified)
 	if err != nil {
-		nd.logger.Debug().Err(err).Msg("ndp listen failed")
+		nd.logger.Debug().Err(err).Msg("Ndp listen failed")
 		return
 	}
 	defer c.Close()
-	nd.logger.Debug().Msgf("listening ndp on: %s", ip.String())
+	nd.logger.Debug().Msgf("Listening ndp on: %s", ip.String())
 	for {
 		select {
 		case <-ctx.Done():
@@ -129,7 +129,7 @@ func (nd *ndpDiscover) listenOnInterface(ctx context.Context, ifi *net.Interface
 			if errors.As(readErr, &opErr) && (opErr.Timeout() || opErr.Temporary()) {
 				continue
 			}
-			nd.logger.Debug().Err(readErr).Msg("ndp read loop error")
+			nd.logger.Debug().Err(readErr).Msg("Ndp read loop error")
 			return
 		}
 

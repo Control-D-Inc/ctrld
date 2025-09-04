@@ -55,7 +55,7 @@ func (d *dhcp) watchChanges() {
 			if event.Has(fsnotify.Create) {
 				if format, ok := clientInfoFiles[event.Name]; ok {
 					if err := d.addLeaseFile(event.Name, format); err != nil {
-						d.logger.Err(err).Str("file", event.Name).Msg("could not add lease file")
+						d.logger.Err(err).Str("file", event.Name).Msg("Could not add lease file")
 					}
 				}
 				continue
@@ -63,14 +63,14 @@ func (d *dhcp) watchChanges() {
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Chmod) || event.Has(fsnotify.Remove) {
 				format := clientInfoFiles[event.Name]
 				if err := d.readLeaseFile(event.Name, format); err != nil && !os.IsNotExist(err) {
-					d.logger.Err(err).Str("file", event.Name).Msg("leases file changed but failed to update client info")
+					d.logger.Err(err).Str("file", event.Name).Msg("Leases file changed but failed to update client info")
 				}
 			}
 		case err, ok := <-d.watcher.Errors:
 			if !ok {
 				return
 			}
-			d.logger.Err(err).Msg("could not watch client info file")
+			d.logger.Err(err).Msg("Could not watch client info file")
 		}
 	}
 
@@ -216,7 +216,7 @@ func (d *dhcp) dnsmasqReadClientInfoReader(reader io.Reader) error {
 		}
 		ip := normalizeIP(string(fields[2]))
 		if net.ParseIP(ip) == nil {
-			d.logger.Warn().Msgf("invalid ip address entry: %q", ip)
+			d.logger.Warn().Msgf("Invalid ip address entry: %q", ip)
 			ip = ""
 		}
 
@@ -271,7 +271,7 @@ func (d *dhcp) iscDHCPReadClientInfoReader(reader io.Reader) error {
 			// DHCP lease files may contain mixed-case IP addresses
 			ip = normalizeIP(strings.ToLower(fields[1]))
 			if net.ParseIP(ip) == nil {
-				d.logger.Warn().Msgf("invalid ip address entry: %q", ip)
+				d.logger.Warn().Msgf("Invalid ip address entry: %q", ip)
 				ip = ""
 			}
 		case "hardware":
@@ -328,7 +328,7 @@ func (d *dhcp) keaDhcp4ReadClientInfoReader(r io.Reader) error {
 		}
 		ip := normalizeIP(record[0])
 		if net.ParseIP(ip) == nil {
-			d.logger.Warn().Msgf("invalid ip address entry: %q", ip)
+			d.logger.Warn().Msgf("Invalid ip address entry: %q", ip)
 			ip = ""
 		}
 
@@ -350,7 +350,7 @@ func (d *dhcp) keaDhcp4ReadClientInfoReader(r io.Reader) error {
 func (d *dhcp) addSelf() {
 	hostname, err := os.Hostname()
 	if err != nil {
-		d.logger.Err(err).Msg("could not get hostname")
+		d.logger.Err(err).Msg("Could not get hostname")
 		return
 	}
 	hostname = normalizeHostname(hostname)

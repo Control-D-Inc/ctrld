@@ -122,7 +122,7 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 	addr := p.cfg.Service.MetricsListener
 	ms, err := newMetricsServer(addr, reg)
 	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not create new metrics server")
+		mainLog.Load().Warn().Err(err).Msg("Could not create new metrics server")
 		return
 	}
 	// Only start listener address if defined.
@@ -137,9 +137,9 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 		statsVersion.WithLabelValues(commit, runtime.Version(), curVersion()).Inc()
 		reg.MustRegister(statsTimeStart)
 		statsTimeStart.Set(float64(time.Now().Unix()))
-		mainLog.Load().Debug().Msgf("starting metrics server on: %s", addr)
+		mainLog.Load().Debug().Msgf("Starting metrics server on: %s", addr)
 		if err := ms.start(); err != nil {
-			mainLog.Load().Warn().Err(err).Msg("could not start metrics server")
+			mainLog.Load().Warn().Err(err).Msg("Could not start metrics server")
 			return
 		}
 	}
@@ -151,7 +151,7 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 	}
 
 	if err := ms.stop(); err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not stop metrics server")
+		mainLog.Load().Warn().Err(err).Msg("Could not stop metrics server")
 		return
 	}
 }

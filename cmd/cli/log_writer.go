@@ -20,19 +20,19 @@ import (
 const (
 	// logWriterSize is the default buffer size for log writers
 	// This provides sufficient space for runtime logs without excessive memory usage
-	logWriterSize          = 1024 * 1024 * 5 // 5 MB
+	logWriterSize = 1024 * 1024 * 5 // 5 MB
 
 	// logWriterSmallSize is used for memory-constrained environments
 	// This reduces memory footprint while still maintaining log functionality
-	logWriterSmallSize     = 1024 * 1024 * 1 // 1 MB
+	logWriterSmallSize = 1024 * 1024 * 1 // 1 MB
 
 	// logWriterInitialSize is the initial buffer allocation
 	// This provides immediate space for early log entries
-	logWriterInitialSize   = 32 * 1024       // 32 KB
+	logWriterInitialSize = 32 * 1024 // 32 KB
 
 	// logWriterSentInterval controls how often logs are sent to external systems
 	// This balances real-time logging with system performance
-	logWriterSentInterval  = time.Minute
+	logWriterSentInterval = time.Minute
 
 	// logWriterInitEndMarker marks the end of initialization logs
 	// This helps separate startup logs from runtime logs
@@ -40,7 +40,7 @@ const (
 
 	// logWriterLogEndMarker marks the end of log sections
 	// This provides clear boundaries for log parsing and analysis
-	logWriterLogEndMarker  = "\n\n=== LOG_END ===\n\n"
+	logWriterLogEndMarker = "\n\n=== LOG_END ===\n\n"
 )
 
 // Custom level encoders that handle NOTICE level
@@ -169,7 +169,7 @@ func (p *prog) initInternalLogging(externalCores []zapcore.Core) {
 		return
 	}
 	p.initInternalLogWriterOnce.Do(func() {
-		p.Notice().Msg("internal logging enabled")
+		p.Notice().Msg("Internal logging enabled")
 		p.internalLogWriter = newLogWriter()
 		p.internalLogSent = time.Now().Add(-logWriterSentInterval)
 		p.internalWarnLogWriter = newSmallLogWriter()

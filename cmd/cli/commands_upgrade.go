@@ -42,7 +42,7 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 
 	bin, err := os.Executable()
 	if err != nil {
-		mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
+		mainLog.Load().Fatal().Err(err).Msg("Failed to get current ctrld binary path")
 	}
 
 	readConfig(false)
@@ -75,7 +75,7 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 		switch channel {
 		case upgradeChannelProd, upgradeChannelDev: // ok
 		default:
-			mainLog.Load().Fatal().Msgf("uprade argument must be either %q or %q", upgradeChannelProd, upgradeChannelDev)
+			mainLog.Load().Fatal().Msgf("Upgrade argument must be either %q or %q", upgradeChannelProd, upgradeChannelDev)
 		}
 		baseUrl = upgradeChannel[channel]
 	}
@@ -85,20 +85,20 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 
 	resp, err := getWithRetry(dlUrl, downloadServerIp)
 	if err != nil {
-		mainLog.Load().Fatal().Err(err).Msg("failed to download binary")
+		mainLog.Load().Fatal().Err(err).Msg("Failed to download binary")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		mainLog.Load().Fatal().Msgf("could not download binary: %s", http.StatusText(resp.StatusCode))
+		mainLog.Load().Fatal().Msgf("Could not download binary: %s", http.StatusText(resp.StatusCode))
 	}
 
 	mainLog.Load().Debug().Msg("Updating current binary")
 	if err := selfupdate.Apply(resp.Body, selfupdate.Options{OldSavePath: oldBin}); err != nil {
 		if rerr := selfupdate.RollbackError(err); rerr != nil {
-			mainLog.Load().Error().Err(rerr).Msg("could not rollback old binary")
+			mainLog.Load().Error().Err(rerr).Msg("Could not rollback old binary")
 		}
-		mainLog.Load().Fatal().Err(err).Msg("failed to update current binary")
+		mainLog.Load().Fatal().Err(err).Msg("Failed to update current binary")
 	}
 
 	doRestart := func() bool {
@@ -154,10 +154,10 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 
 	mainLog.Load().Warn().Msgf("Upgrade failed, restoring previous binary: %s", oldBin)
 	if err := os.Remove(bin); err != nil {
-		mainLog.Load().Fatal().Err(err).Msg("failed to remove new binary")
+		mainLog.Load().Fatal().Err(err).Msg("Failed to remove new binary")
 	}
 	if err := os.Rename(oldBin, bin); err != nil {
-		mainLog.Load().Fatal().Err(err).Msg("failed to restore old binary")
+		mainLog.Load().Fatal().Err(err).Msg("Failed to restore old binary")
 	}
 	if doRestart() {
 		mainLog.Load().Notice().Msg("Restored previous binary successfully")

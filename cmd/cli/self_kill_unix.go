@@ -20,7 +20,7 @@ func selfUninstall(p *prog, logger *ctrld.Logger) {
 
 	bin, err := os.Executable()
 	if err != nil {
-		logger.Fatal().Err(err).Msg("could not determine executable")
+		logger.Fatal().Err(err).Msg("Could not determine executable")
 	}
 	args := []string{"uninstall"}
 	if deactivationPinSet() {
@@ -29,11 +29,11 @@ func selfUninstall(p *prog, logger *ctrld.Logger) {
 	cmd := exec.Command(bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
-		logger.Fatal().Err(err).Msg("could not start self uninstall command")
+		logger.Fatal().Err(err).Msg("Could not start self uninstall command")
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	logger.Warn().Msgf("service was uninstalled because device %q does not exist", cdUID)
+	logger.Warn().Msgf("Service was uninstalled because device %q does not exist", cdUID)
 	_ = cmd.Wait()
 	os.Exit(0)
 }
@@ -41,7 +41,7 @@ func selfUninstall(p *prog, logger *ctrld.Logger) {
 // selfUninstallLinux performs self-uninstallation on Linux platforms
 func selfUninstallLinux(p *prog, logger *ctrld.Logger) {
 	if uninstallInvalidCdUID(p, logger, true) {
-		logger.Warn().Msgf("service was uninstalled because device %q does not exist", cdUID)
+		logger.Warn().Msgf("Service was uninstalled because device %q does not exist", cdUID)
 		os.Exit(0)
 	}
 }
