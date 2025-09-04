@@ -13,6 +13,9 @@ type dotResolver struct {
 }
 
 func (r *dotResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "DoT resolver query started")
+
 	// The dialer is used to prevent bootstrapping cycle.
 	// If r.endpoint is set to dns.controld.dev, we need to resolve
 	// dns.controld.dev first. By using a dialer with custom resolver,
@@ -37,6 +40,12 @@ func (r *dotResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 		endpoint = net.JoinHostPort(r.uc.BootstrapIP, port)
 	}
 
+	Log(ctx, logger.Debug(), "Sending DoT request to: %s", endpoint)
 	answer, _, err := dnsClient.ExchangeContext(ctx, msg, endpoint)
+	if err != nil {
+		Log(ctx, logger.Error().Err(err), "DoT request failed")
+	} else {
+		Log(ctx, logger.Debug(), "DoT resolver query successful")
+	}
 	return answer, wrapCertificateVerificationError(err)
 }

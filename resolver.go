@@ -277,10 +277,12 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	key := fmt.Sprintf("%s:%d:", domain, qtype)
 
 	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "OS resolver query started: %s - %s", domain, dns.TypeToString[qtype])
+
 	// Checking the cache first.
 	if val, ok := o.cache.Load(key); ok {
 		if val, ok := val.(*dns.Msg); ok {
-			Log(ctx, logger.Debug(), "hit hot cached result: %s - %s", domain, dns.TypeToString[qtype])
+			Log(ctx, logger.Debug(), "Hit hot cached result: %s - %s", domain, dns.TypeToString[qtype])
 			res := val.Copy()
 			SetCacheReply(res, msg, val.Rcode)
 			return res, nil
@@ -289,8 +291,10 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 
 	// Ensure only one DNS query is in flight for the key.
 	v, err, shared := o.group.Do(key, func() (interface{}, error) {
+		Log(ctx, logger.Debug(), "Resolving query: %s - %s", domain, dns.TypeToString[qtype])
 		msg, err := o.resolve(ctx, msg)
 		if err != nil {
+			Log(ctx, logger.Error().Err(err), "OS resolver query failed: %s - %s", domain, dns.TypeToString[qtype])
 			return nil, err
 		}
 		// If we got an answer, storing it to the hot cache for hotCacheTTL
@@ -302,6 +306,7 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		time.AfterFunc(hotCacheTTL, func() {
 			o.removeCache(key)
 		})
+		Log(ctx, logger.Debug(), "OS resolver query successful: %s - %s", domain, dns.TypeToString[qtype])
 		return msg, nil
 	})
 	if err != nil {
@@ -315,7 +320,7 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	res := sharedMsg.Copy()
 	SetCacheReply(res, msg, sharedMsg.Rcode)
 	if shared {
-		Log(ctx, logger.Debug(), "shared result: %s - %s", domain, dns.TypeToString[qtype])
+		Log(ctx, logger.Debug(), "Shared result: %s - %s", domain, dns.TypeToString[qtype])
 	}
 
 	return res, nil
@@ -346,7 +351,7 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		question = msg.Question[0].Name
 	}
 	logger := LoggerFromCtx(ctx)
-	Log(ctx, logger.Debug(), "os resolver query for %s with nameservers: %v public: %v", question, nss, publicServers)
+	Log(ctx, logger.Debug(), "OS resolver query for %s with nameservers: %v public: %v", question, nss, publicServers)
 
 	// New check: If no resolvers are available, return an error.
 	if numServers == 0 {
@@ -395,7 +400,7 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 			// If splitting fails, fallback to the original server string
 			host = server
 		}
-		Log(ctx, logger.Debug(), "got answer from nameserver: %s", host)
+		Log(ctx, logger.Debug(), "Got answer from nameserver: %s", host)
 	}
 
 	// try local nameservers
@@ -487,6 +492,9 @@ type legacyResolver struct {
 }
 
 func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "Legacy resolver query started")
+
 	// See comment in (*dotResolver).resolve method.
 	dialer := newDialer(net.JoinHostPort(controldPublicDns, "53"))
 	dnsTyp := uint16(0)
@@ -505,7 +513,13 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 		endpoint = net.JoinHostPort(r.uc.BootstrapIP, port)
 	}
 
+	Log(ctx, logger.Debug(), "Sending legacy request to: %s", endpoint)
 	answer, _, err := dnsClient.ExchangeContext(ctx, msg, endpoint)
+	if err != nil {
+		Log(ctx, logger.Error().Err(err), "Legacy request failed")
+	} else {
+		Log(ctx, logger.Debug(), "Legacy resolver query successful")
+	}
 	return answer, err
 }
 

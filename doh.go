@@ -88,8 +88,12 @@ type dohResolver struct {
 
 // Resolve performs DNS query with given DNS message using DOH protocol.
 func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "DoH resolver query started")
+
 	data, err := msg.Pack()
 	if err != nil {
+		Log(ctx, logger.Error().Err(err), "Failed to pack DNS message")
 		return nil, err
 	}
 
@@ -101,6 +105,7 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	endpoint.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
+		Log(ctx, logger.Error().Err(err), "Could not create HTTP request")
 		return nil, fmt.Errorf("could not create request: %w", err)
 	}
 	addHeader(ctx, req, r.uc)
@@ -112,16 +117,19 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	if r.isDoH3 {
 		transport := r.uc.doh3Transport(ctx, dnsTyp)
 		if transport == nil {
+			Log(ctx, logger.Error(), "DoH3 is not supported")
 			return nil, errors.New("DoH3 is not supported")
 		}
 		c.Transport = transport
 	}
+
+	Log(ctx, logger.Debug(), "Sending DoH request to: %s", endpoint.String())
 	resp, err := c.Do(req)
 	if err != nil && r.uc.FallbackToDirectIP(ctx) {
 		retryCtx, cancel := r.uc.Context(context.WithoutCancel(ctx))
 		defer cancel()
 		logger := LoggerFromCtx(ctx)
-		logger.Warn().Err(err).Msg("retrying request after fallback to direct ip")
+		logger.Warn().Err(err).Msg("Retrying request after fallback to direct ip")
 		resp, err = c.Do(req.Clone(retryCtx))
 	}
 	if err != nil {
@@ -131,23 +139,29 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 				closer.Close()
 			}
 		}
+		Log(ctx, logger.Error().Err(err), "DoH request failed")
 		return nil, fmt.Errorf("could not perform request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	buf, err := io.ReadAll(resp.Body)
 	if err != nil {
+		Log(ctx, logger.Error().Err(err), "Could not read response body")
 		return nil, fmt.Errorf("could not read message from response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		Log(ctx, logger.Error(), "Wrong response from DOH server, got: %s, status: %d", string(buf), resp.StatusCode)
 		return nil, fmt.Errorf("wrong response from DOH server, got: %s, status: %d", string(buf), resp.StatusCode)
 	}
 
 	answer := new(dns.Msg)
 	if err := answer.Unpack(buf); err != nil {
+		Log(ctx, logger.Error().Err(err), "Failed to unpack DNS answer")
 		return nil, fmt.Errorf("answer.Unpack: %w", err)
 	}
+
+	Log(ctx, logger.Debug(), "DoH resolver query successful")
 	return answer, nil
 }
 
@@ -168,7 +182,7 @@ func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 	}
 	if printed {
 		logger := LoggerFromCtx(ctx)
-		Log(ctx, logger.Debug(), "sending request header: %v", dohHeader)
+		Log(ctx, logger.Debug(), "Sending request header: %v", dohHeader)
 	}
 	dohHeader.Set("Content-Type", headerApplicationDNS)
 	dohHeader.Set("Accept", headerApplicationDNS)
