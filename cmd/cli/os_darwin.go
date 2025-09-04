@@ -14,21 +14,25 @@ import (
 // allocateIP allocates an IP address on the specified interface
 // sudo ifconfig lo0 alias 127.0.0.2 up
 func allocateIP(ip string) error {
+	mainLog.Load().Debug().Str("ip", ip).Msg("Allocating IP address")
 	cmd := exec.Command("ifconfig", "lo0", "alias", ip, "up")
 	if err := cmd.Run(); err != nil {
 		mainLog.Load().Error().Err(err).Msg("allocateIP failed")
 		return err
 	}
+	mainLog.Load().Debug().Str("ip", ip).Msg("IP address allocated successfully")
 	return nil
 }
 
 // deAllocateIP deallocates an IP address from the specified interface
 func deAllocateIP(ip string) error {
+	mainLog.Load().Debug().Str("ip", ip).Msg("Deallocating IP address")
 	cmd := exec.Command("ifconfig", "lo0", "-alias", ip)
 	if err := cmd.Run(); err != nil {
 		mainLog.Load().Error().Err(err).Msg("deAllocateIP failed")
 		return err
 	}
+	mainLog.Load().Debug().Str("ip", ip).Msg("IP address deallocated successfully")
 	return nil
 }
 
@@ -48,6 +52,8 @@ func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) e
 // networksetup -setdnsservers Wi-Fi 8.8.8.8 1.1.1.1
 // TODO(cuonglm): use system API
 func setDNS(iface *net.Interface, nameservers []string) error {
+	mainLog.Load().Debug().Str("interface", iface.Name).Strs("nameservers", nameservers).Msg("Setting DNS configuration")
+
 	// Note that networksetup won't modify search domains settings,
 	// This assignment is just a placeholder to silent linter.
 	_ = searchDomains
@@ -57,6 +63,8 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	if out, err := exec.Command(cmd, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("%v: %w", string(out), err)
 	}
+
+	mainLog.Load().Debug().Str("interface", iface.Name).Msg("DNS configuration set successfully")
 	return nil
 }
 
@@ -74,11 +82,15 @@ func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
 
 // TODO(cuonglm): use system API
 func resetDNS(iface *net.Interface) error {
+	mainLog.Load().Debug().Str("interface", iface.Name).Msg("Resetting DNS configuration")
+
 	cmd := "networksetup"
 	args := []string{"-setdnsservers", iface.Name, "empty"}
 	if out, err := exec.Command(cmd, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("%v: %w", string(out), err)
 	}
+
+	mainLog.Load().Debug().Str("interface", iface.Name).Msg("DNS configuration reset successfully")
 	return nil
 }
 

@@ -761,6 +761,8 @@ func processListenFlag() {
 	if listenAddress == "" {
 		return
 	}
+	mainLog.Load().Debug().Str("listen_address", listenAddress).Msg("Processing listen flag")
+
 	host, portStr, err := net.SplitHostPort(listenAddress)
 	if err != nil {
 		mainLog.Load().Fatal().Msgf("invalid listener address: %v", err)
@@ -776,22 +778,31 @@ func processListenFlag() {
 	v.Set("listener", map[string]*ctrld.ListenerConfig{
 		"0": lc,
 	})
+
+	mainLog.Load().Debug().Str("host", host).Int("port", port).Msg("Listen flag processed successfully")
 }
 
 // processLogAndCacheFlags processes log and cache related flags
 func processLogAndCacheFlags() {
+	mainLog.Load().Debug().Msg("Processing log and cache flags")
+
 	if logPath != "" {
 		cfg.Service.LogPath = logPath
+		mainLog.Load().Debug().Str("log_path", logPath).Msg("Log path flag processed")
 	}
 	if logPath != "" && cfg.Service.LogLevel == "" {
 		cfg.Service.LogLevel = "debug"
+		mainLog.Load().Debug().Msg("Log level set to debug")
 	}
 
 	if cacheSize != 0 {
 		cfg.Service.CacheEnable = true
 		cfg.Service.CacheSize = cacheSize
+		mainLog.Load().Debug().Int("cache_size", cacheSize).Msg("Cache flag processed")
 	}
 	v.Set("service", cfg.Service)
+
+	mainLog.Load().Debug().Msg("Log and cache flags processed successfully")
 }
 
 // netInterface returns the network interface by name
@@ -1075,6 +1086,8 @@ func uninstall(p *prog, s service.Service) {
 }
 
 func validateConfig(cfg *ctrld.Config) error {
+	mainLog.Load().Debug().Msg("Validating configuration")
+
 	if err := ctrld.ValidateConfig(validator.New(), cfg); err != nil {
 		var ve validator.ValidationErrors
 		if errors.As(err, &ve) {
@@ -1082,8 +1095,11 @@ func validateConfig(cfg *ctrld.Config) error {
 				mainLog.Load().Error().Msgf("invalid config: %s: %s", fe.Namespace(), fieldErrorMsg(fe))
 			}
 		}
+		mainLog.Load().Error().Err(err).Msg("Configuration validation failed")
 		return err
 	}
+
+	mainLog.Load().Debug().Msg("Configuration validation completed successfully")
 	return nil
 }
 

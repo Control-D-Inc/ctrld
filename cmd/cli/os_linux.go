@@ -33,20 +33,24 @@ type getDNS func(iface string) []string
 // allocate loopback ip
 // sudo ip a add 127.0.0.2/24 dev lo
 func allocateIP(ip string) error {
+	mainLog.Load().Debug().Str("ip", ip).Msg("Allocating IP address")
 	cmd := exec.Command("ip", "a", "add", ip+"/24", "dev", "lo")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		mainLog.Load().Error().Err(err).Msgf("allocateIP failed: %s", string(out))
 		return err
 	}
+	mainLog.Load().Debug().Str("ip", ip).Msg("IP address allocated successfully")
 	return nil
 }
 
 func deAllocateIP(ip string) error {
+	mainLog.Load().Debug().Str("ip", ip).Msg("Deallocating IP address")
 	cmd := exec.Command("ip", "a", "del", ip+"/24", "dev", "lo")
 	if err := cmd.Run(); err != nil {
 		mainLog.Load().Error().Err(err).Msg("deAllocateIP failed")
 		return err
 	}
+	mainLog.Load().Debug().Str("ip", ip).Msg("IP address deallocated successfully")
 	return nil
 }
 
@@ -58,6 +62,8 @@ func setDnsIgnoreUnusableInterface(iface *net.Interface, nameservers []string) e
 }
 
 func setDNS(iface *net.Interface, nameservers []string) error {
+	mainLog.Load().Debug().Str("interface", iface.Name).Strs("nameservers", nameservers).Msg("Setting DNS configuration")
+
 	r, err := dns.NewOSConfigurator(logf, &health.Tracker{}, &controlknobs.Knobs{}, iface.Name)
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to create DNS OS configurator")
@@ -119,6 +125,8 @@ systemdResolve:
 		}
 		mainLog.Load().Debug().Msg("DNS was not set for some reason")
 	}
+
+	mainLog.Load().Debug().Str("interface", iface.Name).Msg("DNS configuration set successfully")
 	return nil
 }
 
@@ -128,6 +136,8 @@ func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
 }
 
 func resetDNS(iface *net.Interface) (err error) {
+	mainLog.Load().Debug().Str("interface", iface.Name).Msg("Resetting DNS configuration")
+
 	defer func() {
 		if err == nil {
 			return

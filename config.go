@@ -114,6 +114,9 @@ func SetConfigNameWithPath(v *viper.Viper, name, configPath string) {
 
 // InitConfig initializes default config values for given *viper.Viper instance.
 func InitConfig(v *viper.Viper, name string) {
+	logger := LoggerFromCtx(context.Background())
+	Log(context.Background(), logger.Debug(), "Config initialization started")
+
 	v.SetDefault("listener", map[string]*ListenerConfig{
 		"0": {
 			IP:   "",
@@ -152,6 +155,8 @@ func InitConfig(v *viper.Viper, name string) {
 			Timeout:     3000,
 		},
 	})
+
+	Log(context.Background(), logger.Debug(), "Config initialization completed")
 }
 
 // Config represents ctrld supported configuration.
@@ -499,7 +504,7 @@ func (uc *UpstreamConfig) ReBootstrap(ctx context.Context) {
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
 		if uc.rebootstrap.CompareAndSwap(false, true) {
 			logger := LoggerFromCtx(ctx)
-			logger.Debug().Msgf("re-bootstrapping upstream ip for %v", uc)
+			Log(ctx, logger.Debug(), "Re-bootstrapping upstream: %s", uc.Name)
 		}
 		return true, nil
 	})
@@ -823,7 +828,7 @@ func (uc *UpstreamConfig) FallbackToDirectIP(ctx context.Context) bool {
 			return
 		}
 		logger := LoggerFromCtx(ctx)
-		logger.Warn().Msgf("using direct IP for %q: %s", uc.Endpoint, ip)
+		Log(ctx, logger.Warn(), "Using direct IP for %q: %s", uc.Endpoint, ip)
 		uc.u.Host = ip
 		done = true
 	})
@@ -832,12 +837,18 @@ func (uc *UpstreamConfig) FallbackToDirectIP(ctx context.Context) bool {
 
 // Init initialized necessary values for an ListenerConfig.
 func (lc *ListenerConfig) Init() {
+	logger := LoggerFromCtx(context.Background())
+	Log(context.Background(), logger.Debug(), "Initializing listener config")
+
 	if lc.Policy != nil {
 		lc.Policy.FailoverRcodeNumbers = make([]int, len(lc.Policy.FailoverRcodes))
 		for i, rcode := range lc.Policy.FailoverRcodes {
 			lc.Policy.FailoverRcodeNumbers[i] = dnsrcode.FromString(rcode)
 		}
+		Log(context.Background(), logger.Debug(), "Listener policy initialized with %d failover rcodes", len(lc.Policy.FailoverRcodes))
 	}
+
+	Log(context.Background(), logger.Debug(), "Listener config initialization completed")
 }
 
 // ValidateConfig validates the given config.
