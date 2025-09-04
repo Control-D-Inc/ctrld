@@ -441,28 +441,39 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 // writeConfigFile writes the configuration to a file
 func writeConfigFile(cfg *ctrld.Config) error {
+	mainLog.Load().Debug().Msg("Writing configuration file")
+
 	if cfu := v.ConfigFileUsed(); cfu != "" {
 		defaultConfigFile = cfu
 	} else if configPath != "" {
 		defaultConfigFile = configPath
 	}
+
+	mainLog.Load().Debug().Str("config_file", defaultConfigFile).Msg("Opening configuration file for writing")
+
 	f, err := os.OpenFile(defaultConfigFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(0o644))
 	if err != nil {
+		mainLog.Load().Error().Err(err).Str("config_file", defaultConfigFile).Msg("Failed to open configuration file")
 		return err
 	}
 	defer f.Close()
 	if cdUID != "" {
 		if _, err := f.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n"); err != nil {
+			mainLog.Load().Error().Err(err).Msg("Failed to write CD header to configuration file")
 			return err
 		}
 	}
 	enc := toml.NewEncoder(f).SetIndentTables(true)
 	if err := enc.Encode(&cfg); err != nil {
+		mainLog.Load().Error().Err(err).Str("config_file", defaultConfigFile).Msg("Failed to encode configuration")
 		return err
 	}
 	if err := f.Close(); err != nil {
+		mainLog.Load().Error().Err(err).Str("config_file", defaultConfigFile).Msg("Failed to close configuration file")
 		return err
 	}
+
+	mainLog.Load().Debug().Str("config_file", defaultConfigFile).Msg("Configuration file written successfully")
 	return nil
 }
 
@@ -539,10 +550,16 @@ func readBase64Config(configBase64 string) error {
 	if configBase64 == "" {
 		return nil
 	}
+
+	mainLog.Load().Debug().Msg("Reading base64 encoded configuration")
+
 	configStr, err := base64.StdEncoding.DecodeString(configBase64)
 	if err != nil {
+		mainLog.Load().Error().Err(err).Msg("Failed to decode base64 configuration")
 		return fmt.Errorf("invalid base64 config: %w", err)
 	}
+
+	mainLog.Load().Debug().Int("config_length", len(configStr)).Msg("Base64 configuration decoded successfully")
 
 	// readBase64Config is called when:
 	//
@@ -552,7 +569,16 @@ func readBase64Config(configBase64 string) error {
 	// So we need to re-create viper instance to discard old one.
 	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
 	v.SetConfigType("toml")
-	return v.ReadConfig(bytes.NewReader(configStr))
+
+	mainLog.Load().Debug().Msg("Parsing base64 configuration as TOML")
+
+	if err := v.ReadConfig(bytes.NewReader(configStr)); err != nil {
+		mainLog.Load().Error().Err(err).Msg("Failed to parse base64 configuration as TOML")
+		return err
+	}
+
+	mainLog.Load().Debug().Msg("Base64 configuration processed successfully")
+	return nil
 }
 
 // processNoConfigFlags processes flags for no-config mode
@@ -560,17 +586,22 @@ func processNoConfigFlags(noConfigStart bool) {
 	if !noConfigStart {
 		return
 	}
+
+	mainLog.Load().Debug().Msg("Processing no-config mode flags")
+
 	if listenAddress == "" || primaryUpstream == "" {
 		mainLog.Load().Fatal().Msg(`"listen" and "primary_upstream" flags must be set in no config mode`)
 	}
 	processListenFlag()
 
 	endpointAndTyp := func(endpoint string) (string, string) {
+		mainLog.Load().Debug().Str("endpoint", endpoint).Msg("Processing endpoint for resolver type")
 		typ := ctrld.ResolverTypeFromEndpoint(endpoint)
 		endpoint = strings.TrimPrefix(endpoint, "quic://")
 		if after, found := strings.CutPrefix(endpoint, "h3://"); found {
 			endpoint = "https://" + after
 		}
+		mainLog.Load().Debug().Str("endpoint", endpoint).Str("type", typ).Msg("Endpoint processed")
 		return endpoint, typ
 	}
 	pEndpoint, pType := endpointAndTyp(primaryUpstream)
