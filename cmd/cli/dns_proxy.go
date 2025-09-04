@@ -105,7 +105,7 @@ func (p *prog) serveDNS(ctx context.Context, listenerNum string) error {
 
 	listenerConfig := p.cfg.Listener[listenerNum]
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
-		p.Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: failed to allocate listen ip")
+		p.Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: Failed to allocate listen IP")
 		return allocErr
 	}
 
@@ -136,7 +136,7 @@ func (p *prog) startListeners(ctx context.Context, cfg *ctrld.ListenerConfig, ha
 				case <-p.stopCh:
 				case <-gctx.Done():
 				case err := <-errCh:
-					p.Warn().Err(err).Msg("local ipv6 listener failed")
+					p.Warn().Err(err).Msg("Local IPv6 listener failed")
 				}
 				return nil
 			})
@@ -154,7 +154,7 @@ func (p *prog) startListeners(ctx context.Context, cfg *ctrld.ListenerConfig, ha
 						case <-p.stopCh:
 						case <-gctx.Done():
 						case err := <-errCh:
-							p.Warn().Err(err).Msgf("could not listen on %s: %s", proto, listenAddr)
+							p.Warn().Err(err).Msgf("Could not listen on %s: %s", proto, listenAddr)
 						}
 					}()
 				}
@@ -476,8 +476,8 @@ func (p *prog) proxyPrivatePtrLookup(ctx context.Context, msg *dns.Msg) *dns.Msg
 			},
 			Ptr: dns.Fqdn(name),
 		}}
-		ctrld.Log(ctx, p.Info(), "private PTR lookup, using client info table")
-		ctrld.Log(ctx, p.Debug(), "client info: %v", ctrld.ClientInfo{
+		ctrld.Log(ctx, p.Info(), "Private PTR lookup, using client info table")
+		ctrld.Log(ctx, p.Debug(), "Client info: %v", ctrld.ClientInfo{
 			Mac:      p.ciTable.LookupMac(ip.String()),
 			IP:       ip.String(),
 			Hostname: name,
@@ -525,8 +525,8 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 				AAAA: ip.AsSlice(),
 			}}
 		}
-		ctrld.Log(ctx, p.Info(), "lan hostname lookup, using client info table")
-		ctrld.Log(ctx, p.Debug(), "client info: %v", ctrld.ClientInfo{
+		ctrld.Log(ctx, p.Info(), "Lan hostname lookup, using client info table")
+		ctrld.Log(ctx, p.Debug(), "Client info: %v", ctrld.ClientInfo{
 			Mac:      p.ciTable.LookupMac(ip.String()),
 			IP:       ip.String(),
 			Hostname: hostname,
@@ -560,7 +560,7 @@ func (p *prog) handleSpecialQueryTypes(ctx *context.Context, req *proxyRequest, 
 		}
 		*upstreams, *upstreamConfigs = p.upstreamsAndUpstreamConfigForPtr(*upstreams, *upstreamConfigs)
 		*ctx = ctrld.LanQueryCtx(*ctx)
-		ctrld.Log(*ctx, p.Debug(), "private PTR lookup, using upstreams: %v", *upstreams)
+		ctrld.Log(*ctx, p.Debug(), "Private PTR lookup, using upstreams: %v", *upstreams)
 		return nil
 	case isLanHostnameQuery(req.msg):
 		req.isLanOrPtrQuery = true
@@ -570,10 +570,10 @@ func (p *prog) handleSpecialQueryTypes(ctx *context.Context, req *proxyRequest, 
 		*upstreams = []string{upstreamOS}
 		*upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 		*ctx = ctrld.LanQueryCtx(*ctx)
-		ctrld.Log(*ctx, p.Debug(), "lan hostname lookup, using upstreams: %v", *upstreams)
+		ctrld.Log(*ctx, p.Debug(), "Lan hostname lookup, using upstreams: %v", *upstreams)
 		return nil
 	default:
-		ctrld.Log(*ctx, p.Debug(), "no explicit policy matched, using default routing -> %v", *upstreams)
+		ctrld.Log(*ctx, p.Debug(), "No explicit policy matched, using default routing -> %v", *upstreams)
 		return nil
 	}
 }
@@ -1093,7 +1093,7 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 		defer close(errCh)
 		if err := s.ListenAndServe(); err != nil {
 			s.NotifyStartedFunc()
-			mainLog.Load().Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)
+			mainLog.Load().Error().Err(err).Msgf("Could not listen and serve on: %s", s.Addr)
 			errCh <- err
 		}
 	}()
@@ -1195,11 +1195,11 @@ func (p *prog) doSelfUninstall(pr *proxyResponse) {
 		p.checkingSelfUninstall = true
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 		_, err := controld.FetchResolverConfig(loggerCtx, cdUID, appVersion, cdDev)
-		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
+		logger.Debug().Msg("Maximum number of refused queries reached, checking device status")
 		selfUninstallCheck(err, p, logger)
 
 		if err != nil {
-			logger.Warn().Err(err).Msg("could not fetch resolver config")
+			logger.Warn().Err(err).Msg("Could not fetch resolver config")
 		}
 		// Cool-of period to prevent abusing the API.
 		go p.selfUninstallCoolOfPeriod()
@@ -1263,7 +1263,7 @@ func (p *prog) queryFromSelf(ip string) bool {
 	netIP := netip.MustParseAddr(ip)
 	regularIPs, loopbackIPs, err := netmon.LocalAddresses()
 	if err != nil {
-		p.Warn().Err(err).Msg("could not get local addresses")
+		p.Warn().Err(err).Msg("Could not get local addresses")
 		return false
 	}
 	for _, localIP := range slices.Concat(regularIPs, loopbackIPs) {
@@ -1384,7 +1384,7 @@ func isWanClient(na net.Addr) bool {
 // resolveInternalDomainTestQuery resolves internal test domain query, returning the answer to the caller.
 func resolveInternalDomainTestQuery(ctx context.Context, domain string, m *dns.Msg) *dns.Msg {
 	logger := ctrld.LoggerFromCtx(ctx)
-	ctrld.Log(ctx, logger.Debug(), "internal domain test query")
+	ctrld.Log(ctx, logger.Debug(), "Internal domain test query")
 
 	q := m.Question[0]
 	answer := new(dns.Msg)
@@ -1521,18 +1521,18 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		// Ensure that selfIP is an IPv4 address.
 		// If defaultRouteIP mistakenly returns an IPv6 (such as a ULA), clear it
 		if ip := net.ParseIP(selfIP); ip != nil && ip.To4() == nil {
-			p.Debug().Msgf("defaultRouteIP returned a non-IPv4 address: %s, ignoring it", selfIP)
+			p.Debug().Msgf("DefaultRouteIP returned a non-ipv4 address: %s, ignoring it", selfIP)
 			selfIP = ""
 		}
 		var ipv6 string
 
 		if delta.New.DefaultRouteInterface != "" {
-			p.Debug().Msgf("default route interface: %s, IPs: %v", delta.New.DefaultRouteInterface, delta.New.InterfaceIPs[delta.New.DefaultRouteInterface])
+			p.Debug().Msgf("Default route interface: %s, ips: %v", delta.New.DefaultRouteInterface, delta.New.InterfaceIPs[delta.New.DefaultRouteInterface])
 			for _, ip := range delta.New.InterfaceIPs[delta.New.DefaultRouteInterface] {
 				ipAddr, _ := netip.ParsePrefix(ip.String())
 				addr := ipAddr.Addr()
 				if selfIP == "" && addr.Is4() {
-					p.Debug().Msgf("checking IP: %s", addr.String())
+					p.Debug().Msgf("Checking ip: %s", addr.String())
 					if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
 						selfIP = addr.String()
 					}
@@ -1543,12 +1543,12 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			}
 		} else {
 			// If no default route interface is set yet, use the changed IPs
-			p.Debug().Msgf("no default route interface found, using changed IPs: %v", changeIPs)
+			p.Debug().Msgf("No default route interface found, using changed ips: %v", changeIPs)
 			for _, ip := range changeIPs {
 				ipAddr, _ := netip.ParsePrefix(ip.String())
 				addr := ipAddr.Addr()
 				if selfIP == "" && addr.Is4() {
-					p.Debug().Msgf("checking IP: %s", addr.String())
+					p.Debug().Msgf("Checking ip: %s", addr.String())
 					if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
 						selfIP = addr.String()
 					}

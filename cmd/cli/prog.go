@@ -165,9 +165,9 @@ func (p *prog) runWait() {
 		var newCfg *ctrld.Config
 		select {
 		case sig := <-reloadSigCh:
-			p.Notice().Msgf("got signal: %s, reloading...", sig.String())
+			p.Notice().Msgf("Got signal: %s, reloading...", sig.String())
 		case <-p.reloadCh:
-			p.Notice().Msg("reloading...")
+			p.Notice().Msg("Reloading...")
 		case apiCfg := <-p.apiReloadCh:
 			newCfg = apiCfg
 		case <-p.stopCh:
@@ -190,18 +190,18 @@ func (p *prog) runWait() {
 			}
 			v.SetConfigFile(confFile)
 			if err := v.ReadInConfig(); err != nil {
-				p.Error().Err(err).Msg("could not read new config")
+				p.Error().Err(err).Msg("Could not read new config")
 				waitOldRunDone()
 				continue
 			}
 			if err := v.Unmarshal(&newCfg); err != nil {
-				p.Error().Err(err).Msg("could not unmarshal new config")
+				p.Error().Err(err).Msg("Could not unmarshal new config")
 				waitOldRunDone()
 				continue
 			}
 			if cdUID != "" {
 				if rc, err := processCDFlags(newCfg); err != nil {
-					p.Error().Err(err).Msg("could not fetch ControlD config")
+					p.Error().Err(err).Msg("Could not fetch controld config")
 					waitOldRunDone()
 					continue
 				} else {
@@ -231,29 +231,29 @@ func (p *prog) runWait() {
 			}
 		}
 		if err := validateConfig(newCfg); err != nil {
-			p.Error().Err(err).Msg("invalid config")
+			p.Error().Err(err).Msg("Invalid config")
 			continue
 		}
 
 		addExtraSplitDnsRule(newCfg)
 		if err := writeConfigFile(newCfg); err != nil {
-			p.Error().Err(err).Msg("could not write new config")
+			p.Error().Err(err).Msg("Could not write new config")
 		}
 
 		// This needs to be done here, otherwise, the DNS handler may observe an invalid
 		// upstream config because its initialization function have not been called yet.
-		p.Debug().Msg("setup upstream with new config")
+		p.Debug().Msg("Setup upstream with new config")
 		p.setupUpstream(newCfg)
 
 		p.mu.Lock()
 		*p.cfg = *newCfg
 		p.mu.Unlock()
 
-		p.Notice().Msg("reloading config successfully")
+		p.Notice().Msg("Reloading config successfully")
 
 		select {
 		case p.reloadDoneCh <- struct{}{}:
-			p.Debug().Msg("reload done signal sent")
+			p.Debug().Msg("Reload done signal sent")
 		default:
 		}
 	}
@@ -272,7 +272,7 @@ func (p *prog) postRun() {
 	if !service.Interactive() {
 		p.resetDNS(false, false)
 		ns := ctrld.InitializeOsResolver(ctrld.LoggerCtx(context.Background(), p.logger.Load()), false)
-		p.Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
+		p.Debug().Msgf("Initialized os resolver with nameservers: %v", ns)
 		p.setDNS()
 		p.csSetDnsDone <- struct{}{}
 		close(p.csSetDnsDone)
@@ -290,7 +290,7 @@ func (p *prog) apiConfigReload() {
 	defer ticker.Stop()
 
 	logger := p.logger.Load().With().Str("mode", "api-reload")
-	logger.Debug().Msg("starting custom config reload timer")
+	logger.Debug().Msg("Starting custom config reload timer")
 	lastUpdated := time.Now().Unix()
 	curVerStr := curVersion()
 	curVer, err := semver.NewVersion(curVerStr)
@@ -300,7 +300,7 @@ func (p *prog) apiConfigReload() {
 		if err != nil {
 			l = l.Err(err)
 		}
-		l.Msgf("current version is not stable, skipping self-upgrade: %s", curVerStr)
+		l.Msgf("Current version is not stable, skipping self-upgrade: %s", curVerStr)
 	}
 
 	doReloadApiConfig := func(forced bool, logger *ctrld.Logger) {
@@ -308,7 +308,7 @@ func (p *prog) apiConfigReload() {
 		resolverConfig, err := controld.FetchResolverConfig(loggerCtx, cdUID, appVersion, cdDev)
 		selfUninstallCheck(err, p, logger)
 		if err != nil {
-			logger.Warn().Err(err).Msg("could not fetch resolver config")
+			logger.Warn().Err(err).Msg("Could not fetch resolver config")
 			return
 		}
 
@@ -322,9 +322,9 @@ func (p *prog) apiConfigReload() {
 			curDeactivationPin := cdDeactivationPin.Load()
 			switch {
 			case curDeactivationPin != defaultDeactivationPin:
-				logger.Debug().Msg("saving deactivation pin")
+				logger.Debug().Msg("Saving deactivation pin")
 			case curDeactivationPin != newDeactivationPin:
-				logger.Debug().Msg("update deactivation pin")
+				logger.Debug().Msg("Update deactivation pin")
 			}
 			cdDeactivationPin.Store(newDeactivationPin)
 		} else {
@@ -347,7 +347,7 @@ func (p *prog) apiConfigReload() {
 		}
 
 		if noCustomConfig && !noExcludeListChanged {
-			logger.Debug().Msg("exclude list changes detected, reloading...")
+			logger.Debug().Msg("Exclude list changes detected, reloading...")
 			p.apiReloadCh <- nil
 			return
 		}
@@ -362,16 +362,16 @@ func (p *prog) apiConfigReload() {
 				cfgErr = validateConfig(cfg)
 			}
 			if cfgErr != nil {
-				logger.Warn().Err(err).Msg("skipping invalid custom config")
+				logger.Warn().Err(err).Msg("Skipping invalid custom config")
 				if _, err := controld.UpdateCustomLastFailed(loggerCtx, cdUID, appVersion, cdDev, true); err != nil {
-					logger.Error().Err(err).Msg("could not mark custom last update failed")
+					logger.Error().Err(err).Msg("Could not mark custom last update failed")
 				}
 				return
 			}
-			logger.Debug().Msg("custom config changes detected, reloading...")
+			logger.Debug().Msg("Custom config changes detected, reloading...")
 			p.apiReloadCh <- cfg
 		} else {
-			logger.Debug().Msg("custom config does not change")
+			logger.Debug().Msg("Custom config does not change")
 		}
 	}
 	for {
@@ -396,14 +396,14 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 		sdns := uc.Type == ctrld.ResolverTypeSDNS
 		uc.Init(loggerCtx)
 		if sdns {
-			p.Debug().Msgf("initialized DNS Stamps with endpoint: %s, type: %s", uc.Endpoint, uc.Type)
+			p.Debug().Msgf("Initialized dns stamps with endpoint: %s, type: %s", uc.Endpoint, uc.Type)
 		}
 		isControlDUpstream = isControlDUpstream || uc.IsControlD()
 		if uc.BootstrapIP == "" {
 			uc.SetupBootstrapIP(ctrld.LoggerCtx(context.Background(), p.logger.Load()))
-			p.Info().Msgf("bootstrap IPs for upstream.%s: %q", n, uc.BootstrapIPs())
+			p.Info().Msgf("Bootstrap ips for upstream.%s: %q", n, uc.BootstrapIPs())
 		} else {
-			p.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("using bootstrap IP for upstream.%s", n)
+			p.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap ip for upstream.%s", n)
 		}
 		uc.SetCertPool(rootCertPool)
 		go uc.Ping(loggerCtx)
@@ -444,9 +444,9 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			p.csSetDnsDone = make(chan struct{}, 1)
 			p.registerControlServerHandler()
 			if err := p.cs.start(); err != nil {
-				p.Warn().Err(err).Msg("could not start control server")
+				p.Warn().Err(err).Msg("Could not start control server")
 			}
-			p.Debug().Msgf("control server started: %s", p.cs.addr)
+			p.Debug().Msgf("Control server started: %s", p.cs.addr)
 		}
 	}
 	p.onStartedDone = make(chan struct{})
@@ -458,7 +458,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
-			p.Error().Err(err).Msg("failed to create cacher, caching is disabled")
+			p.Error().Err(err).Msg("Failed to create cacher, caching is disabled")
 		} else {
 			p.cache = cacher
 			p.cacheFlushDomainsMap = make(map[string]struct{}, 256)
@@ -475,7 +475,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		for _, cidr := range nc.Cidrs {
 			_, ipNet, err := net.ParseCIDR(cidr)
 			if err != nil {
-				p.Error().Err(err).Str("network", nc.Name).Str("cidr", cidr).Msg("invalid cidr")
+				p.Error().Err(err).Str("network", nc.Name).Str("cidr", cidr).Msg("Invalid cidr")
 				continue
 			}
 			nc.IPNets = append(nc.IPNets, ipNet)
@@ -528,17 +528,17 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				listenerConfig := p.cfg.Listener[listenerNum]
 				upstreamConfig := p.cfg.Upstream[listenerNum]
 				if upstreamConfig == nil {
-					p.Warn().Msgf("no default upstream for: [listener.%s]", listenerNum)
+					p.Warn().Msgf("No default upstream for: [listener.%s]", listenerNum)
 				}
 				addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
-				p.Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
+				p.Info().Msgf("Starting dns server on listener.%s: %s", listenerNum, addr)
 				// serveCtx uses Background() context so listeners survive between reloads.
 				// Changes to listeners config require a service restart, not just reload.
 				serveCtx := context.Background()
 				if err := p.serveDNS(serveCtx, listenerNum); err != nil {
-					p.Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
+					p.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
 				}
-				p.Debug().Msgf("end of serveDNS listener.%s: %s", listenerNum, addr)
+				p.Debug().Msgf("End of serveDNS listener.%s: %s", listenerNum, addr)
 			}(listenerNum)
 		}
 		go func() {
@@ -599,7 +599,7 @@ func (p *prog) setupClientInfoDiscover() {
 	selfIP := p.defaultRouteIP()
 	p.ciTable = clientinfo.NewTable(&cfg, selfIP, cdUID, p.ptrNameservers, p.logger.Load())
 	if leaseFile := p.cfg.Service.DHCPLeaseFile; leaseFile != "" {
-		p.Debug().Msgf("watching custom lease file: %s", leaseFile)
+		p.Debug().Msgf("Watching custom lease file: %s", leaseFile)
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
 		p.ciTable.AddLeaseFile(leaseFile, format)
 	}
@@ -618,16 +618,16 @@ func (p *prog) metricsEnabled() bool {
 
 func (p *prog) Stop(_ service.Service) error {
 	p.stopDnsWatchers()
-	p.Debug().Msg("dns watchers stopped")
+	p.Debug().Msg("Dns watchers stopped")
 	for _, f := range p.onStopped {
 		f()
 	}
-	p.Debug().Msg("finish running onStopped functions")
+	p.Debug().Msg("Finish running onStopped functions")
 	defer func() {
 		p.Info().Msg("Service stopped")
 	}()
 	if err := p.deAllocateIP(); err != nil {
-		p.Error().Err(err).Msg("de-allocate ip failed")
+		p.Error().Err(err).Msg("De-allocate ip failed")
 		return err
 	}
 	if deactivationPinSet() {
@@ -639,16 +639,16 @@ func (p *prog) Stop(_ service.Service) error {
 			// No valid pin code was checked, that mean we are stopping
 			// because of OS signal sent directly from someone else.
 			// In this case, restarting ctrld service by ourselves.
-			p.Debug().Msgf("receiving stopping signal without valid pin code")
-			p.Debug().Msgf("self restarting ctrld service")
+			p.Debug().Msgf("Receiving stopping signal without valid pin code")
+			p.Debug().Msgf("Self restarting ctrld service")
 			if exe, err := os.Executable(); err == nil {
 				cmd := exec.Command(exe, "restart")
 				cmd.SysProcAttr = sysProcAttrForDetachedChildProcess()
 				if err := cmd.Start(); err != nil {
-					p.Error().Err(err).Msg("failed to run self restart command")
+					p.Error().Err(err).Msg("Failed to run self restart command")
 				}
 			} else {
-				p.Error().Err(err).Msg("failed to self restart ctrld service")
+				p.Error().Err(err).Msg("Failed to self restart ctrld service")
 			}
 			os.Exit(deactivationPinInvalidExitCode)
 		}
@@ -780,29 +780,29 @@ func (p *prog) setDnsForRunningIface(nameservers []string) (runningIface *net.In
 			if newIface != p.runningIface {
 				p.runningIface = newIface
 				logger = p.logger.Load().With().Str("iface", p.runningIface)
-				logger.Info().Msg("switched to new interface")
+				logger.Info().Msg("Switched to new interface")
 				continue
 			}
 
-			logger.Warn().Err(err).Int("attempt", attempt).Msg("could not get interface, retrying...")
+			logger.Warn().Err(err).Int("attempt", attempt).Msg("Could not get interface, retrying...")
 			time.Sleep(retryDelay)
 			continue
 		}
-		logger.Error().Err(err).Msg("could not get interface after all attempts")
+		logger.Error().Err(err).Msg("Could not get interface after all attempts")
 		return
 	}
 	if err := p.setupNetworkManager(); err != nil {
-		logger.Error().Err(err).Msg("could not patch NetworkManager")
+		logger.Error().Err(err).Msg("Could not patch networkmanager")
 		return
 	}
 
 	runningIface = netIface
-	logger.Debug().Msg("setting DNS for interface")
+	logger.Debug().Msg("Setting dns for interface")
 	if err := setDNS(netIface, nameservers); err != nil {
-		logger.Error().Err(err).Msgf("could not set DNS for interface")
+		logger.Error().Err(err).Msgf("Could not set dns for interface")
 		return
 	}
-	logger.Debug().Msg("setting DNS successfully")
+	logger.Debug().Msg("Setting dns successfully")
 	return
 }
 
@@ -831,7 +831,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 		return
 	}
 
-	p.Debug().Msg("start DNS settings watchdog")
+	p.Debug().Msg("Start dns settings watchdog")
 
 	ns := nameservers
 	slices.Sort(ns)
@@ -842,7 +842,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 		case <-p.dnsWatcherStopCh:
 			return
 		case <-p.stopCh:
-			p.Debug().Msg("stop dns watchdog")
+			p.Debug().Msg("Stop dns watchdog")
 			return
 		case <-ticker.C:
 			if p.recoveryRunning.Load() {
@@ -854,7 +854,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 				// currentStaticDNS is an OS-dependent helper that returns the current static DNS.
 				staticDNS, err := currentStaticDNS(iface)
 				if err != nil {
-					p.Debug().Err(err).Msgf("failed to get static DNS for interface %s", iface.Name)
+					p.Debug().Err(err).Msgf("Failed to get static DNS for interface %s", iface.Name)
 				} else if len(staticDNS) > 0 {
 					//filter out loopback addresses
 					staticDNS = slices.DeleteFunc(staticDNS, func(s string) bool {
@@ -864,12 +864,12 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 					if len(staticDNS) > 0 && len(ctrld.SavedStaticNameservers(iface)) == 0 {
 						// Save these static DNS values so that they can be restored later.
 						if err := saveCurrentStaticDNS(iface); err != nil {
-							p.Debug().Err(err).Msgf("failed to save static DNS for interface %s", iface.Name)
+							p.Debug().Err(err).Msgf("Failed to save static DNS for interface %s", iface.Name)
 						}
 					}
 				}
 				if err := setDNS(iface, ns); err != nil {
-					p.Error().Err(err).Str("iface", iface.Name).Msgf("could not re-apply DNS settings")
+					p.Error().Err(err).Str("iface", iface.Name).Msgf("Could not re-apply DNS settings")
 				}
 			}
 			if p.requiredMultiNICsConfig {
@@ -884,7 +884,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 						// currentStaticDNS is an OS-dependent helper that returns the current static DNS.
 						staticDNS, err := currentStaticDNS(i)
 						if err != nil {
-							p.Debug().Err(err).Msgf("failed to get static DNS for interface %s", i.Name)
+							p.Debug().Err(err).Msgf("Failed to get static DNS for interface %s", i.Name)
 						} else if len(staticDNS) > 0 {
 							//filter out loopback addresses
 							staticDNS = slices.DeleteFunc(staticDNS, func(s string) bool {
@@ -894,15 +894,15 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 							if len(staticDNS) > 0 && len(ctrld.SavedStaticNameservers(i)) == 0 {
 								// Save these static DNS values so that they can be restored later.
 								if err := saveCurrentStaticDNS(i); err != nil {
-									p.Debug().Err(err).Msgf("failed to save static DNS for interface %s", i.Name)
+									p.Debug().Err(err).Msgf("Failed to save static DNS for interface %s", i.Name)
 								}
 							}
 						}
 
 						if err := setDnsIgnoreUnusableInterface(i, nameservers); err != nil {
-							p.Error().Err(err).Str("iface", i.Name).Msgf("could not re-apply DNS settings")
+							p.Error().Err(err).Str("iface", i.Name).Msgf("Could not re-apply DNS settings")
 						} else {
-							p.Debug().Msgf("re-applying DNS for interface %q successfully", i.Name)
+							p.Debug().Msgf("Re-applying DNS for interface %q successfully", i.Name)
 						}
 					}
 					return nil
@@ -932,18 +932,18 @@ func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 // Otherwise, we restore the saved configuration (if any) or reset to DHCP.
 func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runningIface *net.Interface) {
 	if p.runningIface == "" {
-		p.Debug().Msg("no running interface, skipping resetDNS")
+		p.Debug().Msg("No running interface, skipping resetDNS")
 		return
 	}
 	logger := p.logger.Load().With().Str("iface", p.runningIface)
 	netIface, err := netInterface(p.runningIface)
 	if err != nil {
-		logger.Error().Err(err).Msg("could not get interface")
+		logger.Error().Err(err).Msg("Could not get interface")
 		return
 	}
 	runningIface = netIface
 	if err := p.restoreNetworkManager(); err != nil {
-		logger.Error().Err(err).Msg("could not restore NetworkManager")
+		logger.Error().Err(err).Msg("Could not restore NetworkManager")
 		return
 	}
 
@@ -951,7 +951,7 @@ func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runnin
 	if isStart {
 		current, err := currentStaticDNS(netIface)
 		if err != nil {
-			logger.Warn().Err(err).Msg("unable to obtain current static DNS configuration; proceeding to restore saved config")
+			logger.Warn().Err(err).Msg("Unable to obtain current static DNS configuration; proceeding to restore saved config")
 		} else if len(current) > 0 {
 			// If any static DNS value is not our own listener, assume an admin override.
 			hasManualConfig := false
@@ -973,13 +973,13 @@ func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runnin
 	if len(saved) > 0 && restoreStatic {
 		logger.Debug().Msgf("Restoring interface %q from saved static config: %v", netIface.Name, saved)
 		if err := setDNS(netIface, saved); err != nil {
-			logger.Error().Err(err).Msgf("failed to restore static DNS config on interface %q", netIface.Name)
+			logger.Error().Err(err).Msgf("Failed to restore static DNS config on interface %q", netIface.Name)
 			return
 		}
 	} else {
 		logger.Debug().Msgf("No saved static DNS config for interface %q; resetting to DHCP", netIface.Name)
 		if err := resetDNS(netIface); err != nil {
-			logger.Error().Err(err).Msgf("failed to reset DNS to DHCP on interface %q", netIface.Name)
+			logger.Error().Err(err).Msgf("Failed to reset DNS to DHCP on interface %q", netIface.Name)
 			return
 		}
 	}
@@ -990,11 +990,11 @@ func (p *prog) logInterfacesState() {
 	withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
 		addrs, err := i.Addrs()
 		if err != nil {
-			p.Warn().Str("interface", i.Name).Err(err).Msg("failed to get addresses")
+			p.Warn().Str("interface", i.Name).Err(err).Msg("Failed to get addresses")
 		}
 		nss, err := currentStaticDNS(i)
 		if err != nil {
-			p.Warn().Str("interface", i.Name).Err(err).Msg("failed to get DNS")
+			p.Warn().Str("interface", i.Name).Err(err).Msg("Failed to get DNS")
 		}
 		if len(nss) == 0 {
 			nss = currentDNS(i)
@@ -1063,7 +1063,7 @@ func (p *prog) findWorkingInterface() string {
 	// Get all interfaces
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		p.Error().Err(err).Msg("failed to list network interfaces")
+		p.Error().Err(err).Msg("Failed to list network interfaces")
 		return currentIface // Return current interface as fallback
 	}
 
@@ -1132,7 +1132,7 @@ func (p *prog) findWorkingInterface() string {
 	// 3. Fall back to current interface if nothing else works
 	p.Warn().
 		Str("current_iface", currentIface).
-		Msg("no working physical interface found, keeping current")
+		Msg("No working physical interface found, keeping current")
 	return currentIface
 }
 
@@ -1152,19 +1152,19 @@ func randomPort() int {
 func runLogServer(sockPath string) net.Conn {
 	addr, err := net.ResolveUnixAddr("unix", sockPath)
 	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("invalid log sock path")
+		mainLog.Load().Warn().Err(err).Msg("Invalid log sock path")
 		return nil
 	}
 	ln, err := net.ListenUnix("unix", addr)
 	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not listen log socket")
+		mainLog.Load().Warn().Err(err).Msg("Could not listen log socket")
 		return nil
 	}
 	defer ln.Close()
 
 	server, err := ln.Accept()
 	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not accept connection")
+		mainLog.Load().Warn().Err(err).Msg("Could not accept connection")
 		return nil
 	}
 	return server
@@ -1261,9 +1261,9 @@ func (p *prog) defaultRouteIP() string {
 	if err != nil {
 		return ""
 	}
-	p.Debug().Str("iface", drNetIface.Name).Msg("checking default route interface")
+	p.Debug().Str("iface", drNetIface.Name).Msg("Checking default route interface")
 	if ip := ifaceFirstPrivateIP(drNetIface); ip != "" {
-		p.Debug().Str("ip", ip).Msg("found ip with default route interface")
+		p.Debug().Str("ip", ip).Msg("Found ip with default route interface")
 		return ip
 	}
 
@@ -1288,7 +1288,7 @@ func (p *prog) defaultRouteIP() string {
 	})
 
 	if len(addrs) == 0 {
-		p.Warn().Msg("no default route IP found")
+		p.Warn().Msg("No default route IP found")
 		return ""
 	}
 	sort.Slice(addrs, func(i, j int) bool {
@@ -1296,7 +1296,7 @@ func (p *prog) defaultRouteIP() string {
 	})
 
 	ip := addrs[0].String()
-	p.Debug().Str("ip", ip).Msg("found LAN interface IP")
+	p.Debug().Str("ip", ip).Msg("Found LAN interface IP")
 	return ip
 }
 
@@ -1324,7 +1324,7 @@ func withEachPhysicalInterfaces(excludeIfaceName, contextStr string, f func(i *n
 		}
 		netIface := i.Interface
 		if patched, err := patchNetIfaceName(netIface); err != nil {
-			mainLog.Load().Debug().Err(err).Msg("failed to patch net interface name")
+			mainLog.Load().Debug().Err(err).Msg("Failed to patch net interface name")
 			return
 		} else if !patched {
 			// The interface is not functional, skipping.
@@ -1361,7 +1361,7 @@ var errSaveCurrentStaticDNSNotSupported = errors.New("saving current DNS is not 
 // Only works on Windows and Mac.
 func saveCurrentStaticDNS(iface *net.Interface) error {
 	if iface == nil {
-		mainLog.Load().Debug().Msg("could not save current static DNS settings for nil interface")
+		mainLog.Load().Debug().Msg("Could not save current static DNS settings for nil interface")
 		return nil
 	}
 	switch runtime.GOOS {
@@ -1372,11 +1372,11 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 	file := ctrld.SavedStaticDnsSettingsFilePath(iface)
 	ns, err := currentStaticDNS(iface)
 	if err != nil {
-		mainLog.Load().Warn().Err(err).Msgf("could not get current static DNS settings for %q", iface.Name)
+		mainLog.Load().Warn().Err(err).Msgf("Could not get current static DNS settings for %q", iface.Name)
 		return err
 	}
 	if len(ns) == 0 {
-		mainLog.Load().Debug().Msgf("no static DNS settings for %q, removing old static DNS settings file", iface.Name)
+		mainLog.Load().Debug().Msgf("No static DNS settings for %q, removing old static DNS settings file", iface.Name)
 		_ = os.Remove(file) // removing old static DNS settings
 		return nil
 	}
@@ -1391,15 +1391,15 @@ func saveCurrentStaticDNS(iface *net.Interface) error {
 		return nil
 	}
 	if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		mainLog.Load().Warn().Err(err).Msgf("could not remove old static DNS settings file: %s", file)
+		mainLog.Load().Warn().Err(err).Msgf("Could not remove old static DNS settings file: %s", file)
 	}
 	nss := strings.Join(ns, ",")
 	mainLog.Load().Debug().Msgf("DNS settings for %q is static: %v, saving ...", iface.Name, nss)
 	if err := os.WriteFile(file, []byte(nss), 0600); err != nil {
-		mainLog.Load().Err(err).Msgf("could not save DNS settings for iface: %s", iface.Name)
+		mainLog.Load().Err(err).Msgf("Could not save DNS settings for iface: %s", iface.Name)
 		return err
 	}
-	mainLog.Load().Debug().Msgf("save DNS settings for interface %q successfully", iface.Name)
+	mainLog.Load().Debug().Msgf("Save DNS settings for interface %q successfully", iface.Name)
 	return nil
 }
 
@@ -1414,7 +1414,7 @@ func (p *prog) dnsChanged(iface *net.Interface, nameservers []string) bool {
 	curNameservers, _ := currentStaticDNS(iface)
 	slices.Sort(curNameservers)
 	if !slices.Equal(curNameservers, nameservers) {
-		p.Debug().Msgf("interface %q current DNS settings: %v, expected: %v", iface.Name, curNameservers, nameservers)
+		p.Debug().Msgf("Interface %q current DNS settings: %v, expected: %v", iface.Name, curNameservers, nameservers)
 		return true
 	}
 	return false
@@ -1438,7 +1438,7 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger *ctrld.Logger) {
 // Returns true if upgrade is allowed, false otherwise.
 func shouldUpgrade(vt string, cv *semver.Version, logger *ctrld.Logger) bool {
 	if vt == "" {
-		logger.Debug().Msg("no version target set, skipped checking self-upgrade")
+		logger.Debug().Msg("No version target set, skipped checking self-upgrade")
 		return false
 	}
 	vts := vt
@@ -1447,7 +1447,7 @@ func shouldUpgrade(vt string, cv *semver.Version, logger *ctrld.Logger) bool {
 	}
 	targetVer, err := semver.NewVersion(vts)
 	if err != nil {
-		logger.Warn().Err(err).Msgf("invalid target version, skipped self-upgrade: %s", vt)
+		logger.Warn().Err(err).Msgf("Invalid target version, skipped self-upgrade: %s", vt)
 		return false
 	}
 
@@ -1456,7 +1456,7 @@ func shouldUpgrade(vt string, cv *semver.Version, logger *ctrld.Logger) bool {
 		logger.Warn().
 			Str("target", vt).
 			Str("current", cv.String()).
-			Msgf("major version upgrade not allowed (target: %d, current: %d), skipped self-upgrade", targetVer.Major(), cv.Major())
+			Msgf("Major version upgrade not allowed (target: %d, current: %d), skipped self-upgrade", targetVer.Major(), cv.Major())
 		return false
 	}
 
@@ -1464,7 +1464,7 @@ func shouldUpgrade(vt string, cv *semver.Version, logger *ctrld.Logger) bool {
 		logger.Debug().
 			Str("target", vt).
 			Str("current", cv.String()).
-			Msgf("target version is not greater than current one, skipped self-upgrade")
+			Msgf("Target version is not greater than current one, skipped self-upgrade")
 		return false
 	}
 
@@ -1476,16 +1476,16 @@ func shouldUpgrade(vt string, cv *semver.Version, logger *ctrld.Logger) bool {
 func performUpgrade(vt string, logger *ctrld.Logger) bool {
 	exe, err := os.Executable()
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to get executable path, skipped self-upgrade")
+		logger.Error().Err(err).Msg("Failed to get executable path, skipped self-upgrade")
 		return false
 	}
 	cmd := exec.Command(exe, "upgrade", "prod", "-vv")
 	cmd.SysProcAttr = sysProcAttrForDetachedChildProcess()
 	if err := cmd.Start(); err != nil {
-		logger.Error().Err(err).Msg("failed to start self-upgrade")
+		logger.Error().Err(err).Msg("Failed to start self-upgrade")
 		return false
 	}
-	mainLog.Load().Debug().Msgf("self-upgrade triggered, version target: %s", vt)
+	logger.Debug().Msgf("Self-upgrade triggered, version target: %s", vt)
 	return true
 }
 

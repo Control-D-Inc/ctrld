@@ -41,7 +41,7 @@ func getDNSFromScutil(ctx context.Context) []string {
 		cmd := exec.Command("scutil", "--dns")
 		output, err := cmd.Output()
 		if err != nil {
-			Log(context.Background(), logger.Error(), "failed to execute scutil --dns (attempt %d/%d): %v", attempt+1, maxRetries, err)
+			Log(context.Background(), logger.Error(), "Failed to execute scutil --dns (attempt %d/%d): %v", attempt+1, maxRetries, err)
 			continue
 		}
 
@@ -75,7 +75,7 @@ func getDNSFromScutil(ctx context.Context) []string {
 		}
 
 		if err := scanner.Err(); err != nil {
-			Log(context.Background(), logger.Error(), "error scanning scutil output (attempt %d/%d): %v", attempt+1, maxRetries, err)
+			Log(context.Background(), logger.Error(), "Error scanning scutil output (attempt %d/%d): %v", attempt+1, maxRetries, err)
 			continue
 		}
 
@@ -172,7 +172,7 @@ func getAllDHCPNameservers(ctx context.Context) []string {
 
 	// if we have static DNS servers saved for the current default route, we should add them to the list
 	drIfaceName, err := netmon.DefaultRouteInterface()
-	Log(context.Background(), logger.Debug(), "checking for static DNS servers for default route interface: %s", drIfaceName)
+	Log(context.Background(), logger.Debug(), "Checking for static DNS servers for default route interface: %s", drIfaceName)
 	if err != nil {
 		Log(context.Background(), logger.Debug(),
 			"Failed to get default route interface: %v", err)

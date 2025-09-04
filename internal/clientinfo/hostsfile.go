@@ -56,7 +56,7 @@ func (hf *hostsFile) refresh() error {
 	// override hosts file with host_entries.conf content if present.
 	hem, err := parseHostEntriesConf(hostEntriesConfPath)
 	if err != nil && !os.IsNotExist(err) {
-		hf.logger.Debug().Err(err).Msg("could not read host_entries.conf file")
+		hf.logger.Debug().Err(err).Msg("Could not read host_entries.conf file")
 	}
 	for k, v := range hem {
 		hf.m[k] = v
@@ -78,14 +78,14 @@ func (hf *hostsFile) watchChanges() {
 			}
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Chmod) || event.Has(fsnotify.Remove) {
 				if err := hf.refresh(); err != nil && !os.IsNotExist(err) {
-					hf.logger.Err(err).Msg("hosts file changed but failed to update client info")
+					hf.logger.Err(err).Msg("Hosts file changed but Failed to update client info")
 				}
 			}
 		case err, ok := <-hf.watcher.Errors:
 			if !ok {
 				return
 			}
-			hf.logger.Err(err).Msg("could not watch client info file")
+			hf.logger.Err(err).Msg("Could not watch client info file")
 		}
 	}
 

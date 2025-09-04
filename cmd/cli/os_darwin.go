@@ -17,7 +17,7 @@ func allocateIP(ip string) error {
 	mainLog.Load().Debug().Str("ip", ip).Msg("Allocating IP address")
 	cmd := exec.Command("ifconfig", "lo0", "alias", ip, "up")
 	if err := cmd.Run(); err != nil {
-		mainLog.Load().Error().Err(err).Msg("allocateIP failed")
+		mainLog.Load().Error().Err(err).Msg("AllocateIP failed")
 		return err
 	}
 	mainLog.Load().Debug().Str("ip", ip).Msg("IP address allocated successfully")
@@ -29,7 +29,7 @@ func deAllocateIP(ip string) error {
 	mainLog.Load().Debug().Str("ip", ip).Msg("Deallocating IP address")
 	cmd := exec.Command("ifconfig", "lo0", "-alias", ip)
 	if err := cmd.Run(); err != nil {
-		mainLog.Load().Error().Err(err).Msg("deAllocateIP failed")
+		mainLog.Load().Error().Err(err).Msg("DeAllocateIP failed")
 		return err
 	}
 	mainLog.Load().Debug().Str("ip", ip).Msg("IP address deallocated successfully")

@@ -20,7 +20,7 @@ var (
 func HasIPv6(ctx context.Context) bool {
 	hasIPv6Once.Do(func() {
 		logger := LoggerFromCtx(ctx)
-		logger.Debug().Msg("checking for IPv6 availability once")
+		logger.Debug().Msg("Checking for ipv6 availability once")
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		val := ctrldnet.IPv6Available(ctx)
@@ -28,7 +28,7 @@ func HasIPv6(ctx context.Context) bool {
 		logger.Debug().Msgf("ipv6 availability: %v", val)
 		mon, err := netmon.New(func(format string, args ...any) {})
 		if err != nil {
-			logger.Debug().Err(err).Msg("failed to monitor IPv6 state")
+			logger.Debug().Err(err).Msg("Failed to monitor ipv6 state")
 			return
 		}
 		mon.RegisterChangeCallback(func(delta *netmon.ChangeDelta) {
@@ -37,7 +37,7 @@ func HasIPv6(ctx context.Context) bool {
 			if old != cur {
 				logger.Warn().Msgf("ipv6 availability changed, old: %v, new: %v", old, cur)
 			} else {
-				logger.Debug().Msg("ipv6 availability does not changed")
+				logger.Debug().Msg("ipv6 availability does not Changed")
 			}
 			ipv6Available.Store(cur)
 		})
@@ -50,6 +50,6 @@ func HasIPv6(ctx context.Context) bool {
 func DisableIPv6(ctx context.Context) {
 	if ipv6Available.CompareAndSwap(true, false) {
 		logger := LoggerFromCtx(ctx)
-		logger.Debug().Msg("turned off IPv6 availability")
+		logger.Debug().Msg("Turned off ipv6 availability")
 	}
 }

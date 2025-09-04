@@ -84,7 +84,7 @@ func (p *prog) detectLoop(msg *dns.Msg) {
 //
 // See: https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html
 func (p *prog) checkDnsLoop() {
-	p.Debug().Msg("start checking DNS loop")
+	p.Debug().Msg("Start checking DNS loop")
 	upstream := make(map[string]*ctrld.UpstreamConfig)
 	p.loopMu.Lock()
 	for n, uc := range p.cfg.Upstream {
@@ -93,7 +93,7 @@ func (p *prog) checkDnsLoop() {
 		}
 		// Do not send test query to external upstream.
 		if !canBeLocalUpstream(uc.Domain) {
-			p.Debug().Msgf("skipping external: upstream.%s", n)
+			p.Debug().Msgf("Skipping external: upstream.%s", n)
 			continue
 		}
 		uid := uc.UID()
@@ -112,14 +112,14 @@ func (p *prog) checkDnsLoop() {
 		}
 		resolver, err := ctrld.NewResolver(loggerCtx, uc)
 		if err != nil {
-			p.Warn().Err(err).Msgf("could not perform loop check for upstream: %q, endpoint: %q", uc.Name, uc.Endpoint)
+			p.Warn().Err(err).Msgf("Could not perform loop check for upstream: %q, endpoint: %q", uc.Name, uc.Endpoint)
 			continue
 		}
 		if _, err := resolver.Resolve(context.Background(), msg); err != nil {
-			p.Warn().Err(err).Msgf("could not send DNS loop check query for upstream: %q, endpoint: %q", uc.Name, uc.Endpoint)
+			p.Warn().Err(err).Msgf("Could not send DNS loop check query for upstream: %q, endpoint: %q", uc.Name, uc.Endpoint)
 		}
 	}
-	p.Debug().Msg("end checking DNS loop")
+	p.Debug().Msg("End checking DNS loop")
 }
 
 // checkDnsLoopTicker performs p.checkDnsLoop every minute.

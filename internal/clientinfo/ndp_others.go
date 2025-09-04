@@ -15,14 +15,14 @@ func (nd *ndpDiscover) scan() {
 	case "windows":
 		data, err := exec.Command("netsh", "interface", "ipv6", "show", "neighbors").Output()
 		if err != nil {
-			nd.logger.Warn().Err(err).Msg("could not query ndp table")
+			nd.logger.Warn().Err(err).Msg("Could not query ndp table")
 			return
 		}
 		nd.scanWindows(bytes.NewReader(data))
 	default:
 		data, err := exec.Command("ndp", "-an").Output()
 		if err != nil {
-			nd.logger.Warn().Err(err).Msg("could not query ndp table")
+			nd.logger.Warn().Err(err).Msg("Could not query ndp table")
 			return
 		}
 		nd.scanUnix(bytes.NewReader(data))

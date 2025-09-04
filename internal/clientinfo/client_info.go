@@ -196,14 +196,14 @@ func (t *Table) initSelfDiscover() {
 func (t *Table) init() {
 	// Custom client ID presents, use it as the only source.
 	if _, clientID := controld.ParseRawUID(t.cdUID); clientID != "" {
-		t.logger.Debug().Msg("start self discovery with custom client id")
+		t.logger.Debug().Msg("Start self discovery with custom client id")
 		t.initSelfDiscover()
 		return
 	}
 
 	// If we are running on platforms that should only do self discover, use it as the only source, too.
 	if ctrld.SelfDiscover() {
-		t.logger.Debug().Msg("start self discovery on desktop platforms")
+		t.logger.Debug().Msg("Start self discovery on desktop platforms")
 		t.initSelfDiscover()
 		return
 	}
@@ -211,9 +211,9 @@ func (t *Table) init() {
 	// Hosts file mapping.
 	if t.discoverHosts() {
 		t.hf = &hostsFile{logger: t.logger}
-		t.logger.Debug().Msg("start hosts file discovery")
+		t.logger.Debug().Msg("Start hosts file discovery")
 		if err := t.hf.init(); err != nil {
-			t.logger.Error().Err(err).Msg("could not init hosts file discover")
+			t.logger.Error().Err(err).Msg("Could not init hosts file discover")
 		} else {
 			t.hostnameResolvers = append(t.hostnameResolvers, t.hf)
 			t.refreshers = append(t.refreshers, t.hf)
@@ -223,9 +223,9 @@ func (t *Table) init() {
 	// DHCP lease files.
 	if t.discoverDHCP() {
 		t.dhcp = &dhcp{selfIP: t.selfIP, logger: t.logger}
-		t.logger.Debug().Msg("start dhcp discovery")
+		t.logger.Debug().Msg("Start dhcp discovery")
 		if err := t.dhcp.init(); err != nil {
-			t.logger.Error().Err(err).Msg("could not init DHCP discover")
+			t.logger.Error().Err(err).Msg("Could not init dhcp discover")
 		} else {
 			t.ipResolvers = append(t.ipResolvers, t.dhcp)
 			t.macResolvers = append(t.macResolvers, t.dhcp)
@@ -237,7 +237,7 @@ func (t *Table) init() {
 	if t.discoverARP() {
 		t.arp = &arpDiscover{}
 		t.ndp = &ndpDiscover{logger: t.logger}
-		t.logger.Debug().Msg("start arp discovery")
+		t.logger.Debug().Msg("Start arp discovery")
 		discovers := map[string]interface {
 			refresher
 			IpResolver
@@ -249,7 +249,7 @@ func (t *Table) init() {
 
 		for protocol, discover := range discovers {
 			if err := discover.refresh(); err != nil {
-				t.logger.Error().Err(err).Msgf("could not init %s discover", protocol)
+				t.logger.Error().Err(err).Msgf("Could not init %s discover", protocol)
 			} else {
 				t.ipResolvers = append(t.ipResolvers, discover)
 				t.macResolvers = append(t.macResolvers, discover)
@@ -282,18 +282,18 @@ func (t *Table) init() {
 				if _, portErr := strconv.Atoi(port); portErr == nil && port != "0" && net.ParseIP(host) != nil {
 					nss = append(nss, net.JoinHostPort(host, port))
 				} else {
-					t.logger.Warn().Msgf("ignoring invalid nameserver for ptr discover: %q", ns)
+					t.logger.Warn().Msgf("Ignoring invalid nameserver for ptr discover: %q", ns)
 				}
 			}
 			if len(nss) > 0 {
 				t.ptr.resolver = ctrld.NewResolverWithNameserver(nss)
-				t.logger.Debug().Msgf("using nameservers %v for ptr discovery", nss)
+				t.logger.Debug().Msgf("Using nameservers %v for ptr discovery", nss)
 			}
 
 		}
-		t.logger.Debug().Msg("start ptr discovery")
+		t.logger.Debug().Msg("Start ptr discovery")
 		if err := t.ptr.refresh(); err != nil {
-			t.logger.Error().Err(err).Msg("could not init PTR discover")
+			t.logger.Error().Err(err).Msg("Could not init ptr discover")
 		} else {
 			t.hostnameResolvers = append(t.hostnameResolvers, t.ptr)
 			t.refreshers = append(t.refreshers, t.ptr)
@@ -302,9 +302,9 @@ func (t *Table) init() {
 	// mdns.
 	if t.discoverMDNS() {
 		t.mdns = &mdns{logger: t.logger}
-		t.logger.Debug().Msg("start mdns discovery")
+		t.logger.Debug().Msg("Start mdns discovery")
 		if err := t.mdns.init(t.quitCh); err != nil {
-			t.logger.Error().Err(err).Msg("could not init mDNS discover")
+			t.logger.Error().Err(err).Msg("Could not init mdns discover")
 		} else {
 			t.hostnameResolvers = append(t.hostnameResolvers, t.mdns)
 		}

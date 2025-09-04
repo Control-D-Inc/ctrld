@@ -36,7 +36,7 @@ func allocateIP(ip string) error {
 	mainLog.Load().Debug().Str("ip", ip).Msg("Allocating IP address")
 	cmd := exec.Command("ip", "a", "add", ip+"/24", "dev", "lo")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		mainLog.Load().Error().Err(err).Msgf("allocateIP failed: %s", string(out))
+		mainLog.Load().Error().Err(err).Msgf("AllocateIP failed: %s", string(out))
 		return err
 	}
 	mainLog.Load().Debug().Str("ip", ip).Msg("IP address allocated successfully")
@@ -47,7 +47,7 @@ func deAllocateIP(ip string) error {
 	mainLog.Load().Debug().Str("ip", ip).Msg("Deallocating IP address")
 	cmd := exec.Command("ip", "a", "del", ip+"/24", "dev", "lo")
 	if err := cmd.Run(); err != nil {
-		mainLog.Load().Error().Err(err).Msg("deAllocateIP failed")
+		mainLog.Load().Error().Err(err).Msg("DeAllocateIP failed")
 		return err
 	}
 	mainLog.Load().Debug().Str("ip", ip).Msg("IP address deallocated successfully")
@@ -66,7 +66,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 
 	r, err := dns.NewOSConfigurator(logf, &health.Tracker{}, &controlknobs.Knobs{}, iface.Name)
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("failed to create DNS OS configurator")
+		mainLog.Load().Error().Err(err).Msg("Failed to create dns os configurator")
 		return err
 	}
 
@@ -82,7 +82,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 	if sds, err := searchDomains(); err == nil {
 		osConfig.SearchDomains = sds
 	} else {
-		mainLog.Load().Debug().Err(err).Msg("failed to get search domains list")
+		mainLog.Load().Debug().Err(err).Msg("Failed to get search domains list")
 	}
 	trySystemdResolve := false
 	if err := r.SetDNS(osConfig); err != nil {
@@ -149,7 +149,7 @@ func resetDNS(iface *net.Interface) (err error) {
 		if r, oerr := dns.NewOSConfigurator(logf, &health.Tracker{}, &controlknobs.Knobs{}, iface.Name); oerr == nil {
 			_ = r.SetDNS(dns.OSConfig{})
 			if err := r.Close(); err != nil {
-				mainLog.Load().Error().Err(err).Msg("failed to rollback DNS setting")
+				mainLog.Load().Error().Err(err).Msg("Failed to rollback dns setting")
 				return
 			}
 			err = nil
@@ -177,18 +177,18 @@ func resetDNS(iface *net.Interface) (err error) {
 	}
 
 	// TODO(cuonglm): handle DHCPv6 properly.
-	mainLog.Load().Debug().Msg("checking for IPv6 availability")
+	mainLog.Load().Debug().Msg("Checking for ipv6 availability")
 	if ctrldnet.IPv6Available(ctx) {
 		c := client6.NewClient()
 		conversation, err := c.Exchange(iface.Name)
 		if err != nil && !errAddrInUse(err) {
-			mainLog.Load().Debug().Err(err).Msg("could not exchange DHCPv6")
+			mainLog.Load().Debug().Err(err).Msg("Could not exchange dhcpv6")
 		}
 		for _, packet := range conversation {
 			if packet.Type() == dhcpv6.MessageTypeReply {
 				msg, err := packet.GetInnerMessage()
 				if err != nil {
-					mainLog.Load().Debug().Err(err).Msg("could not get inner DHCPv6 message")
+					mainLog.Load().Debug().Err(err).Msg("Could not get inner dhcpv6 message")
 					return nil
 				}
 				nameservers := msg.Options.DNS()

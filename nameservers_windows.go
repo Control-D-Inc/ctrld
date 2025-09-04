@@ -281,7 +281,7 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 			logger.Debug().Msgf("Failed to get interface by name %s: %v", drIfaceName, err)
 		} else {
 			staticNs, file := SavedStaticNameserversAndPath(drIface)
-			logger.Debug().Msgf("static dns servers from %s: %v", file, staticNs)
+			logger.Debug().Msgf("Static dns servers from %s: %v", file, staticNs)
 			if len(staticNs) > 0 {
 				logger.Debug().Msgf("Adding static DNS servers from %s: %v", drIfaceName, staticNs)
 				ns = append(ns, staticNs...)
@@ -392,20 +392,20 @@ func ValidInterfaces(ctx context.Context) map[string]struct{} {
 		defer instances.Close()
 	}
 	if err != nil {
-		logger.Warn().Msgf("failed to get wmi network adapter: %v", err)
+		logger.Warn().Msgf("Failed to get wmi network adapter: %v", err)
 		return nil
 	}
 	var adapters []string
 	for _, i := range instances {
 		adapter, err := netadapter.NewNetworkAdapter(i)
 		if err != nil {
-			logger.Warn().Msgf("failed to get network adapter: %v", err)
+			logger.Warn().Msgf("Failed to get network adapter: %v", err)
 			continue
 		}
 
 		name, err := adapter.GetPropertyName()
 		if err != nil {
-			logger.Warn().Msgf("failed to get interface name: %v", err)
+			logger.Warn().Msgf("Failed to get interface name: %v", err)
 			continue
 		}
 
@@ -415,11 +415,11 @@ func ValidInterfaces(ctx context.Context) map[string]struct{} {
 		// if this is a physical adapter or FALSE if this is not a physical adapter."
 		physical, err := adapter.GetPropertyConnectorPresent()
 		if err != nil {
-			logger.Debug().Msgf("failed to get network adapter connector present property: %v", err)
+			logger.Debug().Msgf("Failed to get network adapter connector present property: %v", err)
 			continue
 		}
 		if !physical {
-			logger.Debug().Msgf("skipping non-physical adapter: %s", name)
+			logger.Debug().Msgf("Skipping non-physical adapter: %s", name)
 			continue
 		}
 
@@ -427,11 +427,11 @@ func ValidInterfaces(ctx context.Context) map[string]struct{} {
 		// because some interfaces are not physical but have a connector.
 		hardware, err := adapter.GetPropertyHardwareInterface()
 		if err != nil {
-			logger.Debug().Msgf("failed to get network adapter hardware interface property: %v", err)
+			logger.Debug().Msgf("Failed to get network adapter hardware interface property: %v", err)
 			continue
 		}
 		if !hardware {
-			logger.Debug().Msgf("skipping non-hardware interface: %s", name)
+			logger.Debug().Msgf("Skipping non-hardware interface: %s", name)
 			continue
 		}
 

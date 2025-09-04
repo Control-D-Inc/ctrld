@@ -115,7 +115,7 @@ func (s *systemd) Start() error {
 		if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
 			return fmt.Errorf("systemctl daemon-reload failed: %w\n%s", err, string(out))
 		}
-		mainLog.Load().Debug().Msg("set KillMode=process successfully")
+		mainLog.Load().Debug().Msg("Set KillMode=process successfully")
 	}
 	return s.Service.Start()
 }
@@ -125,7 +125,7 @@ func (s *systemd) Start() error {
 func ensureSystemdKillMode(r io.Reader) (opts []*unit.UnitOption, change bool) {
 	opts, err := unit.DeserializeOptions(r)
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("failed to deserialize options")
+		mainLog.Load().Error().Err(err).Msg("Failed to deserialize options")
 		return
 	}
 	change = true
@@ -185,13 +185,13 @@ func doTasks(tasks []task) bool {
 		mainLog.Load().Debug().Msgf("Running task %s", task.Name)
 		if err := task.f(); err != nil {
 			if task.abortOnError {
-				mainLog.Load().Error().Msgf("error running task %s: %v", task.Name, err)
+				mainLog.Load().Error().Msgf("Error running task %s: %v", task.Name, err)
 				return false
 			}
 			// if this is darwin stop command, dont print debug
 			// since launchctl complains on every start
 			if runtime.GOOS != "darwin" || task.Name != "Stop" {
-				mainLog.Load().Debug().Msgf("error running task %s: %v", task.Name, err)
+				mainLog.Load().Debug().Msgf("Error running task %s: %v", task.Name, err)
 			}
 		}
 	}
@@ -202,7 +202,7 @@ func doTasks(tasks []task) bool {
 func checkHasElevatedPrivilege() {
 	ok, err := hasElevatedPrivilege()
 	if err != nil {
-		mainLog.Load().Error().Msgf("could not detect user privilege: %v", err)
+		mainLog.Load().Error().Msgf("Could not detect user privilege: %v", err)
 		return
 	}
 	if !ok {

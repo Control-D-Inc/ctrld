@@ -33,7 +33,7 @@ func NewLogCommand() (*LogCommand, error) {
 
 // warnRuntimeLoggingNotEnabled logs a warning about runtime logging not being enabled
 func (lc *LogCommand) warnRuntimeLoggingNotEnabled() {
-	mainLog.Load().Warn().Msg("runtime debug logging is not enabled")
+	mainLog.Load().Warn().Msg("Runtime debug logging is not enabled")
 	mainLog.Load().Warn().Msg(`ctrld may be running without "--cd" flag or logging is already enabled`)
 }
 
@@ -47,11 +47,11 @@ func (lc *LogCommand) SendLogs(cmd *cobra.Command, args []string) error {
 
 	status, err := s.Status()
 	if errors.Is(err, service.ErrNotInstalled) {
-		mainLog.Load().Warn().Msg("service not installed")
+		mainLog.Load().Warn().Msg("Service not installed")
 		return nil
 	}
 	if status == service.StatusStopped {
-		mainLog.Load().Warn().Msg("service is not running")
+		mainLog.Load().Warn().Msg("Service is not running")
 		return nil
 	}
 
@@ -63,7 +63,7 @@ func (lc *LogCommand) SendLogs(cmd *cobra.Command, args []string) error {
 
 	switch resp.StatusCode {
 	case http.StatusServiceUnavailable:
-		mainLog.Load().Warn().Msg("runtime logs could only be sent once per minute")
+		mainLog.Load().Warn().Msg("Runtime logs could only be sent once per minute")
 		return nil
 	case http.StatusMovedPermanently:
 		lc.warnRuntimeLoggingNotEnabled()
@@ -93,11 +93,11 @@ func (lc *LogCommand) ViewLogs(cmd *cobra.Command, args []string) error {
 
 	status, err := s.Status()
 	if errors.Is(err, service.ErrNotInstalled) {
-		mainLog.Load().Warn().Msg("service not installed")
+		mainLog.Load().Warn().Msg("Service not installed")
 		return nil
 	}
 	if status == service.StatusStopped {
-		mainLog.Load().Warn().Msg("service is not running")
+		mainLog.Load().Warn().Msg("Service is not running")
 		return nil
 	}
 
@@ -112,10 +112,10 @@ func (lc *LogCommand) ViewLogs(cmd *cobra.Command, args []string) error {
 		lc.warnRuntimeLoggingNotEnabled()
 		return nil
 	case http.StatusBadRequest:
-		mainLog.Load().Warn().Msg("runtime debugs log is not available")
+		mainLog.Load().Warn().Msg("Runtime debug logs are not available")
 		buf, err := io.ReadAll(resp.Body)
 		if err != nil {
-			mainLog.Load().Fatal().Err(err).Msg("failed to read response body")
+			mainLog.Load().Fatal().Err(err).Msg("Failed to read response body")
 		}
 		mainLog.Load().Warn().Msgf("ctrld process response:\n\n%s\n", string(buf))
 		return nil

@@ -111,24 +111,24 @@ func restoreDNS(iface *net.Interface) (err error) {
 		}
 
 		if len(v4ns) > 0 {
-			mainLog.Load().Debug().Msgf("restoring IPv4 static DNS for interface %q: %v", iface.Name, v4ns)
+			mainLog.Load().Debug().Msgf("Restoring IPv4 static DNS for interface %q: %v", iface.Name, v4ns)
 			if err := setDNS(iface, v4ns); err != nil {
 				return fmt.Errorf("restoreDNS (IPv4): %w", err)
 			}
 		} else {
-			mainLog.Load().Debug().Msgf("restoring IPv4 DHCP for interface %q", iface.Name)
+			mainLog.Load().Debug().Msgf("Restoring IPv4 DHCP for interface %q", iface.Name)
 			if err := luid.SetDNS(windows.AF_INET, nil, nil); err != nil {
 				return fmt.Errorf("restoreDNS (IPv4 clear): %w", err)
 			}
 		}
 
 		if len(v6ns) > 0 {
-			mainLog.Load().Debug().Msgf("restoring IPv6 static DNS for interface %q: %v", iface.Name, v6ns)
+			mainLog.Load().Debug().Msgf("Restoring IPv6 static DNS for interface %q: %v", iface.Name, v6ns)
 			if err := setDNS(iface, v6ns); err != nil {
 				return fmt.Errorf("restoreDNS (IPv6): %w", err)
 			}
 		} else {
-			mainLog.Load().Debug().Msgf("restoring IPv6 DHCP for interface %q", iface.Name)
+			mainLog.Load().Debug().Msgf("Restoring IPv6 DHCP for interface %q", iface.Name)
 			if err := luid.SetDNS(windows.AF_INET6, nil, nil); err != nil {
 				return fmt.Errorf("restoreDNS (IPv6 clear): %w", err)
 			}
@@ -141,12 +141,12 @@ func restoreDNS(iface *net.Interface) (err error) {
 func currentDNS(iface *net.Interface) []string {
 	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("failed to get interface LUID")
+		mainLog.Load().Error().Err(err).Msg("Failed to get interface LUID")
 		return nil
 	}
 	nameservers, err := luid.DNS()
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("failed to get interface DNS")
+		mainLog.Load().Error().Err(err).Msg("Failed to get interface DNS")
 		return nil
 	}
 	ns := make([]string, 0, len(nameservers))
@@ -174,7 +174,7 @@ func currentStaticDNS(iface *net.Interface) ([]string, error) {
 		interfaceKeyPath := path + guid.String()
 		k, err := registry.OpenKey(registry.LOCAL_MACHINE, interfaceKeyPath, registry.QUERY_VALUE)
 		if err != nil {
-			mainLog.Load().Debug().Err(err).Msgf("failed to open registry key %q for interface %q; trying next key", interfaceKeyPath, iface.Name)
+			mainLog.Load().Debug().Err(err).Msgf("Failed to open registry key %q for interface %q; trying next key", interfaceKeyPath, iface.Name)
 			continue
 		}
 		func() {
@@ -182,11 +182,11 @@ func currentStaticDNS(iface *net.Interface) ([]string, error) {
 			for _, keyName := range []string{"NameServer", "ProfileNameServer"} {
 				value, _, err := k.GetStringValue(keyName)
 				if err != nil && !errors.Is(err, registry.ErrNotExist) {
-					mainLog.Load().Debug().Err(err).Msgf("error reading %s registry key", keyName)
+					mainLog.Load().Debug().Err(err).Msgf("Error reading %s registry key", keyName)
 					continue
 				}
 				if len(value) > 0 {
-					mainLog.Load().Debug().Msgf("found static DNS for interface %q: %s", iface.Name, value)
+					mainLog.Load().Debug().Msgf("Found static DNS for interface %q: %s", iface.Name, value)
 					parsed := parseDNSServers(value)
 					for _, pns := range parsed {
 						if !slices.Contains(ns, pns) {
@@ -198,7 +198,7 @@ func currentStaticDNS(iface *net.Interface) ([]string, error) {
 		}()
 	}
 	if len(ns) == 0 {
-		mainLog.Load().Debug().Msgf("no static DNS values found for interface %q", iface.Name)
+		mainLog.Load().Debug().Msgf("No static DNS values found for interface %q", iface.Name)
 	}
 	return ns, nil
 }

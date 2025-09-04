@@ -28,10 +28,10 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 	if rp, _ := filepath.EvalSymlinks(resolvConfPath); rp != "" {
 		resolvConfPath = rp
 	}
-	p.Debug().Msgf("start watching %s file", resolvConfPath)
+	p.Debug().Msgf("Start watching %s file", resolvConfPath)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		p.Warn().Err(err).Msg("could not create watcher for /etc/resolv.conf")
+		p.Warn().Err(err).Msg("Could not create watcher for /etc/resolv.conf")
 		return
 	}
 	defer watcher.Close()
@@ -41,7 +41,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 	// This is necessary because some systems don't properly notify on file changes
 	watchDir := filepath.Dir(resolvConfPath)
 	if err := watcher.Add(watchDir); err != nil {
-		p.Warn().Err(err).Msgf("could not add %s to watcher list", watchDir)
+		p.Warn().Err(err).Msgf("Could not add %s to watcher list", watchDir)
 		return
 	}
 
@@ -50,7 +50,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 		case <-p.dnsWatcherStopCh:
 			return
 		case <-p.stopCh:
-			p.Debug().Msgf("stopping watcher for %s", resolvConfPath)
+			p.Debug().Msgf("Stopping watcher for %s", resolvConfPath)
 			return
 		case event, ok := <-watcher.Events:
 			if p.recoveryRunning.Load() {
@@ -79,7 +79,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 				for retry := 0; retry < maxRetries; retry++ {
 					foundNS, err = p.parseResolvConfNameservers(resolvConfPath)
 					if err != nil {
-						p.Error().Err(err).Msg("failed to read resolv.conf content")
+						p.Error().Err(err).Msg("Failed to read resolv.conf content")
 						break
 					}
 
@@ -128,16 +128,16 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 					// Only revert if the nameservers don't match
 					if !matches {
 						if err := watcher.Remove(watchDir); err != nil {
-							p.Error().Err(err).Msg("failed to pause watcher")
+							p.Error().Err(err).Msg("Failed to pause watcher")
 							continue
 						}
 
 						if err := setDnsFn(iface, ns); err != nil {
-							p.Error().Err(err).Msg("failed to revert /etc/resolv.conf changes")
+							p.Error().Err(err).Msg("Failed to revert /etc/resolv.conf changes")
 						}
 
 						if err := watcher.Add(watchDir); err != nil {
-							p.Error().Err(err).Msg("failed to continue running watcher")
+							p.Error().Err(err).Msg("Failed to continue running watcher")
 							return
 						}
 					}
@@ -147,7 +147,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 			if !ok {
 				return
 			}
-			p.Error().Err(err).Msg("could not get event for /etc/resolv.conf")
+			p.Error().Err(err).Msg("Could not get event for /etc/resolv.conf")
 		}
 	}
 }

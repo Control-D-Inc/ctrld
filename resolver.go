@@ -427,7 +427,7 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 			switch {
 			case res.lan:
 				// Always prefer LAN responses immediately
-				Log(ctx, logger.Debug(), "using LAN answer from: %s", res.server)
+				Log(ctx, logger.Debug(), "Using LAN answer from: %s", res.server)
 				cancel()
 				logAnswer(res.server)
 				return res.answer, nil
@@ -437,7 +437,7 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 				// if there are no LAN nameservers, we should not wait
 				// just use the first response
 				if len(nss) == 0 {
-					Log(ctx, logger.Debug(), "using public answer from: %s", res.server)
+					Log(ctx, logger.Debug(), "Using public answer from: %s", res.server)
 					cancel()
 					logAnswer(res.server)
 					return res.answer, nil
@@ -448,12 +448,12 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 				})
 			}
 		case res.answer != nil:
-			Log(ctx, logger.Debug(), "got non-success answer from: %s with code: %d",
+			Log(ctx, logger.Debug(), "Got non-success answer from: %s with code: %d",
 				res.server, res.answer.Rcode)
 			// When there are no LAN nameservers, we should not wait
 			// for other nameservers to respond.
 			if len(nss) == 0 {
-				Log(ctx, logger.Debug(), "no lan nameservers using public non success answer")
+				Log(ctx, logger.Debug(), "No lan nameservers using public non success answer")
 				cancel()
 				logAnswer(res.server)
 				return res.answer, nil
@@ -466,17 +466,17 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 
 	if len(publicResponses) > 0 {
 		resp := publicResponses[0]
-		Log(ctx, logger.Debug(), "using public answer from: %s", resp.server)
+		Log(ctx, logger.Debug(), "Using public answer from: %s", resp.server)
 		logAnswer(resp.server)
 		return resp.answer, nil
 	}
 	if controldSuccessAnswer != nil {
-		Log(ctx, logger.Debug(), "using ControlD answer from: %s", controldPublicDnsWithPort)
+		Log(ctx, logger.Debug(), "Using ControlD answer from: %s", controldPublicDnsWithPort)
 		logAnswer(controldPublicDnsWithPort)
 		return controldSuccessAnswer, nil
 	}
 	if nonSuccessAnswer != nil {
-		Log(ctx, logger.Debug(), "using non-success answer from: %s", nonSuccessServer)
+		Log(ctx, logger.Debug(), "Using non-success answer from: %s", nonSuccessServer)
 		logAnswer(nonSuccessServer)
 		return nonSuccessAnswer, nil
 	}
@@ -563,12 +563,12 @@ func lookupIP(ctx context.Context, domain string, timeout int, bootstrapDNS []st
 	}
 	logger := LoggerFromCtx(ctx)
 	if bootstrapDNS == nil {
-		logger.Debug().Msgf("empty bootstrap DNS")
+		logger.Debug().Msgf("Empty bootstrap dns")
 		return nil
 	}
 
 	resolver := newResolverWithNameserver(bootstrapDNS)
-	logger.Debug().Msgf("resolving %q using bootstrap DNS %q", domain, bootstrapDNS)
+	logger.Debug().Msgf("Resolving %q using bootstrap dns %q", domain, bootstrapDNS)
 
 	timeoutMs := 2000
 	if timeout > 0 && timeout < timeoutMs {
@@ -612,15 +612,15 @@ func lookupIP(ctx context.Context, domain string, timeout int, bootstrapDNS []st
 
 		r, err := resolver.Resolve(ctx, m)
 		if err != nil {
-			logger.Error().Err(err).Msgf("could not lookup %q record for domain %q", dns.TypeToString[dnsType], domain)
+			logger.Error().Err(err).Msgf("Could not lookup %q record for domain %q", dns.TypeToString[dnsType], domain)
 			return
 		}
 		if r.Rcode != dns.RcodeSuccess {
-			logger.Error().Msgf("could not resolve domain %q, return code: %s", domain, dns.RcodeToString[r.Rcode])
+			logger.Error().Msgf("Could not resolve domain %q, return code: %s", domain, dns.RcodeToString[r.Rcode])
 			return
 		}
 		if len(r.Answer) == 0 {
-			logger.Error().Msg("no answer from OS resolver")
+			logger.Error().Msg("No answer from os resolver")
 			return
 		}
 		target := targetDomain(r.Answer)
