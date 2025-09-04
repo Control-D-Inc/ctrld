@@ -18,6 +18,9 @@ type doqResolver struct {
 }
 
 func (r *doqResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "DoQ resolver query started")
+
 	endpoint := r.uc.Endpoint
 	tlsConfig := &tls.Config{NextProtos: []string{"doq"}}
 	ip := r.uc.BootstrapIP
@@ -31,7 +34,15 @@ func (r *doqResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	tlsConfig.ServerName = r.uc.Domain
 	_, port, _ := net.SplitHostPort(endpoint)
 	endpoint = net.JoinHostPort(ip, port)
-	return resolve(ctx, msg, endpoint, tlsConfig)
+
+	Log(ctx, logger.Debug(), "Sending DoQ request to: %s", endpoint)
+	answer, err := resolve(ctx, msg, endpoint, tlsConfig)
+	if err != nil {
+		Log(ctx, logger.Error().Err(err), "DoQ request failed")
+	} else {
+		Log(ctx, logger.Debug(), "DoQ resolver query successful")
+	}
+	return answer, err
 }
 
 func resolve(ctx context.Context, msg *dns.Msg, endpoint string, tlsConfig *tls.Config) (*dns.Msg, error) {

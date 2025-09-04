@@ -438,21 +438,17 @@ func (uc *UpstreamConfig) UID() string {
 	return uc.uid
 }
 
-// SetupBootstrapIP manually find all available IPs of the upstream.
-// The first usable IP will be used as bootstrap IP of the upstream.
-// The upstream domain will be looked up using following orders:
-//
-// - Current system DNS settings.
-// - Direct IPs table for ControlD upstreams.
-// - ControlD Bootstrap DNS 76.76.2.22
-//
+// SetupBootstrapIP sets up bootstrap IPs for the upstream config.
 // The setup process will block until there's usable IPs found.
 func (uc *UpstreamConfig) SetupBootstrapIP(ctx context.Context) {
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "Setting up bootstrap IPs for upstream: %s", uc.Name)
+
 	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
 	isControlD := uc.IsControlD()
-	logger := LoggerFromCtx(ctx)
 	nss := initDefaultOsResolver(ctx)
 	for {
+		Log(ctx, logger.Debug(), "Looking up bootstrap IPs for domain: %s", uc.Domain)
 		uc.bootstrapIPs = lookupIP(ctx, uc.Domain, uc.Timeout, nss)
 		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
 		// filtering them out here to prevent weird behavior.
@@ -468,18 +464,18 @@ func (uc *UpstreamConfig) SetupBootstrapIP(ctx context.Context) {
 			uc.bootstrapIPs = uc.bootstrapIPs[:n]
 			if len(uc.bootstrapIPs) == 0 {
 				uc.bootstrapIPs = bootstrapIPsFromControlDDomain(uc.Domain)
-				logger.Warn().Msgf("no record found for %q, lookup from direct IP table", uc.Domain)
+				logger.Warn().Msgf("No record found for %q, lookup from direct IP table", uc.Domain)
 			}
 		}
 		if len(uc.bootstrapIPs) == 0 {
-			logger.Warn().Msgf("no record found for %q, using bootstrap server: %s", uc.Domain, PremiumDNSBoostrapIP)
+			logger.Warn().Msgf("No record found for %q, using bootstrap server: %s", uc.Domain, PremiumDNSBoostrapIP)
 			uc.bootstrapIPs = lookupIP(ctx, uc.Domain, uc.Timeout, []string{net.JoinHostPort(PremiumDNSBoostrapIP, "53")})
 
 		}
 		if len(uc.bootstrapIPs) > 0 {
 			break
 		}
-		logger.Warn().Msg("could not resolve bootstrap IPs, retrying...")
+		logger.Warn().Msg("Could not resolve bootstrap IPs, retrying...")
 		b.BackOff(context.Background(), errors.New("no bootstrap IPs"))
 	}
 	for _, ip := range uc.bootstrapIPs {
@@ -489,7 +485,8 @@ func (uc *UpstreamConfig) SetupBootstrapIP(ctx context.Context) {
 			uc.bootstrapIPs4 = append(uc.bootstrapIPs4, ip)
 		}
 	}
-	logger.Debug().Msgf("bootstrap IPs: %v", uc.bootstrapIPs)
+	logger.Debug().Msgf("Bootstrap IPs: %v", uc.bootstrapIPs)
+	Log(ctx, logger.Debug(), "Bootstrap IP setup completed for upstream: %s", uc.Name)
 }
 
 // ReBootstrap re-setup the bootstrap IP and the transport.
