@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -84,8 +85,19 @@ type logSentResponse struct {
 	Error string `json:"error"`
 }
 
-// logReader provides read access to log data with size information
-// This encapsulates the log reading functionality for external consumers
+// logReader provides read access to log data with size information.
+//
+// This struct encapsulates log reading functionality for external consumers,
+// providing both the log content and metadata about the log size. It supports
+// reading from both internal log buffers (when no external logging is configured)
+// and external log files (when logging to file is enabled).
+//
+// Fields:
+//   - r: An io.ReadCloser that provides access to the log content
+//   - size: The total size of the log data in bytes
+//
+// The logReader is used by the control server to serve log content to clients
+// and by various CLI commands that need to display or process log data.
 type logReader struct {
 	r    io.ReadCloser
 	size int64
@@ -213,7 +225,69 @@ func (p *prog) needInternalLogging() bool {
 	return true
 }
 
-func (p *prog) logReader() (*logReader, error) {
+// logReaderNoColor returns a logReader with ANSI color codes stripped from the log content.
+//
+// This method is useful when log content needs to be processed by tools that don't
+// handle ANSI escape sequences properly, or when storing logs in plain text format.
+// It internally calls logReader(true) to strip color codes.
+//
+// Returns:
+//   - *logReader: A logReader instance with color codes removed, or nil if no logs available
+//   - error: Any error encountered during log reading (e.g., empty logs, file access issues)
+//
+// Use cases:
+//   - Log processing pipelines that require plain text
+//   - Storing logs in databases or text files
+//   - Displaying logs in environments that don't support color
+func (p *prog) logReaderNoColor() (*logReader, error) {
+	return p.logReader(true)
+}
+
+// logReaderRaw returns a logReader with ANSI color codes preserved in the log content.
+//
+// This method maintains the original formatting of log entries including color codes,
+// which is useful for displaying logs in terminals that support ANSI colors or when
+// the original visual formatting needs to be preserved. It internally calls logReader(false).
+//
+// Returns:
+//   - *logReader: A logReader instance with color codes preserved, or nil if no logs available
+//   - error: Any error encountered during log reading (e.g., empty logs, file access issues)
+//
+// Use cases:
+//   - Terminal-based log viewers that support color
+//   - Interactive debugging sessions
+//   - Preserving original log formatting for display
+func (p *prog) logReaderRaw() (*logReader, error) {
+	return p.logReader(false)
+}
+
+// logReader creates a logReader instance for accessing log content with optional color stripping.
+//
+// This is the core method that handles log reading from different sources based on the
+// current logging configuration. It supports both internal logging (when no external
+// logging is configured) and external file logging (when logging to file is enabled).
+//
+// Behavior:
+//   - Internal logging: Reads from internal log buffers (normal logs + warning logs)
+//     and combines them with appropriate markers for separation
+//   - External logging: Reads directly from the configured log file
+//   - Empty logs: Returns appropriate error messages when no log content is available
+//
+// Parameters:
+//   - stripColor: If true, removes ANSI color codes from log content; if false, preserves them
+//
+// Returns:
+//   - *logReader: A logReader instance providing access to log content and size metadata
+//   - error: Any error encountered during log reading, including:
+//   - "nil internal log writer" - Internal logging not properly initialized
+//   - "nil internal warn log writer" - Warning log writer not properly initialized
+//   - "internal log is empty" - No content in internal log buffers
+//   - "log file is empty" - External log file exists but contains no data
+//   - File system errors when accessing external log files
+//
+// The method handles thread-safe access to internal log buffers and provides
+// comprehensive error handling for various edge cases.
+func (p *prog) logReader(stripColor bool) (*logReader, error) {
 	if p.needInternalLogging() {
 		p.mu.Lock()
 		lw := p.internalLogWriter
@@ -225,14 +299,15 @@ func (p *prog) logReader() (*logReader, error) {
 		if wlw == nil {
 			return nil, errors.New("nil internal warn log writer")
 		}
+
 		// Normal log content.
 		lw.mu.Lock()
-		lwReader := bytes.NewReader(lw.buf.Bytes())
+		lwReader := newLogReader(&lw.buf, stripColor)
 		lwSize := lw.buf.Len()
 		lw.mu.Unlock()
 		// Warn log content.
 		wlw.mu.Lock()
-		wlwReader := bytes.NewReader(wlw.buf.Bytes())
+		wlwReader := newLogReader(&wlw.buf, stripColor)
 		wlwSize := wlw.buf.Len()
 		wlw.mu.Unlock()
 		reader := io.MultiReader(lwReader, bytes.NewReader([]byte(logWriterLogEndMarker)), wlwReader)
@@ -306,4 +381,27 @@ func newMachineFriendlyZapCore(w io.Writer, level zapcore.Level) zapcore.Core {
 	encoderConfig.EncodeLevel = noticeLevelEncoder
 	encoder := zapcore.NewConsoleEncoder(encoderConfig)
 	return zapcore.NewCore(encoder, zapcore.AddSync(w), level)
+}
+
+// ansiRegex is a regular expression to match ANSI color codes.
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// newLogReader creates a reader for log buffer content with optional ANSI color stripping.
+//
+// This function provides flexible log content access by allowing consumers to choose
+// between raw log data (with ANSI color codes) or stripped content (without color codes).
+// The color stripping is useful when logs need to be processed by tools that don't
+// handle ANSI escape sequences properly, or when storing logs in plain text format.
+//
+// Parameters:
+//   - buf: The log buffer containing the log data to read
+//   - stripColor: If true, strips ANSI color codes from the log content;
+//     if false, returns raw log content with color codes preserved
+//
+// Returns an io.Reader that provides access to the processed log content.
+func newLogReader(buf *bytes.Buffer, stripColor bool) io.Reader {
+	if stripColor {
+		return strings.NewReader(ansiRegex.ReplaceAllString(buf.String(), ""))
+	}
+	return strings.NewReader(buf.String())
 }

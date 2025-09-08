@@ -283,7 +283,7 @@ func (p *prog) registerControlServerHandler() {
 		}
 	}))
 	p.cs.register(viewLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		lr, err := p.logReader()
+		lr, err := p.logReaderRaw()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -309,7 +309,7 @@ func (p *prog) registerControlServerHandler() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		r, err := p.logReader()
+		r, err := p.logReaderNoColor()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
