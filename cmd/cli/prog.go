@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math/rand"
 	"net"
@@ -91,7 +92,7 @@ type prog struct {
 	apiReloadCh          chan *ctrld.Config
 	apiForceReloadCh     chan struct{}
 	apiForceReloadGroup  singleflight.Group
-	logConn              net.Conn
+	logConn              io.WriteCloser
 	cs                   *controlServer
 	logger               atomic.Pointer[ctrld.Logger]
 	csSetDnsDone         chan struct{}
@@ -1146,28 +1147,6 @@ func randomPort() int {
 	min := 1025
 	n := rand.Intn(max-min) + min
 	return n
-}
-
-// runLogServer starts a unix listener, use by startCmd to gather log from runCmd.
-func runLogServer(sockPath string) net.Conn {
-	addr, err := net.ResolveUnixAddr("unix", sockPath)
-	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("Invalid log sock path")
-		return nil
-	}
-	ln, err := net.ListenUnix("unix", addr)
-	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("Could not listen log socket")
-		return nil
-	}
-	defer ln.Close()
-
-	server, err := ln.Accept()
-	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("Could not accept connection")
-		return nil
-	}
-	return server
 }
 
 func errAddrInUse(err error) bool {

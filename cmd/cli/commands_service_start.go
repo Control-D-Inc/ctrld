@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/kardianos/service"
@@ -104,11 +103,10 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	writeDefaultConfig := !noConfigStart && configBase64 == ""
 
 	logServerStarted := make(chan struct{})
-	// A buffer channel to gather log output from runCmd and report
-	// to user in case self-check process failed.
-	runCmdLogCh := make(chan string, 256)
+	stopLogCh := make(chan struct{})
 	ud, err := userHomeDir()
 	sockDir := ud
+	var logServerSocketPath string
 	if err != nil {
 		logger.Warn().Err(err).Msg("Failed to get user home directory")
 		logger.Warn().Msg("Log server did not start")
@@ -122,29 +120,17 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 		if d, err := socketDir(); err == nil {
 			sockDir = d
 		}
-		sockPath := filepath.Join(sockDir, ctrldLogUnixSock)
-		_ = os.Remove(sockPath)
+		logServerSocketPath = filepath.Join(sockDir, ctrldLogUnixSock)
+		_ = os.Remove(logServerSocketPath)
 		go func() {
-			defer func() {
-				close(runCmdLogCh)
-				_ = os.Remove(sockPath)
-			}()
+			defer os.Remove(logServerSocketPath)
+
 			close(logServerStarted)
-			if conn := runLogServer(sockPath); conn != nil {
-				// Enough buffer for log message, we don't produce
-				// such long log message, but just in case.
-				buf := make([]byte, 1024)
-				for {
-					n, err := conn.Read(buf)
-					if err != nil {
-						return
-					}
-					msg := string(buf[:n])
-					if _, _, found := strings.Cut(msg, msgExit); found {
-						cancel()
-					}
-					runCmdLogCh <- msg
-				}
+
+			// Start HTTP log server
+			if err := httpLogServer(logServerSocketPath, stopLogCh); err != nil && err != http.ErrServerClosed {
+				logger.Warn().Err(err).Msg("Failed to serve HTTP log server")
+				return
 			}
 		}()
 	}
@@ -270,19 +256,29 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 		case ok && status == service.StatusRunning:
 			logger.Notice().Msg("Service started")
 		default:
-			marker := bytes.Repeat([]byte("="), 32)
+			marker := append(bytes.Repeat([]byte("="), 32), '\n')
 			// If ctrld service is not running, emitting log obtained from ctrld process.
 			if status != service.StatusRunning || ctx.Err() != nil {
 				logger.Error().Msg("Ctrld service may not have started due to an error or misconfiguration, service log:")
 				_, _ = logger.Write(marker)
-				haveLog := false
-				for msg := range runCmdLogCh {
-					_, _ = logger.Write([]byte(strings.ReplaceAll(msg, msgExit, "")))
-					haveLog = true
-				}
-				// If we're unable to get log from "ctrld run", notice users about it.
-				if !haveLog {
-					logger.Write([]byte(`<no log output is obtained from ctrld process>"`))
+
+				// Wait for log collection to complete
+				<-stopLogCh
+
+				// Retrieve logs from HTTP server if available
+				if logServerSocketPath != "" {
+					hlc := newHTTPLogClient(logServerSocketPath)
+					logs, err := hlc.GetLogs()
+					if err != nil {
+						logger.Warn().Err(err).Msg("Failed to get logs from HTTP log server")
+					}
+					if len(logs) == 0 {
+						logger.Write([]byte(`<no log output is obtained from ctrld process>`))
+					} else {
+						logger.Write(logs)
+					}
+				} else {
+					logger.Write([]byte(`<no log output from HTTP log server>`))
 				}
 			}
 			// Report any error if occurred.
