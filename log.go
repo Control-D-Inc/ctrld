@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"go.uber.org/zap"
@@ -244,7 +245,8 @@ func (l *Logger) GetLogger() *Logger {
 
 // Write implements io.Writer to allow direct writing to the logger
 func (l *Logger) Write(p []byte) (n int, err error) {
-	l.Info().Msg(string(p))
+	stdoutSyncer := zapcore.AddSync(os.Stdout)
+	stdoutSyncer.Write(p)
 	return len(p), nil
 }
 

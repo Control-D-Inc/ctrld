@@ -234,22 +234,21 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		sockDir = d
 	}
 	sockPath := filepath.Join(sockDir, ctrldLogUnixSock)
-	if addr, err := net.ResolveUnixAddr("unix", sockPath); err == nil {
-		if conn, err := net.Dial(addr.Network(), addr.String()); err == nil {
-			lc := &logConn{conn: conn}
-			consoleWriter = newHumanReadableZapCore(io.MultiWriter(os.Stdout, lc), consoleWriterLevel)
-			p.logConn = lc
-		} else {
-			if !errors.Is(err, os.ErrNotExist) {
-				p.Warn().Err(err).Msg("Unable to create log ipc connection")
-			}
+	hlc := newHTTPLogClient(sockPath)
+
+	// Test if HTTP log server is available
+	if err := hlc.Ping(); err != nil {
+		if !errConnectionRefused(err) {
+			p.Warn().Err(err).Msg("Unable to ping log server")
 		}
 	} else {
-		p.Warn().Err(err).Msgf("Unable to resolve socket address: %s", sockPath)
+		// Server is available, use HTTP log client
+		consoleWriter = newHumanReadableZapCore(io.MultiWriter(os.Stdout, hlc), consoleWriterLevel)
+		p.logConn = hlc
 	}
 	notifyExitToLogServer := func() {
 		if p.logConn != nil {
-			_, _ = p.logConn.Write([]byte(msgExit))
+			_ = p.logConn.Close()
 		}
 	}
 
@@ -1354,7 +1353,7 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 				break
 			}
 
-			logMsg(il.Info().Err(err), n, "error listening on address: %s", addr)
+			logMsg(il.Debug().Err(err), n, "error listening on address: %s", addr)
 
 			if !check.IP && !check.Port {
 				if fatal {
