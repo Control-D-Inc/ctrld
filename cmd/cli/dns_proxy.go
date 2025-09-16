@@ -25,6 +25,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
+	"github.com/Control-D-Inc/ctrld/internal/rulematcher"
 )
 
 // DNS proxy constants for configuration and behavior control
@@ -358,6 +359,16 @@ func sendDNSResponse(w dns.ResponseWriter, m *dns.Msg, rcode int) {
 	_ = w.WriteMsg(answer)
 }
 
+// upstreamForRequest contains all parameters needed for upstream determination
+type upstreamForRequest struct {
+	DefaultUpstreamNum string
+	ListenerConfig     *ctrld.ListenerConfig
+	Addr               net.Addr
+	SrcMac             string
+	Domain             string
+	MatchingConfig     *rulematcher.MatchingConfig
+}
+
 // upstreamFor returns the list of upstreams for resolving the given domain,
 // matching by policies defined in the listener config. The second return value
 // reports whether the domain matches the policy.
@@ -366,89 +377,87 @@ func sendDNSResponse(w dns.ResponseWriter, m *dns.Msg, rcode int) {
 // processed later, because policy logging want to know whether a network rule
 // is disregarded in favor of the domain level rule.
 func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, srcMac, domain string) (res *upstreamForResult) {
-	upstreams := []string{upstreamPrefix + defaultUpstreamNum}
-	matchedPolicy := "no policy"
-	matchedNetwork := "no network"
-	matchedRule := "no rule"
-	matched := false
-	res = &upstreamForResult{srcAddr: addr.String()}
+	var matchingConfig *rulematcher.MatchingConfig
+	if lc.Policy != nil && lc.Policy.Matching != nil {
+		// Convert string-based order to RuleType enum
+		var order []rulematcher.RuleType
+		for _, ruleTypeStr := range lc.Policy.Matching.Order {
+			switch ruleTypeStr {
+			case "network":
+				order = append(order, rulematcher.RuleTypeNetwork)
+			case "mac":
+				order = append(order, rulematcher.RuleTypeMac)
+			case "domain":
+				order = append(order, rulematcher.RuleTypeDomain)
+			}
+		}
 
-	defer func() {
+		matchingConfig = &rulematcher.MatchingConfig{
+			Order:            order,
+			StopOnFirstMatch: lc.Policy.Matching.StopOnFirstMatch,
+		}
+	}
+
+	req := &upstreamForRequest{
+		DefaultUpstreamNum: defaultUpstreamNum,
+		ListenerConfig:     lc,
+		Addr:               addr,
+		SrcMac:             srcMac,
+		Domain:             domain,
+		MatchingConfig:     matchingConfig,
+	}
+
+	return p.upstreamForWithConfig(ctx, req)
+}
+
+// upstreamForWithConfig determines upstreams using configurable rule matching
+func (p *prog) upstreamForWithConfig(ctx context.Context, req *upstreamForRequest) (res *upstreamForResult) {
+	// Default upstreams
+	upstreams := []string{upstreamPrefix + req.DefaultUpstreamNum}
+	res = &upstreamForResult{srcAddr: req.Addr.String()}
+
+	// If no policy, return default upstreams
+	if req.ListenerConfig.Policy == nil {
 		res.upstreams = upstreams
-		res.matched = matched
-		res.matchedPolicy = matchedPolicy
-		res.matchedNetwork = matchedNetwork
-		res.matchedRule = matchedRule
-	}()
-
-	if lc.Policy == nil {
+		res.matched = false
+		res.matchedPolicy = "no policy"
+		res.matchedNetwork = "no network"
+		res.matchedRule = "no rule"
 		return
 	}
 
-	do := func(policyUpstreams []string) {
-		upstreams = append([]string(nil), policyUpstreams...)
-	}
-
-	var networkTargets []string
+	// Extract source IP from address
 	var sourceIP net.IP
-	switch addr := addr.(type) {
+	switch addr := req.Addr.(type) {
 	case *net.UDPAddr:
 		sourceIP = addr.IP
 	case *net.TCPAddr:
 		sourceIP = addr.IP
 	}
 
-networkRules:
-	for _, rule := range lc.Policy.Networks {
-		for source, targets := range rule {
-			networkNum := strings.TrimPrefix(source, "network.")
-			nc := p.cfg.Network[networkNum]
-			if nc == nil {
-				continue
-			}
-			for _, ipNet := range nc.IPNets {
-				if ipNet.Contains(sourceIP) {
-					matchedPolicy = lc.Policy.Name
-					matchedNetwork = source
-					networkTargets = targets
-					matched = true
-					break networkRules
-				}
-			}
-		}
+	// Create match request
+	matchRequest := &rulematcher.MatchRequest{
+		SourceIP:  sourceIP,
+		SourceMac: req.SrcMac,
+		Domain:    req.Domain,
+		Policy:    req.ListenerConfig.Policy,
+		Config:    p.cfg,
 	}
 
-macRules:
-	for _, rule := range lc.Policy.Macs {
-		for source, targets := range rule {
-			if source != "" && (strings.EqualFold(source, srcMac) || wildcardMatches(strings.ToLower(source), strings.ToLower(srcMac))) {
-				matchedPolicy = lc.Policy.Name
-				matchedNetwork = source
-				networkTargets = targets
-				matched = true
-				break macRules
-			}
-		}
-	}
+	// Use matching engine to find upstreams
+	engine := rulematcher.NewMatchingEngine(req.MatchingConfig)
+	matchResult := engine.FindUpstreams(ctx, matchRequest)
 
-	for _, rule := range lc.Policy.Rules {
-		// There's only one entry per rule, config validation ensures this.
-		for source, targets := range rule {
-			if source == domain || wildcardMatches(source, domain) {
-				matchedPolicy = lc.Policy.Name
-				if len(networkTargets) > 0 {
-					matchedNetwork += " (unenforced)"
-				}
-				matchedRule = source
-				do(targets)
-				matched = true
-				return
-			}
-		}
-	}
+	// Convert result to upstreamForResult format
+	res.upstreams = matchResult.Upstreams
+	res.matched = matchResult.Matched
+	res.matchedPolicy = matchResult.MatchedPolicy
+	res.matchedNetwork = matchResult.MatchedNetwork
+	res.matchedRule = matchResult.MatchedRule
 
-	if matched {
-		do(networkTargets)
+	// If no match found, use default upstreams
+	if !matchResult.Matched {
+		res.upstreams = upstreams
 	}
 
 	return
