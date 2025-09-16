@@ -143,6 +143,91 @@ func Test_prog_upstreamFor(t *testing.T) {
 	}
 }
 
+func Test_prog_upstreamForWithCustomMatching(t *testing.T) {
+	cfg := testhelper.SampleConfig(t)
+	prog := &prog{cfg: cfg}
+	prog.logger.Store(mainLog.Load())
+	for _, nc := range prog.cfg.Network {
+		for _, cidr := range nc.Cidrs {
+			_, ipNet, err := net.ParseCIDR(cidr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nc.IPNets = append(nc.IPNets, ipNet)
+		}
+	}
+
+	// Create a custom policy with domain-first matching order
+	customPolicy := &ctrld.ListenerPolicyConfig{
+		Name: "Custom Policy",
+		Networks: []ctrld.Rule{
+			{"network.0": []string{"upstream.1", "upstream.0"}},
+		},
+		Macs: []ctrld.Rule{
+			{"14:45:A0:67:83:0A": []string{"upstream.2"}},
+		},
+		Rules: []ctrld.Rule{
+			{"*.ru": []string{"upstream.1"}},
+		},
+		Matching: &ctrld.MatchingConfig{
+			Order:            []string{"domain", "mac", "network"},
+			StopOnFirstMatch: true,
+		},
+	}
+
+	customListener := &ctrld.ListenerConfig{
+		Policy: customPolicy,
+	}
+
+	tests := []struct {
+		name      string
+		ip        string
+		mac       string
+		domain    string
+		upstreams []string
+		matched   bool
+	}{
+		{
+			name:      "Domain rule should match first with custom order",
+			ip:        "192.168.0.1:0",
+			mac:       "14:45:A0:67:83:0A",
+			domain:    "example.ru",
+			upstreams: []string{"upstream.1"},
+			matched:   true,
+		},
+		{
+			name:      "MAC rule should match when no domain rule",
+			ip:        "192.168.0.1:0",
+			mac:       "14:45:A0:67:83:0A",
+			domain:    "example.com",
+			upstreams: []string{"upstream.2"},
+			matched:   true,
+		},
+		{
+			name:      "Network rule should match when no domain or MAC rule",
+			ip:        "192.168.0.1:0",
+			mac:       "00:11:22:33:44:55",
+			domain:    "example.com",
+			upstreams: []string{"upstream.1", "upstream.0"},
+			matched:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, err := net.ResolveUDPAddr("udp", tc.ip)
+			require.NoError(t, err)
+			require.NotNil(t, addr)
+
+			ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, requestID())
+			ufr := prog.upstreamFor(ctx, "0", customListener, addr, tc.mac, tc.domain)
+
+			assert.Equal(t, tc.matched, ufr.matched)
+			assert.Equal(t, tc.upstreams, ufr.upstreams)
+		})
+	}
+}
+
 func TestCache(t *testing.T) {
 	cfg := testhelper.SampleConfig(t)
 	prog := &prog{cfg: cfg}

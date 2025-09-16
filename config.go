@@ -315,14 +315,21 @@ func (lc *ListenerConfig) IsDirectDnsListener() bool {
 	}
 }
 
+// MatchingConfig defines the configuration for rule matching behavior
+type MatchingConfig struct {
+	Order            []string `mapstructure:"order" toml:"order,omitempty" json:"order" yaml:"order"`
+	StopOnFirstMatch bool     `mapstructure:"stop_on_first_match" toml:"stop_on_first_match,omitempty" json:"stop_on_first_match" yaml:"stop_on_first_match"`
+}
+
 // ListenerPolicyConfig specifies the policy rules for ctrld to filter incoming requests.
 type ListenerPolicyConfig struct {
-	Name                 string   `mapstructure:"name" toml:"name,omitempty"`
-	Networks             []Rule   `mapstructure:"networks" toml:"networks,omitempty,inline,multiline" validate:"dive,len=1"`
-	Rules                []Rule   `mapstructure:"rules" toml:"rules,omitempty,inline,multiline" validate:"dive,len=1"`
-	Macs                 []Rule   `mapstructure:"macs" toml:"macs,omitempty,inline,multiline" validate:"dive,len=1"`
-	FailoverRcodes       []string `mapstructure:"failover_rcodes" toml:"failover_rcodes,omitempty" validate:"dive,dnsrcode"`
-	FailoverRcodeNumbers []int    `mapstructure:"-" toml:"-"`
+	Name                 string          `mapstructure:"name" toml:"name,omitempty"`
+	Networks             []Rule          `mapstructure:"networks" toml:"networks,omitempty,inline,multiline" validate:"dive,len=1"`
+	Rules                []Rule          `mapstructure:"rules" toml:"rules,omitempty,inline,multiline" validate:"dive,len=1"`
+	Macs                 []Rule          `mapstructure:"macs" toml:"macs,omitempty,inline,multiline" validate:"dive,len=1"`
+	FailoverRcodes       []string        `mapstructure:"failover_rcodes" toml:"failover_rcodes,omitempty" validate:"dive,dnsrcode"`
+	FailoverRcodeNumbers []int           `mapstructure:"-" toml:"-"`
+	Matching             *MatchingConfig `mapstructure:"-" toml:"-"`
 }
 
 // Rule is a map from source to list of upstreams.
