@@ -38,3 +38,18 @@ type MatchResult struct {
 	MatchedRule string
 	RuleType    RuleType
 }
+
+// MatchingConfig defines the configuration for rule matching behavior
+type MatchingConfig struct {
+	Order            []RuleType `json:"order" yaml:"order"`
+	StopOnFirstMatch bool       `json:"stop_on_first_match" yaml:"stop_on_first_match"`
+}
+
+// DefaultMatchingConfig returns the default matching configuration
+// This maintains backward compatibility with the current behavior
+func DefaultMatchingConfig() *MatchingConfig {
+	return &MatchingConfig{
+		Order:            []RuleType{RuleTypeNetwork, RuleTypeMac, RuleTypeDomain},
+		StopOnFirstMatch: true,
+	}
+}
