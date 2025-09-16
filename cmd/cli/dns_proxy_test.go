@@ -170,8 +170,7 @@ func Test_prog_upstreamForWithCustomMatching(t *testing.T) {
 			{"*.ru": []string{"upstream.1"}},
 		},
 		Matching: &ctrld.MatchingConfig{
-			Order:            []string{"domain", "mac", "network"},
-			StopOnFirstMatch: true,
+			Order: []string{"domain", "mac", "network"},
 		},
 	}
 

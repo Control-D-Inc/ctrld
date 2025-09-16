@@ -53,8 +53,7 @@ func TestMatchingEngine(t *testing.T) {
 		{
 			name: "Custom order - domain first",
 			config: &MatchingConfig{
-				Order:            []RuleType{RuleTypeDomain, RuleTypeNetwork, RuleTypeMac},
-				StopOnFirstMatch: true,
+				Order: []RuleType{RuleTypeDomain, RuleTypeNetwork, RuleTypeMac},
 			},
 			request: &MatchRequest{
 				SourceIP:  net.ParseIP("192.168.0.1"),
@@ -77,8 +76,7 @@ func TestMatchingEngine(t *testing.T) {
 		{
 			name: "Custom order - MAC first",
 			config: &MatchingConfig{
-				Order:            []RuleType{RuleTypeMac, RuleTypeNetwork, RuleTypeDomain},
-				StopOnFirstMatch: true,
+				Order: []RuleType{RuleTypeMac, RuleTypeNetwork, RuleTypeDomain},
 			},
 			request: &MatchRequest{
 				SourceIP:  net.ParseIP("192.168.0.1"),
@@ -184,7 +182,6 @@ func TestDefaultMatchingConfig(t *testing.T) {
 	config := DefaultMatchingConfig()
 
 	assert.Equal(t, []RuleType{RuleTypeNetwork, RuleTypeMac, RuleTypeDomain}, config.Order)
-	assert.True(t, config.StopOnFirstMatch)
 }
 
 func TestMatchingEngineWithInvalidRuleType(t *testing.T) {
@@ -201,8 +198,7 @@ func TestMatchingEngineWithInvalidRuleType(t *testing.T) {
 	}
 
 	config := &MatchingConfig{
-		Order:            []RuleType{RuleType("invalid"), RuleTypeNetwork},
-		StopOnFirstMatch: true,
+		Order: []RuleType{RuleType("invalid"), RuleTypeNetwork},
 	}
 
 	engine := NewMatchingEngine(config)

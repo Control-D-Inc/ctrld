@@ -393,8 +393,7 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 		}
 
 		matchingConfig = &rulematcher.MatchingConfig{
-			Order:            order,
-			StopOnFirstMatch: lc.Policy.Matching.StopOnFirstMatch,
+			Order: order,
 		}
 	}
 

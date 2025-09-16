@@ -317,8 +317,7 @@ func (lc *ListenerConfig) IsDirectDnsListener() bool {
 
 // MatchingConfig defines the configuration for rule matching behavior
 type MatchingConfig struct {
-	Order            []string `mapstructure:"order" toml:"order,omitempty" json:"order" yaml:"order"`
-	StopOnFirstMatch bool     `mapstructure:"stop_on_first_match" toml:"stop_on_first_match,omitempty" json:"stop_on_first_match" yaml:"stop_on_first_match"`
+	Order []string `mapstructure:"order" toml:"order,omitempty" json:"order" yaml:"order"`
 }
 
 // ListenerPolicyConfig specifies the policy rules for ctrld to filter incoming requests.
