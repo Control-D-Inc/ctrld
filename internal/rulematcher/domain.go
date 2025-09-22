@@ -7,11 +7,6 @@ import (
 // DomainRuleMatcher handles matching of domain-based rules
 type DomainRuleMatcher struct{}
 
-// Type returns the rule type for domain matcher
-func (d *DomainRuleMatcher) Type() RuleType {
-	return RuleTypeDomain
-}
-
 // Match evaluates domain rules against the requested domain
 func (d *DomainRuleMatcher) Match(ctx context.Context, req *MatchRequest) *MatchResult {
 	if req.Policy == nil || len(req.Policy.Rules) == 0 {

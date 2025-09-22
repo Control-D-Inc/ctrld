@@ -8,11 +8,6 @@ import (
 // MacRuleMatcher handles matching of MAC address-based rules
 type MacRuleMatcher struct{}
 
-// Type returns the rule type for MAC matcher
-func (m *MacRuleMatcher) Type() RuleType {
-	return RuleTypeMac
-}
-
 // Match evaluates MAC address rules against the source MAC address
 func (m *MacRuleMatcher) Match(ctx context.Context, req *MatchRequest) *MatchResult {
 	if req.Policy == nil || len(req.Policy.Macs) == 0 {

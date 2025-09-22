@@ -19,7 +19,6 @@ const (
 // RuleMatcher defines the interface for matching different types of rules
 type RuleMatcher interface {
 	Match(ctx context.Context, request *MatchRequest) *MatchResult
-	Type() RuleType
 }
 
 // MatchRequest contains all the information needed for rule matching
