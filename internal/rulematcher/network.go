@@ -8,11 +8,6 @@ import (
 // NetworkRuleMatcher handles matching of network-based rules
 type NetworkRuleMatcher struct{}
 
-// Type returns the rule type for network matcher
-func (n *NetworkRuleMatcher) Type() RuleType {
-	return RuleTypeNetwork
-}
-
 // Match evaluates network rules against the source IP address
 func (n *NetworkRuleMatcher) Match(ctx context.Context, req *MatchRequest) *MatchResult {
 	if req.Policy == nil || len(req.Policy.Networks) == 0 {

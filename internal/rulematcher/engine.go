@@ -1,3 +1,40 @@
+// Package rulematcher provides a flexible rule matching engine for DNS request routing.
+//
+// The rulematcher package implements a policy-based DNS routing system that allows
+// configuring different types of rules to determine which upstream DNS servers should
+// handle specific requests. It supports three types of rules:
+//
+//   - Network rules: Match requests based on source IP address ranges
+//   - MAC rules: Match requests based on source MAC addresses
+//   - Domain rules: Match requests based on requested domain names
+//
+// The matching engine uses a configurable priority order to determine which rules
+// take precedence when multiple rules match. By default, the priority order is:
+// Network -> MAC -> Domain, with Domain rules having the highest priority and
+// overriding all other matches.
+//
+// Example usage:
+//
+//	config := &MatchingConfig{
+//		Order: []RuleType{RuleTypeNetwork, RuleTypeMac, RuleTypeDomain},
+//	}
+//	engine := NewMatchingEngine(config)
+//
+//	request := &MatchRequest{
+//		SourceIP:  net.ParseIP("192.168.1.100"),
+//		SourceMac: "aa:bb:cc:dd:ee:ff",
+//		Domain:    "example.com",
+//		Policy:    policyConfig,
+//		Config:    appConfig,
+//	}
+//
+//	result := engine.FindUpstreams(ctx, request)
+//	if result.Matched {
+//		// Use result.Upstreams to route the request
+//	}
+//
+// The package maintains backward compatibility with existing behavior while
+// providing a clean, extensible interface for adding new rule types.
 package rulematcher
 
 import (
