@@ -1786,7 +1786,7 @@ func goArm() string {
 
 // upgradeUrl returns the url for downloading new ctrld binary.
 func upgradeUrl(baseUrl string) string {
-	dlPath := fmt.Sprintf("%s-%s/ctrld", runtime.GOOS, runtime.GOARCH)
+	dlPath := fmt.Sprintf("v2/%s-%s/ctrld", runtime.GOOS, runtime.GOARCH)
 	// Use arm version set during build time, v5 binary can be run on higher arm version system.
 	if armVersion := goArm(); armVersion != "" {
 		dlPath = fmt.Sprintf("%s-%sv%s/ctrld", runtime.GOOS, runtime.GOARCH, armVersion)
