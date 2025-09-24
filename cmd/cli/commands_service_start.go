@@ -348,6 +348,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmd.Flags().BoolVarP(&skipSelfChecks, "skip_self_checks", "", false, `Skip self checks after installing ctrld service`)
 	startCmd.Flags().BoolVarP(&startOnly, "start_only", "", false, "Do not install new service")
 	_ = startCmd.Flags().MarkHidden("start_only")
+	startCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
 
 	// Start command alias
 	startCmdAlias := &cobra.Command{

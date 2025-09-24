@@ -41,6 +41,7 @@ var (
 	skipSelfChecks    bool
 	cleanup           bool
 	startOnly         bool
+	rfc1918           bool
 
 	mainLog            atomic.Pointer[ctrld.Logger]
 	consoleWriter      zapcore.Core
