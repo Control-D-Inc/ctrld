@@ -207,8 +207,8 @@ func (p *prog) serveDNS(listenerNum string) error {
 				return nil
 			})
 		}
-		// When we spawn a listener on 127.0.0.1, also spawn listeners on the RFC1918
-		// addresses of the machine. So ctrld could receive queries from LAN clients.
+		// When we spawn a listener on 127.0.0.1, also spawn listeners on the RFC1918 addresses of the machine
+		// if explicitly set via setting rfc1918 flag, so ctrld could receive queries from LAN clients.
 		if needRFC1918Listeners(listenerConfig) {
 			g.Go(func() error {
 				for _, addr := range ctrld.Rfc1918Addresses() {
@@ -1039,7 +1039,7 @@ func (p *prog) queryFromSelf(ip string) bool {
 // needRFC1918Listeners reports whether ctrld need to spawn listener for RFC 1918 addresses.
 // This is helpful for non-desktop platforms to receive queries from LAN clients.
 func needRFC1918Listeners(lc *ctrld.ListenerConfig) bool {
-	return lc.IP == "127.0.0.1" && lc.Port == 53 && !ctrld.IsDesktopPlatform()
+	return rfc1918 && lc.IP == "127.0.0.1" && lc.Port == 53
 }
 
 // ipFromARPA parses a FQDN arpa domain and return the IP address if valid.

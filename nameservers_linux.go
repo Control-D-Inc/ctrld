@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"encoding/hex"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
+
+	"tailscale.com/net/netmon"
 
 	"github.com/Control-D-Inc/ctrld/internal/dns/resolvconffile"
 )
@@ -127,4 +130,26 @@ func virtualInterfaces() set {
 		}
 	}
 	return s
+}
+
+// validInterfacesMap returns a set containing non virtual interfaces.
+// TODO: deduplicated with cmd/cli/net_linux.go in v2.
+func validInterfaces() set {
+	m := make(map[string]struct{})
+	vis := virtualInterfaces()
+	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
+		if _, existed := vis[i.Name]; existed {
+			return
+		}
+		m[i.Name] = struct{}{}
+	})
+	// Fallback to default route interface if found nothing.
+	if len(m) == 0 {
+		defaultRoute, err := netmon.DefaultRoute()
+		if err != nil {
+			return m
+		}
+		m[defaultRoute.InterfaceName] = struct{}{}
+	}
+	return m
 }
