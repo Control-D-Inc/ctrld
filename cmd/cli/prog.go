@@ -1291,7 +1291,7 @@ func canBeLocalUpstream(addr string) bool {
 // the interface that matches excludeIfaceName. The context is used to clarify the
 // log message when error happens.
 func withEachPhysicalInterfaces(excludeIfaceName, contextStr string, f func(i *net.Interface) error) {
-	validIfacesMap := validInterfacesMap(ctrld.LoggerCtx(context.Background(), mainLog.Load()))
+	validIfacesMap := ctrld.ValidInterfaces(ctrld.LoggerCtx(context.Background(), mainLog.Load()))
 	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		// Skip loopback/virtual/down interface.
 		if i.IsLoopback() || len(i.HardwareAddr) == 0 {
