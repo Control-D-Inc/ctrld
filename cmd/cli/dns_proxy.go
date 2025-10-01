@@ -1435,7 +1435,7 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 
 	mon.RegisterChangeCallback(func(delta *netmon.ChangeDelta) {
 		// Get map of valid interfaces
-		validIfaces := validInterfacesMap(ctrld.LoggerCtx(ctx, p.logger.Load()))
+		validIfaces := ctrld.ValidInterfaces(ctrld.LoggerCtx(ctx, p.logger.Load()))
 
 		isMajorChange := mon.IsMajorChangeFrom(delta.Old, delta.New)
 

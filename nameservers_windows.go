@@ -444,7 +444,3 @@ func ValidInterfaces(ctx context.Context) map[string]struct{} {
 	}
 	return m
 }
-
-func validInterfaces() map[string]struct{} {
-	return ValidInterfaces(context.Background())
-}

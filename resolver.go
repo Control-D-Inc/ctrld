@@ -711,7 +711,7 @@ func newResolverWithNameserver(nameservers []string) *osResolver {
 
 // Rfc1918Addresses returns the list of local physical interfaces private IP addresses
 func Rfc1918Addresses() []string {
-	vis := validInterfaces()
+	vis := ValidInterfaces(context.Background())
 	var res []string
 	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		// Skip virtual interfaces.

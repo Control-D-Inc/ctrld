@@ -24,7 +24,7 @@ func dnsFns() []dnsFn {
 	return []dnsFn{dnsFromResolvConf, dns4, dns6, dnsFromSystemdResolver}
 }
 
-func dns4(_ context.Context) []string {
+func dns4(ctx context.Context) []string {
 	f, err := os.Open(v4RouteFile)
 	if err != nil {
 		return nil
@@ -33,7 +33,7 @@ func dns4(_ context.Context) []string {
 
 	var dns []string
 	seen := make(map[string]bool)
-	vis := virtualInterfaces()
+	vis := virtualInterfaces(ctx)
 	s := bufio.NewScanner(f)
 	first := true
 	for s.Scan() {
@@ -46,7 +46,7 @@ func dns4(_ context.Context) []string {
 			continue
 		}
 		// Skip virtual interfaces.
-		if vis.contains(string(bytes.TrimSpace(fields[0]))) {
+		if _, ok := vis[string(bytes.TrimSpace(fields[0]))]; ok {
 			continue
 		}
 		gw := make([]byte, net.IPv4len)
@@ -64,7 +64,7 @@ func dns4(_ context.Context) []string {
 	return dns
 }
 
-func dns6(_ context.Context) []string {
+func dns6(ctx context.Context) []string {
 	f, err := os.Open(v6RouteFile)
 	if err != nil {
 		return nil
@@ -72,7 +72,7 @@ func dns6(_ context.Context) []string {
 	defer f.Close()
 
 	var dns []string
-	vis := virtualInterfaces()
+	vis := virtualInterfaces(ctx)
 	s := bufio.NewScanner(f)
 	for s.Scan() {
 		fields := bytes.Fields(s.Bytes())
@@ -80,7 +80,7 @@ func dns6(_ context.Context) []string {
 			continue
 		}
 		// Skip virtual interfaces.
-		if vis.contains(string(bytes.TrimSpace(fields[len(fields)-1]))) {
+		if _, ok := vis[string(bytes.TrimSpace(fields[len(fields)-1]))]; ok {
 			continue
 		}
 
@@ -110,34 +110,29 @@ func dnsFromSystemdResolver(_ context.Context) []string {
 	return ns
 }
 
-type set map[string]struct{}
-
-func (s *set) add(e string) {
-	(*s)[e] = struct{}{}
-}
-
-func (s *set) contains(e string) bool {
-	_, ok := (*s)[e]
-	return ok
-}
-
-// virtualInterfaces returns a set of virtual interfaces on current machine.
-func virtualInterfaces() set {
-	s := make(set)
-	entries, _ := os.ReadDir("/sys/devices/virtual/net")
+// virtualInterfaces returns a map of virtual interfaces on the current machine.
+// This reads from /sys/devices/virtual/net to identify virtual network interfaces
+// Virtual interfaces should not have DNS configured as they don't represent physical network connections
+func virtualInterfaces(ctx context.Context) map[string]struct{} {
+	logger := LoggerFromCtx(ctx)
+	s := make(map[string]struct{})
+	entries, err := os.ReadDir("/sys/devices/virtual/net")
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to read /sys/devices/virtual/net")
+		return nil
+	}
 	for _, entry := range entries {
 		if entry.IsDir() {
-			s.add(strings.TrimSpace(entry.Name()))
+			s[strings.TrimSpace(entry.Name())] = struct{}{}
 		}
 	}
 	return s
 }
 
-// validInterfacesMap returns a set containing non virtual interfaces.
-// TODO: deduplicated with cmd/cli/net_linux.go in v2.
-func validInterfaces() set {
+// ValidInterfaces returns a set containing non virtual interfaces.
+func ValidInterfaces(ctx context.Context) map[string]struct{} {
 	m := make(map[string]struct{})
-	vis := virtualInterfaces()
+	vis := virtualInterfaces(ctx)
 	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		if _, existed := vis[i.Name]; existed {
 			return
