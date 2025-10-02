@@ -44,12 +44,12 @@ There are several ways to download and install `ctrld`.
 The simplest way to download and install `ctrld` is to use the following installer command on any UNIX-like platform:
 
 ```shell
-sh -c 'sh -c "$(curl -sL https://api.controld.com/dl)"'
+sh -c 'sh -c "$(curl -sL https://api.controld.com/dl?version=2)"'
 ```
 
 Windows user and prefer Powershell (who doesn't)? No problem, execute this command instead in administrative PowerShell:
 ```shell
-(Invoke-WebRequest -Uri 'https://api.controld.com/dl/ps1' -UseBasicParsing).Content | Set-Content "$env:TEMPctrld_install.ps1"; Invoke-Expression "& '$env:TEMPctrld_install.ps1'"
+(Invoke-WebRequest -Uri 'https://api.controld.com/dl/ps1?version=2' -UseBasicParsing).Content | Set-Content "$env:TEMPctrld_install.ps1"; Invoke-Expression "& '$env:TEMPctrld_install.ps1'"
 ```
 
 Or you can pull and run a Docker container from [Docker Hub](https://hub.docker.com/r/controldns/ctrld)
@@ -61,7 +61,7 @@ docker run -d --name=ctrld -p 127.0.0.1:53:53/tcp -p 127.0.0.1:53:53/udp control
 Alternatively, if you know what you're doing you can download pre-compiled binaries from the [Releases](https://github.com/Control-D-Inc/ctrld/releases) section for the appropriate platform. 
 
 ## Build
-Lastly, you can build `ctrld` from source which requires `go1.21+`:
+Lastly, you can build `ctrld` from source which requires `go1.23+`:
 
 ```shell
 go build ./cmd/ctrld
@@ -111,7 +111,7 @@ Available Commands:
 Flags:
   -h, --help            help for ctrld
   -s, --silent          do not write any log output
-  -v, --verbose count   verbose log output, "-v" basic logging, "-vv" debug level logging
+  -v, --verbose count   verbose log output, "-v" basic logging, "-vv" debug logging
       --version         version for ctrld
 
 Use "ctrld [command] --help" for more information about a command.
@@ -179,7 +179,7 @@ Linux or Macos
 `ctrld` can be configured in variety of different ways, which include: API, local config file or via cli launch args. 
 
 ## API Based Auto Configuration
-Application can be started with a specific Control D resolver config, instead of the default one. Simply supply your Resolver ID with a `--cd` flag, when using the `start` (service) mode. In this mode, the application will automatically choose a non-conflicting IP and/or port and configure itself as the upstream to whatever process is running on port 53 (like dnsmasq or Windows DNS Server). This mode is used when the 1 liner installer command from the Control D onboarding guide is executed. 
+Application can be started with a specific Control D resolver config, instead of the default one. Simply supply your Resolver ID with a `--cd` flag, when using the `start` (service) mode. This mode is used when the 1 liner installer command from the Control D onboarding guide is executed. 
 
 The following command will use your own personal Control D Device resolver, and start the application in service mode. Your resolver ID is displayed on the "Show Resolvers" screen for the relevant Control D Endpoint. 
 
@@ -196,7 +196,7 @@ sudo ctrld start --cd abcd1234
 Once you run the above command, the following things will happen:
 - You resolver configuration will be fetched from the API, and config file templated with the resolver data
 - Application will start as a service, and keep running (even after reboot) until you run the `stop` or `uninstall` sub-commands
-- All physical network interface will be updated to use the listener started by the service or dnsmasq upstream will be switched to `ctrld`
+- All physical network interface will be updated to use the listener started by the service
 - All DNS queries will be sent to the listener
 
 ## Manual Configuration 
