@@ -273,26 +273,27 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 						logger.Warn().Err(err).Msg("Failed to get logs from HTTP log server")
 					}
 					if len(logs) == 0 {
-						logger.Write([]byte(`<no log output is obtained from ctrld process>`))
+						logger.Write([]byte("<no log output is obtained from ctrld process>\n"))
 					} else {
 						logger.Write(logs)
+						logger.Write([]byte("\n"))
 					}
 				} else {
-					logger.Write([]byte(`<no log output from HTTP log server>`))
+					logger.Write([]byte("<no log output from HTTP log server>\n"))
 				}
 			}
 			// Report any error if occurred.
 			if err != nil {
 				_, _ = logger.Write(marker)
-				msg := fmt.Sprintf("An error occurred while performing test query: %s", err)
+				msg := fmt.Sprintf("An error occurred while performing test query: %s\n", err)
 				logger.Write([]byte(msg))
 			}
 			// If ctrld service is running but selfCheckStatus failed, it could be related
 			// to user's system firewall configuration, notice users about it.
 			if status == service.StatusRunning && err == nil {
 				_, _ = logger.Write(marker)
-				logger.Write([]byte(`ctrld service was running, but a DNS query could not be sent to its listener`))
-				logger.Write([]byte(`Please check your system firewall if it is configured to block/intercept/redirect DNS queries`))
+				logger.Write([]byte("ctrld service was running, but a DNS query could not be sent to its listener\n"))
+				logger.Write([]byte("Please check your system firewall if it is configured to block/intercept/redirect DNS queries\n"))
 			}
 
 			_, _ = logger.Write(marker)
