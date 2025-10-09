@@ -12,12 +12,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/nettest"
 )
 
+func unixDomainSocketPath(t *testing.T) string {
+	t.Helper()
+	sockPath, err := nettest.LocalPath()
+	if err != nil {
+		t.Fatalf("Failed to create temporary directory: %v", err)
+	}
+	return sockPath
+}
+
 func TestHTTPLogServer(t *testing.T) {
-	// Create a temporary socket path
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "test.sock")
+	sockPath := unixDomainSocketPath(t)
 
 	// Create log channel
 	stopLogCh := make(chan struct{})
@@ -238,8 +247,8 @@ func TestHTTPLogServerInvalidSocketPath(t *testing.T) {
 
 func TestHTTPLogServerSocketInUse(t *testing.T) {
 	// Create a temporary socket path
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "test.sock")
+	sockPath := unixDomainSocketPath(t)
+	defer os.Remove(sockPath)
 
 	// Create the first server
 	stopLogCh1 := make(chan struct{})
@@ -261,15 +270,12 @@ func TestHTTPLogServerSocketInUse(t *testing.T) {
 	if !strings.Contains(err.Error(), "could not listen log socket") {
 		t.Errorf("Expected 'could not listen log socket' error, got: %v", err)
 	}
-
-	// Clean up
-	os.Remove(sockPath)
 }
 
 func TestHTTPLogServerConcurrentRequests(t *testing.T) {
 	// Create a temporary socket path
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "test.sock")
+	sockPath := unixDomainSocketPath(t)
+	defer os.Remove(sockPath)
 
 	// Create log channel
 	stopLogCh := make(chan struct{})
@@ -348,15 +354,12 @@ func TestHTTPLogServerConcurrentRequests(t *testing.T) {
 			t.Errorf("Log '%s' was not stored", expectedLog)
 		}
 	}
-
-	// Clean up
-	os.Remove(sockPath)
 }
 
 func TestHTTPLogServerErrorHandling(t *testing.T) {
 	// Create a temporary socket path
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "test.sock")
+	sockPath := unixDomainSocketPath(t)
+	defer os.Remove(sockPath)
 
 	// Create log channel
 	stopLogCh := make(chan struct{})
@@ -393,9 +396,6 @@ func TestHTTPLogServerErrorHandling(t *testing.T) {
 			t.Errorf("Expected status 200, got %d", resp.StatusCode)
 		}
 	})
-
-	// Clean up
-	os.Remove(sockPath)
 }
 
 func BenchmarkHTTPLogServer(b *testing.B) {
@@ -440,8 +440,8 @@ func BenchmarkHTTPLogServer(b *testing.B) {
 
 func TestHTTPLogClient(t *testing.T) {
 	// Create a temporary socket path
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "test.sock")
+	sockPath := unixDomainSocketPath(t)
+	defer os.Remove(sockPath)
 
 	// Create log channel
 	stopLogCh := make(chan struct{})
@@ -502,9 +502,6 @@ func TestHTTPLogClient(t *testing.T) {
 			t.Error("Timeout waiting for channel closure")
 		}
 	})
-
-	// Clean up
-	os.Remove(sockPath)
 }
 
 func TestHTTPLogClientServerUnavailable(t *testing.T) {
@@ -570,8 +567,8 @@ func BenchmarkHTTPLogClient(b *testing.B) {
 
 func TestHTTPLogServerWithLogWriter(t *testing.T) {
 	// Create a temporary socket path
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "test.sock")
+	sockPath := unixDomainSocketPath(t)
+	defer os.Remove(sockPath)
 
 	// Create log channel
 	stopLogCh := make(chan struct{})
@@ -632,8 +629,7 @@ func TestHTTPLogServerWithLogWriter(t *testing.T) {
 
 	t.Run("Empty logs endpoint", func(t *testing.T) {
 		// Create a new server for this test
-		tmpDir2 := t.TempDir()
-		sockPath2 := filepath.Join(tmpDir2, "test2.sock")
+		sockPath2 := unixDomainSocketPath(t)
 		stopLogCh2 := make(chan struct{})
 
 		go func() {
@@ -684,15 +680,12 @@ func TestHTTPLogServerWithLogWriter(t *testing.T) {
 			t.Error("Timeout waiting for channel closure")
 		}
 	})
-
-	// Clean up
-	os.Remove(sockPath)
 }
 
 func TestHTTPLogClientGetLogs(t *testing.T) {
 	// Create a temporary socket path
-	tmpDir := t.TempDir()
-	sockPath := filepath.Join(tmpDir, "test.sock")
+	sockPath := unixDomainSocketPath(t)
+	defer os.Remove(sockPath)
 
 	// Create log channel
 	stopLogCh := make(chan struct{})
@@ -731,8 +724,7 @@ func TestHTTPLogClientGetLogs(t *testing.T) {
 
 	t.Run("Get empty logs", func(t *testing.T) {
 		// Create a new client for empty logs test
-		tmpDir2 := t.TempDir()
-		sockPath2 := filepath.Join(tmpDir2, "test2.sock")
+		sockPath2 := unixDomainSocketPath(t)
 		stopLogCh2 := make(chan struct{})
 
 		go func() {
@@ -752,7 +744,4 @@ func TestHTTPLogClientGetLogs(t *testing.T) {
 
 		os.Remove(sockPath2)
 	})
-
-	// Clean up
-	os.Remove(sockPath)
 }
