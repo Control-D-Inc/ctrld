@@ -53,7 +53,7 @@ func dnsFns() []dnsFn {
 }
 
 func dnsFromAdapter(ctx context.Context) []string {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultDNSAdapterTimeout)
+	ctx, cancel := context.WithTimeout(ctx, defaultDNSAdapterTimeout)
 	defer cancel()
 
 	var ns []string
@@ -295,11 +295,6 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 
 	logger.Debug().Msgf("DNS server discovery completed, count=%d, servers=%v (including %d DC servers)", len(ns), ns, len(dcServers))
 	return ns, nil
-}
-
-// CurrentNameserversFromResolvconf returns a nil slice of strings.
-func currentNameserversFromResolvconf() []string {
-	return nil
 }
 
 // checkDomainJoined checks if the machine is joined to an Active Directory domain
