@@ -357,8 +357,9 @@ func Test_legacyResolverWithBigExtraSection(t *testing.T) {
 		Type:     ResolverTypeLegacy,
 		Endpoint: lanAddr,
 	}
-	uc.Init()
-	r, err := NewResolver(uc)
+	ctx := context.Background()
+	uc.Init(ctx)
+	r, err := NewResolver(ctx, uc)
 	if err != nil {
 		t.Fatal(err)
 	}
