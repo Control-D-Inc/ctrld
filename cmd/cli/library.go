@@ -18,13 +18,11 @@ type AppCallback struct {
 
 // AppConfig allows overwriting ctrld cli flags from mobile platforms.
 type AppConfig struct {
-	CdUID          string
-	ProvisionID    string
-	CustomHostname string
-	HomeDir        string
-	UpstreamProto  string
-	Verbose        int
-	LogPath        string
+	CdUID         string
+	HomeDir       string
+	UpstreamProto string
+	Verbose       int
+	LogPath       string
 }
 
 const (

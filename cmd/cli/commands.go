@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -189,7 +188,6 @@ func initRunCmd() *cobra.Command {
 	runCmd.Flags().StringVarP(&iface, "iface", "", "", `Update DNS setting for iface, "auto" means the default interface gateway`)
 	_ = runCmd.Flags().MarkHidden("iface")
 	runCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
-	runCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
 
 	runCmd.FParseErrWhitelist = cobra.FParseErrWhitelist{UnknownFlags: true}
 	rootCmd.AddCommand(runCmd)
@@ -208,7 +206,6 @@ func initStartCmd() *cobra.Command {
 
 NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
 		Args: func(cmd *cobra.Command, args []string) error {
-			args = filterEmptyStrings(args)
 			if len(args) > 0 {
 				return fmt.Errorf("'ctrld start' doesn't accept positional arguments\n" +
 					"Use flags instead (e.g. --cd, --iface) or see 'ctrld start --help' for all options")
@@ -222,7 +219,6 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			sc := &service.Config{}
 			*sc = *svcConfig
 			osArgs := os.Args[2:]
-			osArgs = filterEmptyStrings(osArgs)
 			if os.Args[1] == "service" {
 				osArgs = os.Args[3:]
 			}
@@ -532,7 +528,6 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmd.Flags().BoolVarP(&skipSelfChecks, "skip_self_checks", "", false, `Skip self checks after installing ctrld service`)
 	startCmd.Flags().BoolVarP(&startOnly, "start_only", "", false, "Do not install new service")
 	_ = startCmd.Flags().MarkHidden("start_only")
-	startCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
@@ -571,7 +566,6 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 
 NOTE: running "ctrld start" without any arguments will start already installed ctrld service.`,
 		Args: func(cmd *cobra.Command, args []string) error {
-			args = filterEmptyStrings(args)
 			if len(args) > 0 {
 				return fmt.Errorf("'ctrld start' doesn't accept positional arguments\n" +
 					"Use flags instead (e.g. --cd, --iface) or see 'ctrld start --help' for all options")
@@ -1386,12 +1380,4 @@ func initServicesCmd(commands ...*cobra.Command) *cobra.Command {
 	rootCmd.AddCommand(serviceCmd)
 
 	return serviceCmd
-}
-
-// filterEmptyStrings removes empty strings from a slice of strings.
-// It returns a new slice containing only non-empty strings.
-func filterEmptyStrings(slice []string) []string {
-	return slices.DeleteFunc(slice, func(s string) bool {
-		return s == ""
-	})
 }

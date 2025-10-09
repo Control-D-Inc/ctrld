@@ -36,7 +36,7 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 	rt := &http3.Transport{}
 	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
-	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 		_, port, _ := net.SplitHostPort(addr)
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
 		if uc.BootstrapIP != "" {
@@ -96,14 +96,14 @@ func (uc *UpstreamConfig) doh3Transport(dnsType uint16) http.RoundTripper {
 //   - quic dialer is different with net.Dialer
 //   - simplification for quic free version
 type parallelDialerResult struct {
-	conn *quic.Conn
+	conn quic.EarlyConnection
 	err  error
 }
 
 type quicParallelDialer struct{}
 
 // Dial performs parallel dialing to the given address list.
-func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 	if len(addrs) == 0 {
 		return nil, errors.New("empty addresses")
 	}

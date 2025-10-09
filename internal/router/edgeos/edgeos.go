@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/kardianos/service"
@@ -182,7 +181,7 @@ func ContentFilteringEnabled() bool {
 // DnsShieldEnabled reports whether DNS Shield is enabled.
 // See: https://community.ui.com/releases/UniFi-OS-Dream-Machines-3-2-7/251dfc1e-f4dd-4264-a080-3be9d8b9e02b
 func DnsShieldEnabled() bool {
-	buf, err := os.ReadFile(filepath.Join(dnsmasq.UbiosConfPath(), "dns.conf"))
+	buf, err := os.ReadFile("/var/run/dnsmasq.conf.d/dns.conf")
 	if err != nil {
 		return false
 	}

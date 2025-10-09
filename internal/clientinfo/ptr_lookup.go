@@ -104,6 +104,7 @@ func (p *ptrDiscover) lookupIPByHostname(name string, v6 bool) string {
 		if value == name {
 			if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
 				ip = addr.String()
+				//lint:ignore S1008 This is used for readable.
 				if addr.IsLoopback() { // Continue searching if this is loopback address.
 					return true
 				}
@@ -119,7 +120,8 @@ func (p *ptrDiscover) lookupIPByHostname(name string, v6 bool) string {
 // is reachable, set p.serverDown to false, so p.lookupHostname can continue working.
 func (p *ptrDiscover) checkServer() {
 	bo := backoff.NewBackoff("ptrDiscover", func(format string, args ...any) {}, time.Minute*5)
-	m := (&ctrld.UpstreamConfig{}).VerifyMsg()
+	m := new(dns.Msg)
+	m.SetQuestion(".", dns.TypeNS)
 	ping := func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

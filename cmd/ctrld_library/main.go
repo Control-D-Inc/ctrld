@@ -28,17 +28,15 @@ type AppCallback interface {
 // Start configures utility with config.toml from provided directory.
 // This function will block until Stop is called
 // Check port availability prior to calling it.
-func (c *Controller) Start(CdUID string, ProvisionID string, CustomHostname string, HomeDir string, UpstreamProto string, logLevel int, logPath string) {
+func (c *Controller) Start(CdUID string, HomeDir string, UpstreamProto string, logLevel int, logPath string) {
 	if c.stopCh == nil {
 		c.stopCh = make(chan struct{})
 		c.Config = cli.AppConfig{
-			CdUID:          CdUID,
-			ProvisionID:    ProvisionID,
-			CustomHostname: CustomHostname,
-			HomeDir:        HomeDir,
-			UpstreamProto:  UpstreamProto,
-			Verbose:        logLevel,
-			LogPath:        logPath,
+			CdUID:         CdUID,
+			HomeDir:       HomeDir,
+			UpstreamProto: UpstreamProto,
+			Verbose:       logLevel,
+			LogPath:       logPath,
 		}
 		appCallback := mapCallback(c.AppCallback)
 		cli.RunMobile(&c.Config, &appCallback, c.stopCh)

@@ -3,7 +3,6 @@ package ubios
 import (
 	"bytes"
 	"os"
-	"path/filepath"
 	"strconv"
 
 	"github.com/kardianos/service"
@@ -13,19 +12,19 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
 )
 
-const Name = "ubios"
+const (
+	Name                      = "ubios"
+	ubiosDNSMasqConfigPath    = "/run/dnsmasq.conf.d/zzzctrld.conf"
+	ubiosDNSMasqDnsConfigPath = "/run/dnsmasq.conf.d/dns.conf"
+)
 
 type Ubios struct {
-	cfg             *ctrld.Config
-	dnsmasqConfPath string
+	cfg *ctrld.Config
 }
 
 // New returns a router.Router for configuring/setup/run ctrld on Ubios routers.
 func New(cfg *ctrld.Config) *Ubios {
-	return &Ubios{
-		cfg:             cfg,
-		dnsmasqConfPath: filepath.Join(dnsmasq.UbiosConfPath(), dnsmasq.UbiosConfName),
-	}
+	return &Ubios{cfg: cfg}
 }
 
 func (u *Ubios) ConfigureService(config *service.Config) error {
@@ -60,7 +59,7 @@ func (u *Ubios) Setup() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(u.dnsmasqConfPath, []byte(data), 0600); err != nil {
+	if err := os.WriteFile(ubiosDNSMasqConfigPath, []byte(data), 0600); err != nil {
 		return err
 	}
 	// Restart dnsmasq service.
@@ -75,7 +74,7 @@ func (u *Ubios) Cleanup() error {
 		return nil
 	}
 	// Remove the custom dnsmasq config
-	if err := os.Remove(u.dnsmasqConfPath); err != nil {
+	if err := os.Remove(ubiosDNSMasqConfigPath); err != nil {
 		return err
 	}
 	// Restart dnsmasq service.
@@ -86,7 +85,7 @@ func (u *Ubios) Cleanup() error {
 }
 
 func restartDNSMasq() error {
-	buf, err := os.ReadFile(dnsmasq.UbiosPidFile())
+	buf, err := os.ReadFile("/run/dnsmasq.pid")
 	if err != nil {
 		return err
 	}

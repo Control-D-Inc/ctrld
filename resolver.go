@@ -729,15 +729,10 @@ func newResolverWithNameserver(nameservers []string) *osResolver {
 	return r
 }
 
-// Rfc1918Addresses returns the list of local physical interfaces private IP addresses
+// Rfc1918Addresses returns the list of local interfaces private IP addresses
 func Rfc1918Addresses() []string {
-	vis := validInterfaces()
 	var res []string
 	netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
-		// Skip virtual interfaces.
-		if _, existed := vis[i.Name]; !existed {
-			return
-		}
 		addrs, _ := i.Addrs()
 		for _, addr := range addrs {
 			ipNet, ok := addr.(*net.IPNet)
