@@ -1,4 +1,4 @@
-package ctrld
+package cli
 
 import (
 	"maps"

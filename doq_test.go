@@ -142,7 +142,7 @@ func (s *testQUICServer) serve(t *testing.T) {
 }
 
 // handleConnection manages an individual QUIC connection by accepting and handling incoming streams in separate goroutines.
-func (s *testQUICServer) handleConnection(t *testing.T, conn *quic.Conn) {
+func (s *testQUICServer) handleConnection(t *testing.T, conn quic.Connection) {
 	for {
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
@@ -154,7 +154,7 @@ func (s *testQUICServer) handleConnection(t *testing.T, conn *quic.Conn) {
 }
 
 // handleStream processes a single QUIC stream, reads DNS messages, generates a response, and sends it back to the client.
-func (s *testQUICServer) handleStream(t *testing.T, stream *quic.Stream) {
+func (s *testQUICServer) handleStream(t *testing.T, stream quic.Stream) {
 	defer stream.Close()
 
 	// Read length (2 bytes)

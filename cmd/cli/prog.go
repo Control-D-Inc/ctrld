@@ -35,7 +35,6 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/internal/router"
-	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
 
 const (
@@ -329,7 +328,7 @@ func (p *prog) apiConfigReload() {
 
 		// Performing self-upgrade check for production version.
 		if isStable {
-			_ = selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, &logger)
+			selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, &logger)
 		}
 
 		if resolverConfig.DeactivationPin != nil {
@@ -530,15 +529,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		go p.watchLinkState(ctx)
 	}
 
-	if !reload {
-		go func() {
-			// Start network monitoring
-			if err := p.monitorNetworkChanges(); err != nil {
-				mainLog.Load().Error().Err(err).Msg("Failed to start network monitoring")
-			}
-		}()
-	}
-
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()
 		if !reload {
@@ -550,7 +540,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				}
 				addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 				mainLog.Load().Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
-				if err := p.serveDNS(listenerNum); err != nil {
+				if err := p.serveDNS(ctx, listenerNum); err != nil {
 					mainLog.Load().Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
 				}
 				mainLog.Load().Debug().Msgf("end of serveDNS listener.%s: %s", listenerNum, addr)
@@ -616,12 +606,6 @@ func (p *prog) setupClientInfoDiscover(selfIP string) {
 		mainLog.Load().Debug().Msgf("watching custom lease file: %s", leaseFile)
 		format := ctrld.LeaseFileFormat(p.cfg.Service.DHCPLeaseFileFormat)
 		p.ciTable.AddLeaseFile(leaseFile, format)
-	}
-	if leaseFiles := dnsmasq.AdditionalLeaseFiles(); len(leaseFiles) > 0 {
-		mainLog.Load().Debug().Msgf("watching additional lease files: %v", leaseFiles)
-		for _, leaseFile := range leaseFiles {
-			p.ciTable.AddLeaseFile(leaseFile, ctrld.Dnsmasq)
-		}
 	}
 }
 
@@ -1483,15 +1467,14 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 	}
 }
 
-// shouldUpgrade checks if the version target vt is greater than the current one cv.
-// Major version upgrades are not allowed to prevent breaking changes.
+// selfUpgradeCheck checks if the version target vt is greater
+// than the current one cv, perform self-upgrade then.
 //
 // The callers must ensure curVer and logger are non-nil.
-// Returns true if upgrade is allowed, false otherwise.
-func shouldUpgrade(vt string, cv *semver.Version, logger *zerolog.Logger) bool {
+func selfUpgradeCheck(vt string, cv *semver.Version, logger *zerolog.Logger) {
 	if vt == "" {
 		logger.Debug().Msg("no version target set, skipped checking self-upgrade")
-		return false
+		return
 	}
 	vts := vt
 	if !strings.HasPrefix(vts, "v") {
@@ -1500,58 +1483,28 @@ func shouldUpgrade(vt string, cv *semver.Version, logger *zerolog.Logger) bool {
 	targetVer, err := semver.NewVersion(vts)
 	if err != nil {
 		logger.Warn().Err(err).Msgf("invalid target version, skipped self-upgrade: %s", vt)
-		return false
+		return
 	}
-
-	// Prevent major version upgrades to avoid breaking changes
-	if targetVer.Major() != cv.Major() {
-		logger.Warn().
-			Str("target", vt).
-			Str("current", cv.String()).
-			Msgf("major version upgrade not allowed (target: %d, current: %d), skipped self-upgrade", targetVer.Major(), cv.Major())
-		return false
-	}
-
 	if !targetVer.GreaterThan(cv) {
 		logger.Debug().
 			Str("target", vt).
 			Str("current", cv.String()).
 			Msgf("target version is not greater than current one, skipped self-upgrade")
-		return false
+		return
 	}
 
-	return true
-}
-
-// performUpgrade executes the self-upgrade command.
-// Returns true if upgrade was initiated successfully, false otherwise.
-func performUpgrade(vt string) bool {
 	exe, err := os.Executable()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to get executable path, skipped self-upgrade")
-		return false
+		return
 	}
 	cmd := exec.Command(exe, "upgrade", "prod", "-vv")
 	cmd.SysProcAttr = sysProcAttrForDetachedChildProcess()
 	if err := cmd.Start(); err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to start self-upgrade")
-		return false
+		return
 	}
-	mainLog.Load().Debug().Msgf("self-upgrade triggered, version target: %s", vt)
-	return true
-}
-
-// selfUpgradeCheck checks if the version target vt is greater
-// than the current one cv, perform self-upgrade then.
-// Major version upgrades are not allowed to prevent breaking changes.
-//
-// The callers must ensure curVer and logger are non-nil.
-// Returns true if upgrade is allowed and should proceed, false otherwise.
-func selfUpgradeCheck(vt string, cv *semver.Version, logger *zerolog.Logger) bool {
-	if shouldUpgrade(vt, cv, logger) {
-		return performUpgrade(vt)
-	}
-	return false
+	mainLog.Load().Debug().Msgf("self-upgrade triggered, version target: %s", vts)
 }
 
 // leakOnUpstreamFailure reports whether ctrld should initiate a recovery flow
