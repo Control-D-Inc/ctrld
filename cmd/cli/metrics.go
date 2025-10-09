@@ -15,6 +15,7 @@ import (
 )
 
 // metricsServer represents a server to expose Prometheus metrics via HTTP.
+// This provides monitoring and observability for the DNS proxy service
 type metricsServer struct {
 	server  *http.Server
 	mux     *http.ServeMux
@@ -24,6 +25,7 @@ type metricsServer struct {
 }
 
 // newMetricsServer returns new metrics server.
+// This initializes the HTTP server for exposing Prometheus metrics
 func newMetricsServer(addr string, reg *prometheus.Registry) (*metricsServer, error) {
 	mux := http.NewServeMux()
 	ms := &metricsServer{
@@ -37,11 +39,13 @@ func newMetricsServer(addr string, reg *prometheus.Registry) (*metricsServer, er
 }
 
 // register adds handlers for given pattern.
+// This provides a clean interface for adding HTTP endpoints to the metrics server
 func (ms *metricsServer) register(pattern string, handler http.Handler) {
 	ms.mux.Handle(pattern, handler)
 }
 
 // registerMetricsServerHandler adds handlers for metrics server.
+// This sets up both Prometheus format and JSON format endpoints for metrics
 func (ms *metricsServer) registerMetricsServerHandler() {
 	ms.register("/metrics", promhttp.HandlerFor(
 		ms.reg,
@@ -74,6 +78,7 @@ func (ms *metricsServer) registerMetricsServerHandler() {
 }
 
 // start runs the metricsServer.
+// This starts the HTTP server for metrics exposure
 func (ms *metricsServer) start() error {
 	listener, err := net.Listen("tcp", ms.addr)
 	if err != nil {
@@ -85,6 +90,7 @@ func (ms *metricsServer) start() error {
 }
 
 // stop shutdowns the metricsServer within 2 seconds timeout.
+// This ensures graceful shutdown of the metrics server
 func (ms *metricsServer) stop() error {
 	if !ms.started {
 		return nil
@@ -95,6 +101,7 @@ func (ms *metricsServer) stop() error {
 }
 
 // runMetricsServer initializes metrics stats and runs the metrics server if enabled.
+// This sets up the complete metrics infrastructure including Prometheus collectors
 func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 	if !p.metricsEnabled() {
 		return
@@ -115,7 +122,7 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 	addr := p.cfg.Service.MetricsListener
 	ms, err := newMetricsServer(addr, reg)
 	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not create new metrics server")
+		mainLog.Load().Warn().Err(err).Msg("Could not create new metrics server")
 		return
 	}
 	// Only start listener address if defined.
@@ -130,9 +137,9 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 		statsVersion.WithLabelValues(commit, runtime.Version(), curVersion()).Inc()
 		reg.MustRegister(statsTimeStart)
 		statsTimeStart.Set(float64(time.Now().Unix()))
-		mainLog.Load().Debug().Msgf("starting metrics server on: %s", addr)
+		mainLog.Load().Debug().Msgf("Starting metrics server on: %s", addr)
 		if err := ms.start(); err != nil {
-			mainLog.Load().Warn().Err(err).Msg("could not start metrics server")
+			mainLog.Load().Warn().Err(err).Msg("Could not start metrics server")
 			return
 		}
 	}
@@ -144,7 +151,7 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 	}
 
 	if err := ms.stop(); err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not stop metrics server")
+		mainLog.Load().Warn().Err(err).Msg("Could not stop metrics server")
 		return
 	}
 }

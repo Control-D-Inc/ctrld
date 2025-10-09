@@ -52,28 +52,25 @@ func dnsFns() []dnsFn {
 	return []dnsFn{dnsFromAdapter}
 }
 
-func dnsFromAdapter() []string {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultDNSAdapterTimeout)
+func dnsFromAdapter(ctx context.Context) []string {
+	ctx, cancel := context.WithTimeout(ctx, defaultDNSAdapterTimeout)
 	defer cancel()
 
 	var ns []string
 	var err error
 
-	logger := *ProxyLogger.Load()
+	logger := LoggerFromCtx(ctx)
 
 	for i := 0; i < maxDNSAdapterRetries; i++ {
 		if ctx.Err() != nil {
-			Log(context.Background(), logger.Debug(),
-				"dnsFromAdapter lookup cancelled or timed out, attempt %d", i)
+			logger.Debug().Msgf("dnsFromAdapter lookup cancelled or timed out, attempt %d", i)
 			return nil
 		}
 
 		ns, err = getDNSServers(ctx)
 		if err == nil && len(ns) >= minDNSServers {
 			if i > 0 {
-				Log(context.Background(), logger.Debug(),
-					"Successfully got DNS servers after %d attempts, found %d servers",
-					i+1, len(ns))
+				logger.Debug().Msgf("Successfully got DNS servers after %d attempts, found %d servers", i+1, len(ns))
 			}
 			return ns
 		}
@@ -85,11 +82,9 @@ func dnsFromAdapter() []string {
 		}
 
 		if err != nil {
-			Log(context.Background(), logger.Debug(),
-				"Failed to get DNS servers, attempt %d: %v", i+1, err)
+			logger.Debug().Msgf("Failed to get DNS servers, attempt %d: %v", i+1, err)
 		} else {
-			Log(context.Background(), logger.Debug(),
-				"Got insufficient DNS servers, retrying, found %d servers", len(ns))
+			logger.Debug().Msgf("Got insufficient DNS servers, retrying, found %d servers", len(ns))
 		}
 
 		select {
@@ -99,14 +94,12 @@ func dnsFromAdapter() []string {
 		}
 	}
 
-	Log(context.Background(), logger.Debug(),
-		"Failed to get sufficient DNS servers after all attempts, max_retries=%d", maxDNSAdapterRetries)
+	logger.Debug().Msgf("Failed to get sufficient DNS servers after all attempts, max_retries=%d", maxDNSAdapterRetries)
+
 	return ns
 }
 
 func getDNSServers(ctx context.Context) ([]string, error) {
-	logger := *ProxyLogger.Load()
-
 	// Check context before making the call
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -121,17 +114,16 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("getting adapters: %w", err)
 	}
 
-	Log(context.Background(), logger.Debug(),
-		"Found network adapters, count=%d", len(aas))
+	logger := LoggerFromCtx(ctx)
+	logger.Debug().Msgf("Found network adapters, count=%d", len(aas))
 
 	// Try to get domain controller info if domain-joined
 	var dcServers []string
-	isDomain := checkDomainJoined()
+	isDomain := checkDomainJoined(ctx)
 	if isDomain {
 		domainName, err := getLocalADDomain()
 		if err != nil {
-			Log(context.Background(), logger.Debug(),
-				"Failed to get local AD domain: %v", err)
+			logger.Debug().Msgf("Failed to get local AD domain: %v", err)
 		} else {
 			// Load netapi32.dll
 			netapi32 := windows.NewLazySystemDLL("netapi32.dll")
@@ -142,11 +134,9 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 
 			domainUTF16, err := windows.UTF16PtrFromString(domainName)
 			if err != nil {
-				Log(context.Background(), logger.Debug(),
-					"Failed to convert domain name to UTF16: %v", err)
+				logger.Debug().Msgf("Failed to convert domain name to UTF16: %v", err)
 			} else {
-				Log(context.Background(), logger.Debug(),
-					"Attempting to get DC for domain: %s with flags: 0x%x", domainName, flags)
+				logger.Debug().Msgf("Attempting to get DC for domain: %s with flags: 0x%x", domainName, flags)
 
 				// Call DsGetDcNameW with domain name
 				ret, _, err := dsDcName.Call(
@@ -160,38 +150,32 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 				if ret != 0 {
 					switch ret {
 					case 1355: // ERROR_NO_SUCH_DOMAIN
-						Log(context.Background(), logger.Debug(),
-							"Domain not found: %s (%d)", domainName, ret)
+						logger.Debug().Msgf("Domain not found: %s (%d)", domainName, ret)
 					case 1311: // ERROR_NO_LOGON_SERVERS
-						Log(context.Background(), logger.Debug(),
-							"No logon servers available for domain: %s (%d)", domainName, ret)
+						logger.Debug().Msgf("No logon servers available for domain: %s (%d)", domainName, ret)
 					case 1004: // ERROR_DC_NOT_FOUND
-						Log(context.Background(), logger.Debug(),
-							"Domain controller not found for domain: %s (%d)", domainName, ret)
+						logger.Debug().Msgf("Domain controller not found for domain: %s (%d)", domainName, ret)
 					case 1722: // RPC_S_SERVER_UNAVAILABLE
-						Log(context.Background(), logger.Debug(),
-							"RPC server unavailable for domain: %s (%d)", domainName, ret)
+						logger.Debug().Msgf("RPC server unavailable for domain: %s (%d)", domainName, ret)
 					default:
-						Log(context.Background(), logger.Debug(),
-							"Failed to get domain controller info for domain %s: %d, %v", domainName, ret, err)
+						logger.Debug().Msgf("Failed to get domain controller info for domain %s: %d, %v", domainName, ret, err)
 					}
 				} else if info != nil {
 					defer windows.NetApiBufferFree((*byte)(unsafe.Pointer(info)))
 
 					if info.DomainControllerAddress != nil {
 						dcAddr := windows.UTF16PtrToString(info.DomainControllerAddress)
+						// Remove "\\" prefix from domain controller address
+						// Windows domain controller addresses are returned with "\\" prefix,
+						// but we need just the IP address for DNS resolution
 						dcAddr = strings.TrimPrefix(dcAddr, "\\\\")
-						Log(context.Background(), logger.Debug(),
-							"Found domain controller address: %s", dcAddr)
-
+						logger.Debug().Msgf("Found domain controller address: %s", dcAddr)
 						if ip := net.ParseIP(dcAddr); ip != nil {
 							dcServers = append(dcServers, ip.String())
-							Log(context.Background(), logger.Debug(),
-								"Added domain controller DNS servers: %v", dcServers)
+							logger.Debug().Msgf("Added domain controller DNS servers: %v", dcServers)
 						}
 					} else {
-						Log(context.Background(), logger.Debug(),
-							"No domain controller address found")
+						logger.Debug().Msg("No domain controller address found")
 					}
 				}
 			}
@@ -206,31 +190,27 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 	// Collect all local IPs
 	for _, aa := range aas {
 		if aa.OperStatus != winipcfg.IfOperStatusUp {
-			Log(context.Background(), logger.Debug(),
-				"Skipping adapter %s - not up, status: %d", aa.FriendlyName(), aa.OperStatus)
+			logger.Debug().Msgf("Skipping adapter %s - not up, status: %d", aa.FriendlyName(), aa.OperStatus)
 			continue
 		}
 
 		// Skip if software loopback or other non-physical types
 		// This is to avoid the "Loopback Pseudo-Interface 1" issue we see on windows
 		if aa.IfType == winipcfg.IfTypeSoftwareLoopback {
-			Log(context.Background(), logger.Debug(),
-				"Skipping %s (software loopback)", aa.FriendlyName())
+			logger.Debug().Msgf("Skipping %s (software loopback)", aa.FriendlyName())
 			continue
 		}
 
-		Log(context.Background(), logger.Debug(),
-			"Processing adapter %s", aa.FriendlyName())
+		logger.Debug().Msgf("Processing adapter %s", aa.FriendlyName())
 
 		for a := aa.FirstUnicastAddress; a != nil; a = a.Next {
 			ip := a.Address.IP().String()
 			addressMap[ip] = struct{}{}
-			Log(context.Background(), logger.Debug(),
-				"Added local IP %s from adapter %s", ip, aa.FriendlyName())
+			logger.Debug().Msgf("Added local IP %s from adapter %s", ip, aa.FriendlyName())
 		}
 	}
 
-	validInterfacesMap := validInterfaces()
+	validInterfacesMap := ValidInterfaces(ctx)
 
 	// Collect DNS servers
 	for _, aa := range aas {
@@ -241,23 +221,20 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 		// Skip if software loopback or other non-physical types
 		// This is to avoid the "Loopback Pseudo-Interface 1" issue we see on windows
 		if aa.IfType == winipcfg.IfTypeSoftwareLoopback {
-			Log(context.Background(), logger.Debug(),
-				"Skipping %s (software loopback)", aa.FriendlyName())
+			logger.Debug().Msgf("Skipping %s (software loopback)", aa.FriendlyName())
 			continue
 		}
 
 		// if not in the validInterfacesMap, skip
 		if _, ok := validInterfacesMap[aa.FriendlyName()]; !ok {
-			Log(context.Background(), logger.Debug(),
-				"Skipping %s (not in validInterfacesMap)", aa.FriendlyName())
+			logger.Debug().Msgf("Skipping %s (not in validInterfacesMap)", aa.FriendlyName())
 			continue
 		}
 
 		for dns := aa.FirstDNSServerAddress; dns != nil; dns = dns.Next {
 			ip := dns.Address.IP()
 			if ip == nil {
-				Log(context.Background(), logger.Debug(),
-					"Skipping nil IP from adapter %s", aa.FriendlyName())
+				logger.Debug().Msgf("Skipping nil IP from adapter %s", aa.FriendlyName())
 				continue
 			}
 
@@ -290,28 +267,23 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 		if !seen[dcServer] {
 			seen[dcServer] = true
 			ns = append(ns, dcServer)
-			Log(context.Background(), logger.Debug(),
-				"Added additional domain controller DNS server: %s", dcServer)
+			logger.Debug().Msgf("Added additional domain controller DNS server: %s", dcServer)
 		}
 	}
 
 	// if we have static DNS servers saved for the current default route, we should add them to the list
 	drIfaceName, err := netmon.DefaultRouteInterface()
 	if err != nil {
-		Log(context.Background(), logger.Debug(),
-			"Failed to get default route interface: %v", err)
+		logger.Debug().Msgf("Failed to get default route interface: %v", err)
 	} else {
 		drIface, err := net.InterfaceByName(drIfaceName)
 		if err != nil {
-			Log(context.Background(), logger.Debug(),
-				"Failed to get interface by name %s: %v", drIfaceName, err)
+			logger.Debug().Msgf("Failed to get interface by name %s: %v", drIfaceName, err)
 		} else {
-			staticNs, file := SavedStaticNameservers(drIface)
-			Log(context.Background(), logger.Debug(),
-				"static dns servers from %s: %v", file, staticNs)
+			staticNs, file := SavedStaticNameserversAndPath(drIface)
+			logger.Debug().Msgf("Static dns servers from %s: %v", file, staticNs)
 			if len(staticNs) > 0 {
-				Log(context.Background(), logger.Debug(),
-					"Adding static DNS servers from %s: %v", drIfaceName, staticNs)
+				logger.Debug().Msgf("Adding static DNS servers from %s: %v", drIfaceName, staticNs)
 				ns = append(ns, staticNs...)
 			}
 		}
@@ -321,27 +293,20 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("no valid DNS servers found")
 	}
 
-	Log(context.Background(), logger.Debug(),
-		"DNS server discovery completed, count=%d, servers=%v (including %d DC servers)",
-		len(ns), ns, len(dcServers))
+	logger.Debug().Msgf("DNS server discovery completed, count=%d, servers=%v (including %d DC servers)", len(ns), ns, len(dcServers))
 	return ns, nil
-}
-
-// currentNameserversFromResolvconf returns a nil slice of strings.
-func currentNameserversFromResolvconf() []string {
-	return nil
 }
 
 // checkDomainJoined checks if the machine is joined to an Active Directory domain
 // Returns whether it's domain joined and the domain name if available
-func checkDomainJoined() bool {
-	logger := *ProxyLogger.Load()
+func checkDomainJoined(ctx context.Context) bool {
+	logger := LoggerFromCtx(ctx)
 
 	var domain *uint16
 	var status uint32
 
 	if err := windows.NetGetJoinInformation(nil, &domain, &status); err != nil {
-		Log(context.Background(), logger.Debug(), "Failed to get domain join status: %v", err)
+		logger.Debug().Msgf("Failed to get domain join status: %v", err)
 		return false
 	}
 	defer windows.NetApiBufferFree((*byte)(unsafe.Pointer(domain)))
@@ -356,12 +321,12 @@ func checkDomainJoined() bool {
 	//
 	// We only care about NetSetupDomainName.
 	domainName := windows.UTF16PtrToString(domain)
-	Log(context.Background(), logger.Debug(),
+	logger.Debug().Msgf(
 		"Domain join status: domain=%s status=%d (UnknownStatus=0, Unjoined=1, WorkgroupName=2, DomainName=3)",
 		domainName, status)
 
 	isDomain := status == syscall.NetSetupDomainName
-	Log(context.Background(), logger.Debug(), "Is domain joined? status=%d, result=%v", status, isDomain)
+	logger.Debug().Msgf("Is domain joined? status=%d, result=%v", status, isDomain)
 
 	return isDomain
 }
@@ -406,15 +371,14 @@ func getLocalADDomain() (string, error) {
 	return domainName, nil
 }
 
-// validInterfaces returns a list of all physical interfaces.
-// this is a duplicate of what is in net_windows.go, we should
-// clean this up so there is only one version
-func validInterfaces() map[string]struct{} {
+// ValidInterfaces returns a map of valid network interface names as keys with empty struct values.
+// It filters interfaces to include only physical, hardware-based adapters using WMI queries.
+func ValidInterfaces(ctx context.Context) map[string]struct{} {
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(os.Stderr)
 
 	//load the logger
-	logger := *ProxyLogger.Load()
+	logger := LoggerFromCtx(ctx)
 
 	whost := host.NewWmiLocalHost()
 	q := query.NewWmiQuery("MSFT_NetAdapter")
@@ -423,23 +387,20 @@ func validInterfaces() map[string]struct{} {
 		defer instances.Close()
 	}
 	if err != nil {
-		Log(context.Background(), logger.Warn(),
-			"failed to get wmi network adapter: %v", err)
+		logger.Warn().Msgf("Failed to get wmi network adapter: %v", err)
 		return nil
 	}
 	var adapters []string
 	for _, i := range instances {
 		adapter, err := netadapter.NewNetworkAdapter(i)
 		if err != nil {
-			Log(context.Background(), logger.Warn(),
-				"failed to get network adapter: %v", err)
+			logger.Warn().Msgf("Failed to get network adapter: %v", err)
 			continue
 		}
 
 		name, err := adapter.GetPropertyName()
 		if err != nil {
-			Log(context.Background(), logger.Warn(),
-				"failed to get interface name: %v", err)
+			logger.Warn().Msgf("Failed to get interface name: %v", err)
 			continue
 		}
 
@@ -449,13 +410,11 @@ func validInterfaces() map[string]struct{} {
 		// if this is a physical adapter or FALSE if this is not a physical adapter."
 		physical, err := adapter.GetPropertyConnectorPresent()
 		if err != nil {
-			Log(context.Background(), logger.Debug(),
-				"failed to get network adapter connector present property: %v", err)
+			logger.Debug().Msgf("Failed to get network adapter connector present property: %v", err)
 			continue
 		}
 		if !physical {
-			Log(context.Background(), logger.Debug(),
-				"skipping non-physical adapter: %s", name)
+			logger.Debug().Msgf("Skipping non-physical adapter: %s", name)
 			continue
 		}
 
@@ -463,13 +422,11 @@ func validInterfaces() map[string]struct{} {
 		// because some interfaces are not physical but have a connector.
 		hardware, err := adapter.GetPropertyHardwareInterface()
 		if err != nil {
-			Log(context.Background(), logger.Debug(),
-				"failed to get network adapter hardware interface property: %v", err)
+			logger.Debug().Msgf("Failed to get network adapter hardware interface property: %v", err)
 			continue
 		}
 		if !hardware {
-			Log(context.Background(), logger.Debug(),
-				"skipping non-hardware interface: %s", name)
+			logger.Debug().Msgf("Skipping non-hardware interface: %s", name)
 			continue
 		}
 

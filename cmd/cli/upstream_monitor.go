@@ -2,6 +2,7 @@ package cli
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -16,7 +17,8 @@ const (
 
 // upstreamMonitor performs monitoring upstreams health.
 type upstreamMonitor struct {
-	cfg *ctrld.Config
+	cfg    *ctrld.Config
+	logger atomic.Pointer[ctrld.Logger]
 
 	mu         sync.RWMutex
 	checking   map[string]bool
@@ -28,7 +30,8 @@ type upstreamMonitor struct {
 	failureTimerActive map[string]bool
 }
 
-func newUpstreamMonitor(cfg *ctrld.Config) *upstreamMonitor {
+// newUpstreamMonitor creates a new upstream monitor instance
+func newUpstreamMonitor(cfg *ctrld.Config, logger *ctrld.Logger) *upstreamMonitor {
 	um := &upstreamMonitor{
 		cfg:                cfg,
 		checking:           make(map[string]bool),
@@ -37,6 +40,7 @@ func newUpstreamMonitor(cfg *ctrld.Config) *upstreamMonitor {
 		recovered:          make(map[string]bool),
 		failureTimerActive: make(map[string]bool),
 	}
+	um.logger.Store(logger)
 	for n := range cfg.Upstream {
 		upstream := upstreamPrefix + n
 		um.reset(upstream)
@@ -53,7 +57,7 @@ func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 	defer um.mu.Unlock()
 
 	if um.recovered[upstream] {
-		mainLog.Load().Debug().Msgf("upstream %q is recovered, skipping failure count increase", upstream)
+		um.logger.Load().Debug().Msgf("Upstream %q is recovered, skipping failure count increase", upstream)
 		return
 	}
 
@@ -61,7 +65,7 @@ func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 	failedCount := um.failureReq[upstream]
 
 	// Log the updated failure count.
-	mainLog.Load().Debug().Msgf("upstream %q failure count updated to %d", upstream, failedCount)
+	um.logger.Load().Debug().Msgf("Upstream %q failure count updated to %d", upstream, failedCount)
 
 	// If this is the first failure and no timer is running, start a 10-second timer.
 	if failedCount == 1 && !um.failureTimerActive[upstream] {
@@ -74,7 +78,7 @@ func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 			// and the upstream is not in a recovered state, mark it as down.
 			if um.failureReq[upstream] > 0 && !um.recovered[upstream] {
 				um.down[upstream] = true
-				mainLog.Load().Warn().Msgf("upstream %q marked as down after 10 seconds (failure count: %d)", upstream, um.failureReq[upstream])
+				um.logger.Load().Warn().Msgf("Upstream %q marked as down after 10 seconds (failure count: %d)", upstream, um.failureReq[upstream])
 			}
 			// Reset the timer flag so that a new timer can be spawned if needed.
 			um.failureTimerActive[upstream] = false
@@ -84,7 +88,7 @@ func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 	// If the failure count quickly reaches the threshold, mark the upstream as down immediately.
 	if failedCount >= maxFailureRequest {
 		um.down[upstream] = true
-		mainLog.Load().Warn().Msgf("upstream %q marked as down immediately (failure count: %d)", upstream, failedCount)
+		um.logger.Load().Warn().Msgf("Upstream %q marked as down immediately (failure count: %d)", upstream, failedCount)
 	}
 }
 

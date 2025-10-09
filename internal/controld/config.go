@@ -18,8 +18,6 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/certs"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
-	"github.com/Control-D-Inc/ctrld/internal/router"
-	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
 )
 
 const (
@@ -88,117 +86,176 @@ type LogsRequest struct {
 }
 
 // FetchResolverConfig fetch Control D config for given uid.
-func FetchResolverConfig(rawUID, version string, cdDev bool) (*ResolverConfig, error) {
+func FetchResolverConfig(ctx context.Context, rawUID, version string, cdDev bool) (*ResolverConfig, error) {
+	logger := ctrld.LoggerFromCtx(ctx)
+	ctrld.Log(ctx, logger.Debug(), "Fetching ControlD resolver configuration")
+
 	uid, clientID := ParseRawUID(rawUID)
+	ctrld.Log(ctx, logger.Debug(), "Parsed UID: %s, ClientID: %s", uid, clientID)
+
 	req := utilityRequest{UID: uid}
 	if clientID != "" {
 		req.ClientID = clientID
+		ctrld.Log(ctx, logger.Debug(), "Including client ID in request")
 	}
 	body, _ := json.Marshal(req)
-	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
+
+	ctrld.Log(ctx, logger.Debug(), "Sending resolver config request to ControlD API")
+	return postUtilityAPI(ctx, version, cdDev, false, bytes.NewReader(body))
 }
 
 // FetchResolverUID fetch resolver uid from provision token.
-func FetchResolverUID(req *UtilityOrgRequest, version string, cdDev bool) (*ResolverConfig, error) {
+func FetchResolverUID(ctx context.Context, req *UtilityOrgRequest, version string, cdDev bool) (*ResolverConfig, error) {
+	logger := ctrld.LoggerFromCtx(ctx)
+	ctrld.Log(ctx, logger.Debug(), "Fetching resolver UID from provision token")
+
 	if req == nil {
+		ctrld.Log(ctx, logger.Error(), "Invalid request: request is nil")
 		return nil, errors.New("invalid request")
 	}
+
 	hostname := req.Hostname
 	if hostname == "" {
 		hostname, _ = os.Hostname()
+		ctrld.Log(ctx, logger.Debug(), "Using system hostname: %s", hostname)
+	} else {
+		ctrld.Log(ctx, logger.Debug(), "Using provided hostname: %s", hostname)
 	}
+
+	ctrld.Log(ctx, logger.Debug(), "Sending UID request to ControlD API")
 	body, _ := json.Marshal(UtilityOrgRequest{ProvToken: req.ProvToken, Hostname: hostname})
-	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
+	return postUtilityAPI(ctx, version, cdDev, false, bytes.NewReader(body))
 }
 
 // UpdateCustomLastFailed calls API to mark custom config is bad.
-func UpdateCustomLastFailed(rawUID, version string, cdDev, lastUpdatedFailed bool) (*ResolverConfig, error) {
+func UpdateCustomLastFailed(ctx context.Context, rawUID, version string, cdDev, lastUpdatedFailed bool) (*ResolverConfig, error) {
 	uid, clientID := ParseRawUID(rawUID)
 	req := utilityRequest{UID: uid}
 	if clientID != "" {
 		req.ClientID = clientID
 	}
 	body, _ := json.Marshal(req)
-	return postUtilityAPI(version, cdDev, true, bytes.NewReader(body))
+	return postUtilityAPI(ctx, version, cdDev, true, bytes.NewReader(body))
 }
 
-func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reader) (*ResolverConfig, error) {
+func postUtilityAPI(ctx context.Context, version string, cdDev, lastUpdatedFailed bool, body io.Reader) (*ResolverConfig, error) {
+	logger := ctrld.LoggerFromCtx(ctx)
+	ctrld.Log(ctx, logger.Debug(), "Posting utility API request")
+
 	apiUrl := resolverDataURLCom
 	if cdDev {
 		apiUrl = resolverDataURLDev
+		ctrld.Log(ctx, logger.Debug(), "Using development API URL: %s", apiUrl)
+	} else {
+		ctrld.Log(ctx, logger.Debug(), "Using production API URL: %s", apiUrl)
 	}
+
+	ctrld.Log(ctx, logger.Debug(), "Creating HTTP request")
 	req, err := http.NewRequest("POST", apiUrl, body)
 	if err != nil {
+		ctrld.Log(ctx, logger.Error(), "Failed to create HTTP request: %v", err)
 		return nil, fmt.Errorf("http.NewRequest: %w", err)
 	}
+
+	ctrld.Log(ctx, logger.Debug(), "Setting request parameters")
 	q := req.URL.Query()
 	q.Set("platform", "ctrld")
 	q.Set("version", version)
 	if lastUpdatedFailed {
 		q.Set("custom_last_failed", "1")
+		ctrld.Log(ctx, logger.Debug(), "Marking custom config as failed")
 	}
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/json")
-	transport := apiTransport(cdDev)
+
+	ctrld.Log(ctx, logger.Debug(), "Setting up API transport")
+	transport := apiTransport(ctx, cdDev)
 	client := &http.Client{
 		Timeout:   defaultTimeout,
 		Transport: transport,
 	}
-	resp, err := doWithFallback(client, req, apiServerIP(cdDev))
+
+	ctrld.Log(ctx, logger.Debug(), "Sending request to ControlD API")
+	resp, err := doWithFallback(ctx, client, req, apiServerIP(cdDev))
 	if err != nil {
+		ctrld.Log(ctx, logger.Error(), "Failed to send request to ControlD API: %v", err)
 		return nil, fmt.Errorf("postUtilityAPI client.Do: %w", err)
 	}
 	defer resp.Body.Close()
+
+	ctrld.Log(ctx, logger.Debug(), "Processing API response")
 	d := json.NewDecoder(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		errResp := &ErrorResponse{}
 		if err := d.Decode(errResp); err != nil {
+			ctrld.Log(ctx, logger.Error(), "Failed to decode error response: %v", err)
 			return nil, err
 		}
+		ctrld.Log(ctx, logger.Error(), "ControlD API returned error: %s", errResp.Error())
 		return nil, errResp
 	}
 
 	ur := &utilityResponse{}
 	if err := d.Decode(ur); err != nil {
+		ctrld.Log(ctx, logger.Error(), "Failed to decode utility response: %v", err)
 		return nil, err
 	}
+
+	ctrld.Log(ctx, logger.Debug(), "Successfully received resolver configuration")
 	return &ur.Body.Resolver, nil
 }
 
 // SendLogs sends runtime log to ControlD API.
-func SendLogs(lr *LogsRequest, cdDev bool) error {
+func SendLogs(ctx context.Context, lr *LogsRequest, cdDev bool) error {
+	logger := ctrld.LoggerFromCtx(ctx)
+	ctrld.Log(ctx, logger.Debug(), "Sending runtime logs to ControlD API")
+
 	defer lr.Data.Close()
 	apiUrl := logURLCom
 	if cdDev {
 		apiUrl = logURLDev
 	}
+
+	ctrld.Log(ctx, logger.Debug(), "Creating HTTP request for log upload")
 	req, err := http.NewRequest("POST", apiUrl, lr.Data)
 	if err != nil {
+		ctrld.Log(ctx, logger.Error(), "Failed to create HTTP request: %v", err)
 		return fmt.Errorf("http.NewRequest: %w", err)
 	}
 	q := req.URL.Query()
 	q.Set("uid", lr.UID)
 	req.URL.RawQuery = q.Encode()
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	transport := apiTransport(cdDev)
+
+	ctrld.Log(ctx, logger.Debug(), "Setting up API transport")
+	transport := apiTransport(ctx, cdDev)
 	client := &http.Client{
 		Timeout:   sendLogTimeout,
 		Transport: transport,
 	}
-	resp, err := doWithFallback(client, req, apiServerIP(cdDev))
+
+	ctrld.Log(ctx, logger.Debug(), "Sending log data to ControlD API")
+	resp, err := doWithFallback(ctx, client, req, apiServerIP(cdDev))
 	if err != nil {
+		ctrld.Log(ctx, logger.Error(), "Failed to send logs to ControlD API: %v", err)
 		return fmt.Errorf("SendLogs client.Do: %w", err)
 	}
 	defer resp.Body.Close()
+
+	ctrld.Log(ctx, logger.Debug(), "Processing API response")
 	d := json.NewDecoder(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		errResp := &ErrorResponse{}
 		if err := d.Decode(errResp); err != nil {
+			ctrld.Log(ctx, logger.Error(), "Failed to decode error response: %v", err)
 			return err
 		}
+		ctrld.Log(ctx, logger.Error(), "ControlD API returned error: %s", errResp.Error())
 		return errResp
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
+
+	ctrld.Log(ctx, logger.Debug(), "Runtime logs sent successfully to ControlD API")
 	return nil
 }
 
@@ -213,7 +270,7 @@ func ParseRawUID(rawUID string) (string, string) {
 }
 
 // apiTransport returns an HTTP transport for connecting to ControlD API endpoint.
-func apiTransport(cdDev bool) *http.Transport {
+func apiTransport(loggerCtx context.Context, cdDev bool) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		apiDomain := apiDomainCom
@@ -227,13 +284,16 @@ func apiTransport(cdDev bool) *http.Transport {
 			apiIPs = []string{apiDomainDevIPv4}
 		}
 
-		ips := ctrld.LookupIP(apiDomain)
+		ips := ctrld.LookupIP(loggerCtx, apiDomain)
 		if len(ips) == 0 {
-			ctrld.ProxyLogger.Load().Warn().Msgf("No IPs found for %s, use direct IPs: %v", apiDomain, apiIPs)
+			logger := ctrld.LoggerFromCtx(loggerCtx)
+			logger.Warn().Msgf("No ips found for %s, use direct ips: %v", apiDomain, apiIPs)
 			ips = apiIPs
 		}
 
 		// Separate IPv4 and IPv6 addresses
+		// This separation is needed because different network stacks may have different
+		// connectivity to IPv4 vs IPv6, so we try them separately for better reliability
 		var ipv4s, ipv6s []string
 		for _, ip := range ips {
 			if strings.Contains(ip, ":") {
@@ -245,7 +305,8 @@ func apiTransport(cdDev bool) *http.Transport {
 
 		dial := func(ctx context.Context, network string, addrs []string) (net.Conn, error) {
 			d := &ctrldnet.ParallelDialer{}
-			return d.DialContext(ctx, network, addrs, ctrld.ProxyLogger.Load())
+			logger := ctrld.LoggerFromCtx(loggerCtx)
+			return d.DialContext(ctx, network, addrs, logger.Logger)
 		}
 		_, port, _ := net.SplitHostPort(addr)
 
@@ -269,7 +330,7 @@ func apiTransport(cdDev bool) *http.Transport {
 		// Fallback to direct IPv6
 		return dial(ctx, "tcp6", addrsFromPort(apiIpsV6, port))
 	}
-	if router.Name() == ddwrt.Name || runtime.GOOS == "android" {
+	if runtime.GOOS == "android" {
 		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
 	}
 	return transport
@@ -283,10 +344,11 @@ func addrsFromPort(ips []string, port string) []string {
 	return addrs
 }
 
-func doWithFallback(client *http.Client, req *http.Request, apiIp string) (*http.Response, error) {
+func doWithFallback(ctx context.Context, client *http.Client, req *http.Request, apiIp string) (*http.Response, error) {
 	resp, err := client.Do(req)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Warn().Err(err).Msgf("failed to send request, fallback to direct IP: %s", apiIp)
+		logger := ctrld.LoggerFromCtx(ctx)
+		logger.Warn().Err(err).Msgf("Failed to send request, fallback to direct ip: %s", apiIp)
 		ipReq := req.Clone(req.Context())
 		ipReq.Host = apiIp
 		ipReq.URL.Host = apiIp

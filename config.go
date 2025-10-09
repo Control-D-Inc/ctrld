@@ -114,6 +114,10 @@ func SetConfigNameWithPath(v *viper.Viper, name, configPath string) {
 
 // InitConfig initializes default config values for given *viper.Viper instance.
 func InitConfig(v *viper.Viper, name string) {
+	ctx := context.Background()
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "Config initialization started")
+
 	v.SetDefault("listener", map[string]*ListenerConfig{
 		"0": {
 			IP:   "",
@@ -152,6 +156,8 @@ func InitConfig(v *viper.Viper, name string) {
 			Timeout:     3000,
 		},
 	})
+
+	Log(ctx, logger.Debug(), "Config initialization completed")
 }
 
 // Config represents ctrld supported configuration.
@@ -309,14 +315,20 @@ func (lc *ListenerConfig) IsDirectDnsListener() bool {
 	}
 }
 
+// MatchingConfig defines the configuration for rule matching behavior
+type MatchingConfig struct {
+	Order []string `mapstructure:"order" toml:"order,omitempty"`
+}
+
 // ListenerPolicyConfig specifies the policy rules for ctrld to filter incoming requests.
 type ListenerPolicyConfig struct {
-	Name                 string   `mapstructure:"name" toml:"name,omitempty"`
-	Networks             []Rule   `mapstructure:"networks" toml:"networks,omitempty,inline,multiline" validate:"dive,len=1"`
-	Rules                []Rule   `mapstructure:"rules" toml:"rules,omitempty,inline,multiline" validate:"dive,len=1"`
-	Macs                 []Rule   `mapstructure:"macs" toml:"macs,omitempty,inline,multiline" validate:"dive,len=1"`
-	FailoverRcodes       []string `mapstructure:"failover_rcodes" toml:"failover_rcodes,omitempty" validate:"dive,dnsrcode"`
-	FailoverRcodeNumbers []int    `mapstructure:"-" toml:"-"`
+	Name                 string          `mapstructure:"name" toml:"name,omitempty"`
+	Networks             []Rule          `mapstructure:"networks" toml:"networks,omitempty,inline,multiline" validate:"dive,len=1"`
+	Rules                []Rule          `mapstructure:"rules" toml:"rules,omitempty,inline,multiline" validate:"dive,len=1"`
+	Macs                 []Rule          `mapstructure:"macs" toml:"macs,omitempty,inline,multiline" validate:"dive,len=1"`
+	FailoverRcodes       []string        `mapstructure:"failover_rcodes" toml:"failover_rcodes,omitempty" validate:"dive,dnsrcode"`
+	FailoverRcodeNumbers []int           `mapstructure:"-" toml:"-"`
+	Matching             *MatchingConfig `mapstructure:"-" toml:"-"`
 }
 
 // Rule is a map from source to list of upstreams.
@@ -325,12 +337,13 @@ type ListenerPolicyConfig struct {
 type Rule map[string][]string
 
 // Init initialized necessary values for an UpstreamConfig.
-func (uc *UpstreamConfig) Init() {
+func (uc *UpstreamConfig) Init(ctx context.Context) {
+	logger := LoggerFromCtx(ctx)
 	if err := uc.initDnsStamps(); err != nil {
-		ProxyLogger.Load().Fatal().Err(err).Msg("invalid DNS Stamps")
+		logger.Fatal().Err(err).Msg("Invalid dns stamps")
 	}
 	uc.initDoHScheme()
-	uc.uid = upstreamUID()
+	uc.uid = upstreamUID(ctx)
 	if u, err := url.Parse(uc.Endpoint); err == nil {
 		uc.Domain = u.Hostname()
 		switch uc.Type {
@@ -350,6 +363,9 @@ func (uc *UpstreamConfig) Init() {
 		}
 	}
 	if uc.IPStack == "" {
+		// Set default IP stack based on upstream type
+		// Control-D upstreams use split stack for better IPv4/IPv6 handling,
+		// while other upstreams use both stacks for maximum compatibility
 		if uc.IsControlD() {
 			uc.IPStack = IpStackSplit
 		} else {
@@ -411,7 +427,7 @@ func (uc *UpstreamConfig) IsDiscoverable() bool {
 		return *uc.Discoverable
 	}
 	switch uc.Type {
-	case ResolverTypeOS, ResolverTypeLegacy, ResolverTypePrivate, ResolverTypeLocal:
+	case ResolverTypeOS, ResolverTypeLegacy, ResolverTypePrivate:
 		if ip, err := netip.ParseAddr(uc.Domain); err == nil {
 			return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || tsaddr.CGNATRange().Contains(ip)
 		}
@@ -434,21 +450,18 @@ func (uc *UpstreamConfig) UID() string {
 	return uc.uid
 }
 
-// SetupBootstrapIP manually find all available IPs of the upstream.
-// The first usable IP will be used as bootstrap IP of the upstream.
-// The upstream domain will be looked up using following orders:
-//
-// - Current system DNS settings.
-// - Direct IPs table for ControlD upstreams.
-// - ControlD Bootstrap DNS 76.76.2.22
-//
+// SetupBootstrapIP sets up bootstrap IPs for the upstream config.
 // The setup process will block until there's usable IPs found.
-func (uc *UpstreamConfig) SetupBootstrapIP() {
+func (uc *UpstreamConfig) SetupBootstrapIP(ctx context.Context) {
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "Setting up bootstrap IPs for upstream: %s", uc.Name)
+
 	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
 	isControlD := uc.IsControlD()
-	nss := initDefaultOsResolver()
+	nss := initDefaultOsResolver(ctx)
 	for {
-		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, nss)
+		Log(ctx, logger.Debug(), "Looking up bootstrap IPs for domain: %s", uc.Domain)
+		uc.bootstrapIPs = lookupIP(ctx, uc.Domain, uc.Timeout, nss)
 		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
 		// filtering them out here to prevent weird behavior.
 		if isControlD {
@@ -463,18 +476,18 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 			uc.bootstrapIPs = uc.bootstrapIPs[:n]
 			if len(uc.bootstrapIPs) == 0 {
 				uc.bootstrapIPs = bootstrapIPsFromControlDDomain(uc.Domain)
-				ProxyLogger.Load().Warn().Msgf("no record found for %q, lookup from direct IP table", uc.Domain)
+				logger.Warn().Msgf("No record found for %q, lookup from direct ip table", uc.Domain)
 			}
 		}
 		if len(uc.bootstrapIPs) == 0 {
-			ProxyLogger.Load().Warn().Msgf("no record found for %q, using bootstrap server: %s", uc.Domain, PremiumDNSBoostrapIP)
-			uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, []string{net.JoinHostPort(PremiumDNSBoostrapIP, "53")})
+			logger.Warn().Msgf("No record found for %q, using bootstrap server: %s", uc.Domain, PremiumDNSBoostrapIP)
+			uc.bootstrapIPs = lookupIP(ctx, uc.Domain, uc.Timeout, []string{net.JoinHostPort(PremiumDNSBoostrapIP, "53")})
 
 		}
 		if len(uc.bootstrapIPs) > 0 {
 			break
 		}
-		ProxyLogger.Load().Warn().Msg("could not resolve bootstrap IPs, retrying...")
+		logger.Warn().Msg("Could not resolve bootstrap ips, retrying...")
 		b.BackOff(context.Background(), errors.New("no bootstrap IPs"))
 	}
 	for _, ip := range uc.bootstrapIPs {
@@ -484,11 +497,12 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 			uc.bootstrapIPs4 = append(uc.bootstrapIPs4, ip)
 		}
 	}
-	ProxyLogger.Load().Debug().Msgf("bootstrap IPs: %v", uc.bootstrapIPs)
+	logger.Debug().Msgf("Bootstrap ips: %v", uc.bootstrapIPs)
+	Log(ctx, logger.Debug(), "Bootstrap IP setup completed for upstream: %s", uc.Name)
 }
 
 // ReBootstrap re-setup the bootstrap IP and the transport.
-func (uc *UpstreamConfig) ReBootstrap() {
+func (uc *UpstreamConfig) ReBootstrap(ctx context.Context) {
 	switch uc.Type {
 	case ResolverTypeDOH, ResolverTypeDOH3:
 	default:
@@ -496,7 +510,8 @@ func (uc *UpstreamConfig) ReBootstrap() {
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
 		if uc.rebootstrap.CompareAndSwap(false, true) {
-			ProxyLogger.Load().Debug().Msgf("re-bootstrapping upstream ip for %v", uc)
+			logger := LoggerFromCtx(ctx)
+			Log(ctx, logger.Debug(), "Re-bootstrapping upstream: %s", uc.Name)
 		}
 		return true, nil
 	})
@@ -504,35 +519,35 @@ func (uc *UpstreamConfig) ReBootstrap() {
 
 // SetupTransport initializes the network transport used to connect to upstream server.
 // For now, only DoH upstream is supported.
-func (uc *UpstreamConfig) SetupTransport() {
+func (uc *UpstreamConfig) SetupTransport(ctx context.Context) {
 	switch uc.Type {
 	case ResolverTypeDOH:
-		uc.setupDOHTransport()
+		uc.setupDOHTransport(ctx)
 	case ResolverTypeDOH3:
-		uc.setupDOH3Transport()
+		uc.setupDOH3Transport(ctx)
 	}
 }
 
-func (uc *UpstreamConfig) setupDOHTransport() {
+func (uc *UpstreamConfig) setupDOHTransport(ctx context.Context) {
 	switch uc.IPStack {
 	case IpStackBoth, "":
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs)
+		uc.transport = uc.newDOHTransport(ctx, uc.bootstrapIPs)
 	case IpStackV4:
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs4)
+		uc.transport = uc.newDOHTransport(ctx, uc.bootstrapIPs4)
 	case IpStackV6:
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs6)
+		uc.transport = uc.newDOHTransport(ctx, uc.bootstrapIPs6)
 	case IpStackSplit:
-		uc.transport4 = uc.newDOHTransport(uc.bootstrapIPs4)
-		if HasIPv6() {
-			uc.transport6 = uc.newDOHTransport(uc.bootstrapIPs6)
+		uc.transport4 = uc.newDOHTransport(ctx, uc.bootstrapIPs4)
+		if HasIPv6(ctx) {
+			uc.transport6 = uc.newDOHTransport(ctx, uc.bootstrapIPs6)
 		} else {
 			uc.transport6 = uc.transport4
 		}
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs)
+		uc.transport = uc.newDOHTransport(ctx, uc.bootstrapIPs)
 	}
 }
 
-func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
+func (uc *UpstreamConfig) newDOHTransport(ctx context.Context, addrs []string) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = 100
 	transport.TLSClientConfig = &tls.Config{
@@ -552,12 +567,13 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 		dialerTimeoutMs = uc.Timeout
 	}
 	dialerTimeout := time.Duration(dialerTimeoutMs) * time.Millisecond
+	logger := LoggerFromCtx(ctx)
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		_, port, _ := net.SplitHostPort(addr)
 		if uc.BootstrapIP != "" {
 			dialer := net.Dialer{Timeout: dialerTimeout, KeepAlive: dialerTimeout}
 			addr := net.JoinHostPort(uc.BootstrapIP, port)
-			Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", addr)
+			Log(ctx, logger.Debug(), "Sending doh request to: %s", addr)
 			return dialer.DialContext(ctx, network, addr)
 		}
 		pd := &ctrldnet.ParallelDialer{}
@@ -567,11 +583,11 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 		for i := range addrs {
 			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
 		}
-		conn, err := pd.DialContext(ctx, network, dialAddrs, ProxyLogger.Load())
+		conn, err := pd.DialContext(ctx, network, dialAddrs, logger.Logger)
 		if err != nil {
 			return nil, err
 		}
-		Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", conn.RemoteAddr())
+		Log(ctx, logger.Debug(), "Sending doh request to: %s", conn.RemoteAddr())
 		return conn, nil
 	}
 	runtime.SetFinalizer(transport, func(transport *http.Transport) {
@@ -581,19 +597,20 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 }
 
 // Ping warms up the connection to DoH/DoH3 upstream.
-func (uc *UpstreamConfig) Ping() {
-	if err := uc.ping(); err != nil {
-		ProxyLogger.Load().Debug().Err(err).Msgf("upstream ping failed: %s", uc.Endpoint)
-		_ = uc.FallbackToDirectIP()
+func (uc *UpstreamConfig) Ping(ctx context.Context) {
+	if err := uc.ping(ctx); err != nil {
+		logger := LoggerFromCtx(ctx)
+		logger.Debug().Err(err).Msgf("Upstream ping failed: %s", uc.Endpoint)
+		_ = uc.FallbackToDirectIP(ctx)
 	}
 }
 
 // ErrorPing is like Ping, but return an error if any.
-func (uc *UpstreamConfig) ErrorPing() error {
-	return uc.ping()
+func (uc *UpstreamConfig) ErrorPing(ctx context.Context) error {
+	return uc.ping(ctx)
 }
 
-func (uc *UpstreamConfig) ping() error {
+func (uc *UpstreamConfig) ping(ctx context.Context) error {
 	switch uc.Type {
 	case ResolverTypeDOH, ResolverTypeDOH3:
 	default:
@@ -622,11 +639,11 @@ func (uc *UpstreamConfig) ping() error {
 	for _, typ := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		switch uc.Type {
 		case ResolverTypeDOH:
-			if err := ping(uc.dohTransport(typ)); err != nil {
+			if err := ping(uc.dohTransport(ctx, typ)); err != nil {
 				return err
 			}
 		case ResolverTypeDOH3:
-			if err := ping(uc.doh3Transport(typ)); err != nil {
+			if err := ping(uc.doh3Transport(ctx, typ)); err != nil {
 				return err
 			}
 		}
@@ -661,12 +678,12 @@ func (uc *UpstreamConfig) isNextDNS() bool {
 	return domain == "dns.nextdns.io"
 }
 
-func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
+func (uc *UpstreamConfig) dohTransport(ctx context.Context, dnsType uint16) http.RoundTripper {
 	uc.transportOnce.Do(func() {
-		uc.SetupTransport()
+		uc.SetupTransport(ctx)
 	})
 	if uc.rebootstrap.CompareAndSwap(true, false) {
-		uc.SetupTransport()
+		uc.SetupTransport(ctx)
 	}
 	switch uc.IPStack {
 	case IpStackBoth, IpStackV4, IpStackV6:
@@ -682,7 +699,7 @@ func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
 	return uc.transport
 }
 
-func (uc *UpstreamConfig) bootstrapIPForDNSType(dnsType uint16) string {
+func (uc *UpstreamConfig) bootstrapIPForDNSType(ctx context.Context, dnsType uint16) string {
 	switch uc.IPStack {
 	case IpStackBoth:
 		return pick(uc.bootstrapIPs)
@@ -695,7 +712,7 @@ func (uc *UpstreamConfig) bootstrapIPForDNSType(dnsType uint16) string {
 		case dns.TypeA:
 			return pick(uc.bootstrapIPs4)
 		default:
-			if HasIPv6() {
+			if HasIPv6(ctx) {
 				return pick(uc.bootstrapIPs6)
 			}
 			return pick(uc.bootstrapIPs4)
@@ -704,7 +721,7 @@ func (uc *UpstreamConfig) bootstrapIPForDNSType(dnsType uint16) string {
 	return pick(uc.bootstrapIPs)
 }
 
-func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
+func (uc *UpstreamConfig) netForDNSType(ctx context.Context, dnsType uint16) (string, string) {
 	switch uc.IPStack {
 	case IpStackBoth:
 		return "tcp-tls", "udp"
@@ -717,7 +734,7 @@ func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
 		case dns.TypeA:
 			return "tcp4-tls", "udp4"
 		default:
-			if HasIPv6() {
+			if HasIPv6(ctx) {
 				return "tcp6-tls", "udp6"
 			}
 			return "tcp4-tls", "udp4"
@@ -798,7 +815,7 @@ func (uc *UpstreamConfig) Context(ctx context.Context) (context.Context, context
 }
 
 // FallbackToDirectIP changes ControlD upstream endpoint to use direct IP instead of domain.
-func (uc *UpstreamConfig) FallbackToDirectIP() bool {
+func (uc *UpstreamConfig) FallbackToDirectIP(ctx context.Context) bool {
 	if !uc.IsControlD() {
 		return false
 	}
@@ -817,7 +834,8 @@ func (uc *UpstreamConfig) FallbackToDirectIP() bool {
 		default:
 			return
 		}
-		ProxyLogger.Load().Warn().Msgf("using direct IP for %q: %s", uc.Endpoint, ip)
+		logger := LoggerFromCtx(ctx)
+		Log(ctx, logger.Warn(), "Using direct IP for %q: %s", uc.Endpoint, ip)
 		uc.u.Host = ip
 		done = true
 	})
@@ -826,12 +844,18 @@ func (uc *UpstreamConfig) FallbackToDirectIP() bool {
 
 // Init initialized necessary values for an ListenerConfig.
 func (lc *ListenerConfig) Init() {
+	logger := LoggerFromCtx(context.Background())
+	Log(context.Background(), logger.Debug(), "Initializing listener config")
+
 	if lc.Policy != nil {
 		lc.Policy.FailoverRcodeNumbers = make([]int, len(lc.Policy.FailoverRcodes))
 		for i, rcode := range lc.Policy.FailoverRcodes {
 			lc.Policy.FailoverRcodeNumbers[i] = dnsrcode.FromString(rcode)
 		}
+		Log(context.Background(), logger.Debug(), "Listener policy initialized with %d failover rcodes", len(lc.Policy.FailoverRcodes))
 	}
+
+	Log(context.Background(), logger.Debug(), "Listener config initialization completed")
 }
 
 // ValidateConfig validates the given config.
@@ -951,11 +975,12 @@ func pick(s []string) string {
 }
 
 // upstreamUID generates an unique identifier for an upstream.
-func upstreamUID() string {
+func upstreamUID(ctx context.Context) string {
+	logger := LoggerFromCtx(ctx)
 	b := make([]byte, 4)
 	for {
 		if _, err := crand.Read(b); err != nil {
-			ProxyLogger.Load().Warn().Err(err).Msg("could not generate uid for upstream, retrying...")
+			logger.Warn().Err(err).Msg("Could not generate uid for upstream, retrying...")
 			continue
 		}
 		return hex.EncodeToString(b)

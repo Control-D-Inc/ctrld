@@ -49,28 +49,3 @@ func validInterface(iface *net.Interface, validIfacesMap map[string]struct{}) bo
 	_, ok := validIfacesMap[iface.Name]
 	return ok
 }
-
-// validInterfacesMap returns a set of all valid hardware ports.
-func validInterfacesMap() map[string]struct{} {
-	b, err := exec.Command("networksetup", "-listallhardwareports").Output()
-	if err != nil {
-		return nil
-	}
-	return parseListAllHardwarePorts(bytes.NewReader(b))
-}
-
-// parseListAllHardwarePorts parses output of "networksetup -listallhardwareports"
-// and returns map presents all hardware ports.
-func parseListAllHardwarePorts(r io.Reader) map[string]struct{} {
-	m := make(map[string]struct{})
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		line := scanner.Text()
-		after, ok := strings.CutPrefix(line, "Device: ")
-		if !ok {
-			continue
-		}
-		m[after] = struct{}{}
-	}
-	return m
-}

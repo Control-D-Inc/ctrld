@@ -3,24 +3,18 @@
 package ctrld
 
 import (
+	"context"
 	"net"
 	"slices"
 	"time"
 
 	"tailscale.com/net/netmon"
-
-	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
-
-// currentNameserversFromResolvconf returns the current nameservers set from /etc/resolv.conf file.
-func currentNameserversFromResolvconf() []string {
-	return resolvconffile.NameServers()
-}
 
 // dnsFromResolvConf reads usable nameservers from /etc/resolv.conf file.
 // A nameserver is usable if it's not one of current machine's IP addresses
 // and loopback IP addresses.
-func dnsFromResolvConf() []string {
+func dnsFromResolvConf(_ context.Context) []string {
 	const (
 		maxRetries    = 10
 		retryInterval = 100 * time.Millisecond
@@ -34,7 +28,7 @@ func dnsFromResolvConf() []string {
 			time.Sleep(retryInterval)
 		}
 
-		nss := resolvconffile.NameServers()
+		nss := CurrentNameserversFromResolvconf()
 		var localDNS []string
 		seen := make(map[string]bool)
 

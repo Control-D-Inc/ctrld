@@ -37,12 +37,14 @@ type ifaceResponse struct {
 	OK   bool   `json:"ok"`
 }
 
+// controlServer represents an HTTP server for handling control requests
 type controlServer struct {
 	server *http.Server
 	mux    *http.ServeMux
 	addr   string
 }
 
+// newControlServer creates a new control server instance
 func newControlServer(addr string) (*controlServer, error) {
 	mux := http.NewServeMux()
 	s := &controlServer{
@@ -79,34 +81,34 @@ func (s *controlServer) register(pattern string, handler http.Handler) {
 
 func (p *prog) registerControlServerHandler() {
 	p.cs.register(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		mainLog.Load().Debug().Msg("handling list clients request")
+		p.Debug().Msg("Handling list clients request")
 
 		clients := p.ciTable.ListClients()
-		mainLog.Load().Debug().Int("client_count", len(clients)).Msg("retrieved clients list")
+		p.Debug().Int("client_count", len(clients)).Msg("Retrieved clients list")
 
 		sort.Slice(clients, func(i, j int) bool {
 			return clients[i].IP.Less(clients[j].IP)
 		})
-		mainLog.Load().Debug().Msg("sorted clients by IP address")
+		p.Debug().Msg("Sorted clients by IP address")
 
 		if p.metricsQueryStats.Load() {
-			mainLog.Load().Debug().Msg("metrics query stats enabled, collecting query counts")
+			p.Debug().Msg("Metrics query stats enabled, collecting query counts")
 
 			for idx, client := range clients {
-				mainLog.Load().Debug().
+				p.Debug().
 					Int("index", idx).
 					Str("ip", client.IP.String()).
 					Str("mac", client.Mac).
 					Str("hostname", client.Hostname).
-					Msg("processing client metrics")
+					Msg("Processing client metrics")
 
 				client.IncludeQueryCount = true
 				dm := &dto.Metric{}
 
 				if statsClientQueriesCount.MetricVec == nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Str("client_ip", client.IP.String()).
-						Msg("skipping metrics collection: MetricVec is nil")
+						Msg("Skipping metrics collection: MetricVec is nil")
 					continue
 				}
 
@@ -116,44 +118,44 @@ func (p *prog) registerControlServerHandler() {
 					client.Hostname,
 				)
 				if err != nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Err(err).
 						Str("client_ip", client.IP.String()).
 						Str("mac", client.Mac).
 						Str("hostname", client.Hostname).
-						Msg("failed to get metrics for client")
+						Msg("Failed to get metrics for client")
 					continue
 				}
 
 				if err := m.Write(dm); err == nil && dm.Counter != nil {
 					client.QueryCount = int64(dm.Counter.GetValue())
-					mainLog.Load().Debug().
+					p.Debug().
 						Str("client_ip", client.IP.String()).
 						Int64("query_count", client.QueryCount).
-						Msg("successfully collected query count")
+						Msg("Successfully collected query count")
 				} else if err != nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Err(err).
 						Str("client_ip", client.IP.String()).
-						Msg("failed to write metric")
+						Msg("Failed to write metric")
 				}
 			}
 		} else {
-			mainLog.Load().Debug().Msg("metrics query stats disabled, skipping query counts")
+			p.Debug().Msg("Metrics query stats disabled, skipping query counts")
 		}
 
 		if err := json.NewEncoder(w).Encode(&clients); err != nil {
-			mainLog.Load().Error().
+			p.Error().
 				Err(err).
 				Int("client_count", len(clients)).
-				Msg("failed to encode clients response")
+				Msg("Failed to encode clients response")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		mainLog.Load().Debug().
+		p.Debug().
 			Int("client_count", len(clients)).
-			Msg("successfully sent clients list response")
+			Msg("Successfully sent clients list response")
 	}))
 	p.cs.register(startedPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		select {
@@ -175,14 +177,14 @@ func (p *prog) registerControlServerHandler() {
 		oldSvc := p.cfg.Service
 		p.mu.Unlock()
 		if err := p.sendReloadSignal(); err != nil {
-			mainLog.Load().Err(err).Msg("could not send reload signal")
+			p.Error().Err(err).Msg("Could not send reload signal")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		select {
 		case <-p.reloadDoneCh:
 		case <-time.After(5 * time.Second):
-			http.Error(w, "timeout waiting for ctrld reload", http.StatusInternalServerError)
+			http.Error(w, "Timeout waiting for ctrld reload", http.StatusInternalServerError)
 			return
 		}
 
@@ -216,15 +218,16 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 
+		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 		// Re-fetch pin code from API.
-		if rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev); rc != nil {
+		if rc, err := controld.FetchResolverConfig(loggerCtx, cdUID, appVersion, cdDev); rc != nil {
 			if rc.DeactivationPin != nil {
 				cdDeactivationPin.Store(*rc.DeactivationPin)
 			} else {
 				cdDeactivationPin.Store(defaultDeactivationPin)
 			}
 		} else {
-			mainLog.Load().Warn().Err(err).Msg("could not re-fetch deactivation pin code")
+			p.Warn().Err(err).Msg("Could not re-fetch deactivation pin code")
 		}
 
 		// If pin code not set, allowing deactivation.
@@ -236,7 +239,7 @@ func (p *prog) registerControlServerHandler() {
 		var req deactivationRequest
 		if err := json.NewDecoder(request.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusPreconditionFailed)
-			mainLog.Load().Err(err).Msg("invalid deactivation request")
+			p.Error().Err(err).Msg("Invalid deactivation request")
 			return
 		}
 
@@ -280,7 +283,7 @@ func (p *prog) registerControlServerHandler() {
 		}
 	}))
 	p.cs.register(viewLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		lr, err := p.logReader()
+		lr, err := p.logReaderRaw()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -306,7 +309,7 @@ func (p *prog) registerControlServerHandler() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		r, err := p.logReader()
+		r, err := p.logReaderNoColor()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -319,14 +322,15 @@ func (p *prog) registerControlServerHandler() {
 			UID:  cdUID,
 			Data: r.r,
 		}
-		mainLog.Load().Debug().Msg("sending log file to ControlD server")
+		p.Debug().Msg("Sending log file to ControlD server")
 		resp := logSentResponse{Size: r.size}
-		if err := controld.SendLogs(req, cdDev); err != nil {
-			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
+		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
+		if err := controld.SendLogs(loggerCtx, req, cdDev); err != nil {
+			p.Error().Msgf("Could not send log file to ControlD server: %v", err)
 			resp.Error = err.Error()
 			w.WriteHeader(http.StatusInternalServerError)
 		} else {
-			mainLog.Load().Debug().Msg("sending log file successfully")
+			p.Debug().Msg("Sending log file successfully")
 			w.WriteHeader(http.StatusOK)
 		}
 		if err := json.NewEncoder(w).Encode(&resp); err != nil {
@@ -336,6 +340,7 @@ func (p *prog) registerControlServerHandler() {
 	}))
 }
 
+// jsonResponse wraps an HTTP handler to set JSON content type
 func jsonResponse(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

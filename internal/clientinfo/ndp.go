@@ -20,8 +20,9 @@ import (
 
 // ndpDiscover provides client discovery functionality using NDP protocol.
 type ndpDiscover struct {
-	mac sync.Map // ip  => mac
-	ip  sync.Map // mac => ip
+	mac    sync.Map // ip  => mac
+	ip     sync.Map // mac => ip
+	logger *ctrld.Logger
 }
 
 // refresh re-scans the NDP table.
@@ -97,7 +98,7 @@ func (nd *ndpDiscover) saveInfo(ip, mac string) {
 func (nd *ndpDiscover) listen(ctx context.Context) {
 	ifis, err := allInterfacesWithV6LinkLocal()
 	if err != nil {
-		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("failed to find valid ipv6 interfaces")
+		nd.logger.Debug().Err(err).Msg("Failed to find valid ipv6 interfaces")
 		return
 	}
 	for _, ifi := range ifis {
@@ -110,11 +111,11 @@ func (nd *ndpDiscover) listen(ctx context.Context) {
 func (nd *ndpDiscover) listenOnInterface(ctx context.Context, ifi *net.Interface) {
 	c, ip, err := ndp.Listen(ifi, ndp.Unspecified)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("ndp listen failed")
+		nd.logger.Debug().Err(err).Msg("Ndp listen failed")
 		return
 	}
 	defer c.Close()
-	ctrld.ProxyLogger.Load().Debug().Msgf("listening ndp on: %s", ip.String())
+	nd.logger.Debug().Msgf("Listening ndp on: %s", ip.String())
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,7 +129,7 @@ func (nd *ndpDiscover) listenOnInterface(ctx context.Context, ifi *net.Interface
 			if errors.As(readErr, &opErr) && (opErr.Timeout() || opErr.Temporary()) {
 				continue
 			}
-			ctrld.ProxyLogger.Load().Debug().Err(readErr).Msg("ndp read loop error")
+			nd.logger.Debug().Err(readErr).Msg("Ndp read loop error")
 			return
 		}
 
@@ -173,6 +174,9 @@ func (nd *ndpDiscover) scanUnix(r io.Reader) {
 		}
 		if mac := parseMAC(fields[1]); mac != "" {
 			ip := fields[0]
+			// Remove interface suffix from IPv6 addresses
+			// Unix systems append interface names to IPv6 addresses (e.g., "fe80::1%eth0")
+			// This suffix needs to be removed for proper IP parsing
 			if idx := strings.IndexByte(ip, '%'); idx != -1 {
 				ip = ip[:idx]
 			}
@@ -191,11 +195,15 @@ func normalizeMac(mac string) string {
 		return mac
 	}
 	// Windows use "-" instead of ":" as separator.
+	// This normalization is needed because different operating systems use different
+	// separators for MAC addresses, but net.ParseMAC expects ":" format
 	mac = strings.ReplaceAll(mac, "-", ":")
 	parts := strings.Split(mac, ":")
 	if len(parts) != 6 {
 		return ""
 	}
+	// Pad single-digit hex values with leading zero
+	// This ensures consistent formatting for MAC address parsing
 	for i, c := range parts {
 		if len(c) == 1 {
 			parts[i] = "0" + c
