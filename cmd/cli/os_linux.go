@@ -72,7 +72,15 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 		SearchDomains: []dnsname.FQDN{},
 	}
 	if sds, err := searchDomains(); err == nil {
-		osConfig.SearchDomains = sds
+		// Filter the root domain, since it's not allowed by systemd.
+		// See https://github.com/systemd/systemd/issues/9515
+		filteredSds := slices.DeleteFunc(sds, func(s dnsname.FQDN) bool {
+			return s == "" || s == "."
+		})
+		if len(filteredSds) != len(sds) {
+			mainLog.Load().Debug().Msg(`Removed root domain "." from search domains list`)
+		}
+		osConfig.SearchDomains = filteredSds
 	} else {
 		mainLog.Load().Debug().Err(err).Msg("failed to get search domains list")
 	}
