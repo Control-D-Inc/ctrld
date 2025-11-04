@@ -213,7 +213,8 @@ func (p *prog) runWait() {
 				continue
 			}
 			if cdUID != "" {
-				if rc, err := processCDFlags(newCfg); err != nil {
+				rc, err := processCDFlags(newCfg)
+				if err != nil {
 					logger.Err(err).Msg("could not fetch ControlD config")
 					waitOldRunDone()
 					continue
@@ -224,6 +225,10 @@ func (p *prog) runWait() {
 				}
 			}
 		}
+
+		// Though the log configuration could not be changed during reloading, we still need to
+		// process the current flags here, so runtime internal logs can be used correctly.
+		processLogAndCacheFlags(v, newCfg)
 
 		waitOldRunDone()
 

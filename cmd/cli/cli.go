@@ -282,7 +282,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 	p.mu.Unlock()
 
-	processLogAndCacheFlags()
+	processLogAndCacheFlags(v, &cfg)
 
 	// Log config do not have thing to validate, so it's safe to init log here,
 	// so it's able to log information in processCDFlags.
@@ -342,7 +342,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	updated := updateListenerConfig(&cfg, notifyExitToLogServer)
 
 	if cdUID != "" {
-		processLogAndCacheFlags()
+		processLogAndCacheFlags(v, &cfg)
 	}
 
 	if updated {
@@ -780,7 +780,8 @@ func processListenFlag() {
 	})
 }
 
-func processLogAndCacheFlags() {
+// processLogAndCacheFlags processes log and cache related flags
+func processLogAndCacheFlags(v *viper.Viper, cfg *ctrld.Config) {
 	if logPath != "" {
 		cfg.Service.LogPath = logPath
 	}
