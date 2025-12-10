@@ -69,14 +69,23 @@ func (u ErrorResponse) Error() string {
 }
 
 type utilityRequest struct {
-	UID      string `json:"uid"`
-	ClientID string `json:"client_id,omitempty"`
+	UID      string            `json:"uid"`
+	ClientID string            `json:"client_id,omitempty"`
+	Metadata map[string]string `json:"metadata"`
 }
 
 // UtilityOrgRequest contains request data for calling Org API.
 type UtilityOrgRequest struct {
-	ProvToken string `json:"prov_token"`
-	Hostname  string `json:"hostname"`
+	ProvToken string            `json:"prov_token"`
+	Hostname  string            `json:"hostname"`
+	Metadata  map[string]string `json:"metadata"`
+}
+
+// ResolverConfigRequest contains request data for fetching resolver config.
+type ResolverConfigRequest struct {
+	RawUID   string
+	Version  string
+	Metadata map[string]string
 }
 
 // LogsRequest contains request data for sending runtime logs to API.
@@ -85,26 +94,28 @@ type LogsRequest struct {
 	Data io.ReadCloser `json:"-"`
 }
 
-// FetchResolverConfig fetch Control D config for given uid.
-func FetchResolverConfig(ctx context.Context, rawUID, version string, cdDev bool) (*ResolverConfig, error) {
+// FetchResolverConfig fetch Control D config for a given request.
+func FetchResolverConfig(ctx context.Context, req *ResolverConfigRequest, cdDev bool) (*ResolverConfig, error) {
 	logger := ctrld.LoggerFromCtx(ctx)
 	ctrld.Log(ctx, logger.Debug(), "Fetching ControlD resolver configuration")
 
-	uid, clientID := ParseRawUID(rawUID)
+	uid, clientID := ParseRawUID(req.RawUID)
 	ctrld.Log(ctx, logger.Debug(), "Parsed UID: %s, ClientID: %s", uid, clientID)
 
-	req := utilityRequest{UID: uid}
+	uReq := utilityRequest{
+		UID:      uid,
+		Metadata: req.Metadata,
+	}
 	if clientID != "" {
-		req.ClientID = clientID
+		uReq.ClientID = clientID
 		ctrld.Log(ctx, logger.Debug(), "Including client ID in request")
 	}
-	body, _ := json.Marshal(req)
-
+	body, _ := json.Marshal(uReq)
 	ctrld.Log(ctx, logger.Debug(), "Sending resolver config request to ControlD API")
-	return postUtilityAPI(ctx, version, cdDev, false, bytes.NewReader(body))
+	return postUtilityAPI(ctx, req.Version, cdDev, false, bytes.NewReader(body))
 }
 
-// FetchResolverUID fetch resolver uid from provision token.
+// FetchResolverUID fetch resolver uid from a given request.
 func FetchResolverUID(ctx context.Context, req *UtilityOrgRequest, version string, cdDev bool) (*ResolverConfig, error) {
 	logger := ctrld.LoggerFromCtx(ctx)
 	ctrld.Log(ctx, logger.Debug(), "Fetching resolver UID from provision token")
@@ -115,15 +126,16 @@ func FetchResolverUID(ctx context.Context, req *UtilityOrgRequest, version strin
 	}
 
 	hostname := req.Hostname
-	if hostname == "" {
+	if req.Hostname == "" {
 		hostname, _ = os.Hostname()
 		ctrld.Log(ctx, logger.Debug(), "Using system hostname: %s", hostname)
+		req.Hostname = hostname
 	} else {
 		ctrld.Log(ctx, logger.Debug(), "Using provided hostname: %s", hostname)
 	}
 
 	ctrld.Log(ctx, logger.Debug(), "Sending UID request to ControlD API")
-	body, _ := json.Marshal(UtilityOrgRequest{ProvToken: req.ProvToken, Hostname: hostname})
+	body, _ := json.Marshal(req)
 	return postUtilityAPI(ctx, version, cdDev, false, bytes.NewReader(body))
 }
 
@@ -135,7 +147,7 @@ func UpdateCustomLastFailed(ctx context.Context, rawUID, version string, cdDev, 
 		req.ClientID = clientID
 	}
 	body, _ := json.Marshal(req)
-	return postUtilityAPI(ctx, version, cdDev, true, bytes.NewReader(body))
+	return postUtilityAPI(ctx, version, cdDev, lastUpdatedFailed, bytes.NewReader(body))
 }
 
 func postUtilityAPI(ctx context.Context, version string, cdDev, lastUpdatedFailed bool, body io.Reader) (*ResolverConfig, error) {

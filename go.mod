@@ -5,6 +5,7 @@ go 1.24
 require (
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/ameshkov/dnsstamps v1.0.3
+	github.com/brunogui0812/sysprofiler v0.5.0
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/cuonglm/osinfo v0.0.0-20230921071424-e0e1b1e0bbbf
 	github.com/docker/go-units v0.5.0
@@ -15,6 +16,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.1
 	github.com/illarion/gonotify/v2 v2.0.3
 	github.com/insomniacslk/dhcp v0.0.0-20231206064809-8c70d406f6d2
+	github.com/jaypipes/ghw v0.21.0
 	github.com/jaytaylor/go-hostsfile v0.0.0-20220426042432-61485ac1fa6c
 	github.com/josharian/native v1.1.1-0.20230202152459-5c7d0dd6ab86
 	github.com/kardianos/service v1.2.1
@@ -54,8 +56,10 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/groob/plist v0.0.0-20200425180238-0f631f258c01 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/jaypipes/pcidb v1.1.1 // indirect
 	github.com/jsimonetti/rtnetlink v1.4.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
@@ -75,6 +79,7 @@ require (
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
 	github.com/rogpeppe/go-internal v1.11.0 // indirect
+	github.com/spakin/awk v1.0.0 // indirect
 	github.com/spf13/afero v1.9.5 // indirect
 	github.com/spf13/cast v1.6.0 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
@@ -82,6 +87,7 @@ require (
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/u-root/uio v0.0.0-20240118234441-a3c409a6018e // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
+	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
@@ -93,6 +99,7 @@ require (
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	howett.net/plist v1.0.2-0.20250314012144-ee69052608d9 // indirect
 )
 
 replace github.com/mr-karan/doggo => github.com/Windscribe/doggo v0.0.0-20220919152748-2c118fc391f8

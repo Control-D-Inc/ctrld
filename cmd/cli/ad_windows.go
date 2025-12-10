@@ -1,20 +1,15 @@
 package cli
 
 import (
-	"io"
-	"log"
-	"os"
 	"strings"
 
-	"github.com/microsoft/wmi/pkg/base/host"
-	hh "github.com/microsoft/wmi/pkg/hardware/host"
-
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/system"
 )
 
 // addExtraSplitDnsRule adds split DNS rule for domain if it's part of active directory.
 func addExtraSplitDnsRule(cfg *ctrld.Config) bool {
-	domain, err := getActiveDirectoryDomain()
+	domain, err := system.GetActiveDirectoryDomain()
 	if err != nil {
 		mainLog.Load().Debug().Msgf("Unable to get active directory domain: %v", err)
 		return false
@@ -48,26 +43,4 @@ func addSplitDnsRule(cfg *ctrld.Config, domain string) bool {
 		lc.Policy.Rules = append(lc.Policy.Rules, ctrld.Rule{domain: []string{}})
 	}
 	return true
-}
-
-// getActiveDirectoryDomain returns AD domain name of this computer.
-func getActiveDirectoryDomain() (string, error) {
-	log.SetOutput(io.Discard)
-	defer log.SetOutput(os.Stderr)
-	whost := host.NewWmiLocalHost()
-	cs, err := hh.GetComputerSystem(whost)
-	if cs != nil {
-		defer cs.Close()
-	}
-	if err != nil {
-		return "", err
-	}
-	pod, err := cs.GetPropertyPartOfDomain()
-	if err != nil {
-		return "", err
-	}
-	if pod {
-		return cs.GetPropertyDomain()
-	}
-	return "", nil
 }

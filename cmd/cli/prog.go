@@ -306,7 +306,12 @@ func (p *prog) apiConfigReload() {
 
 	doReloadApiConfig := func(forced bool, logger *ctrld.Logger) {
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-		resolverConfig, err := controld.FetchResolverConfig(loggerCtx, cdUID, appVersion, cdDev)
+		req := &controld.ResolverConfigRequest{
+			RawUID:   cdUID,
+			Version:  appVersion,
+			Metadata: ctrld.SystemMetadata(loggerCtx),
+		}
+		resolverConfig, err := controld.FetchResolverConfig(loggerCtx, req, cdDev)
 		selfUninstallCheck(err, p, logger)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Could not fetch resolver config")
