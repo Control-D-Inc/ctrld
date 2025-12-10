@@ -5,14 +5,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Control-D-Inc/ctrld"
-	"github.com/Control-D-Inc/ctrld/testhelper"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/system"
+	"github.com/Control-D-Inc/ctrld/testhelper"
 )
 
 func Test_getActiveDirectoryDomain(t *testing.T) {
 	start := time.Now()
-	domain, err := getActiveDirectoryDomain()
+	domain, err := system.GetActiveDirectoryDomain()
 	if err != nil {
 		t.Fatal(err)
 	}

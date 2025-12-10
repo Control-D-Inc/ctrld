@@ -656,7 +656,12 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
 	bo.LogLongerThan = 30 * time.Second
 	ctx := ctrld.LoggerCtx(context.Background(), logger)
-	resolverConfig, err := controld.FetchResolverConfig(ctx, cdUID, appVersion, cdDev)
+	req := &controld.ResolverConfigRequest{
+		RawUID:   cdUID,
+		Version:  appVersion,
+		Metadata: ctrld.SystemMetadata(ctx),
+	}
+	resolverConfig, err := controld.FetchResolverConfig(ctx, req, cdDev)
 
 	// Retry logic for network errors using bootstrap DNS
 	// This is needed because the initial DNS resolution might fail due to network issues
@@ -665,7 +670,7 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 		if errUrlNetworkError(err) {
 			bo.BackOff(ctx, err)
 			logger.Warn().Msg("Could not fetch resolver using bootstrap DNS, retrying...")
-			resolverConfig, err = controld.FetchResolverConfig(ctx, cdUID, appVersion, cdDev)
+			resolverConfig, err = controld.FetchResolverConfig(ctx, req, cdDev)
 			continue
 		}
 		break
@@ -1494,9 +1499,13 @@ func cdUIDFromProvToken() string {
 	if customHostname != "" && !validHostname(customHostname) {
 		mainLog.Load().Fatal().Msgf("Invalid custom hostname: %q", customHostname)
 	}
-	req := &controld.UtilityOrgRequest{ProvToken: cdOrg, Hostname: customHostname}
-	// Process provision token if provided.
 	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+	req := &controld.UtilityOrgRequest{
+		ProvToken: cdOrg,
+		Hostname:  customHostname,
+		Metadata:  ctrld.SystemMetadata(loggerCtx),
+	}
+	// Process provision token if provided.
 	resolverConfig, err := controld.FetchResolverUID(loggerCtx, req, appVersion, cdDev)
 	if err != nil {
 		mainLog.Load().Fatal().Err(err).Msgf("Failed to fetch resolver uid with provision token: %s", cdOrg)
@@ -1824,7 +1833,12 @@ func runningIface(s service.Service) *ifaceResponse {
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
 func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
-	rc, err := controld.FetchResolverConfig(loggerCtx, cdUID, appVersion, cdDev)
+	req := &controld.ResolverConfigRequest{
+		RawUID:   cdUID,
+		Version:  appVersion,
+		Metadata: ctrld.SystemMetadata(loggerCtx),
+	}
+	rc, err := controld.FetchResolverConfig(loggerCtx, req, cdDev)
 	if err != nil {
 		logger := mainLog.Load().Fatal()
 		if !fatal {

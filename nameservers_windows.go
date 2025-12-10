@@ -20,6 +20,8 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 	"tailscale.com/net/netmon"
+
+	"github.com/Control-D-Inc/ctrld/internal/system"
 )
 
 const (
@@ -121,7 +123,7 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 	var dcServers []string
 	isDomain := checkDomainJoined(ctx)
 	if isDomain {
-		domainName, err := getLocalADDomain()
+		domainName, err := system.GetActiveDirectoryDomain()
 		if err != nil {
 			logger.Debug().Msgf("Failed to get local AD domain: %v", err)
 		} else {
@@ -302,73 +304,16 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 func checkDomainJoined(ctx context.Context) bool {
 	logger := LoggerFromCtx(ctx)
 
-	var domain *uint16
-	var status uint32
-
-	if err := windows.NetGetJoinInformation(nil, &domain, &status); err != nil {
-		logger.Debug().Msgf("Failed to get domain join status: %v", err)
+	status, err := system.DomainJoinedStatus()
+	if err != nil {
+		logger.Debug().Msgf("Failed to get domain joined status: %v", err)
 		return false
 	}
-	defer windows.NetApiBufferFree((*byte)(unsafe.Pointer(domain)))
-
-	// NETSETUP_JOIN_STATUS constants from Microsoft Windows API
-	// See: https://learn.microsoft.com/en-us/windows/win32/api/lmjoin/ne-lmjoin-netsetup_join_status
-	//
-	// NetSetupUnknownStatus         uint32 = 0 // The status is unknown
-	// NetSetupUnjoined              uint32 = 1 // The computer is not joined to a domain or workgroup
-	// NetSetupWorkgroupName         uint32 = 2 // The computer is joined to a workgroup
-	// NetSetupDomainName            uint32 = 3 // The computer is joined to a domain
-	//
-	// We only care about NetSetupDomainName.
-	domainName := windows.UTF16PtrToString(domain)
-	logger.Debug().Msgf(
-		"Domain join status: domain=%s status=%d (UnknownStatus=0, Unjoined=1, WorkgroupName=2, DomainName=3)",
-		domainName, status)
-
 	isDomain := status == syscall.NetSetupDomainName
+	logger.Debug().Msg("Domain join status: (UnknownStatus=0, Unjoined=1, WorkgroupName=2, DomainName=3)")
 	logger.Debug().Msgf("Is domain joined? status=%d, result=%v", status, isDomain)
 
 	return isDomain
-}
-
-// getLocalADDomain uses Microsoft's WMI wrappers (github.com/microsoft/wmi/pkg/*)
-// to query the Domain field from Win32_ComputerSystem instead of a direct go-ole call.
-func getLocalADDomain() (string, error) {
-	log.SetOutput(io.Discard)
-	defer log.SetOutput(os.Stderr)
-	// 1) Check environment variable
-	envDomain := os.Getenv("USERDNSDOMAIN")
-	if envDomain != "" {
-		return strings.TrimSpace(envDomain), nil
-	}
-
-	// 2) Query WMI via the microsoft/wmi library
-	whost := host.NewWmiLocalHost()
-	q := query.NewWmiQuery("Win32_ComputerSystem")
-	instances, err := instance.GetWmiInstancesFromHost(whost, string(constant.CimV2), q)
-	if instances != nil {
-		defer instances.Close()
-	}
-	if err != nil {
-		return "", fmt.Errorf("WMI query failed: %v", err)
-	}
-
-	// If no results, return an error
-	if len(instances) == 0 {
-		return "", fmt.Errorf("no rows returned from Win32_ComputerSystem")
-	}
-
-	// We only care about the first row
-	domainVal, err := instances[0].GetProperty("Domain")
-	if err != nil {
-		return "", fmt.Errorf("machine does not appear to have a domain set: %v", err)
-	}
-
-	domainName := strings.TrimSpace(fmt.Sprintf("%v", domainVal))
-	if domainName == "" {
-		return "", fmt.Errorf("machine does not appear to have a domain set")
-	}
-	return domainName, nil
 }
 
 // ValidInterfaces returns a map of valid network interface names as keys with empty struct values.

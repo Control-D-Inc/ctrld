@@ -220,7 +220,12 @@ func (p *prog) registerControlServerHandler() {
 
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 		// Re-fetch pin code from API.
-		if rc, err := controld.FetchResolverConfig(loggerCtx, cdUID, appVersion, cdDev); rc != nil {
+		rcReq := &controld.ResolverConfigRequest{
+			RawUID:   cdUID,
+			Version:  appVersion,
+			Metadata: ctrld.SystemMetadata(loggerCtx),
+		}
+		if rc, err := controld.FetchResolverConfig(loggerCtx, rcReq, cdDev); rc != nil {
 			if rc.DeactivationPin != nil {
 				cdDeactivationPin.Store(*rc.DeactivationPin)
 			} else {

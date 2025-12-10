@@ -1204,7 +1204,12 @@ func (p *prog) doSelfUninstall(pr *proxyResponse) {
 	if p.refusedQueryCount > selfUninstallMaxQueries {
 		p.checkingSelfUninstall = true
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-		_, err := controld.FetchResolverConfig(loggerCtx, cdUID, appVersion, cdDev)
+		req := &controld.ResolverConfigRequest{
+			RawUID:   cdUID,
+			Version:  appVersion,
+			Metadata: ctrld.SystemMetadata(loggerCtx),
+		}
+		_, err := controld.FetchResolverConfig(loggerCtx, req, cdDev)
 		logger.Debug().Msg("Maximum number of refused queries reached, checking device status")
 		selfUninstallCheck(err, p, logger)
 
