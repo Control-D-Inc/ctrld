@@ -217,7 +217,12 @@ func (p *prog) registerControlServerHandler() {
 		}
 
 		// Re-fetch pin code from API.
-		if rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev); rc != nil {
+		rcReq := &controld.ResolverConfigRequest{
+			RawUID:   cdUID,
+			Version:  rootCmd.Version,
+			Metadata: ctrld.SystemMetadata(context.Background()),
+		}
+		if rc, err := controld.FetchResolverConfig(rcReq, cdDev); rc != nil {
 			if rc.DeactivationPin != nil {
 				cdDeactivationPin.Store(*rc.DeactivationPin)
 			} else {
