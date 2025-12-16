@@ -27,10 +27,10 @@ require (
 	github.com/prometheus/client_golang v1.19.1
 	github.com/prometheus/client_model v0.5.0
 	github.com/prometheus/prom2json v1.3.3
-	github.com/quic-go/quic-go v0.56.0
-	github.com/spf13/cobra v1.8.1
+	github.com/quic-go/quic-go v0.57.1
+	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.16.0
-	github.com/stretchr/testify v1.9.0
+	github.com/stretchr/testify v1.11.1
 	github.com/vishvananda/netlink v1.2.1-beta.2
 	go.uber.org/zap v1.27.0
 	golang.org/x/net v0.43.0
@@ -72,13 +72,13 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/common v0.48.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
-	github.com/quic-go/qpack v0.5.1 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
 	github.com/rogpeppe/go-internal v1.11.0 // indirect
 	github.com/spf13/afero v1.9.5 // indirect
 	github.com/spf13/cast v1.6.0 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
+	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/u-root/uio v0.0.0-20240118234441-a3c409a6018e // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
