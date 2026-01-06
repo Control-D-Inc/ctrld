@@ -86,7 +86,7 @@ func newDOQConnPool(uc *UpstreamConfig, addrs []string) *doqConnPool {
 // Resolve performs a DNS query using a pooled QUIC connection.
 func (p *doqConnPool) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	// Retry logic for io.EOF errors (as per original implementation)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		answer, err := p.doResolve(ctx, msg)
 		if err == io.EOF {
 			continue

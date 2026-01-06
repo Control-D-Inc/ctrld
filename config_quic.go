@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
@@ -34,6 +33,9 @@ func (uc *UpstreamConfig) setupDOH3Transport() {
 }
 
 func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
+	if uc.Type != ResolverTypeDOH3 {
+		return nil
+	}
 	rt := &http3.Transport{}
 	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
@@ -71,45 +73,13 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 }
 
 func (uc *UpstreamConfig) doh3Transport(dnsType uint16) http.RoundTripper {
-	uc.transportOnce.Do(func() {
-		uc.SetupTransport()
-	})
-	if uc.rebootstrap.CompareAndSwap(true, false) {
-		uc.SetupTransport()
-	}
-	switch uc.IPStack {
-	case IpStackBoth, IpStackV4, IpStackV6:
-		return uc.http3RoundTripper
-	case IpStackSplit:
-		switch dnsType {
-		case dns.TypeA:
-			return uc.http3RoundTripper4
-		default:
-			return uc.http3RoundTripper6
-		}
-	}
-	return uc.http3RoundTripper
+	uc.ensureSetupTransport()
+	return transportByIpStack(uc.IPStack, dnsType, uc.http3RoundTripper, uc.http3RoundTripper4, uc.http3RoundTripper6)
 }
 
 func (uc *UpstreamConfig) doqTransport(dnsType uint16) *doqConnPool {
-	uc.transportOnce.Do(func() {
-		uc.SetupTransport()
-	})
-	if uc.rebootstrap.CompareAndSwap(true, false) {
-		uc.SetupTransport()
-	}
-	switch uc.IPStack {
-	case IpStackBoth, IpStackV4, IpStackV6:
-		return uc.doqConnPool
-	case IpStackSplit:
-		switch dnsType {
-		case dns.TypeA:
-			return uc.doqConnPool4
-		default:
-			return uc.doqConnPool6
-		}
-	}
-	return uc.doqConnPool
+	uc.ensureSetupTransport()
+	return transportByIpStack(uc.IPStack, dnsType, uc.doqConnPool, uc.doqConnPool4, uc.doqConnPool6)
 }
 
 // Putting the code for quic parallel dialer here:
@@ -181,5 +151,8 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 }
 
 func (uc *UpstreamConfig) newDOQConnPool(addrs []string) *doqConnPool {
+	if uc.Type != ResolverTypeDOQ {
+		return nil
+	}
 	return newDOQConnPool(uc, addrs)
 }

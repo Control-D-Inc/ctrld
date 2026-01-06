@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/netip"
@@ -509,54 +508,49 @@ func (uc *UpstreamConfig) ReBootstrap() {
 // For now, only DoH upstream is supported.
 func (uc *UpstreamConfig) SetupTransport() {
 	switch uc.Type {
-	case ResolverTypeDOH:
-		uc.setupDOHTransport()
-	case ResolverTypeDOH3:
-		uc.setupDOH3Transport()
-	case ResolverTypeDOQ:
-		uc.setupDOQTransport()
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ:
+	default:
+		return
 	}
-}
-
-func (uc *UpstreamConfig) setupDOQTransport() {
+	ips := uc.bootstrapIPs
 	switch uc.IPStack {
-	case IpStackBoth, "":
-		uc.doqConnPool = uc.newDOQConnPool(uc.bootstrapIPs)
 	case IpStackV4:
-		uc.doqConnPool = uc.newDOQConnPool(uc.bootstrapIPs4)
+		ips = uc.bootstrapIPs4
 	case IpStackV6:
-		uc.doqConnPool = uc.newDOQConnPool(uc.bootstrapIPs6)
-	case IpStackSplit:
+		ips = uc.bootstrapIPs6
+	}
+	uc.transport = uc.newDOHTransport(ips)
+	uc.http3RoundTripper = uc.newDOH3Transport(ips)
+	uc.doqConnPool = uc.newDOQConnPool(ips)
+	if uc.IPStack == IpStackSplit {
+		uc.transport4 = uc.newDOHTransport(uc.bootstrapIPs4)
+		uc.http3RoundTripper4 = uc.newDOH3Transport(uc.bootstrapIPs4)
 		uc.doqConnPool4 = uc.newDOQConnPool(uc.bootstrapIPs4)
 		if HasIPv6() {
+			uc.transport6 = uc.newDOHTransport(uc.bootstrapIPs6)
+			uc.http3RoundTripper6 = uc.newDOH3Transport(uc.bootstrapIPs6)
 			uc.doqConnPool6 = uc.newDOQConnPool(uc.bootstrapIPs6)
 		} else {
+			uc.transport6 = uc.transport4
+			uc.http3RoundTripper6 = uc.http3RoundTripper4
 			uc.doqConnPool6 = uc.doqConnPool4
 		}
-		uc.doqConnPool = uc.newDOQConnPool(uc.bootstrapIPs)
 	}
 }
 
-func (uc *UpstreamConfig) setupDOHTransport() {
-	switch uc.IPStack {
-	case IpStackBoth, "":
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs)
-	case IpStackV4:
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs4)
-	case IpStackV6:
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs6)
-	case IpStackSplit:
-		uc.transport4 = uc.newDOHTransport(uc.bootstrapIPs4)
-		if HasIPv6() {
-			uc.transport6 = uc.newDOHTransport(uc.bootstrapIPs6)
-		} else {
-			uc.transport6 = uc.transport4
-		}
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs)
+func (uc *UpstreamConfig) ensureSetupTransport() {
+	uc.transportOnce.Do(func() {
+		uc.SetupTransport()
+	})
+	if uc.rebootstrap.CompareAndSwap(true, false) {
+		uc.SetupTransport()
 	}
 }
 
 func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
+	if uc.Type != ResolverTypeDOH {
+		return nil
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = 100
 	transport.TLSClientConfig = &tls.Config{
@@ -690,46 +684,8 @@ func (uc *UpstreamConfig) isNextDNS() bool {
 }
 
 func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
-	uc.transportOnce.Do(func() {
-		uc.SetupTransport()
-	})
-	if uc.rebootstrap.CompareAndSwap(true, false) {
-		uc.SetupTransport()
-	}
-	switch uc.IPStack {
-	case IpStackBoth, IpStackV4, IpStackV6:
-		return uc.transport
-	case IpStackSplit:
-		switch dnsType {
-		case dns.TypeA:
-			return uc.transport4
-		default:
-			return uc.transport6
-		}
-	}
-	return uc.transport
-}
-
-func (uc *UpstreamConfig) bootstrapIPForDNSType(dnsType uint16) string {
-	switch uc.IPStack {
-	case IpStackBoth:
-		return pick(uc.bootstrapIPs)
-	case IpStackV4:
-		return pick(uc.bootstrapIPs4)
-	case IpStackV6:
-		return pick(uc.bootstrapIPs6)
-	case IpStackSplit:
-		switch dnsType {
-		case dns.TypeA:
-			return pick(uc.bootstrapIPs4)
-		default:
-			if HasIPv6() {
-				return pick(uc.bootstrapIPs6)
-			}
-			return pick(uc.bootstrapIPs4)
-		}
-	}
-	return pick(uc.bootstrapIPs)
+	uc.ensureSetupTransport()
+	return transportByIpStack(uc.IPStack, dnsType, uc.transport, uc.transport4, uc.transport6)
 }
 
 func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
@@ -974,10 +930,6 @@ func ResolverTypeFromEndpoint(endpoint string) string {
 	return ResolverTypeDOT
 }
 
-func pick(s []string) string {
-	return s[rand.Intn(len(s))]
-}
-
 // upstreamUID generates an unique identifier for an upstream.
 func upstreamUID() string {
 	b := make([]byte, 4)
@@ -1012,4 +964,19 @@ func bootstrapIPsFromControlDDomain(domain string) []string {
 		return []string{freeDNSBoostrapIP, freeDNSBoostrapIPv6}
 	}
 	return nil
+}
+
+func transportByIpStack[T any](ipStack string, dnsType uint16, transport, transport4, transport6 T) T {
+	switch ipStack {
+	case IpStackBoth, IpStackV4, IpStackV6:
+		return transport
+	case IpStackSplit:
+		switch dnsType {
+		case dns.TypeA:
+			return transport4
+		default:
+			return transport6
+		}
+	}
+	return transport
 }
