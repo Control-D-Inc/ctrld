@@ -282,6 +282,9 @@ type UpstreamConfig struct {
 	http3RoundTripper  http.RoundTripper
 	http3RoundTripper4 http.RoundTripper
 	http3RoundTripper6 http.RoundTripper
+	doqConnPool        *doqConnPool
+	doqConnPool4       *doqConnPool
+	doqConnPool6       *doqConnPool
 	certPool           *x509.CertPool
 	u                  *url.URL
 	fallbackOnce       sync.Once
@@ -504,7 +507,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP(ctx context.Context) {
 // ReBootstrap re-setup the bootstrap IP and the transport.
 func (uc *UpstreamConfig) ReBootstrap(ctx context.Context) {
 	switch uc.Type {
-	case ResolverTypeDOH, ResolverTypeDOH3:
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ:
 	default:
 		return
 	}
@@ -525,6 +528,27 @@ func (uc *UpstreamConfig) SetupTransport(ctx context.Context) {
 		uc.setupDOHTransport(ctx)
 	case ResolverTypeDOH3:
 		uc.setupDOH3Transport(ctx)
+	case ResolverTypeDOQ:
+		uc.setupDOQTransport(ctx)
+	}
+}
+
+func (uc *UpstreamConfig) setupDOQTransport(ctx context.Context) {
+	switch uc.IPStack {
+	case IpStackBoth, "":
+		uc.doqConnPool = uc.newDOQConnPool(ctx, uc.bootstrapIPs)
+	case IpStackV4:
+		uc.doqConnPool = uc.newDOQConnPool(ctx, uc.bootstrapIPs4)
+	case IpStackV6:
+		uc.doqConnPool = uc.newDOQConnPool(ctx, uc.bootstrapIPs6)
+	case IpStackSplit:
+		uc.doqConnPool4 = uc.newDOQConnPool(ctx, uc.bootstrapIPs4)
+		if HasIPv6(ctx) {
+			uc.doqConnPool6 = uc.newDOQConnPool(ctx, uc.bootstrapIPs6)
+		} else {
+			uc.doqConnPool6 = uc.doqConnPool4
+		}
+		uc.doqConnPool = uc.newDOQConnPool(ctx, uc.bootstrapIPs)
 	}
 }
 
@@ -612,7 +636,7 @@ func (uc *UpstreamConfig) ErrorPing(ctx context.Context) error {
 
 func (uc *UpstreamConfig) ping(ctx context.Context) error {
 	switch uc.Type {
-	case ResolverTypeDOH, ResolverTypeDOH3:
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ:
 	default:
 		return nil
 	}
@@ -646,6 +670,10 @@ func (uc *UpstreamConfig) ping(ctx context.Context) error {
 			if err := ping(uc.doh3Transport(ctx, typ)); err != nil {
 				return err
 			}
+		case ResolverTypeDOQ:
+			// For DoQ, we just ensure transport is set up by calling doqTransport
+			// DoQ doesn't use HTTP, so we can't ping it the same way
+			_ = uc.doqTransport(ctx, typ)
 		}
 	}
 
