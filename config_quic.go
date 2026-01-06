@@ -92,6 +92,27 @@ func (uc *UpstreamConfig) doh3Transport(ctx context.Context, dnsType uint16) htt
 	return uc.http3RoundTripper
 }
 
+func (uc *UpstreamConfig) doqTransport(ctx context.Context, dnsType uint16) *doqConnPool {
+	uc.transportOnce.Do(func() {
+		uc.SetupTransport(ctx)
+	})
+	if uc.rebootstrap.CompareAndSwap(true, false) {
+		uc.SetupTransport(ctx)
+	}
+	switch uc.IPStack {
+	case IpStackBoth, IpStackV4, IpStackV6:
+		return uc.doqConnPool
+	case IpStackSplit:
+		switch dnsType {
+		case dns.TypeA:
+			return uc.doqConnPool4
+		default:
+			return uc.doqConnPool6
+		}
+	}
+	return uc.doqConnPool
+}
+
 // Putting the code for quic parallel dialer here:
 //
 //   - quic dialer is different with net.Dialer
@@ -158,4 +179,8 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 	}
 
 	return nil, errors.Join(errs...)
+}
+
+func (uc *UpstreamConfig) newDOQConnPool(ctx context.Context, addrs []string) *doqConnPool {
+	return newDOQConnPool(ctx, uc, addrs)
 }
