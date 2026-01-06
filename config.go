@@ -276,6 +276,9 @@ type UpstreamConfig struct {
 	http3RoundTripper  http.RoundTripper
 	http3RoundTripper4 http.RoundTripper
 	http3RoundTripper6 http.RoundTripper
+	doqConnPool        *doqConnPool
+	doqConnPool4       *doqConnPool
+	doqConnPool6       *doqConnPool
 	certPool           *x509.CertPool
 	u                  *url.URL
 	fallbackOnce       sync.Once
@@ -490,7 +493,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 // ReBootstrap re-setup the bootstrap IP and the transport.
 func (uc *UpstreamConfig) ReBootstrap() {
 	switch uc.Type {
-	case ResolverTypeDOH, ResolverTypeDOH3:
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ:
 	default:
 		return
 	}
@@ -510,6 +513,27 @@ func (uc *UpstreamConfig) SetupTransport() {
 		uc.setupDOHTransport()
 	case ResolverTypeDOH3:
 		uc.setupDOH3Transport()
+	case ResolverTypeDOQ:
+		uc.setupDOQTransport()
+	}
+}
+
+func (uc *UpstreamConfig) setupDOQTransport() {
+	switch uc.IPStack {
+	case IpStackBoth, "":
+		uc.doqConnPool = uc.newDOQConnPool(uc.bootstrapIPs)
+	case IpStackV4:
+		uc.doqConnPool = uc.newDOQConnPool(uc.bootstrapIPs4)
+	case IpStackV6:
+		uc.doqConnPool = uc.newDOQConnPool(uc.bootstrapIPs6)
+	case IpStackSplit:
+		uc.doqConnPool4 = uc.newDOQConnPool(uc.bootstrapIPs4)
+		if HasIPv6() {
+			uc.doqConnPool6 = uc.newDOQConnPool(uc.bootstrapIPs6)
+		} else {
+			uc.doqConnPool6 = uc.doqConnPool4
+		}
+		uc.doqConnPool = uc.newDOQConnPool(uc.bootstrapIPs)
 	}
 }
 
@@ -595,7 +619,7 @@ func (uc *UpstreamConfig) ErrorPing() error {
 
 func (uc *UpstreamConfig) ping() error {
 	switch uc.Type {
-	case ResolverTypeDOH, ResolverTypeDOH3:
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ:
 	default:
 		return nil
 	}
@@ -629,6 +653,10 @@ func (uc *UpstreamConfig) ping() error {
 			if err := ping(uc.doh3Transport(typ)); err != nil {
 				return err
 			}
+		case ResolverTypeDOQ:
+			// For DoQ, we just ensure transport is set up by calling doqTransport
+			// DoQ doesn't use HTTP, so we can't ping it the same way
+			_ = uc.doqTransport(typ)
 		}
 	}
 
