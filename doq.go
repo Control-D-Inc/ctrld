@@ -63,7 +63,7 @@ type doqConn struct {
 	mu       sync.Mutex
 }
 
-func newDOQConnPool(ctx context.Context, uc *UpstreamConfig, addrs []string) *doqConnPool {
+func newDOQConnPool(_ context.Context, uc *UpstreamConfig, addrs []string) *doqConnPool {
 	_, port, _ := net.SplitHostPort(uc.Endpoint)
 	if port == "" {
 		port = "853"
@@ -96,7 +96,7 @@ func newDOQConnPool(ctx context.Context, uc *UpstreamConfig, addrs []string) *do
 // Resolve performs a DNS query using a pooled QUIC connection.
 func (p *doqConnPool) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
 	// Retry logic for io.EOF errors (as per original implementation)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		answer, err := p.doResolve(ctx, msg)
 		if err == io.EOF {
 			continue
