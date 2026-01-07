@@ -82,6 +82,10 @@ const (
 	endpointPrefixQUIC  = "quic://"
 	endpointPrefixH3    = "h3://"
 	endpointPrefixSdns  = "sdns://"
+
+	rebootstrapNotStarted = 0
+	rebootstrapStarted    = 1
+	rebootstrapInProgress = 2
 )
 
 var (
@@ -270,7 +274,7 @@ type UpstreamConfig struct {
 	Discoverable *bool `mapstructure:"discoverable" toml:"discoverable"`
 
 	g                  singleflight.Group
-	rebootstrap        atomic.Bool
+	rebootstrap        atomic.Int64
 	bootstrapIPs       []string
 	bootstrapIPs4      []string
 	bootstrapIPs6      []string
@@ -511,7 +515,7 @@ func (uc *UpstreamConfig) ReBootstrap(ctx context.Context) {
 		return
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
-		if uc.rebootstrap.CompareAndSwap(false, true) {
+		if uc.rebootstrap.CompareAndSwap(rebootstrapNotStarted, rebootstrapStarted) {
 			logger := LoggerFromCtx(ctx)
 			Log(ctx, logger.Debug(), "Re-bootstrapping upstream: %s", uc.Name)
 		}
@@ -557,8 +561,10 @@ func (uc *UpstreamConfig) ensureSetupTransport(ctx context.Context) {
 	uc.transportOnce.Do(func() {
 		uc.SetupTransport(ctx)
 	})
-	if uc.rebootstrap.CompareAndSwap(true, false) {
+
+	if uc.rebootstrap.CompareAndSwap(rebootstrapStarted, rebootstrapInProgress) {
 		uc.SetupTransport(ctx)
+		uc.rebootstrap.Store(rebootstrapNotStarted)
 	}
 }
 

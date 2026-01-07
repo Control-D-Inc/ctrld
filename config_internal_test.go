@@ -3,6 +3,7 @@ package ctrld
 import (
 	"context"
 	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -504,6 +505,52 @@ func TestUpstreamConfig_IsDiscoverable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRebootstrapRace(t *testing.T) {
+	uc := &UpstreamConfig{
+		Name:         "test-doh",
+		Type:         ResolverTypeDOH,
+		Endpoint:     "https://example.com/dns-query",
+		Domain:       "example.com",
+		bootstrapIPs: []string{"1.1.1.1", "1.0.0.1"},
+	}
+
+	ctx := LoggerCtx(context.Background(), NopLogger)
+
+	uc.SetupTransport(ctx)
+
+	if uc.transport == nil {
+		t.Fatal("initial transport should be set")
+	}
+
+	const goroutines = 100
+
+	uc.ReBootstrap(ctx)
+
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		for {
+			switch uc.rebootstrap.Load() {
+			case rebootstrapStarted, rebootstrapInProgress:
+				uc.ReBootstrap(ctx)
+			default:
+				return
+			}
+		}
+	}()
+
+	<-started
+
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Go(func() {
+			uc.ensureSetupTransport(ctx)
+		})
+	}
+
+	wg.Wait()
 }
 
 func ptrBool(b bool) *bool {
