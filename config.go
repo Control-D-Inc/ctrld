@@ -82,6 +82,10 @@ const (
 	endpointPrefixQUIC  = "quic://"
 	endpointPrefixH3    = "h3://"
 	endpointPrefixSdns  = "sdns://"
+
+	rebootstrapNotStarted = 0
+	rebootstrapStarted    = 1
+	rebootstrapInProgress = 2
 )
 
 var (
@@ -264,7 +268,7 @@ type UpstreamConfig struct {
 	Discoverable *bool `mapstructure:"discoverable" toml:"discoverable"`
 
 	g                  singleflight.Group
-	rebootstrap        atomic.Bool
+	rebootstrap        atomic.Int64
 	bootstrapIPs       []string
 	bootstrapIPs4      []string
 	bootstrapIPs6      []string
@@ -497,7 +501,7 @@ func (uc *UpstreamConfig) ReBootstrap() {
 		return
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
-		if uc.rebootstrap.CompareAndSwap(false, true) {
+		if uc.rebootstrap.CompareAndSwap(rebootstrapNotStarted, rebootstrapStarted) {
 			ProxyLogger.Load().Debug().Msgf("re-bootstrapping upstream ip for %v", uc)
 		}
 		return true, nil
@@ -542,8 +546,9 @@ func (uc *UpstreamConfig) ensureSetupTransport() {
 	uc.transportOnce.Do(func() {
 		uc.SetupTransport()
 	})
-	if uc.rebootstrap.CompareAndSwap(true, false) {
+	if uc.rebootstrap.CompareAndSwap(rebootstrapStarted, rebootstrapInProgress) {
 		uc.SetupTransport()
+		uc.rebootstrap.Store(rebootstrapNotStarted)
 	}
 }
 
