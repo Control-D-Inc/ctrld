@@ -88,6 +88,9 @@ type dohResolver struct {
 
 // Resolve performs DNS query with given DNS message using DOH protocol.
 func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	if err := validateMsg(msg); err != nil {
+		return nil, err
+	}
 	logger := LoggerFromCtx(ctx)
 	Log(ctx, logger.Debug(), "DoH resolver query started")
 

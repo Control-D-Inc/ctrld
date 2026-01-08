@@ -21,6 +21,9 @@ type doqResolver struct {
 }
 
 func (r *doqResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	if err := validateMsg(msg); err != nil {
+		return nil, err
+	}
 	logger := LoggerFromCtx(ctx)
 	Log(ctx, logger.Debug(), "DoQ resolver query started")
 
