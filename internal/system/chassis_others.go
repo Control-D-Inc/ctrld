@@ -6,7 +6,9 @@ import "github.com/jaypipes/ghw"
 
 // GetChassisInfo retrieves hardware information including machine model type and vendor from the system profiler.
 func GetChassisInfo() (*ChassisInfo, error) {
-	chassis, err := ghw.Chassis()
+	// Disable warnings from ghw, since these are undesirable but recoverable errors.
+	// With warnings enabled, ghw will emit unnecessary log messages.
+	chassis, err := ghw.Chassis(ghw.WithDisableWarnings())
 	if err != nil {
 		return nil, err
 	}
