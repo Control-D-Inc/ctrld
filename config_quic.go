@@ -64,6 +64,11 @@ func (uc *UpstreamConfig) doqTransport(ctx context.Context, dnsType uint16) *doq
 	return transportByIpStack(uc.IPStack, dnsType, uc.doqConnPool, uc.doqConnPool4, uc.doqConnPool6)
 }
 
+func (uc *UpstreamConfig) dotTransport(ctx context.Context, dnsType uint16) *dotConnPool {
+	uc.ensureSetupTransport(ctx)
+	return transportByIpStack(uc.IPStack, dnsType, uc.dotClientPool, uc.dotClientPool4, uc.dotClientPool6)
+}
+
 // Putting the code for quic parallel dialer here:
 //
 //   - quic dialer is different with net.Dialer
@@ -137,4 +142,11 @@ func (uc *UpstreamConfig) newDOQConnPool(ctx context.Context, addrs []string) *d
 		return nil
 	}
 	return newDOQConnPool(ctx, uc, addrs)
+}
+
+func (uc *UpstreamConfig) newDOTClientPool(ctx context.Context, addrs []string) *dotConnPool {
+	if uc.Type != ResolverTypeDOT {
+		return nil
+	}
+	return newDOTClientPool(ctx, uc, addrs)
 }
