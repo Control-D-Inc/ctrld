@@ -13,25 +13,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
-func (uc *UpstreamConfig) setupDOH3Transport() {
-	switch uc.IPStack {
-	case IpStackBoth, "":
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
-	case IpStackV4:
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs4)
-	case IpStackV6:
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs6)
-	case IpStackSplit:
-		uc.http3RoundTripper4 = uc.newDOH3Transport(uc.bootstrapIPs4)
-		if HasIPv6() {
-			uc.http3RoundTripper6 = uc.newDOH3Transport(uc.bootstrapIPs6)
-		} else {
-			uc.http3RoundTripper6 = uc.http3RoundTripper4
-		}
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
-	}
-}
-
 func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 	if uc.Type != ResolverTypeDOH3 {
 		return nil
@@ -80,6 +61,11 @@ func (uc *UpstreamConfig) doh3Transport(dnsType uint16) http.RoundTripper {
 func (uc *UpstreamConfig) doqTransport(dnsType uint16) *doqConnPool {
 	uc.ensureSetupTransport()
 	return transportByIpStack(uc.IPStack, dnsType, uc.doqConnPool, uc.doqConnPool4, uc.doqConnPool6)
+}
+
+func (uc *UpstreamConfig) dotTransport(dnsType uint16) *dotConnPool {
+	uc.ensureSetupTransport()
+	return transportByIpStack(uc.IPStack, dnsType, uc.dotClientPool, uc.dotClientPool4, uc.dotClientPool6)
 }
 
 // Putting the code for quic parallel dialer here:
@@ -155,4 +141,11 @@ func (uc *UpstreamConfig) newDOQConnPool(addrs []string) *doqConnPool {
 		return nil
 	}
 	return newDOQConnPool(uc, addrs)
+}
+
+func (uc *UpstreamConfig) newDOTClientPool(addrs []string) *dotConnPool {
+	if uc.Type != ResolverTypeDOT {
+		return nil
+	}
+	return newDOTClientPool(uc, addrs)
 }

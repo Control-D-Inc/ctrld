@@ -291,6 +291,9 @@ const hotCacheTTL = time.Second
 // for a short period (currently 1 second), reducing unnecessary traffics
 // sent to upstreams.
 func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	if err := validateMsg(msg); err != nil {
+		return nil, err
+	}
 	if len(msg.Question) == 0 {
 		return nil, errors.New("no question found")
 	}
@@ -509,6 +512,10 @@ type legacyResolver struct {
 }
 
 func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	if err := validateMsg(msg); err != nil {
+		return nil, err
+	}
+
 	// See comment in (*dotResolver).resolve method.
 	dialer := newDialer(net.JoinHostPort(controldPublicDns, "53"))
 	dnsTyp := uint16(0)
@@ -534,6 +541,9 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 type dummyResolver struct{}
 
 func (d dummyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	if err := validateMsg(msg); err != nil {
+		return nil, err
+	}
 	ans := new(dns.Msg)
 	ans.SetReply(msg)
 	return ans, nil
@@ -768,4 +778,14 @@ func isLanAddr(addr netip.Addr) bool {
 		addr.IsLoopback() ||
 		addr.IsLinkLocalUnicast() ||
 		tsaddr.CGNATRange().Contains(addr)
+}
+
+func validateMsg(msg *dns.Msg) error {
+	if msg == nil {
+		return errors.New("nil DNS message")
+	}
+	if len(msg.Question) == 0 {
+		return errors.New("no question found")
+	}
+	return nil
 }

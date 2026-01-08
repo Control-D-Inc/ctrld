@@ -282,6 +282,9 @@ type UpstreamConfig struct {
 	doqConnPool        *doqConnPool
 	doqConnPool4       *doqConnPool
 	doqConnPool6       *doqConnPool
+	dotClientPool      *dotConnPool
+	dotClientPool4     *dotConnPool
+	dotClientPool6     *dotConnPool
 	certPool           *x509.CertPool
 	u                  *url.URL
 	fallbackOnce       sync.Once
@@ -496,7 +499,7 @@ func (uc *UpstreamConfig) SetupBootstrapIP() {
 // ReBootstrap re-setup the bootstrap IP and the transport.
 func (uc *UpstreamConfig) ReBootstrap() {
 	switch uc.Type {
-	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ:
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ, ResolverTypeDOT:
 	default:
 		return
 	}
@@ -508,11 +511,11 @@ func (uc *UpstreamConfig) ReBootstrap() {
 	})
 }
 
-// SetupTransport initializes the network transport used to connect to upstream server.
-// For now, only DoH upstream is supported.
+// SetupTransport initializes the network transport used to connect to upstream servers.
+// For now, DoH/DoH3/DoQ/DoT upstreams are supported.
 func (uc *UpstreamConfig) SetupTransport() {
 	switch uc.Type {
-	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ:
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ, ResolverTypeDOT:
 	default:
 		return
 	}
@@ -523,21 +526,26 @@ func (uc *UpstreamConfig) SetupTransport() {
 	case IpStackV6:
 		ips = uc.bootstrapIPs6
 	}
+
 	uc.transport = uc.newDOHTransport(ips)
 	uc.http3RoundTripper = uc.newDOH3Transport(ips)
 	uc.doqConnPool = uc.newDOQConnPool(ips)
+	uc.dotClientPool = uc.newDOTClientPool(ips)
 	if uc.IPStack == IpStackSplit {
 		uc.transport4 = uc.newDOHTransport(uc.bootstrapIPs4)
 		uc.http3RoundTripper4 = uc.newDOH3Transport(uc.bootstrapIPs4)
 		uc.doqConnPool4 = uc.newDOQConnPool(uc.bootstrapIPs4)
+		uc.dotClientPool4 = uc.newDOTClientPool(uc.bootstrapIPs4)
 		if HasIPv6() {
 			uc.transport6 = uc.newDOHTransport(uc.bootstrapIPs6)
 			uc.http3RoundTripper6 = uc.newDOH3Transport(uc.bootstrapIPs6)
 			uc.doqConnPool6 = uc.newDOQConnPool(uc.bootstrapIPs6)
+			uc.dotClientPool6 = uc.newDOTClientPool(uc.bootstrapIPs6)
 		} else {
 			uc.transport6 = uc.transport4
 			uc.http3RoundTripper6 = uc.http3RoundTripper4
 			uc.doqConnPool6 = uc.doqConnPool4
+			uc.dotClientPool6 = uc.dotClientPool4
 		}
 	}
 }
@@ -656,6 +664,10 @@ func (uc *UpstreamConfig) ping() error {
 			// For DoQ, we just ensure transport is set up by calling doqTransport
 			// DoQ doesn't use HTTP, so we can't ping it the same way
 			_ = uc.doqTransport(typ)
+		case ResolverTypeDOT:
+			// For DoT, we just ensure transport is set up by calling dotTransport
+			// DoT doesn't use HTTP, so we can't ping it the same way
+			_ = uc.dotTransport(typ)
 		}
 	}
 

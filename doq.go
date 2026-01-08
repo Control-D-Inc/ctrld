@@ -21,6 +21,10 @@ type doqResolver struct {
 }
 
 func (r *doqResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	if err := validateMsg(msg); err != nil {
+		return nil, err
+	}
+
 	// Get the appropriate connection pool based on DNS type and IP stack
 	dnsTyp := uint16(0)
 	if msg != nil && len(msg.Question) > 0 {
