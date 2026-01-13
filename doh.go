@@ -122,11 +122,6 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	}
 	if err != nil {
 		err = wrapUrlError(err)
-		if r.isDoH3 {
-			if closer, ok := c.Transport.(io.Closer); ok {
-				closer.Close()
-			}
-		}
 		return nil, fmt.Errorf("could not perform request: %w", err)
 	}
 	defer resp.Body.Close()

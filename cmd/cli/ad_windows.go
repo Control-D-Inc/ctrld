@@ -10,11 +10,12 @@ import (
 	hh "github.com/microsoft/wmi/pkg/hardware/host"
 
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/system"
 )
 
 // addExtraSplitDnsRule adds split DNS rule for domain if it's part of active directory.
 func addExtraSplitDnsRule(cfg *ctrld.Config) bool {
-	domain, err := getActiveDirectoryDomain()
+	domain, err := system.GetActiveDirectoryDomain()
 	if err != nil {
 		mainLog.Load().Debug().Msgf("unable to get active directory domain: %v", err)
 		return false

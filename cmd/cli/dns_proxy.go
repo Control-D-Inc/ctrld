@@ -954,7 +954,13 @@ func (p *prog) doSelfUninstall(answer *dns.Msg) {
 	logger := mainLog.Load().With().Str("mode", "self-uninstall").Logger()
 	if p.refusedQueryCount > selfUninstallMaxQueries {
 		p.checkingSelfUninstall = true
-		_, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+
+		req := &controld.ResolverConfigRequest{
+			RawUID:   cdUID,
+			Version:  rootCmd.Version,
+			Metadata: ctrld.SystemMetadata(context.Background()),
+		}
+		_, err := controld.FetchResolverConfig(req, cdDev)
 		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
 		selfUninstallCheck(err, p, logger)
 

@@ -642,13 +642,19 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
 	bo.LogLongerThan = 30 * time.Second
+
 	ctx := context.Background()
-	resolverConfig, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+	req := &controld.ResolverConfigRequest{
+		RawUID:   cdUID,
+		Version:  rootCmd.Version,
+		Metadata: ctrld.SystemMetadata(ctx),
+	}
+	resolverConfig, err := controld.FetchResolverConfig(req, cdDev)
 	for {
 		if errUrlNetworkError(err) {
 			bo.BackOff(ctx, err)
 			logger.Warn().Msg("could not fetch resolver using bootstrap DNS, retrying...")
-			resolverConfig, err = controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+			resolverConfig, err = controld.FetchResolverConfig(req, cdDev)
 			continue
 		}
 		break
@@ -1516,7 +1522,12 @@ func cdUIDFromProvToken() string {
 	if customHostname != "" && !validHostname(customHostname) {
 		mainLog.Load().Fatal().Msgf("invalid custom hostname: %q", customHostname)
 	}
-	req := &controld.UtilityOrgRequest{ProvToken: cdOrg, Hostname: customHostname}
+
+	req := &controld.UtilityOrgRequest{
+		ProvToken: cdOrg,
+		Hostname:  customHostname,
+		Metadata:  ctrld.SystemMetadata(context.Background()),
+	}
 	// Process provision token if provided.
 	resolverConfig, err := controld.FetchResolverUID(req, rootCmd.Version, cdDev)
 	if err != nil {
@@ -1857,7 +1868,12 @@ func runningIface(s service.Service) *ifaceResponse {
 
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
 func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
-	rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev)
+	req := &controld.ResolverConfigRequest{
+		RawUID:   cdUID,
+		Version:  rootCmd.Version,
+		Metadata: ctrld.SystemMetadata(context.Background()),
+	}
+	rc, err := controld.FetchResolverConfig(req, cdDev)
 	if err != nil {
 		logger := mainLog.Load().Fatal()
 		if !fatal {

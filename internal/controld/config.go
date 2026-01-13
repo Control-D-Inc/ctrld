@@ -71,14 +71,23 @@ func (u ErrorResponse) Error() string {
 }
 
 type utilityRequest struct {
-	UID      string `json:"uid"`
-	ClientID string `json:"client_id,omitempty"`
+	UID      string            `json:"uid"`
+	ClientID string            `json:"client_id,omitempty"`
+	Metadata map[string]string `json:"metadata"`
 }
 
 // UtilityOrgRequest contains request data for calling Org API.
 type UtilityOrgRequest struct {
-	ProvToken string `json:"prov_token"`
-	Hostname  string `json:"hostname"`
+	ProvToken string            `json:"prov_token"`
+	Hostname  string            `json:"hostname"`
+	Metadata  map[string]string `json:"metadata"`
+}
+
+// ResolverConfigRequest contains request data for fetching resolver config.
+type ResolverConfigRequest struct {
+	RawUID   string
+	Version  string
+	Metadata map[string]string
 }
 
 // LogsRequest contains request data for sending runtime logs to API.
@@ -88,26 +97,30 @@ type LogsRequest struct {
 }
 
 // FetchResolverConfig fetch Control D config for given uid.
-func FetchResolverConfig(rawUID, version string, cdDev bool) (*ResolverConfig, error) {
-	uid, clientID := ParseRawUID(rawUID)
-	req := utilityRequest{UID: uid}
-	if clientID != "" {
-		req.ClientID = clientID
+func FetchResolverConfig(req *ResolverConfigRequest, cdDev bool) (*ResolverConfig, error) {
+	uid, clientID := ParseRawUID(req.RawUID)
+	uReq := utilityRequest{
+		UID:      uid,
+		Metadata: req.Metadata,
 	}
-	body, _ := json.Marshal(req)
-	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
+	if clientID != "" {
+		uReq.ClientID = clientID
+	}
+	body, _ := json.Marshal(uReq)
+	return postUtilityAPI(req.Version, cdDev, false, bytes.NewReader(body))
 }
 
-// FetchResolverUID fetch resolver uid from provision token.
+// FetchResolverUID fetch resolver uid from a given request.
 func FetchResolverUID(req *UtilityOrgRequest, version string, cdDev bool) (*ResolverConfig, error) {
 	if req == nil {
 		return nil, errors.New("invalid request")
 	}
-	hostname := req.Hostname
-	if hostname == "" {
-		hostname, _ = os.Hostname()
+	if req.Hostname == "" {
+		hostname, _ := os.Hostname()
+		req.Hostname = hostname
 	}
-	body, _ := json.Marshal(UtilityOrgRequest{ProvToken: req.ProvToken, Hostname: hostname})
+
+	body, _ := json.Marshal(req)
 	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
 }
 
