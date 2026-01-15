@@ -17,6 +17,7 @@ import (
 	"github.com/microsoft/wmi/pkg/base/query"
 	"github.com/microsoft/wmi/pkg/constant"
 	"github.com/microsoft/wmi/pkg/hardware/network/netadapter"
+	"github.com/miekg/dns"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 	"tailscale.com/net/netmon"
@@ -121,12 +122,14 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 
 	// Try to get domain controller info if domain-joined
 	var dcServers []string
+	var adDomain string
 	isDomain := checkDomainJoined(ctx)
 	if isDomain {
 		domainName, err := system.GetActiveDirectoryDomain()
 		if err != nil {
 			logger.Debug().Msgf("Failed to get local AD domain: %v", err)
 		} else {
+			adDomain = domainName
 			// Load netapi32.dll
 			netapi32 := windows.NewLazySystemDLL("netapi32.dll")
 			dsDcName := netapi32.NewProc("DsGetDcNameW")
@@ -214,6 +217,10 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 
 	validInterfacesMap := ValidInterfaces(ctx)
 
+	if isDomain && adDomain == "" {
+		logger.Warn().Msg("The machine is joined domain, but domain name is empty")
+	}
+	checkDnsSuffix := isDomain && adDomain != ""
 	// Collect DNS servers
 	for _, aa := range aas {
 		if aa.OperStatus != winipcfg.IfOperStatusUp {
@@ -227,8 +234,21 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 			continue
 		}
 
-		// if not in the validInterfacesMap, skip
-		if _, ok := validInterfacesMap[aa.FriendlyName()]; !ok {
+		_, valid := validInterfacesMap[aa.FriendlyName()]
+		if !valid && checkDnsSuffix {
+			for suffix := aa.FirstDNSSuffix; suffix != nil; suffix = suffix.Next {
+				// For non-physical adapters, if the DNS suffix matches the domain name,
+				// (or vice versa) consider it valid. This can happen on remote VPN machines.
+				ds := strings.TrimSpace(suffix.String())
+				if dns.IsSubDomain(adDomain, ds) || dns.IsSubDomain(ds, adDomain) {
+					logger.Debug().Msgf("Found valid interface %s with DNS suffix %s", aa.FriendlyName(), suffix.String())
+					valid = true
+					break
+				}
+			}
+		}
+		// if not a valid interface, skip it
+		if !valid {
 			logger.Debug().Msgf("Skipping %s (not in validInterfacesMap)", aa.FriendlyName())
 			continue
 		}
