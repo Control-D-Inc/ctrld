@@ -1280,6 +1280,11 @@ func (p *prog) monitorNetworkChanges() error {
 			return
 		}
 
+		mainLog.Load().Debug().Msg("Link state changed, re-bootstrapping")
+		for _, uc := range p.cfg.Upstream {
+			uc.ReBootstrap()
+		}
+
 		// Get IPs from default route interface in new state
 		selfIP := defaultRouteIP()
 
