@@ -1530,6 +1530,11 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			return
 		}
 
+		p.Debug().Msg("Link state changed, re-bootstrapping")
+		for _, uc := range p.cfg.Upstream {
+			uc.ReBootstrap(ctrld.LoggerCtx(ctx, p.logger.Load()))
+		}
+
 		// Get IPs from default route interface in new state
 		selfIP := p.defaultRouteIP()
 
