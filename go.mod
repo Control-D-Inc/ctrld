@@ -33,7 +33,7 @@ require (
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.16.0
 	github.com/stretchr/testify v1.11.1
-	github.com/vishvananda/netlink v1.2.1-beta.2
+	github.com/vishvananda/netlink v1.3.1
 	go.uber.org/zap v1.27.0
 	golang.org/x/net v0.43.0
 	golang.org/x/sync v0.16.0
@@ -86,7 +86,7 @@ require (
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/u-root/uio v0.0.0-20240118234441-a3c409a6018e // indirect
-	github.com/vishvananda/netns v0.0.4 // indirect
+	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13 // indirect

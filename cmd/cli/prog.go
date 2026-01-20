@@ -515,7 +515,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			defer wg.Done()
 			p.runClientInfoDiscover(ctx)
 		}()
-		go p.watchLinkState(ctx)
 	}
 
 	if !reload {
