@@ -100,7 +100,7 @@ docker build -t controldns/ctrld . -f docker/Dockerfile
 
 
 # Usage
-The cli is self documenting, so free free to run `--help` on any sub-command to get specific usages. 
+The cli is self documenting, so feel free to run `--help` on any sub-command to get specific usages. 
 
 ## Arguments
 ```
