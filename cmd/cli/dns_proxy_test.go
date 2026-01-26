@@ -464,3 +464,13 @@ func Test_isWanClient(t *testing.T) {
 		})
 	}
 }
+
+func Test_prog_queryFromSelf(t *testing.T) {
+	p := &prog{}
+	require.NotPanics(t, func() {
+		p.queryFromSelf("")
+	})
+	require.NotPanics(t, func() {
+		p.queryFromSelf("foo")
+	})
+}
