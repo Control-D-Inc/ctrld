@@ -1158,7 +1158,12 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	} else {
 		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	}
-	ci.Self = p.queryFromSelf(ci.IP)
+
+	if ci.IP == "" {
+		p.Debug().Msgf("client info entry with empty IP address: %v", ci)
+	} else {
+		ci.Self = p.queryFromSelf(ci.IP)
+	}
 	// If this is a query from self, but ci.IP is not loopback IP,
 	// try using hostname mapping for lookback IP if presents.
 	if ci.Self {
@@ -1275,7 +1280,12 @@ func (p *prog) queryFromSelf(ip string) bool {
 	if val, ok := p.queryFromSelfMap.Load(ip); ok {
 		return val.(bool)
 	}
-	netIP := netip.MustParseAddr(ip)
+	netIP, err := netip.ParseAddr(ip)
+	if err != nil {
+		p.Debug().Err(err).Msgf("could not parse IP: %q", ip)
+		return false
+	}
+
 	regularIPs, loopbackIPs, err := netmon.LocalAddresses()
 	if err != nil {
 		p.Warn().Err(err).Msg("Could not get local addresses")

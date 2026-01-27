@@ -794,6 +794,16 @@ func Test_handleRecovery_Integration(t *testing.T) {
 	}
 }
 
+func Test_prog_queryFromSelf(t *testing.T) {
+	p := newTestProg(t)
+	require.NotPanics(t, func() {
+		p.queryFromSelf("")
+	})
+	require.NotPanics(t, func() {
+		p.queryFromSelf("foo")
+	})
+}
+
 // newTestProg creates a properly initialized *prog for testing.
 func newTestProg(t *testing.T) *prog {
 	p := &prog{cfg: testhelper.SampleConfig(t)}
