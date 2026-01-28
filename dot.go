@@ -48,7 +48,7 @@ type dotConnPool struct {
 }
 
 type dotConn struct {
-	conn     net.Conn
+	conn     *tls.Conn
 	lastUsed time.Time
 	refCount int
 	mu       sync.Mutex
@@ -105,13 +105,6 @@ func (p *dotConnPool) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 		return nil, wrapCertificateVerificationError(err)
 	}
 
-	// Set deadline
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(5 * time.Second)
-	}
-	_ = conn.SetDeadline(deadline)
-
 	client := dns.Client{Net: "tcp-tls"}
 	answer, _, err := client.ExchangeWithConnContext(ctx, msg, &dns.Conn{Conn: conn})
 	isGood := err == nil
@@ -136,7 +129,7 @@ func (p *dotConnPool) getConn(ctx context.Context) (net.Conn, string, error) {
 	// Try to reuse an existing connection
 	for addr, dotConn := range p.conns {
 		dotConn.mu.Lock()
-		if dotConn.refCount == 0 && dotConn.conn != nil {
+		if dotConn.refCount == 0 && dotConn.conn != nil && isAlive(dotConn.conn) {
 			dotConn.refCount++
 			dotConn.lastUsed = time.Now()
 			conn := dotConn.conn
@@ -193,7 +186,7 @@ func (p *dotConnPool) putConn(addr string, conn net.Conn, isGood bool) {
 }
 
 // dialConn creates a new TCP/TLS connection.
-func (p *dotConnPool) dialConn(ctx context.Context) (string, net.Conn, error) {
+func (p *dotConnPool) dialConn(ctx context.Context) (string, *tls.Conn, error) {
 	logger := ProxyLogger.Load()
 	var endpoint string
 
@@ -215,7 +208,7 @@ func (p *dotConnPool) dialConn(ctx context.Context) (string, net.Conn, error) {
 	// Try bootstrap IPs in parallel
 	if len(p.addrs) > 0 {
 		type result struct {
-			conn net.Conn
+			conn *tls.Conn
 			addr string
 			err  error
 		}
@@ -306,4 +299,29 @@ func (p *dotConnPool) CloseIdleConnections() {
 		dotConn.mu.Unlock()
 		delete(p.conns, addr)
 	}
+}
+
+func isAlive(c *tls.Conn) bool {
+	// Set a very short deadline for the read
+	c.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+
+	// Try to read 1 byte without consuming it (using a small buffer)
+	one := make([]byte, 1)
+	_, err := c.Read(one)
+
+	// Reset the deadline for future operations
+	c.SetReadDeadline(time.Time{})
+
+	if err == io.EOF {
+		return false // Connection is definitely closed
+	}
+
+	// If we get a timeout, it means no data is waiting,
+	// but the connection is likely still "up."
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	return err == nil
 }
