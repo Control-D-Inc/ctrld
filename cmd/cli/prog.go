@@ -1209,6 +1209,16 @@ func errConnectionRefused(err error) bool {
 	return errors.Is(opErr.Err, syscall.ECONNREFUSED) || errors.Is(opErr.Err, windowsECONNREFUSED)
 }
 
+// errLogServerUnavailable reports whether err indicates the log server is not up yet
+// (e.g. socket missing or connection refused). Callers should not log these as errors.
+func errLogServerUnavailable(err error) bool {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		return false
+	}
+	return errors.Is(opErr.Err, syscall.ECONNREFUSED) || errors.Is(opErr.Err, syscall.ENOENT) || errors.Is(opErr.Err, windowsECONNREFUSED)
+}
+
 func ifaceFirstPrivateIP(iface *net.Interface) string {
 	if iface == nil {
 		return ""
