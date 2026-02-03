@@ -238,7 +238,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	// Test if HTTP log server is available
 	if err := hlc.Ping(); err != nil {
-		if !errConnectionRefused(err) {
+		if !errLogServerUnavailable(err) {
 			p.Warn().Err(err).Msg("Unable to ping log server")
 		}
 	} else {
