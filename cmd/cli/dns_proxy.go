@@ -101,6 +101,15 @@ func (p *prog) serveDNS(listenerNum string) error {
 			_ = w.WriteMsg(answer)
 			return
 		}
+		// When mDNSResponder hack has been done, ctrld was listening on 0.0.0.0:53, but only requests
+		// to 127.0.0.1:53 are accepted. Since binding to 0.0.0.0 will make the IP info of the local address
+		// hidden (appeared as [::]), we checked for requests originated from 127.0.0.1 instead.
+		if needMdnsResponderHack && !strings.HasPrefix(w.RemoteAddr().String(), "127.0.0.1:") {
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeRefused)
+			_ = w.WriteMsg(answer)
+			return
+		}
 		listenerConfig := p.cfg.Listener[listenerNum]
 		reqId := requestID()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
@@ -854,6 +863,9 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 	errCh := make(chan error)
 	go func() {
 		defer close(errCh)
+		if needMdnsResponderHack {
+			killMdnsResponder()
+		}
 		if err := s.ListenAndServe(); err != nil {
 			s.NotifyStartedFunc()
 			mainLog.Load().Error().Err(err).Msgf("could not listen and serve on: %s", s.Addr)

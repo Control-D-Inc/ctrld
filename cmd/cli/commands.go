@@ -360,6 +360,10 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				initInteractiveLogging()
 				tasks := []task{
 					{func() error {
+						doMdnsResponderCleanup()
+						return nil
+					}, false, "Cleanup service before installation"},
+					{func() error {
 						// Save current DNS so we can restore later.
 						withEachPhysicalInterfaces("", "saveCurrentStaticDNS", func(i *net.Interface) error {
 							if err := saveCurrentStaticDNS(i); !errors.Is(err, errSaveCurrentStaticDNSNotSupported) && err != nil {
@@ -374,6 +378,10 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					}, false, "Configure service failure actions"},
 					{s.Start, true, "Start"},
 					{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
+					{func() error {
+						doMdnsResponderHackPostInstall()
+						return nil
+					}, false, "Configure service post installation"},
 				}
 				mainLog.Load().Notice().Msg("Starting existing ctrld service")
 				if doTasks(tasks) {
@@ -437,6 +445,10 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			}
 
 			tasks := []task{
+				{func() error {
+					doMdnsResponderCleanup()
+					return nil
+				}, false, "Cleanup service before installation"},
 				{s.Stop, false, "Stop"},
 				{func() error { return doGenerateNextDNSConfig(nextdns) }, true, "Checking config"},
 				{func() error { return ensureUninstall(s) }, false, "Ensure uninstall"},
@@ -459,6 +471,10 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				// Note that startCmd do not actually write ControlD config, but the config file was
 				// generated after s.Start, so we notice users here for consistent with nextdns mode.
 				{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
+				{func() error {
+					doMdnsResponderHackPostInstall()
+					return nil
+				}, false, "Configure service post installation"},
 			}
 			mainLog.Load().Notice().Msg("Starting service")
 			if doTasks(tasks) {

@@ -901,6 +901,9 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 
 	lc := cfg.FirstListener()
 	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
+	if needMdnsResponderHack {
+		addr = "127.0.0.1:53"
+	}
 
 	mainLog.Load().Debug().Msgf("performing listener test, sending queries to %s", addr)
 
@@ -1113,6 +1116,10 @@ func uninstall(p *prog, s service.Service) {
 		// Stop already did router.Cleanup and report any error if happens,
 		// ignoring error here to prevent false positive.
 		_ = p.router.Cleanup()
+
+		// Run mDNS responder cleanup if necessary
+		doMdnsResponderCleanup()
+
 		mainLog.Load().Notice().Msg("Service uninstalled")
 		return
 	}
@@ -1230,6 +1237,8 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 	nextdnsMode := nextdns != ""
 	// For Windows server with local Dns server running, we can only try on random local IP.
 	hasLocalDnsServer := hasLocalDnsServerRunning()
+	// For Macos with mDNSResponder running on port 53, we must use 0.0.0.0 to prevent conflicting.
+	needMdnsResponderHack := needMdnsResponderHack
 	notRouter := router.Name() == ""
 	isDesktop := ctrld.IsDesktopPlatform()
 	for n, listener := range cfg.Listener {
@@ -1263,6 +1272,12 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 				lcc[n].Port = false
 			}
 		}
+		if needMdnsResponderHack {
+			listener.IP = "0.0.0.0"
+			listener.Port = 53
+			lcc[n].IP = false
+			lcc[n].Port = false
+		}
 		updated = updated || lcc[n].IP || lcc[n].Port
 	}
 
@@ -1295,6 +1310,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 	// Created listeners will be kept in listeners slice above, and close
 	// before function finished.
 	tryListen := func(addr string) error {
+		if needMdnsResponderHack {
+			killMdnsResponder()
+		}
 		udpLn, udpErr := net.ListenPacket("udp", addr)
 		if udpLn != nil {
 			closers = append(closers, udpLn)
@@ -1358,6 +1376,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 		}
 		attempts := 0
 		maxAttempts := 10
+		if needMdnsResponderHack {
+			maxAttempts = 1
+		}
 		for {
 			if attempts == maxAttempts {
 				notifyFunc()
