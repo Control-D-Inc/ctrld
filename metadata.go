@@ -3,7 +3,10 @@ package ctrld
 import (
 	"context"
 	"os"
+	"os/exec"
 	"os/user"
+	"runtime"
+	"strings"
 
 	"github.com/cuonglm/osinfo"
 
@@ -49,30 +52,42 @@ func SystemMetadata(ctx context.Context) map[string]string {
 
 // currentLoginUser attempts to find the actual login user, even if the process is running as root.
 func currentLoginUser(ctx context.Context) string {
-	// 1. Check SUDO_USER: This is the most reliable way to find the original user
-	// when a script is run via 'sudo'.
-	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
-		return sudoUser
+	// On Darwin 26.2+, sudo no longer preserves SUDO_USER, LOGNAME, USER etc., so we cannot
+	// rely on environment variables when running under sudo. See CVE-2025-43416.
+	// We use the logname(1) command on Unix, which reports the login name from the session
+	// (e.g. utmp); there is no portable syscall equivalent in Go, so we exec logname.
+	if runtime.GOOS != "windows" {
+		if name := runLogname(ctx); name != "" {
+			return name
+		}
 	}
 
-	// 2. Check general user login variables. LOGNAME is often preferred over USER.
-	if logName := os.Getenv("LOGNAME"); logName != "" {
-		return logName
+	// Fallback: env vars (still set on older systems or when not using sudo)
+	if u := os.Getenv("SUDO_USER"); u != "" {
+		return u
+	}
+	if u := os.Getenv("LOGNAME"); u != "" {
+		return u
+	}
+	if u := os.Getenv("USER"); u != "" {
+		return u
 	}
 
-	// 3. Fallback to USER variable.
-	if userEnv := os.Getenv("USER"); userEnv != "" {
-		return userEnv
-	}
-
-	// 4. Final fallback: Use the standard library function to get the *effective* user.
-	// This will return "root" if the process is running as root.
 	currentUser, err := user.Current()
 	if err != nil {
-		// Handle error gracefully, returning a placeholder
 		ProxyLogger.Load().Debug().Err(err).Msg("Failed to get current user")
 		return "unknown"
 	}
-
 	return currentUser.Username
+}
+
+// runLogname runs the logname(1) command and returns the trimmed output, or "" on failure.
+func runLogname(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "logname")
+	out, err := cmd.Output()
+	if err != nil {
+		ProxyLogger.Load().Debug().Err(err).Msg("Failed to run logname")
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
