@@ -120,6 +120,16 @@ func FetchResolverUID(req *UtilityOrgRequest, version string, cdDev bool) (*Reso
 		req.Hostname = hostname
 	}
 
+	// Include all hostname sources in metadata so the API can pick the
+	// best one if the primary looks generic (e.g., "Mac", "Mac.lan").
+	if req.Metadata == nil {
+		req.Metadata = make(map[string]string)
+	}
+	for k, v := range hostnameHints() {
+		req.Metadata["hostname_"+k] = v
+	}
+	ctrld.ProxyLogger.Load().Debug().Msgf("Sending UID request to ControlD API")
+
 	body, _ := json.Marshal(req)
 	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
 }
