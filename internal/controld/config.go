@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -116,7 +115,8 @@ func FetchResolverUID(req *UtilityOrgRequest, version string, cdDev bool) (*Reso
 		return nil, errors.New("invalid request")
 	}
 	if req.Hostname == "" {
-		hostname, _ := os.Hostname()
+		hostname, _ := preferredHostname()
+		ctrld.ProxyLogger.Load().Debug().Msgf("Using system hostname: %s", hostname)
 		req.Hostname = hostname
 	}
 
