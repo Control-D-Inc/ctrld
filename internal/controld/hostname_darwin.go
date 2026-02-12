@@ -24,3 +24,21 @@ func preferredHostname() (string, error) {
 	}
 	return os.Hostname()
 }
+
+// hostnameHints returns all available hostname sources on macOS for
+// diagnostic/fallback purposes. The API can use these to pick the
+// best hostname if the primary one looks generic (e.g., "Mac").
+func hostnameHints() map[string]string {
+	hints := make(map[string]string)
+	for _, key := range []string{"ComputerName", "LocalHostName", "HostName"} {
+		if out, err := exec.Command("scutil", "--get", key).Output(); err == nil {
+			if name := strings.TrimSpace(string(out)); name != "" {
+				hints[key] = name
+			}
+		}
+	}
+	if h, err := os.Hostname(); err == nil {
+		hints["os.Hostname"] = h
+	}
+	return hints
+}
