@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -127,7 +126,7 @@ func FetchResolverUID(ctx context.Context, req *UtilityOrgRequest, version strin
 
 	hostname := req.Hostname
 	if req.Hostname == "" {
-		hostname, _ = os.Hostname()
+		hostname, _ = preferredHostname()
 		ctrld.Log(ctx, logger.Debug(), "Using system hostname: %s", hostname)
 		req.Hostname = hostname
 	} else {
