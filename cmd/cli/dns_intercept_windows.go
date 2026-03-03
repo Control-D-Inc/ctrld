@@ -1062,36 +1062,6 @@ func (p *prog) stopDNSIntercept() error {
 	return nil
 }
 
-// dnsInterceptSupported reports whether DNS intercept mode is supported on this platform.
-func dnsInterceptSupported() bool {
-	if err := fwpuclntDLL.Load(); err != nil {
-		return false
-	}
-	return true
-}
-
-// validateDNSIntercept checks that the system meets requirements for DNS intercept mode.
-func (p *prog) validateDNSIntercept() error {
-	// Hard mode requires WFP and elevation for filter management.
-	if hardIntercept {
-		if !dnsInterceptSupported() {
-			return fmt.Errorf("dns intercept: fwpuclnt.dll not available — WFP requires Windows Vista or later")
-		}
-		if !isElevated() {
-			return fmt.Errorf("dns intercept: administrator privileges required for WFP filter management in hard mode")
-		}
-	}
-	// dns mode only needs NRPT (HKLM registry writes), which services can do
-	// without explicit elevation checks.
-	return nil
-}
-
-// isElevated checks if the current process has administrator privileges.
-func isElevated() bool {
-	token := windows.GetCurrentProcessToken()
-	return token.IsElevated()
-}
-
 // exemptVPNDNSServers updates the WFP filters to permit outbound DNS to the given
 // VPN DNS server IPs. This prevents the block filters from intercepting ctrld's own
 // forwarded queries to VPN DNS servers (split DNS routing).
@@ -1316,11 +1286,6 @@ func parseIPv4AsUint32(ipStr string) uint32 {
 
 // ensurePFAnchorActive is a no-op on Windows (WFP handles intercept differently).
 func (p *prog) ensurePFAnchorActive() bool {
-	return false
-}
-
-// pfAnchorIsWiped is a no-op on Windows (WFP handles intercept differently).
-func (p *prog) pfAnchorIsWiped() bool {
 	return false
 }
 

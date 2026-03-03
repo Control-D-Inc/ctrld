@@ -14,9 +14,7 @@ import (
 )
 
 var (
-	kernel32                         = windows.NewLazySystemDLL("kernel32.dll")
 	wtsapi32                         = windows.NewLazySystemDLL("wtsapi32.dll")
-	procGetConsoleWindow             = kernel32.NewProc("GetConsoleWindow")
 	procWTSGetActiveConsoleSessionId = wtsapi32.NewProc("WTSGetActiveConsoleSessionId")
 	procWTSQuerySessionInformation   = wtsapi32.NewProc("WTSQuerySessionInformationW")
 	procWTSFreeMemory                = wtsapi32.NewProc("WTSFreeMemory")
