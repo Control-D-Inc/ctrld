@@ -345,6 +345,16 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		processLogAndCacheFlags(v, &cfg)
 	}
 
+	// Persist intercept_mode to config when provided via CLI flag on full install.
+	// This ensures the config file reflects the actual running mode for RMM/MDM visibility.
+	if interceptMode == "dns" || interceptMode == "hard" {
+		if cfg.Service.InterceptMode != interceptMode {
+			cfg.Service.InterceptMode = interceptMode
+			updated = true
+			mainLog.Load().Info().Msgf("writing intercept_mode = %q to config", interceptMode)
+		}
+	}
+
 	if updated {
 		if err := writeConfigFile(&cfg); err != nil {
 			notifyExitToLogServer()
@@ -647,7 +657,7 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	req := &controld.ResolverConfigRequest{
 		RawUID:   cdUID,
 		Version:  rootCmd.Version,
-		Metadata: ctrld.SystemMetadata(ctx),
+		Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 	}
 	resolverConfig, err := controld.FetchResolverConfig(req, cdDev)
 	for {
@@ -901,9 +911,6 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 
 	lc := cfg.FirstListener()
 	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
-	if needMdnsResponderHack {
-		addr = "127.0.0.1:53"
-	}
 
 	mainLog.Load().Debug().Msgf("performing listener test, sending queries to %s", addr)
 
@@ -1116,10 +1123,6 @@ func uninstall(p *prog, s service.Service) {
 		// Stop already did router.Cleanup and report any error if happens,
 		// ignoring error here to prevent false positive.
 		_ = p.router.Cleanup()
-
-		// Run mDNS responder cleanup if necessary
-		doMdnsResponderCleanup()
-
 		mainLog.Load().Notice().Msg("Service uninstalled")
 		return
 	}
@@ -1227,18 +1230,105 @@ func updateListenerConfig(cfg *ctrld.Config, notifyToLogServerFunc func()) bool 
 	return updated
 }
 
+// tryUpdateListenerConfigIntercept handles listener binding for dns-intercept mode on macOS.
+// In intercept mode, pf redirects all outbound port-53 traffic to ctrld's listener,
+// so ctrld can safely listen on a non-standard port if port 53 is unavailable
+// (e.g., mDNSResponder holds *:53).
+//
+// Flow:
+//  1. If config has explicit (non-default) IP:port → use exactly that, no fallback
+//  2. Otherwise → try 127.0.0.1:53, then 127.0.0.1:5354, then fatal
+func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fatal bool) (updated, ok bool) {
+	ok = true
+	lc := cfg.FirstListener()
+	if lc == nil {
+		return false, true
+	}
+
+	hasExplicitConfig := lc.IP != "" && lc.IP != "0.0.0.0" && lc.Port != 0
+	if !hasExplicitConfig {
+		// Set defaults for intercept mode
+		if lc.IP == "" || lc.IP == "0.0.0.0" {
+			lc.IP = "127.0.0.1"
+			updated = true
+		}
+		if lc.Port == 0 {
+			lc.Port = 53
+			updated = true
+		}
+	}
+
+	tryListen := func(ip string, port int) bool {
+		addr := net.JoinHostPort(ip, strconv.Itoa(port))
+		udpLn, udpErr := net.ListenPacket("udp", addr)
+		if udpLn != nil {
+			udpLn.Close()
+		}
+		tcpLn, tcpErr := net.Listen("tcp", addr)
+		if tcpLn != nil {
+			tcpLn.Close()
+		}
+		return udpErr == nil && tcpErr == nil
+	}
+
+	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
+	if tryListen(lc.IP, lc.Port) {
+		mainLog.Load().Debug().Msgf("DNS intercept: listener available at %s", addr)
+		return updated, true
+	}
+
+	mainLog.Load().Info().Msgf("DNS intercept: cannot bind %s", addr)
+
+	if hasExplicitConfig {
+		// User specified explicit address — don't guess, just fail
+		if fatal {
+			notifyFunc()
+			mainLog.Load().Fatal().Msgf("DNS intercept: cannot listen on configured address %s", addr)
+		}
+		return updated, false
+	}
+
+	// Fallback: try port 5354 (mDNSResponder likely holds *:53)
+	if tryListen("127.0.0.1", 5354) {
+		mainLog.Load().Info().Msg("DNS intercept: port 53 unavailable (likely mDNSResponder), using 127.0.0.1:5354")
+		lc.IP = "127.0.0.1"
+		lc.Port = 5354
+		return true, true
+	}
+
+	if fatal {
+		notifyFunc()
+		mainLog.Load().Fatal().Msg("DNS intercept: cannot bind 127.0.0.1:53 or 127.0.0.1:5354")
+	}
+	return updated, false
+}
+
 // tryUpdateListenerConfig tries updating listener config with a working one.
 // If fatal is true, and there's listen address conflicted, the function do
 // fatal error.
 func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, notifyFunc func(), fatal bool) (updated, ok bool) {
+	// In intercept mode (macOS), pf redirects all port-53 traffic to ctrld's listener,
+	// so ctrld can safely listen on a non-standard port. Use a simple two-attempt flow:
+	// 1. If config has explicit non-default IP:port, use exactly that
+	// 2. Otherwise: try 127.0.0.1:53, then 127.0.0.1:5354, then fatal
+	// This bypasses the full cd-mode listener probing loop entirely.
+	// Check interceptMode (CLI flag) first, then fall back to config value.
+	// dnsIntercept bool is derived later in prog.run(), but we need to know
+	// the intercept mode here to select the right listener probing strategy.
+	im := interceptMode
+	if im == "" || im == "off" {
+		im = cfg.Service.InterceptMode
+	}
+	if (im == "dns" || im == "hard") && runtime.GOOS == "darwin" {
+		return tryUpdateListenerConfigIntercept(cfg, notifyFunc, fatal)
+	}
+
 	ok = true
 	lcc := make(map[string]*listenerConfigCheck)
 	cdMode := cdUID != ""
 	nextdnsMode := nextdns != ""
 	// For Windows server with local Dns server running, we can only try on random local IP.
 	hasLocalDnsServer := hasLocalDnsServerRunning()
-	// For Macos with mDNSResponder running on port 53, we must use 0.0.0.0 to prevent conflicting.
-	needMdnsResponderHack := needMdnsResponderHack
 	notRouter := router.Name() == ""
 	isDesktop := ctrld.IsDesktopPlatform()
 	for n, listener := range cfg.Listener {
@@ -1272,12 +1362,6 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 				lcc[n].Port = false
 			}
 		}
-		if needMdnsResponderHack {
-			listener.IP = "0.0.0.0"
-			listener.Port = 53
-			lcc[n].IP = false
-			lcc[n].Port = false
-		}
 		updated = updated || lcc[n].IP || lcc[n].Port
 	}
 
@@ -1310,9 +1394,6 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 	// Created listeners will be kept in listeners slice above, and close
 	// before function finished.
 	tryListen := func(addr string) error {
-		if needMdnsResponderHack {
-			killMdnsResponder()
-		}
 		udpLn, udpErr := net.ListenPacket("udp", addr)
 		if udpLn != nil {
 			closers = append(closers, udpLn)
@@ -1376,9 +1457,6 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 		}
 		attempts := 0
 		maxAttempts := 10
-		if needMdnsResponderHack {
-			maxAttempts = 1
-		}
 		for {
 			if attempts == maxAttempts {
 				notifyFunc()
@@ -1889,10 +1967,12 @@ func runningIface(s service.Service) *ifaceResponse {
 
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
 func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
+	// Username is only sent during initial provisioning (cdUIDFromProvToken).
+	// All subsequent calls use lightweight metadata to avoid EDR triggers.
 	req := &controld.ResolverConfigRequest{
 		RawUID:   cdUID,
 		Version:  rootCmd.Version,
-		Metadata: ctrld.SystemMetadata(context.Background()),
+		Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 	}
 	rc, err := controld.FetchResolverConfig(req, cdDev)
 	if err != nil {

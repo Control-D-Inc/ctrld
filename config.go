@@ -240,6 +240,7 @@ type ServiceConfig struct {
 	RefetchTime             *int           `mapstructure:"refetch_time" toml:"refetch_time,omitempty"`
 	ForceRefetchWaitTime    *int           `mapstructure:"force_refetch_wait_time" toml:"force_refetch_wait_time,omitempty"`
 	LeakOnUpstreamFailure   *bool          `mapstructure:"leak_on_upstream_failure" toml:"leak_on_upstream_failure,omitempty"`
+	InterceptMode           string         `mapstructure:"intercept_mode" toml:"intercept_mode,omitempty" validate:"omitempty,oneof=off dns hard"`
 	Daemon                  bool           `mapstructure:"-" toml:"-"`
 	AllocateIP              bool           `mapstructure:"-" toml:"-"`
 }
@@ -511,6 +512,69 @@ func (uc *UpstreamConfig) ReBootstrap() {
 	})
 }
 
+// ForceReBootstrap immediately replaces the upstream transport, closing old
+// connections and creating new ones synchronously. Unlike ReBootstrap() which
+// sets a lazy flag (new transport created on next query), this ensures the
+// transport is ready before any queries arrive. Use when external events
+// (e.g. firewall state flush) are known to have killed existing connections.
+func (uc *UpstreamConfig) ForceReBootstrap() {
+	switch uc.Type {
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ, ResolverTypeDOT:
+	default:
+		return
+	}
+	ProxyLogger.Load().Debug().Msgf("force re-bootstrapping upstream transport for %v", uc)
+	uc.SetupTransport()
+	// Clear any pending lazy re-bootstrap flag so ensureSetupTransport()
+	// doesn't redundantly recreate the transport we just built.
+	uc.rebootstrap.Store(rebootstrapNotStarted)
+}
+
+// closeTransports closes idle connections on all existing transports.
+// This is called before creating new transports during re-bootstrap to
+// force in-flight requests on stale connections to fail quickly, rather
+// than waiting for the full context deadline (e.g. 5s) after a firewall
+// state table flush kills the underlying TCP/QUIC connections.
+func (uc *UpstreamConfig) closeTransports() {
+	if t := uc.transport; t != nil {
+		t.CloseIdleConnections()
+	}
+	if t := uc.transport4; t != nil {
+		t.CloseIdleConnections()
+	}
+	if t := uc.transport6; t != nil {
+		t.CloseIdleConnections()
+	}
+	if p := uc.doqConnPool; p != nil {
+		p.CloseIdleConnections()
+	}
+	if p := uc.doqConnPool4; p != nil {
+		p.CloseIdleConnections()
+	}
+	if p := uc.doqConnPool6; p != nil {
+		p.CloseIdleConnections()
+	}
+	if p := uc.dotClientPool; p != nil {
+		p.CloseIdleConnections()
+	}
+	if p := uc.dotClientPool4; p != nil {
+		p.CloseIdleConnections()
+	}
+	if p := uc.dotClientPool6; p != nil {
+		p.CloseIdleConnections()
+	}
+	// http3RoundTripper is stored as http.RoundTripper but the concrete type
+	// (*http3.Transport) exposes CloseIdleConnections via this interface.
+	type idleCloser interface {
+		CloseIdleConnections()
+	}
+	for _, rt := range []http.RoundTripper{uc.http3RoundTripper, uc.http3RoundTripper4, uc.http3RoundTripper6} {
+		if c, ok := rt.(idleCloser); ok {
+			c.CloseIdleConnections()
+		}
+	}
+}
+
 // SetupTransport initializes the network transport used to connect to upstream servers.
 // For now, DoH/DoH3/DoQ/DoT upstreams are supported.
 func (uc *UpstreamConfig) SetupTransport() {
@@ -519,6 +583,13 @@ func (uc *UpstreamConfig) SetupTransport() {
 	default:
 		return
 	}
+
+	// Close existing transport connections before creating new ones.
+	// This forces in-flight requests on stale connections (e.g. after a
+	// firewall state table flush) to fail fast instead of waiting for
+	// the full context deadline timeout.
+	uc.closeTransports()
+
 	ips := uc.bootstrapIPs
 	switch uc.IPStack {
 	case IpStackV4:

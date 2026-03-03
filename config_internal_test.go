@@ -541,10 +541,12 @@ func TestRebootstrapRace(t *testing.T) {
 	<-started
 
 	var wg sync.WaitGroup
+	wg.Add(goroutines)
 	for range goroutines {
-		wg.Go(func() {
+		go func() {
+			defer wg.Done()
 			uc.ensureSetupTransport()
-		})
+		}()
 	}
 
 	wg.Wait()
