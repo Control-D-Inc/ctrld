@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -37,6 +38,28 @@ const (
 	DS_IP_REQUIRED                = 0x00000200
 	DS_IS_DNS_NAME                = 0x00020000
 	DS_RETURN_DNS_NAME            = 0x40000000
+
+	// AD DC retry constants
+	dcRetryInitialDelay = 1 * time.Second
+	dcRetryMaxDelay     = 30 * time.Second
+	dcRetryMaxAttempts  = 10
+
+	// DsGetDcName error codes
+	errNoSuchDomain   uintptr = 1355
+	errNoLogonServers uintptr = 1311
+	errDCNotFound     uintptr = 1004
+	errRPCUnavailable uintptr = 1722
+	errConnReset      uintptr = 10054
+	errNetUnreachable uintptr = 1231
+)
+
+var (
+	dcRetryMu     sync.Mutex
+	dcRetryCancel context.CancelFunc
+
+	// Lazy-loaded netapi32 for DsGetDcNameW calls.
+	netapi32DLL  = windows.NewLazySystemDLL("netapi32.dll")
+	dsGetDcNameW = netapi32DLL.NewProc("DsGetDcNameW")
 )
 
 type DomainControllerInfo struct {
@@ -110,6 +133,9 @@ func dnsFromAdapter() []string {
 func getDNSServers(ctx context.Context) ([]string, error) {
 	logger := *ProxyLogger.Load()
 
+	// Cancel any in-flight DC retry from a previous network state.
+	cancelDCRetry()
+
 	// Check context before making the call
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -139,9 +165,6 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 		} else {
 			adDomain = domainName
 			// Load netapi32.dll
-			netapi32 := windows.NewLazySystemDLL("netapi32.dll")
-			dsDcName := netapi32.NewProc("DsGetDcNameW")
-
 			var info *DomainControllerInfo
 			flags := uint32(DS_RETURN_DNS_NAME | DS_IP_REQUIRED | DS_IS_DNS_NAME)
 
@@ -153,7 +176,7 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 					"Attempting to get DC for domain: %s with flags: 0x%x", domainName, flags)
 
 				// Call DsGetDcNameW with domain name
-				ret, _, err := dsDcName.Call(
+				ret, _, err := dsGetDcNameW.Call(
 					0,                                    // ComputerName - can be NULL
 					uintptr(unsafe.Pointer(domainUTF16)), // DomainName
 					0,                                    // DomainGuid - not needed
@@ -163,21 +186,27 @@ func getDNSServers(ctx context.Context) ([]string, error) {
 
 				if ret != 0 {
 					switch ret {
-					case 1355: // ERROR_NO_SUCH_DOMAIN
+					case errNoSuchDomain:
 						Log(ctx, logger.Debug(),
 							"Domain not found: %s (%d)", domainName, ret)
-					case 1311: // ERROR_NO_LOGON_SERVERS
+					case errNoLogonServers:
 						Log(ctx, logger.Debug(),
 							"No logon servers available for domain: %s (%d)", domainName, ret)
-					case 1004: // ERROR_DC_NOT_FOUND
+					case errDCNotFound:
 						Log(ctx, logger.Debug(),
 							"Domain controller not found for domain: %s (%d)", domainName, ret)
-					case 1722: // RPC_S_SERVER_UNAVAILABLE
+					case errRPCUnavailable:
 						Log(ctx, logger.Debug(),
 							"RPC server unavailable for domain: %s (%d)", domainName, ret)
 					default:
 						Log(ctx, logger.Debug(),
 							"Failed to get domain controller info for domain %s: %d, %v", domainName, ret, err)
+					}
+					// Start background retry for transient DC errors.
+					if isTransientDCError(ret) {
+						Log(ctx, logger.Info(),
+							"AD DC detection failed with transient error %d for %s, starting background retry", ret, domainName)
+						startDCRetry(domainName)
 					}
 				} else if info != nil {
 					defer windows.NetApiBufferFree((*byte)(unsafe.Pointer(info)))
@@ -355,6 +384,143 @@ func checkDomainJoined() bool {
 	logger.Debug().Msgf("Is domain joined? status=%d, result=%v", status, isDomain)
 
 	return isDomain
+}
+
+// isTransientDCError returns true if the DsGetDcName error code indicates
+// a transient failure that may succeed on retry.
+func isTransientDCError(code uintptr) bool {
+	switch code {
+	case errConnReset, errRPCUnavailable, errNoLogonServers, errDCNotFound, errNetUnreachable:
+		return true
+	default:
+		return false
+	}
+}
+
+// cancelDCRetry cancels any in-flight DC retry goroutine.
+func cancelDCRetry() {
+	dcRetryMu.Lock()
+	defer dcRetryMu.Unlock()
+	if dcRetryCancel != nil {
+		dcRetryCancel()
+		dcRetryCancel = nil
+	}
+}
+
+// startDCRetry spawns a background goroutine that retries DsGetDcName with
+// exponential backoff. On success it appends the DC IP to the OS resolver.
+func startDCRetry(domainName string) {
+	dcRetryMu.Lock()
+	// Cancel any previous retry.
+	if dcRetryCancel != nil {
+		dcRetryCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	dcRetryCancel = cancel
+	dcRetryMu.Unlock()
+
+	go func() {
+		logger := *ProxyLogger.Load()
+		delay := dcRetryInitialDelay
+
+		for attempt := 1; attempt <= dcRetryMaxAttempts; attempt++ {
+			select {
+			case <-ctx.Done():
+				Log(context.Background(), logger.Debug(), "AD DC retry cancelled for domain %s", domainName)
+				return
+			case <-time.After(delay):
+			}
+
+			Log(ctx, logger.Debug(),
+				"AD DC retry attempt %d/%d for domain %s (delay was %v)",
+				attempt, dcRetryMaxAttempts, domainName, delay)
+
+			dcIP, errCode := tryGetDCAddress(domainName)
+			if dcIP != "" {
+				Log(context.Background(), logger.Info(),
+					"AD DC retry succeeded: found DC at %s for domain %s (attempt %d)",
+					dcIP, domainName, attempt)
+				if AppendOsResolverNameservers([]string{dcIP}) {
+					Log(context.Background(), logger.Info(),
+						"Added DC %s to OS resolver nameservers", dcIP)
+				} else {
+					Log(context.Background(), logger.Warn(),
+						"AD DC retry: OS resolver not initialized, DC IP %s was not added", dcIP)
+				}
+				return
+			}
+
+			// Permanent error or unexpected empty result — stop retrying.
+			if errCode != 0 && !isTransientDCError(errCode) {
+				Log(context.Background(), logger.Debug(),
+					"AD DC retry stopping: permanent error %d for domain %s", errCode, domainName)
+				return
+			}
+			if errCode == 0 {
+				// DsGetDcName returned success but no usable address — don't retry.
+				Log(context.Background(), logger.Debug(),
+					"AD DC retry stopping: DsGetDcName returned no address for domain %s", domainName)
+				return
+			}
+
+			// Exponential backoff.
+			delay *= 2
+			if delay > dcRetryMaxDelay {
+				delay = dcRetryMaxDelay
+			}
+		}
+
+		Log(ctx, logger.Warn(),
+			"AD DC retry exhausted %d attempts for domain %s", dcRetryMaxAttempts, domainName)
+	}()
+}
+
+// tryGetDCAddress attempts a single DsGetDcName call and returns the DC IP on success,
+// or empty string and the error code on failure.
+func tryGetDCAddress(domainName string) (string, uintptr) {
+	logger := *ProxyLogger.Load()
+
+	var info *DomainControllerInfo
+	// Use DS_FORCE_REDISCOVERY on retries to bypass the DC locator cache,
+	// which may have cached the initial transient failure.
+	flags := uint32(DS_RETURN_DNS_NAME | DS_IP_REQUIRED | DS_IS_DNS_NAME | DS_FORCE_REDISCOVERY)
+
+	domainUTF16, err := windows.UTF16PtrFromString(domainName)
+	if err != nil {
+		Log(context.Background(), logger.Debug(),
+			"Failed to convert domain name to UTF16: %v", err)
+		return "", 0
+	}
+
+	ret, _, _ := dsGetDcNameW.Call(
+		0,
+		uintptr(unsafe.Pointer(domainUTF16)),
+		0,
+		0,
+		uintptr(flags),
+		uintptr(unsafe.Pointer(&info)))
+
+	if ret != 0 {
+		Log(context.Background(), logger.Debug(),
+			"DsGetDcName retry failed for %s: error %d", domainName, ret)
+		return "", ret
+	}
+
+	if info == nil {
+		return "", 0
+	}
+	defer windows.NetApiBufferFree((*byte)(unsafe.Pointer(info)))
+
+	if info.DomainControllerAddress == nil {
+		return "", 0
+	}
+
+	dcAddr := windows.UTF16PtrToString(info.DomainControllerAddress)
+	dcAddr = strings.TrimPrefix(dcAddr, "\\\\")
+	if ip := net.ParseIP(dcAddr); ip != nil {
+		return ip.String(), 0
+	}
+	return "", 0
 }
 
 // validInterfaces returns a list of all physical interfaces.
