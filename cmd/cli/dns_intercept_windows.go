@@ -1138,39 +1138,9 @@ func (p *prog) stopDNSIntercept() error {
 	return nil
 }
 
-// dnsInterceptSupported reports whether DNS intercept mode is supported on this platform.
-func dnsInterceptSupported() bool {
-	if err := fwpuclntDLL.Load(); err != nil {
-		return false
-	}
-	return true
-}
-
-// validateDNSIntercept checks that the system meets requirements for DNS intercept mode.
-func (p *prog) validateDNSIntercept() error {
-	// Hard mode requires WFP and elevation for filter management.
-	if hardIntercept {
-		if !dnsInterceptSupported() {
-			return fmt.Errorf("dns intercept: fwpuclnt.dll not available — WFP requires Windows Vista or later")
-		}
-		if !isElevated() {
-			return fmt.Errorf("dns intercept: administrator privileges required for WFP filter management in hard mode")
-		}
-	}
-	// dns mode only needs NRPT (HKLM registry writes), which services can do
-	// without explicit elevation checks.
-	return nil
-}
-
-// isElevated checks if the current process has administrator privileges.
-func isElevated() bool {
-	token := windows.GetCurrentProcessToken()
-	return token.IsElevated()
-}
-
-// exemptVPNDNSServers updates the WFP filters to permit outbound DNS to VPN DNS servers.
-// This prevents the block filters from intercepting ctrld's own forwarded queries to
-// VPN DNS servers (split DNS routing).
+// exemptVPNDNSServers updates the WFP filters to permit outbound DNS to the given
+// VPN DNS server IPs. This prevents the block filters from intercepting ctrld's own
+// forwarded queries to VPN DNS servers (split DNS routing).
 //
 // The function is idempotent: it first removes ALL existing VPN permit filters,
 // then adds new ones for the current server list. When called with nil/empty
@@ -1570,31 +1540,6 @@ func (p *prog) probeNRPT() bool {
 		mainLog.Load().Debug().Str("domain", probeID).Msg("DNS intercept: NRPT probe timed out — interception not working")
 		return false
 	}
-}
-
-// restartDNSClientService restarts the Windows DNS Client (Dnscache) service.
-// This forces the DNS Client to fully re-initialize, including re-reading NRPT
-// from the registry. This is the nuclear option when RefreshPolicyEx alone isn't
-// enough — equivalent to macOS forceReloadPFMainRuleset().
-func restartDNSClientService() {
-	mainLog.Load().Info().Msg("DNS intercept: restarting DNS Client service (Dnscache) to force NRPT reload")
-	cmd := exec.Command("net", "stop", "Dnscache", "/y")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		mainLog.Load().Debug().Err(err).Str("output", string(out)).Msg("DNS intercept: failed to stop Dnscache (may require SYSTEM privileges)")
-		// Fall back to PowerShell Restart-Service
-		cmd2 := exec.Command("powershell", "-Command", "Restart-Service", "Dnscache", "-Force")
-		if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
-			mainLog.Load().Warn().Err(err2).Str("output", string(out2)).Msg("DNS intercept: failed to restart Dnscache via PowerShell")
-			return
-		}
-	} else {
-		// Start it again
-		cmd3 := exec.Command("net", "start", "Dnscache")
-		if out3, err3 := cmd3.CombinedOutput(); err3 != nil {
-			mainLog.Load().Warn().Err(err3).Str("output", string(out3)).Msg("DNS intercept: failed to start Dnscache after stop")
-		}
-	}
-	mainLog.Load().Info().Msg("DNS intercept: DNS Client service restarted")
 }
 
 // nrptProbeAndHeal runs the NRPT probe with retries and escalating remediation.
