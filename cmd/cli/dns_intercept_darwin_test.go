@@ -5,6 +5,8 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/Control-D-Inc/ctrld"
 )
 
 // =============================================================================
@@ -12,13 +14,13 @@ import (
 // =============================================================================
 
 func TestPFBuildAnchorRules_Basic(t *testing.T) {
-	p := &prog{}
+	p := &prog{cfg: &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"0": {IP: "127.0.0.1", Port: 53}}}}
 	rules := p.buildPFAnchorRules(nil)
 
 	// rdr (translation) must come before pass (filtering)
-	rdrIdx := strings.Index(rules, "rdr pass on lo0")
-	passRouteIdx := strings.Index(rules, "pass out quick on ! lo0 route-to lo0")
-	passInIdx := strings.Index(rules, "pass in quick on lo0")
+	rdrIdx := strings.Index(rules, "rdr on lo0 inet proto udp")
+	passRouteIdx := strings.Index(rules, "pass out quick on ! lo0 route-to lo0 inet proto udp")
+	passInIdx := strings.Index(rules, "pass in quick on lo0 reply-to lo0")
 
 	if rdrIdx < 0 {
 		t.Fatal("missing rdr rule")
@@ -43,34 +45,46 @@ func TestPFBuildAnchorRules_Basic(t *testing.T) {
 }
 
 func TestPFBuildAnchorRules_WithVPNServers(t *testing.T) {
-	p := &prog{}
-	vpnServers := []string{"10.8.0.1", "10.8.0.2"}
+	p := &prog{cfg: &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"0": {IP: "127.0.0.1", Port: 53}}}}
+	vpnServers := []vpnDNSExemption{
+		{Server: "10.8.0.1"},
+		{Server: "10.8.0.2"},
+	}
 	rules := p.buildPFAnchorRules(vpnServers)
 
 	// VPN exemption rules must appear
 	for _, s := range vpnServers {
-		if !strings.Contains(rules, s) {
-			t.Errorf("missing VPN exemption for %s", s)
+		if !strings.Contains(rules, s.Server) {
+			t.Errorf("missing VPN exemption for %s", s.Server)
 		}
 	}
 
 	// VPN exemptions must come before route-to
-	exemptIdx := strings.Index(rules, "10.8.0.1")
-	routeIdx := strings.Index(rules, "route-to lo0")
+	exemptIdx := strings.Index(rules, "10.8.0.1 port 53 group")
+	routeIdx := strings.Index(rules, "pass out quick on ! lo0 route-to lo0 inet proto udp")
+	if exemptIdx < 0 {
+		t.Fatal("missing VPN exemption rule for 10.8.0.1")
+	}
+	if routeIdx < 0 {
+		t.Fatal("missing route-to rule")
+	}
 	if exemptIdx >= routeIdx {
 		t.Error("VPN exemptions must come before route-to rules")
 	}
 }
 
 func TestPFBuildAnchorRules_IPv4AndIPv6VPN(t *testing.T) {
-	p := &prog{}
-	vpnServers := []string{"10.8.0.1", "fd00::1"}
+	p := &prog{cfg: &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"0": {IP: "127.0.0.1", Port: 53}}}}
+	vpnServers := []vpnDNSExemption{
+		{Server: "10.8.0.1"},
+		{Server: "fd00::1"},
+	}
 	rules := p.buildPFAnchorRules(vpnServers)
 
 	// IPv4 server should use "inet"
 	lines := strings.Split(rules, "\n")
 	for _, line := range lines {
-		if strings.Contains(line, "10.8.0.1") {
+		if strings.Contains(line, "10.8.0.1") && strings.HasPrefix(line, "pass") {
 			if !strings.Contains(line, "inet ") {
 				t.Error("IPv4 VPN server rule should contain 'inet'")
 			}
@@ -78,7 +92,7 @@ func TestPFBuildAnchorRules_IPv4AndIPv6VPN(t *testing.T) {
 				t.Error("IPv4 VPN server rule should not contain 'inet6'")
 			}
 		}
-		if strings.Contains(line, "fd00::1") {
+		if strings.Contains(line, "fd00::1") && strings.HasPrefix(line, "pass") {
 			if !strings.Contains(line, "inet6") {
 				t.Error("IPv6 VPN server rule should contain 'inet6'")
 			}
@@ -87,15 +101,17 @@ func TestPFBuildAnchorRules_IPv4AndIPv6VPN(t *testing.T) {
 }
 
 func TestPFBuildAnchorRules_Ordering(t *testing.T) {
-	p := &prog{}
-	vpnServers := []string{"10.8.0.1"}
+	p := &prog{cfg: &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"0": {IP: "127.0.0.1", Port: 53}}}}
+	vpnServers := []vpnDNSExemption{
+		{Server: "10.8.0.1"},
+	}
 	rules := p.buildPFAnchorRules(vpnServers)
 
 	// Verify ordering: rdr → exemptions → route-to → pass in on lo0
-	rdrIdx := strings.Index(rules, "rdr pass on lo0")
-	exemptIdx := strings.Index(rules, "pass out quick on ! lo0 inet proto { udp, tcp } from any to 10.8.0.1")
-	routeIdx := strings.Index(rules, "pass out quick on ! lo0 route-to lo0")
-	passInIdx := strings.Index(rules, "pass in quick on lo0")
+	rdrIdx := strings.Index(rules, "rdr on lo0 inet proto udp")
+	exemptIdx := strings.Index(rules, "pass out quick on ! lo0 inet proto { udp, tcp } from any to 10.8.0.1 port 53 group _ctrld")
+	routeIdx := strings.Index(rules, "pass out quick on ! lo0 route-to lo0 inet proto udp")
+	passInIdx := strings.Index(rules, "pass in quick on lo0 reply-to lo0")
 
 	if rdrIdx < 0 || exemptIdx < 0 || routeIdx < 0 || passInIdx < 0 {
 		t.Fatalf("missing expected rules: rdr=%d exempt=%d route=%d passIn=%d", rdrIdx, exemptIdx, routeIdx, passInIdx)
