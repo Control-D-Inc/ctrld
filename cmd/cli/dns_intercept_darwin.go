@@ -1123,28 +1123,6 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
-// pfAnchorIsWiped checks if our pf anchor references have been removed from the
-// running ruleset. This is a read-only check — it does NOT attempt to restore.
-// Used to distinguish VPNs that wipe pf (Windscribe) from those that don't (Tailscale).
-func (p *prog) pfAnchorIsWiped() bool {
-	rdrAnchorRef := fmt.Sprintf("rdr-anchor \"%s\"", pfAnchorName)
-	anchorRef := fmt.Sprintf("anchor \"%s\"", pfAnchorName)
-
-	natOut, err := exec.Command("pfctl", "-sn").CombinedOutput()
-	if err != nil {
-		return true // Can't check — assume wiped (safer)
-	}
-	if !strings.Contains(string(natOut), rdrAnchorRef) {
-		return true
-	}
-
-	filterOut, err := exec.Command("pfctl", "-sr").CombinedOutput()
-	if err != nil {
-		return true
-	}
-	return !strings.Contains(string(filterOut), anchorRef)
-}
-
 // pfStartStabilization enters stabilization mode, suppressing all pf restores
 // until the VPN's ruleset stops changing. This prevents a death spiral where
 // ctrld and the VPN repeatedly overwrite each other's pf rules.
