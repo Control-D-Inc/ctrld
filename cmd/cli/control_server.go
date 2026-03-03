@@ -224,7 +224,7 @@ func (p *prog) registerControlServerHandler() {
 		rcReq := &controld.ResolverConfigRequest{
 			RawUID:   cdUID,
 			Version:  appVersion,
-			Metadata: ctrld.SystemMetadata(loggerCtx),
+			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 		}
 		if rc, err := controld.FetchResolverConfig(loggerCtx, rcReq, cdDev); rc != nil {
 			if rc.DeactivationPin != nil {
