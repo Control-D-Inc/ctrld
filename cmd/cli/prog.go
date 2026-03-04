@@ -131,6 +131,7 @@ type prog struct {
 	runningIface              string
 	requiredMultiNICsConfig   bool
 	adDomain                  string
+	hasLocalDNS               bool
 	runningOnDomainController bool
 
 	selfUninstallMu       sync.Mutex
@@ -144,6 +145,55 @@ type prog struct {
 	recoveryCancelMu sync.Mutex
 	recoveryCancel   context.CancelFunc
 	recoveryRunning  atomic.Bool
+
+	// recoveryBypass is set when dns-intercept mode enters recovery.
+	// When true, proxy() forwards all queries to OS/DHCP resolver
+	// instead of using the normal upstream flow.
+	recoveryBypass atomic.Bool
+
+	// DNS intercept mode state (platform-specific).
+	// On Windows: *wfpState, on macOS: *pfState, nil on other platforms.
+	dnsInterceptState any
+
+	// lastTunnelIfaces tracks the set of active VPN/tunnel interfaces (utun*, ipsec*, etc.)
+	// discovered during the last pf anchor rule build. When the set changes (e.g., a VPN
+	// connects and creates utun420), we rebuild the pf anchor to add interface-specific
+	// intercept rules for the new interface. Protected by mu.
+	lastTunnelIfaces []string //lint:ignore U1000 used on darwin
+
+	// pfStabilizing is true while we're waiting for a VPN's pf ruleset to settle.
+	// While true, the watchdog and network change callbacks do NOT restore our rules.
+	pfStabilizing atomic.Bool
+
+	// pfStabilizeCancel cancels the active stabilization goroutine, if any.
+	// Protected by mu.
+	pfStabilizeCancel context.CancelFunc //lint:ignore U1000 used on darwin
+
+	// pfLastRestoreTime records when we last restored our anchor (unix millis).
+	// Used to detect immediate re-wipes (VPN reconnect cycle).
+	pfLastRestoreTime atomic.Int64 //lint:ignore U1000 used on darwin
+
+	// pfBackoffMultiplier tracks exponential backoff for stabilization.
+	// Resets to 0 when rules survive for >60s.
+	pfBackoffMultiplier atomic.Int32 //lint:ignore U1000 used on darwin
+
+	// pfMonitorRunning ensures only one pfInterceptMonitor goroutine runs at a time.
+	// When an interface appears/disappears, we spawn a monitor that probes pf
+	// interception with exponential backoff and auto-heals if broken.
+	pfMonitorRunning atomic.Bool //lint:ignore U1000 used on darwin
+
+	// pfProbeExpected holds the domain name of a pending pf interception probe.
+	// When non-empty, the DNS handler checks incoming queries against this value
+	// and signals pfProbeCh if matched. The probe verifies that pf's rdr rules
+	// are actually translating packets (not just present in rule text).
+	pfProbeExpected atomic.Value // string
+
+	// pfProbeCh is signaled when the DNS handler receives the expected probe query.
+	// The channel is created by probePFIntercept() and closed when the probe arrives.
+	pfProbeCh atomic.Value // *chan struct{}
+
+	// VPN DNS manager for split DNS routing when intercept mode is active.
+	vpnDNS *vpnDNSManager
 
 	started       chan struct{}
 	onStartedDone chan struct{}
@@ -328,7 +378,7 @@ func (p *prog) apiConfigReload() {
 		req := &controld.ResolverConfigRequest{
 			RawUID:   cdUID,
 			Version:  rootCmd.Version,
-			Metadata: ctrld.SystemMetadata(context.Background()),
+			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 		}
 		resolverConfig, err := controld.FetchResolverConfig(req, cdDev)
 		selfUninstallCheck(err, p, logger)
@@ -491,9 +541,13 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			}
 		}
 	}
-	if domain, err := getActiveDirectoryDomain(); err == nil && domain != "" && hasLocalDnsServerRunning() {
+	if domain, err := getActiveDirectoryDomain(); err == nil && domain != "" {
 		mainLog.Load().Debug().Msgf("active directory domain: %s", domain)
 		p.adDomain = domain
+		if hasLocalDnsServerRunning() {
+			mainLog.Load().Debug().Msg("local DNS server detected (Domain Controller)")
+			p.hasLocalDNS = true
+		}
 	}
 
 	var wg sync.WaitGroup
@@ -537,7 +591,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			defer wg.Done()
 			p.runClientInfoDiscover(ctx)
 		}()
-		go p.watchLinkState(ctx)
 	}
 
 	if !reload {
@@ -725,6 +778,54 @@ func (p *prog) setDNS() {
 		p.csSetDnsOk = setDnsOK
 	}()
 
+	// Validate and resolve intercept mode.
+	// CLI flag (--intercept-mode) takes priority over config file.
+	// Valid values: "" (off), "dns" (with VPN split routing), "hard" (all DNS through ctrld).
+	if interceptMode != "" && !validInterceptMode(interceptMode) {
+		mainLog.Load().Fatal().Msgf("invalid --intercept-mode value %q: must be 'off', 'dns', or 'hard'", interceptMode)
+	}
+	if interceptMode == "" || interceptMode == "off" {
+		interceptMode = cfg.Service.InterceptMode
+		if interceptMode != "" && interceptMode != "off" {
+			mainLog.Load().Info().Msgf("Intercept mode enabled via config (intercept_mode = %q)", interceptMode)
+		}
+	}
+
+	// Derive convenience bools from interceptMode.
+	switch interceptMode {
+	case "dns":
+		dnsIntercept = true
+	case "hard":
+		dnsIntercept = true
+		hardIntercept = true
+	}
+
+	// DNS intercept mode: use OS-level packet interception (WFP/pf) instead of
+	// modifying interface DNS settings. This eliminates race conditions with VPN
+	// software that also manages DNS. See issue #489.
+	if dnsIntercept {
+		if err := p.startDNSIntercept(); err != nil {
+			mainLog.Load().Error().Err(err).Msg("DNS intercept mode failed — falling back to interface DNS settings")
+			// Fall through to traditional setDNS behavior.
+		} else {
+			if hardIntercept {
+				mainLog.Load().Info().Msg("Hard intercept mode active — all DNS through ctrld, no VPN split routing")
+			} else {
+				mainLog.Load().Info().Msg("DNS intercept mode active — skipping interface DNS configuration and watchdog")
+
+				// Initialize VPN DNS manager for split DNS routing.
+				// Discovers search domains from virtual/VPN interfaces and forwards
+				// matching queries to the DNS server on that interface.
+				// Skipped in --intercept-mode hard where all DNS goes through ctrld.
+				p.vpnDNS = newVPNDNSManager(p.exemptVPNDNSServers)
+				p.vpnDNS.Refresh(true)
+			}
+
+			setDnsOK = true
+			return
+		}
+	}
+
 	if cfg.Listener == nil {
 		return
 	}
@@ -751,7 +852,7 @@ func (p *prog) setDNS() {
 	if needRFC1918Listeners(lc) {
 		nameservers = append(nameservers, ctrld.Rfc1918Addresses()...)
 	}
-	if needLocalIPv6Listener() {
+	if needLocalIPv6Listener(p.cfg.Service.InterceptMode) {
 		nameservers = append(nameservers, "::1")
 	}
 
@@ -946,7 +1047,18 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 }
 
 // resetDNS performs a DNS reset for all interfaces.
+// In DNS intercept mode, this tears down the WFP/pf filters instead.
 func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
+	if dnsIntercept && p.dnsInterceptState != nil {
+		if err := p.stopDNSIntercept(); err != nil {
+			mainLog.Load().Error().Err(err).Msg("Failed to stop DNS intercept mode during reset")
+		}
+
+		// Clean up VPN DNS manager
+		p.vpnDNS = nil
+
+		return
+	}
 	netIfaceName := ""
 	if netIface := p.resetDNSForRunningIface(isStart, restoreStatic); netIface != nil {
 		netIfaceName = netIface.Name

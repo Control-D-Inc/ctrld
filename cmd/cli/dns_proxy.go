@@ -104,7 +104,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		listenerConfig := p.cfg.Listener[listenerNum]
 		reqId := requestID()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
-		if !listenerConfig.AllowWanClients && isWanClient(w.RemoteAddr()) {
+		if !listenerConfig.AllowWanClients && isWanClient(w.RemoteAddr()) && !isIPv6LoopbackListener(w.LocalAddr()) {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "query refused, listener does not allow WAN clients: %s", w.RemoteAddr().String())
 			answer := new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeRefused)
@@ -122,6 +122,23 @@ func (p *prog) serveDNS(listenerNum string) error {
 			return
 		case domain == selfCheckInternalTestDomain:
 			answer := resolveInternalDomainTestQuery(ctx, domain, m)
+			_ = w.WriteMsg(answer)
+			return
+		}
+
+		// Interception probe: if we're expecting a probe query and this matches,
+		// signal the prober and respond NXDOMAIN. Used by both macOS pf probes
+		// (_pf-probe-*) and Windows NRPT probes (_nrpt-probe-*) to verify that
+		// DNS interception is actually routing queries to ctrld's listener.
+		if probeID, ok := p.pfProbeExpected.Load().(string); ok && probeID != "" && domain == probeID {
+			if chPtr, ok := p.pfProbeCh.Load().(*chan struct{}); ok && chPtr != nil {
+				select {
+				case *chPtr <- struct{}{}:
+				default:
+				}
+			}
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeNameError) // NXDOMAIN
 			_ = w.WriteMsg(answer)
 			return
 		}
@@ -192,7 +209,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 	g, ctx := errgroup.WithContext(context.Background())
 	for _, proto := range []string{"udp", "tcp"} {
 		proto := proto
-		if needLocalIPv6Listener() {
+		if needLocalIPv6Listener(p.cfg.Service.InterceptMode) {
 			g.Go(func() error {
 				s, errCh := runDNSServer(net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)), proto, handler)
 				defer s.Shutdown()
@@ -421,6 +438,24 @@ func (p *prog) proxyLanHostnameQuery(ctx context.Context, msg *dns.Msg) *dns.Msg
 }
 
 func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
+	// DNS intercept recovery bypass: forward all queries to OS/DHCP resolver.
+	// This runs when upstreams are unreachable (e.g., captive portal network)
+	// and allows the network's DNS to handle authentication pages.
+	if dnsIntercept && p.recoveryBypass.Load() {
+		ctrld.Log(ctx, mainLog.Load().Debug(), "Recovery bypass active: forwarding to OS resolver")
+		resolver, err := ctrld.NewResolver(osUpstreamConfig)
+		if err == nil {
+			resolveCtx, cancel := osUpstreamConfig.Context(ctx)
+			defer cancel()
+			answer, _ := resolver.Resolve(resolveCtx, req.msg)
+			if answer != nil {
+				return &proxyResponse{answer: answer}
+			}
+		}
+		ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver failed during recovery bypass")
+		// Fall through to normal flow as last resort
+	}
+
 	var staleAnswer *dns.Msg
 	upstreams := req.ufr.upstreams
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
@@ -433,9 +468,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		// However, on Active Directory Domain Controller, where it has local DNS server
 		// running and listening on local addresses, these local addresses must be used
 		// as nameservers, so queries for ADDC could be resolved as expected.
-		if p.isAdDomainQuery(req.msg) {
+		if p.isAdDomainQuery(req.msg) && p.hasLocalDNS {
 			ctrld.Log(ctx, mainLog.Load().Debug(),
-				"AD domain query detected for %s in domain %s",
+				"AD domain query detected for %s in domain %s, using local DNS server",
 				req.msg.Question[0].Name, p.adDomain)
 			upstreamConfigs = []*ctrld.UpstreamConfig{localUpstreamConfig}
 			upstreams = []string{upstreamOSLocal}
@@ -506,6 +541,92 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			staleAnswer = answer
 		}
 	}
+
+	// VPN DNS split routing (only in dns-intercept mode)
+	if dnsIntercept && p.vpnDNS != nil && len(req.msg.Question) > 0 {
+		domain := req.msg.Question[0].Name
+		if vpnServers := p.vpnDNS.UpstreamForDomain(domain); len(vpnServers) > 0 {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "VPN DNS route matched for domain %s, using servers: %v", domain, vpnServers)
+
+			for _, server := range vpnServers {
+				upstreamConfig := p.vpnDNS.upstreamConfigFor(server)
+				ctrld.Log(ctx, mainLog.Load().Debug(), "Querying VPN DNS server: %s", server)
+
+				dnsResolver, err := ctrld.NewResolver(upstreamConfig)
+				if err != nil {
+					ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create VPN DNS resolver")
+					continue
+				}
+				resolveCtx, cancel := upstreamConfig.Context(ctx)
+				answer, err := dnsResolver.Resolve(resolveCtx, req.msg)
+				cancel()
+				if answer != nil {
+					ctrld.Log(ctx, mainLog.Load().Debug(), "VPN DNS query successful")
+					if p.cache != nil {
+						ttl := 60 * time.Second
+						if len(answer.Answer) > 0 {
+							ttl = time.Duration(answer.Answer[0].Header().Ttl) * time.Second
+						}
+						for _, upstream := range upstreams {
+							p.cache.Add(dnscache.NewKey(req.msg, upstream), dnscache.NewValue(answer, time.Now().Add(ttl)))
+						}
+					}
+					return &proxyResponse{answer: answer}
+				}
+				ctrld.Log(ctx, mainLog.Load().Debug().Err(err), "VPN DNS server %s failed", server)
+			}
+
+			ctrld.Log(ctx, mainLog.Load().Debug(), "All VPN DNS servers failed, falling back to normal upstreams")
+		}
+	}
+
+	// Domain-less VPN DNS fallback: when a query is going to upstream.os via a
+	// split-rule (matched policy) and we have VPN DNS servers with no associated
+	// domains, try those servers for this query. This handles cases like F5 VPN
+	// where the VPN doesn't advertise DNS search domains but its DNS servers
+	// know the internal zones referenced by split-rules (e.g., *.provisur.local).
+	// These servers are NOT used for general OS resolver queries to avoid
+	// polluting captive portal / DHCP flows.
+	if dnsIntercept && p.vpnDNS != nil && req.ufr.matched &&
+		len(upstreams) > 0 && upstreams[0] == upstreamOS &&
+		len(req.msg.Question) > 0 && !p.isAdDomainQuery(req.msg) {
+		if dlServers := p.vpnDNS.DomainlessServers(); len(dlServers) > 0 {
+			domain := req.msg.Question[0].Name
+			ctrld.Log(ctx, mainLog.Load().Debug(),
+				"Split-rule query %s going to upstream.os, trying %d domain-less VPN DNS servers first: %v",
+				domain, len(dlServers), dlServers)
+
+			for _, server := range dlServers {
+				upstreamCfg := p.vpnDNS.upstreamConfigFor(server)
+				ctrld.Log(ctx, mainLog.Load().Debug(), "Querying domain-less VPN DNS server: %s", server)
+
+				dnsResolver, err := ctrld.NewResolver(upstreamCfg)
+				if err != nil {
+					ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create domain-less VPN DNS resolver")
+					continue
+				}
+				resolveCtx, cancel := upstreamCfg.Context(ctx)
+				answer, err := dnsResolver.Resolve(resolveCtx, req.msg)
+				cancel()
+				if answer != nil && answer.Rcode == dns.RcodeSuccess {
+					ctrld.Log(ctx, mainLog.Load().Debug(),
+						"Domain-less VPN DNS server %s answered %s successfully", server, domain)
+					return &proxyResponse{answer: answer}
+				}
+				if answer != nil {
+					ctrld.Log(ctx, mainLog.Load().Debug(),
+						"Domain-less VPN DNS server %s returned %s for %s, trying next",
+						server, dns.RcodeToString[answer.Rcode], domain)
+				} else {
+					ctrld.Log(ctx, mainLog.Load().Debug().Err(err),
+						"Domain-less VPN DNS server %s failed for %s", server, domain)
+				}
+			}
+			ctrld.Log(ctx, mainLog.Load().Debug(),
+				"All domain-less VPN DNS servers failed for %s, falling back to OS resolver", domain)
+		}
+	}
+
 	resolve1 := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "sending query to %s: %s", upstream, upstreamConfig.Name)
 		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
@@ -771,10 +892,30 @@ func ttlFromMsg(msg *dns.Msg) uint32 {
 	return 0
 }
 
-func needLocalIPv6Listener() bool {
+func needLocalIPv6Listener(interceptMode string) bool {
+	if !ctrldnet.SupportsIPv6ListenLocal() {
+		mainLog.Load().Debug().Msg("IPv6 listener: not needed — SupportsIPv6ListenLocal() is false")
+		return false
+	}
 	// On Windows, there's no easy way for disabling/removing IPv6 DNS resolver, so we check whether we can
 	// listen on ::1, then spawn a listener for receiving DNS requests.
-	return ctrldnet.SupportsIPv6ListenLocal() && runtime.GOOS == "windows"
+	if runtime.GOOS == "windows" {
+		mainLog.Load().Debug().Msg("IPv6 listener: enabled (Windows)")
+		return true
+	}
+	// On macOS in intercept mode, pf can't redirect IPv6 DNS to an IPv4 listener (cross-AF rdr
+	// not supported), and blocking IPv6 DNS causes ~1s timeouts (BSD doesn't deliver ICMP errors
+	// to unconnected UDP sockets). Listening on [::1] lets us intercept IPv6 DNS directly.
+	//
+	// NOTE: We accept the intercept mode string as a parameter instead of reading the global
+	// dnsIntercept bool, because dnsIntercept is derived later in prog.run() — after the
+	// listener goroutines are already spawned. Same pattern as the port 5354 fallback fix (MR !860).
+	if (interceptMode == "dns" || interceptMode == "hard") && runtime.GOOS == "darwin" {
+		mainLog.Load().Debug().Msg("IPv6 listener: enabled (macOS intercept mode)")
+		return true
+	}
+	mainLog.Load().Debug().Str("os", runtime.GOOS).Str("interceptMode", interceptMode).Msg("IPv6 listener: not needed")
+	return false
 }
 
 // ipAndMacFromMsg extracts IP and MAC information included in a DNS message, if any.
@@ -910,12 +1051,35 @@ func (p *prog) getClientInfo(remoteIP string, msg *dns.Msg) *ctrld.ClientInfo {
 	} else {
 		ci.Hostname = p.ciTable.LookupHostname(ci.IP, ci.Mac)
 	}
-	ci.Self = p.queryFromSelf(ci.IP)
+
+	if ci.IP == "" {
+		mainLog.Load().Debug().Msgf("client info entry with empty IP address: %v", ci)
+	} else {
+		ci.Self = p.queryFromSelf(ci.IP)
+	}
+
+	// In DNS intercept mode, ALL queries are from the local machine — pf/WFP
+	// intercepts outbound DNS and redirects to ctrld. The source IP may be a
+	// virtual interface (Tailscale, VPN) that has no ARP/MAC entry, causing
+	// missing x-cd-mac, x-cd-host, and x-cd-os headers. Force Self=true and
+	// populate from the primary physical interface info.
+	if dnsIntercept && !ci.Self {
+		ci.Self = true
+	}
+
 	// If this is a query from self, but ci.IP is not loopback IP,
 	// try using hostname mapping for lookback IP if presents.
 	if ci.Self {
 		if name := p.ciTable.LocalHostname(); name != "" {
 			ci.Hostname = name
+		}
+		// If MAC is still empty (e.g., query arrived via virtual interface IP
+		// like Tailscale), fall back to the loopback MAC mapping which addSelf()
+		// populates from the primary physical interface.
+		if ci.Mac == "" {
+			if mac := p.ciTable.LookupMac("127.0.0.1"); mac != "" {
+				ci.Mac = mac
+			}
 		}
 	}
 	p.spoofLoopbackIpInClientInfo(ci)
@@ -958,7 +1122,7 @@ func (p *prog) doSelfUninstall(answer *dns.Msg) {
 		req := &controld.ResolverConfigRequest{
 			RawUID:   cdUID,
 			Version:  rootCmd.Version,
-			Metadata: ctrld.SystemMetadata(context.Background()),
+			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 		}
 		_, err := controld.FetchResolverConfig(req, cdDev)
 		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
@@ -1026,7 +1190,12 @@ func (p *prog) queryFromSelf(ip string) bool {
 	if val, ok := p.queryFromSelfMap.Load(ip); ok {
 		return val.(bool)
 	}
-	netIP := netip.MustParseAddr(ip)
+	netIP, err := netip.ParseAddr(ip)
+	if err != nil {
+		mainLog.Load().Debug().Err(err).Msgf("could not parse IP: %q", ip)
+		return false
+	}
+
 	regularIPs, loopbackIPs, err := netmon.LocalAddresses()
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not get local addresses")
@@ -1145,6 +1314,18 @@ func isWanClient(na net.Addr) bool {
 		!ip.IsLinkLocalUnicast() &&
 		!ip.IsLinkLocalMulticast() &&
 		!tsaddr.CGNATRange().Contains(ip)
+}
+
+// isIPv6LoopbackListener reports whether the listener address is [::1].
+// The [::1] listener only serves locally-redirected traffic (via pf on macOS
+// or system DNS on Windows), so queries arriving on it are always from this
+// machine — even when the source IP is a global IPv6 address (pf preserves the
+// original source IP during rdr).
+func isIPv6LoopbackListener(na net.Addr) bool {
+	if ap, err := netip.ParseAddrPort(na.String()); err == nil {
+		return ap.Addr() == netip.IPv6Loopback()
+	}
+	return false
 }
 
 // resolveInternalDomainTestQuery resolves internal test domain query, returning the answer to the caller.
@@ -1272,12 +1453,76 @@ func (p *prog) monitorNetworkChanges() error {
 			mainLog.Load().Debug().Msg("Ignoring interface change - no valid interfaces affected")
 			// check if the default IPs are still on an interface that is up
 			ValidateDefaultLocalIPsFromDelta(delta.New)
+			// Even minor interface changes can trigger macOS pf reloads — verify anchor.
+			// We check immediately AND schedule delayed re-checks (2s + 4s) to catch
+			// programs like Windscribe that modify pf rules and DNS settings
+			// asynchronously after the network change event fires.
+			if dnsIntercept && p.dnsInterceptState != nil {
+				if !p.pfStabilizing.Load() {
+					p.ensurePFAnchorActive()
+				}
+				// Check tunnel interfaces unconditionally — it decides internally
+				// whether to enter stabilization or rebuild immediately.
+				p.checkTunnelInterfaceChanges()
+				// Schedule delayed re-checks to catch async VPN teardown changes.
+				// These also refresh the OS resolver and VPN DNS routes.
+				p.scheduleDelayedRechecks()
+
+				// Detect interface appearance/disappearance — hypervisors (Parallels,
+				// VMware, VirtualBox) reload pf when creating/destroying virtual network
+				// interfaces, which can corrupt pf's internal translation state. The rdr
+				// rules survive in text form (watchdog says "intact") but stop evaluating.
+				// Spawn an async monitor that probes pf interception with backoff and
+				// forces a full pf reload if broken.
+				if delta.Old != nil {
+					interfaceChanged := false
+					var changedIface string
+					for ifaceName := range delta.Old.Interface {
+						if ifaceName == "lo0" {
+							continue
+						}
+						if _, exists := delta.New.Interface[ifaceName]; !exists {
+							interfaceChanged = true
+							changedIface = ifaceName
+							break
+						}
+					}
+					if !interfaceChanged {
+						for ifaceName := range delta.New.Interface {
+							if ifaceName == "lo0" {
+								continue
+							}
+							if _, exists := delta.Old.Interface[ifaceName]; !exists {
+								interfaceChanged = true
+								changedIface = ifaceName
+								break
+							}
+						}
+					}
+					if interfaceChanged {
+						mainLog.Load().Info().Str("interface", changedIface).
+							Msg("DNS intercept: interface appeared/disappeared — starting interception probe monitor")
+						go p.pfInterceptMonitor()
+					}
+				}
+			}
+			// Refresh VPN DNS on tunnel interface changes (e.g., Tailscale connect/disconnect)
+			// even though the physical interface didn't change. Runs after tunnel checks
+			// so the pf anchor rebuild includes current VPN DNS exemptions.
+			if dnsIntercept && p.vpnDNS != nil {
+				p.vpnDNS.Refresh(true)
+			}
 			return
 		}
 
 		if !activeInterfaceExists {
 			mainLog.Load().Debug().Msg("No active interfaces found, skipping reinitialization")
 			return
+		}
+
+		mainLog.Load().Debug().Msg("Link state changed, re-bootstrapping")
+		for _, uc := range p.cfg.Upstream {
+			uc.ReBootstrap()
 		}
 
 		// Get IPs from default route interface in new state
@@ -1339,6 +1584,26 @@ func (p *prog) monitorNetworkChanges() error {
 		// we only trigger recovery flow for network changes on non router devices
 		if router.Name() == "" {
 			p.handleRecovery(RecoveryReasonNetworkChange)
+		}
+
+		// After network changes, verify our pf anchor is still active and
+		// refresh VPN DNS state. Order matters: tunnel checks first (may rebuild
+		// anchor), then VPN DNS refresh (updates exemptions in anchor), then
+		// delayed re-checks for async VPN teardown.
+		if dnsIntercept && p.dnsInterceptState != nil {
+			if !p.pfStabilizing.Load() {
+				p.ensurePFAnchorActive()
+			}
+			// Check tunnel interfaces unconditionally — it decides internally
+			// whether to enter stabilization or rebuild immediately.
+			p.checkTunnelInterfaceChanges()
+			// Refresh VPN DNS routes — runs after tunnel checks so the anchor
+			// rebuild includes current VPN DNS exemptions.
+			if p.vpnDNS != nil {
+				p.vpnDNS.Refresh(true)
+			}
+			// Schedule delayed re-checks to catch async VPN teardown changes.
+			p.scheduleDelayedRechecks()
 		}
 	})
 
@@ -1464,22 +1729,57 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 	p.recoveryCancel = cancel
 	p.recoveryCancelMu.Unlock()
 
-	// Immediately remove our DNS settings from the interface.
 	// set recoveryRunning to true to prevent watchdogs from putting the listener back on the interface
 	p.recoveryRunning.Store(true)
-	// we do not want to restore any static DNS settings
-	// we must try to get the DHCP values, any static DNS settings
-	// will be appended to nameservers from the saved interface values
-	p.resetDNS(false, false)
 
-	// For an OS failure, reinitialize OS resolver nameservers immediately.
-	if reason == RecoveryReasonOSFailure {
-		mainLog.Load().Debug().Msg("OS resolver failure detected; reinitializing OS resolver nameservers")
-		ns := ctrld.InitializeOsResolver(true)
-		if len(ns) == 0 {
-			mainLog.Load().Warn().Msg("No nameservers found for OS resolver; using existing values")
+	// In DNS intercept mode, don't tear down WFP/pf filters.
+	// Instead, enable recovery bypass so proxy() forwards queries to
+	// the OS/DHCP resolver. This handles captive portal authentication
+	// without the overhead of filter teardown/rebuild.
+	if dnsIntercept && p.dnsInterceptState != nil {
+		p.recoveryBypass.Store(true)
+		mainLog.Load().Info().Msg("DNS intercept recovery: enabling DHCP bypass (filters stay active)")
+
+		// Reinitialize OS resolver to discover DHCP servers on the new network.
+		mainLog.Load().Debug().Msg("DNS intercept recovery: discovering DHCP nameservers")
+		dhcpServers := ctrld.InitializeOsResolver(true)
+		if len(dhcpServers) == 0 {
+			mainLog.Load().Warn().Msg("DNS intercept recovery: no DHCP nameservers found")
 		} else {
-			mainLog.Load().Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+			mainLog.Load().Info().Msgf("DNS intercept recovery: found DHCP nameservers: %v", dhcpServers)
+		}
+
+		// Exempt DHCP nameservers from intercept filters so the OS resolver
+		// can actually reach them on port 53.
+		if len(dhcpServers) > 0 {
+			// Build exemptions without an Interface — DHCP servers are not VPN-specific,
+			// so they only generate group-scoped pf rules (ctrld process only).
+			exemptions := make([]vpnDNSExemption, 0, len(dhcpServers))
+			for _, s := range dhcpServers {
+				host := s
+				if h, _, err := net.SplitHostPort(s); err == nil {
+					host = h
+				}
+				exemptions = append(exemptions, vpnDNSExemption{Server: host})
+			}
+			mainLog.Load().Info().Msgf("DNS intercept recovery: exempting DHCP nameservers from filters: %v", exemptions)
+			if err := p.exemptVPNDNSServers(exemptions); err != nil {
+				mainLog.Load().Warn().Err(err).Msg("DNS intercept recovery: failed to exempt DHCP nameservers — recovery queries may fail")
+			}
+		}
+	} else {
+		// Traditional flow: remove DNS settings to expose DHCP nameservers
+		p.resetDNS(false, false)
+
+		// For an OS failure, reinitialize OS resolver nameservers immediately.
+		if reason == RecoveryReasonOSFailure {
+			mainLog.Load().Debug().Msg("OS resolver failure detected; reinitializing OS resolver nameservers")
+			ns := ctrld.InitializeOsResolver(true)
+			if len(ns) == 0 {
+				mainLog.Load().Warn().Msg("No nameservers found for OS resolver; using existing values")
+			} else {
+				mainLog.Load().Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+			}
 		}
 	}
 
@@ -1500,22 +1800,45 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 	// reset the upstream failure count and down state
 	p.um.reset(recovered)
 
-	// For network changes we also reinitialize the OS resolver.
-	if reason == RecoveryReasonNetworkChange {
-		ns := ctrld.InitializeOsResolver(true)
-		if len(ns) == 0 {
-			mainLog.Load().Warn().Msg("No nameservers found for OS resolver during network-change recovery; using existing values")
-		} else {
-			mainLog.Load().Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+	// In DNS intercept mode, just disable the bypass — filters are still active.
+	if dnsIntercept && p.dnsInterceptState != nil {
+		p.recoveryBypass.Store(false)
+		mainLog.Load().Info().Msg("DNS intercept recovery complete: disabling DHCP bypass, resuming normal flow")
+
+		// Refresh VPN DNS routes in case VPN state changed during recovery.
+		if p.vpnDNS != nil {
+			p.vpnDNS.Refresh(true)
 		}
+
+		// Reinitialize OS resolver for the recovered state.
+		if reason == RecoveryReasonNetworkChange {
+			ns := ctrld.InitializeOsResolver(true)
+			if len(ns) == 0 {
+				mainLog.Load().Warn().Msg("No nameservers found for OS resolver during network-change recovery; using existing values")
+			} else {
+				mainLog.Load().Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+			}
+		}
+
+		p.recoveryRunning.Store(false)
+	} else {
+		// For network changes we also reinitialize the OS resolver.
+		if reason == RecoveryReasonNetworkChange {
+			ns := ctrld.InitializeOsResolver(true)
+			if len(ns) == 0 {
+				mainLog.Load().Warn().Msg("No nameservers found for OS resolver during network-change recovery; using existing values")
+			} else {
+				mainLog.Load().Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+			}
+		}
+
+		// Apply our DNS settings back and log the interface state.
+		p.setDNS()
+		p.logInterfacesState()
+
+		// allow watchdogs to put the listener back on the interface if its changed for any reason
+		p.recoveryRunning.Store(false)
 	}
-
-	// Apply our DNS settings back and log the interface state.
-	p.setDNS()
-	p.logInterfacesState()
-
-	// allow watchdogs to put the listener back on the interface if its changed for any reason
-	p.recoveryRunning.Store(false)
 
 	// Clear the recovery cancellation for a clean slate.
 	p.recoveryCancelMu.Lock()

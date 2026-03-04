@@ -22,15 +22,15 @@ func Test_wildcardMatches(t *testing.T) {
 		domain   string
 		match    bool
 	}{
-		{"domain - prefix parent should not match", "*.windscribe.com", "windscribe.com", false},
-		{"domain - prefix", "*.windscribe.com", "anything.windscribe.com", true},
-		{"domain - prefix not match other s", "*.windscribe.com", "example.com", false},
-		{"domain - prefix not match s in name", "*.windscribe.com", "wwindscribe.com", false},
-		{"domain - suffix", "suffix.*", "suffix.windscribe.com", true},
-		{"domain - suffix not match other", "suffix.*", "suffix1.windscribe.com", false},
-		{"domain - both", "suffix.*.windscribe.com", "suffix.anything.windscribe.com", true},
-		{"domain - both not match", "suffix.*.windscribe.com", "suffix1.suffix.windscribe.com", false},
-		{"domain - case-insensitive", "*.WINDSCRIBE.com", "anything.windscribe.com", true},
+		{"domain - prefix parent should not match", "*.example.com", "example.com", false},
+		{"domain - prefix", "*.example.com", "anything.example.com", true},
+		{"domain - prefix not match other s", "*.example.com", "other.org", false},
+		{"domain - prefix not match s in name", "*.example.com", "eexample.com", false},
+		{"domain - suffix", "suffix.*", "suffix.example.com", true},
+		{"domain - suffix not match other", "suffix.*", "suffix1.example.com", false},
+		{"domain - both", "suffix.*.example.com", "suffix.anything.example.com", true},
+		{"domain - both not match", "suffix.*.example.com", "suffix1.suffix.example.com", false},
+		{"domain - case-insensitive", "*.EXAMPLE.com", "anything.example.com", true},
 		{"mac - prefix", "*:98:05:b4:2b", "d4:67:98:05:b4:2b", true},
 		{"mac - prefix not match other s", "*:98:05:b4:2b", "0d:ba:54:09:94:2c", false},
 		{"mac - prefix not match s in name", "*:98:05:b4:2b", "e4:67:97:05:b4:2b", false},
@@ -57,9 +57,9 @@ func Test_canonicalName(t *testing.T) {
 		domain    string
 		canonical string
 	}{
-		{"fqdn to canonical", "windscribe.com.", "windscribe.com"},
-		{"already canonical", "windscribe.com", "windscribe.com"},
-		{"case insensitive", "Windscribe.Com.", "windscribe.com"},
+		{"fqdn to canonical", "example.com.", "example.com"},
+		{"already canonical", "example.com", "example.com"},
+		{"case insensitive", "Example.Com.", "example.com"},
 	}
 
 	for _, tc := range tests {
@@ -463,4 +463,14 @@ func Test_isWanClient(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_prog_queryFromSelf(t *testing.T) {
+	p := &prog{}
+	require.NotPanics(t, func() {
+		p.queryFromSelf("")
+	})
+	require.NotPanics(t, func() {
+		p.queryFromSelf("foo")
+	})
 }

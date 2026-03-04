@@ -35,7 +35,7 @@ require (
 	github.com/spf13/pflag v1.0.6
 	github.com/spf13/viper v1.16.0
 	github.com/stretchr/testify v1.11.1
-	github.com/vishvananda/netlink v1.2.1-beta.2
+	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/net v0.43.0
 	golang.org/x/sync v0.16.0
 	golang.org/x/sys v0.35.0
@@ -88,7 +88,7 @@ require (
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/u-root/uio v0.0.0-20240118234441-a3c409a6018e // indirect
-	github.com/vishvananda/netns v0.0.4 // indirect
+	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect

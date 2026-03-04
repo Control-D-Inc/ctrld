@@ -55,7 +55,7 @@ func setDNS(iface *net.Interface, nameservers []string) error {
 				mainLog.Load().Debug().Msgf("Existing forwarders content: %s", string(oldForwardersContent))
 			}
 
-			hasLocalIPv6Listener := needLocalIPv6Listener()
+			hasLocalIPv6Listener := needLocalIPv6Listener(interceptMode)
 			mainLog.Load().Debug().Bool("has_ipv6_listener", hasLocalIPv6Listener).Msg("IPv6 listener status")
 
 			forwarders := slices.DeleteFunc(slices.Clone(nameservers), func(s string) bool {

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"encoding/hex"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -40,6 +42,9 @@ var (
 	cleanup           bool
 	startOnly         bool
 	rfc1918           bool
+	interceptMode     string // "", "dns", or "hard" — set via --intercept-mode flag or config
+	dnsIntercept      bool   // derived: interceptMode == "dns" || interceptMode == "hard"
+	hardIntercept     bool   // derived: interceptMode == "hard"
 
 	mainLog       atomic.Pointer[zerolog.Logger]
 	consoleWriter zerolog.ConsoleWriter
@@ -59,6 +64,16 @@ func init() {
 }
 
 func Main() {
+	// Fast path for pf interception probe subprocess. This runs before cobra
+	// initialization to minimize startup time. The parent process spawns us with
+	// "pf-probe-send <host> <hex-dns-packet>" and a non-_ctrld GID so pf
+	// intercepts the DNS query. If pf rdr is working, the query reaches ctrld's
+	// listener; if not, it goes to the real DNS server and ctrld detects the miss.
+	if len(os.Args) >= 4 && os.Args[1] == "pf-probe-send" {
+		pfProbeSend(os.Args[2], os.Args[3])
+		return
+	}
+
 	ctrld.InitConfig(v, "ctrld")
 	initCLI()
 	if err := rootCmd.Execute(); err != nil {
@@ -188,4 +203,26 @@ func initCache() {
 	if cfg.Service.CacheSize == 0 {
 		cfg.Service.CacheSize = 4096
 	}
+}
+
+// pfProbeSend is a minimal subprocess that sends a pre-built DNS query packet
+// to the specified host on port 53. It's invoked by probePFIntercept() with a
+// non-_ctrld GID so pf interception applies to the query.
+//
+// Usage: ctrld pf-probe-send <host> <hex-encoded-dns-packet>
+func pfProbeSend(host, hexPacket string) {
+	packet, err := hex.DecodeString(hexPacket)
+	if err != nil {
+		os.Exit(1)
+	}
+	conn, err := net.DialTimeout("udp", net.JoinHostPort(host, "53"), time.Second)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(time.Second))
+	_, _ = conn.Write(packet)
+	// Read response (don't care about result, just need the send to happen)
+	buf := make([]byte, 512)
+	_, _ = conn.Read(buf)
 }

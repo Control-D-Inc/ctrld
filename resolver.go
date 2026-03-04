@@ -234,6 +234,79 @@ type publicResponse struct {
 	server string
 }
 
+// OsResolverNameservers returns the current OS resolver nameservers (host:port format).
+// Returns nil if the OS resolver has not been initialized.
+func OsResolverNameservers() []string {
+	resolverMutex.Lock()
+	r := or
+	resolverMutex.Unlock()
+	if r == nil {
+		return nil
+	}
+	var nss []string
+	if lan := r.lanServers.Load(); lan != nil {
+		nss = append(nss, *lan...)
+	}
+	if pub := r.publicServers.Load(); pub != nil {
+		nss = append(nss, *pub...)
+	}
+	return nss
+}
+
+// AppendOsResolverNameservers adds additional nameservers to the existing OS resolver
+// without reinitializing it. This is used for late-arriving nameservers such as AD
+// domain controller IPs discovered via background retry.
+// Returns true if nameservers were actually added.
+func AppendOsResolverNameservers(servers []string) bool {
+	if len(servers) == 0 {
+		return false
+	}
+	resolverMutex.Lock()
+	defer resolverMutex.Unlock()
+	if or == nil {
+		return false
+	}
+
+	// Collect existing nameservers to avoid duplicates.
+	existing := make(map[string]bool)
+	if lan := or.lanServers.Load(); lan != nil {
+		for _, s := range *lan {
+			existing[s] = true
+		}
+	}
+	if pub := or.publicServers.Load(); pub != nil {
+		for _, s := range *pub {
+			existing[s] = true
+		}
+	}
+
+	var added bool
+	for _, s := range servers {
+		// Normalize to host:port format.
+		if _, _, err := net.SplitHostPort(s); err != nil {
+			s = net.JoinHostPort(s, "53")
+		}
+		if existing[s] {
+			continue
+		}
+		existing[s] = true
+		added = true
+
+		ip, _, _ := net.SplitHostPort(s)
+		addr, _ := netip.ParseAddr(ip)
+		if isLanAddr(addr) {
+			lan := or.lanServers.Load()
+			newLan := append(append([]string{}, (*lan)...), s)
+			or.lanServers.Store(&newLan)
+		} else {
+			pub := or.publicServers.Load()
+			newPub := append(append([]string{}, (*pub)...), s)
+			or.publicServers.Store(&newPub)
+		}
+	}
+	return added
+}
+
 // SetDefaultLocalIPv4 updates the stored local IPv4.
 func SetDefaultLocalIPv4(ip net.IP) {
 	Log(context.Background(), ProxyLogger.Load().Debug(), "SetDefaultLocalIPv4: %s", ip)
@@ -291,6 +364,9 @@ const hotCacheTTL = time.Second
 // for a short period (currently 1 second), reducing unnecessary traffics
 // sent to upstreams.
 func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	if err := validateMsg(msg); err != nil {
+		return nil, err
+	}
 	if len(msg.Question) == 0 {
 		return nil, errors.New("no question found")
 	}
@@ -509,6 +585,10 @@ type legacyResolver struct {
 }
 
 func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	if err := validateMsg(msg); err != nil {
+		return nil, err
+	}
+
 	// See comment in (*dotResolver).resolve method.
 	dialer := newDialer(net.JoinHostPort(controldPublicDns, "53"))
 	dnsTyp := uint16(0)
@@ -534,6 +614,9 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 type dummyResolver struct{}
 
 func (d dummyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	if err := validateMsg(msg); err != nil {
+		return nil, err
+	}
 	ans := new(dns.Msg)
 	ans.SetReply(msg)
 	return ans, nil
@@ -768,4 +851,14 @@ func isLanAddr(addr netip.Addr) bool {
 		addr.IsLoopback() ||
 		addr.IsLinkLocalUnicast() ||
 		tsaddr.CGNATRange().Contains(addr)
+}
+
+func validateMsg(msg *dns.Msg) error {
+	if msg == nil {
+		return errors.New("nil DNS message")
+	}
+	if len(msg.Question) == 0 {
+		return errors.New("no question found")
+	}
+	return nil
 }
