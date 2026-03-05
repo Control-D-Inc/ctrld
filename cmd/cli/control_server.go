@@ -32,9 +32,10 @@ const (
 )
 
 type ifaceResponse struct {
-	Name string `json:"name"`
-	All  bool   `json:"all"`
-	OK   bool   `json:"ok"`
+	Name          string `json:"name"`
+	All           bool   `json:"all"`
+	OK            bool   `json:"ok"`
+	InterceptMode string `json:"intercept_mode,omitempty"` // "dns", "hard", or "" (not intercepting)
 }
 
 // controlServer represents an HTTP server for handling control requests
@@ -279,6 +280,10 @@ func (p *prog) registerControlServerHandler() {
 				res.Name = p.runningIface
 				res.All = p.requiredMultiNICsConfig
 				res.OK = true
+				// Report intercept mode to the start command for proper log output.
+				if interceptMode == "dns" || interceptMode == "hard" {
+					res.InterceptMode = interceptMode
+				}
 			}
 		}
 		if err := json.NewEncoder(w).Encode(res); err != nil {

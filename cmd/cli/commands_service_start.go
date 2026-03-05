@@ -36,6 +36,14 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	setDependencies(svcConfig)
 	svcConfig.Arguments = append([]string{"run"}, osArgs...)
 
+	// Validate --intercept-mode early, before installing the service.
+	// Without this, a typo like "--intercept-mode fds" would install the service,
+	// the child process would Fatal() on the invalid value, and the parent would
+	// then uninstall — confusing and destructive.
+	if interceptMode != "" && !validInterceptMode(interceptMode) {
+		logger.Fatal().Msgf("invalid --intercept-mode value %q: must be 'off', 'dns', or 'hard'", interceptMode)
+	}
+
 	// Initialize service manager with proper configuration
 	s, p, err := sc.initializeServiceManagerWithServiceConfig(svcConfig)
 	if err != nil {
@@ -52,6 +60,49 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 
 	// Get current running iface, if any.
 	var currentIface *ifaceResponse
+
+	// Handle "ctrld start --intercept-mode dns|hard" on an existing
+	// service BEFORE the pin check. Adding intercept mode is an enhancement, not
+	// deactivation, so it doesn't require the deactivation pin. We modify the
+	// plist/registry directly and restart the service via the OS service manager.
+	osArgsEarly := os.Args[2:]
+	if os.Args[1] == "service" {
+		osArgsEarly = os.Args[3:]
+	}
+	osArgsEarly = filterEmptyStrings(osArgsEarly)
+	interceptOnly := onlyInterceptFlags(osArgsEarly)
+	svcExists := serviceConfigFileExists()
+	logger.Debug().Msgf("intercept upgrade check: args=%v interceptOnly=%v svcConfigExists=%v interceptMode=%q", osArgsEarly, interceptOnly, svcExists, interceptMode)
+	if interceptOnly && svcExists {
+		// Remove any existing intercept flags before applying the new value.
+		_ = removeServiceFlag("--intercept-mode")
+
+		if interceptMode == "off" {
+			// "off" = remove intercept mode entirely (just the removal above).
+			logger.Notice().Msg("Existing service detected — removing --intercept-mode from service arguments")
+		} else {
+			// Add the new mode value.
+			logger.Notice().Msgf("Existing service detected — appending --intercept-mode %s to service arguments", interceptMode)
+			if err := appendServiceFlag("--intercept-mode"); err != nil {
+				logger.Fatal().Err(err).Msg("failed to append intercept flag to service arguments")
+			}
+			if err := appendServiceFlag(interceptMode); err != nil {
+				logger.Fatal().Err(err).Msg("failed to append intercept mode value to service arguments")
+			}
+		}
+
+		// Stop the service if running (bypasses ctrld pin — this is an
+		// enhancement, not deactivation). Then fall through to the normal
+		// startOnly path which handles start, self-check, and reporting.
+		if isCtrldRunning {
+			logger.Notice().Msg("Stopping service for intercept mode upgrade")
+			_ = s.Stop()
+			isCtrldRunning = false
+		}
+		startOnly = true
+		isCtrldInstalled = true
+		// Fall through to startOnly path below.
+	}
 
 	// If pin code was set, do not allow running start command.
 	if isCtrldRunning {
@@ -78,20 +129,31 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 					return
 				}
 				if res.OK {
-					name := res.Name
-					if iff, err := net.InterfaceByName(name); err == nil {
-						_, _ = patchNetIfaceName(iff)
-						name = iff.Name
-					}
-					logger := logger.With().Str("iface", name)
-					logger.Debug().Msg("Setting DNS successfully")
-					if res.All {
-						// Log that DNS is set for other interfaces.
-						withEachPhysicalInterfaces(
-							name,
-							"set DNS",
-							func(i *net.Interface) error { return nil },
-						)
+					// In intercept mode, show intercept-specific status instead of
+					// per-interface DNS messages (which are irrelevant).
+					if res.InterceptMode != "" {
+						switch res.InterceptMode {
+						case "hard":
+							logger.Notice().Msg("DNS hard intercept mode active — all DNS traffic intercepted, no VPN split routing")
+						default:
+							logger.Notice().Msg("DNS intercept mode active — all DNS traffic intercepted via OS packet filter")
+						}
+					} else {
+						name := res.Name
+						if iff, err := net.InterfaceByName(name); err == nil {
+							_, _ = patchNetIfaceName(iff)
+							name = iff.Name
+						}
+						ifaceLogger := logger.With().Str("iface", name)
+						ifaceLogger.Debug().Msg("Setting DNS successfully")
+						if res.All {
+							// Log that DNS is set for other interfaces.
+							withEachPhysicalInterfaces(
+								name,
+								"set DNS",
+								func(i *net.Interface) error { return nil },
+							)
+						}
 					}
 				}
 			}
@@ -179,6 +241,10 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 				os.Exit(1)
 			}
 			reportSetDnsOk(sockDir)
+			// Verify service registration after successful start.
+			if err := verifyServiceRegistration(); err != nil {
+				logger.Warn().Err(err).Msg("Service registry verification failed")
+			}
 		} else {
 			logger.Error().Err(err).Msg("Failed to start existing ctrld service")
 			os.Exit(1)
@@ -301,6 +367,10 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 			os.Exit(1)
 		}
 		reportSetDnsOk(sockDir)
+		// Verify service registration after successful start.
+		if err := verifyServiceRegistration(); err != nil {
+			logger.Warn().Err(err).Msg("Service registry verification failed")
+		}
 	}
 
 	logger.Debug().Msg("Service start command completed")
@@ -350,6 +420,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmd.Flags().BoolVarP(&startOnly, "start_only", "", false, "Do not install new service")
 	_ = startCmd.Flags().MarkHidden("start_only")
 	startCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
+	startCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'dns' (with VPN split routing) or 'hard' (all DNS through ctrld, no VPN split routing)")
 
 	// Start command alias
 	startCmdAlias := &cobra.Command{

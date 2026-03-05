@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"encoding/hex"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"time"
 
 	"github.com/kardianos/service"
 	"go.uber.org/zap"
@@ -42,6 +45,9 @@ var (
 	cleanup           bool
 	startOnly         bool
 	rfc1918           bool
+	interceptMode     string // "", "dns", or "hard" — set via --intercept-mode flag or config
+	dnsIntercept      bool   // derived: interceptMode == "dns" || interceptMode == "hard"
+	hardIntercept     bool   // derived: interceptMode == "hard"
 
 	mainLog            atomic.Pointer[ctrld.Logger]
 	consoleWriter      zapcore.Core
@@ -68,6 +74,12 @@ func init() {
 // Main is the entry point for the CLI application
 // It initializes configuration, sets up the CLI structure, and executes the root command
 func Main() {
+	// Fast path for pf interception probe subprocess.
+	if len(os.Args) >= 4 && os.Args[1] == "pf-probe-send" {
+		pfProbeSend(os.Args[2], os.Args[3])
+		return
+	}
+
 	ctrld.InitConfig(v, "ctrld")
 	rootCmd := initCLI()
 	if err := rootCmd.Execute(); err != nil {
@@ -228,4 +240,22 @@ func initCache() {
 		// Default cache size provides good balance between memory usage and performance
 		cfg.Service.CacheSize = 4096
 	}
+}
+
+// pfProbeSend is a minimal subprocess that sends a pre-built DNS query packet
+// to the specified host on port 53.
+func pfProbeSend(host, hexPacket string) {
+	packet, err := hex.DecodeString(hexPacket)
+	if err != nil {
+		os.Exit(1)
+	}
+	conn, err := net.DialTimeout("udp", net.JoinHostPort(host, "53"), time.Second)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(time.Second))
+	_, _ = conn.Write(packet)
+	buf := make([]byte, 512)
+	_, _ = conn.Read(buf)
 }

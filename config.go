@@ -246,6 +246,7 @@ type ServiceConfig struct {
 	RefetchTime             *int           `mapstructure:"refetch_time" toml:"refetch_time,omitempty"`
 	ForceRefetchWaitTime    *int           `mapstructure:"force_refetch_wait_time" toml:"force_refetch_wait_time,omitempty"`
 	LeakOnUpstreamFailure   *bool          `mapstructure:"leak_on_upstream_failure" toml:"leak_on_upstream_failure,omitempty"`
+	InterceptMode           string         `mapstructure:"intercept_mode" toml:"intercept_mode,omitempty" validate:"omitempty,oneof=off dns hard"`
 	Daemon                  bool           `mapstructure:"-" toml:"-"`
 	AllocateIP              bool           `mapstructure:"-" toml:"-"`
 }
@@ -524,6 +525,32 @@ func (uc *UpstreamConfig) ReBootstrap(ctx context.Context) {
 		}
 		return true, nil
 	})
+}
+
+// ForceReBootstrap immediately creates a new transport (closing old idle
+// connections first) without waiting for the lazy re-bootstrap mechanism.
+// Used after pf state table flushes where existing TCP/QUIC connections
+// are dead and we need fresh connections immediately.
+func (uc *UpstreamConfig) ForceReBootstrap(ctx context.Context) {
+	switch uc.Type {
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ, ResolverTypeDOT:
+	default:
+		return
+	}
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "force re-bootstrapping upstream transport for %v", uc)
+	uc.closeTransports()
+	uc.SetupTransport(ctx)
+	// Clear any pending lazy re-bootstrap flag so ensureSetupTransport()
+	// doesn't redundantly recreate the transport we just built.
+	uc.rebootstrap.Store(rebootstrapNotStarted)
+}
+
+// closeTransports closes idle connections on all existing transports.
+func (uc *UpstreamConfig) closeTransports() {
+	if t := uc.transport; t != nil {
+		t.CloseIdleConnections()
+	}
 }
 
 // SetupTransport initializes the network transport used to connect to upstream servers.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
@@ -253,4 +254,54 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	rootCmd.AddCommand(serviceCmd)
 
 	return serviceCmd
+}
+
+// validInterceptMode reports whether the given value is a recognized --intercept-mode.
+// This is the single source of truth for mode validation — used by the early start
+// command check, the runtime validation in prog.go, and onlyInterceptFlags below.
+// Add new modes here to have them recognized everywhere.
+func validInterceptMode(mode string) bool {
+	switch mode {
+	case "off", "dns", "hard":
+		return true
+	}
+	return false
+}
+
+// onlyInterceptFlags reports whether args contain only intercept mode
+// flags (--intercept-mode <value>) and flags that are auto-added by the
+// start command alias (--iface). This is used to detect "ctrld start --intercept-mode dns"
+// (or "off" to disable) on an existing installation, where the intent is to modify the
+// intercept flag on the existing service without replacing other arguments.
+//
+// Note: the startCmdAlias appends "--iface=auto" to os.Args when --iface isn't
+// explicitly provided, so we must allow it here.
+func onlyInterceptFlags(args []string) bool {
+	hasIntercept := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--intercept-mode":
+			// Next arg must be a valid mode value.
+			if i+1 < len(args) && validInterceptMode(args[i+1]) {
+				hasIntercept = true
+				i++ // skip the value
+			} else {
+				return false
+			}
+		case strings.HasPrefix(arg, "--intercept-mode="):
+			val := strings.TrimPrefix(arg, "--intercept-mode=")
+			if validInterceptMode(val) {
+				hasIntercept = true
+			} else {
+				return false
+			}
+		case arg == "--iface=auto" || arg == "--iface" || arg == "auto":
+			// Auto-added by startCmdAlias or its value; safe to ignore.
+			continue
+		default:
+			return false
+		}
+	}
+	return hasIntercept
 }
