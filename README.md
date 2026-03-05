@@ -81,7 +81,7 @@ docker build -t controldns/ctrld . -f docker/Dockerfile
 
 
 # Usage
-The cli is self documenting, so free free to run `--help` on any sub-command to get specific usages. 
+The cli is self documenting, so feel free to run `--help` on any sub-command to get specific usages. 
 
 ## Arguments
 ```
@@ -244,6 +244,68 @@ The above will start a foreground process and:
 - Forward all queries to `https://freedns.controld.com/p2` using DoH protocol, while...
 - Excluding `*.company.int` and `very-secure.local` matching queries, that are forwarded to `10.0.10.1:53`
 - Write a debug log to `/path/to/log.log`
+
+## DNS Intercept Mode
+When running `ctrld` alongside VPN software, DNS conflicts can cause intermittent failures, bypassed filtering, or configuration loops. DNS Intercept Mode prevents these issues by transparently capturing all DNS traffic on the system and routing it through `ctrld`, without modifying network adapter DNS settings.
+
+### When to Use
+Enable DNS Intercept Mode if you:
+- Use corporate VPN software (F5, Cisco AnyConnect, Palo Alto GlobalProtect, Zscaler)
+- Run overlay networks like Tailscale or WireGuard
+- Experience random DNS failures when VPN connects/disconnects
+- See gaps in your Control D analytics when VPN is active
+- Have endpoint security software that also manages DNS
+
+### Command
+
+Windows (Admin Shell)
+```shell
+ctrld.exe start --intercept-mode dns --cd RESOLVER_ID_HERE
+```
+
+macOS
+```shell
+sudo ctrld start --intercept-mode dns --cd RESOLVER_ID_HERE
+```
+
+`--intercept-mode dns` automatically detects VPN internal domains and routes them to the VPN's DNS server, while Control D handles everything else.
+
+To disable intercept mode on a service that already has it enabled:
+
+Windows (Admin Shell)
+```shell
+ctrld.exe start --intercept-mode off
+```
+
+macOS
+```shell
+sudo ctrld start --intercept-mode off
+```
+
+This removes the intercept rules and reverts to standard interface-based DNS configuration.
+
+### Platform Support
+| Platform | Supported | Mechanism |
+|----------|-----------|-----------|
+| Windows  | ✅        | NRPT (Name Resolution Policy Table) |
+| macOS    | ✅        | pf (packet filter) redirect |
+| Linux    | ❌        | Not currently supported |
+
+### Features
+- **VPN split routing** — VPN-specific domains are automatically detected and forwarded to the VPN's DNS server
+- **Captive portal recovery** — Wi-Fi login pages (hotels, airports, coffee shops) work automatically
+- **No network adapter changes** — DNS settings stay untouched, eliminating conflicts entirely
+- **Automatic port 53 conflict resolution** — if another process (e.g., `mDNSResponder` on macOS) is already using port 53, `ctrld` automatically listens on a different port. OS-level packet interception redirects all DNS traffic to `ctrld` transparently, so no manual configuration is needed. This only applies to intercept mode.
+
+### Tested VPN Software
+- F5 BIG-IP APM
+- Cisco AnyConnect
+- Palo Alto GlobalProtect
+- Tailscale (including Exit Nodes)
+- Windscribe
+- WireGuard
+
+For more details, see the [DNS Intercept Mode documentation](https://docs.controld.com/docs/dns-intercept).
 
 ## Contributing
 See [Contribution Guideline](./docs/contributing.md)
