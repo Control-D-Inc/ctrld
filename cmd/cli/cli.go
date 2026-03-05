@@ -342,6 +342,16 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		processLogAndCacheFlags()
 	}
 
+	// Persist intercept_mode to config when provided via CLI flag on full install.
+	// This ensures the config file reflects the actual running mode for RMM/MDM visibility.
+	if interceptMode == "dns" || interceptMode == "hard" {
+		if cfg.Service.InterceptMode != interceptMode {
+			cfg.Service.InterceptMode = interceptMode
+			updated = true
+			p.Info().Msgf("writing intercept_mode = %q to config", interceptMode)
+		}
+	}
+
 	if updated {
 		if err := writeConfigFile(&cfg); err != nil {
 			notifyExitToLogServer()

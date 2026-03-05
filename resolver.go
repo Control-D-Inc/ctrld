@@ -120,6 +120,25 @@ func InitializeOsResolver(ctx context.Context, guardAgainstNoNameservers bool) [
 	return ns
 }
 
+// OsResolverNameservers returns the current OS resolver nameservers (host:port format).
+// Returns nil if the OS resolver has not been initialized.
+func OsResolverNameservers() []string {
+	resolverMutex.Lock()
+	r := or
+	resolverMutex.Unlock()
+	if r == nil {
+		return nil
+	}
+	var nss []string
+	if lan := r.lanServers.Load(); lan != nil {
+		nss = append(nss, *lan...)
+	}
+	if pub := r.publicServers.Load(); pub != nil {
+		nss = append(nss, *pub...)
+	}
+	return nss
+}
+
 // initializeOsResolver performs logic for choosing OS resolver nameserver.
 // The logic:
 //
