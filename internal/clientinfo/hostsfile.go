@@ -27,6 +27,7 @@ type hostsFile struct {
 	watcher *fsnotify.Watcher
 	mu      sync.Mutex
 	m       map[string][]string
+	logger  *ctrld.Logger
 }
 
 // init performs initialization works, which is necessary before hostsFile can be fully operated.
@@ -55,7 +56,7 @@ func (hf *hostsFile) refresh() error {
 	// override hosts file with host_entries.conf content if present.
 	hem, err := parseHostEntriesConf(hostEntriesConfPath)
 	if err != nil && !os.IsNotExist(err) {
-		ctrld.ProxyLogger.Load().Debug().Err(err).Msg("could not read host_entries.conf file")
+		hf.logger.Debug().Err(err).Msg("Could not read host_entries.conf file")
 	}
 	for k, v := range hem {
 		hf.m[k] = v
@@ -77,14 +78,14 @@ func (hf *hostsFile) watchChanges() {
 			}
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Chmod) || event.Has(fsnotify.Remove) {
 				if err := hf.refresh(); err != nil && !os.IsNotExist(err) {
-					ctrld.ProxyLogger.Load().Err(err).Msg("hosts file changed but failed to update client info")
+					hf.logger.Err(err).Msg("Hosts file changed but Failed to update client info")
 				}
 			}
 		case err, ok := <-hf.watcher.Errors:
 			if !ok {
 				return
 			}
-			ctrld.ProxyLogger.Load().Err(err).Msg("could not watch client info file")
+			hf.logger.Err(err).Msg("Could not watch client info file")
 		}
 	}
 
@@ -164,6 +165,8 @@ func parseHostEntriesConfFromReader(r io.Reader) map[string][]string {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if after, found := strings.CutPrefix(line, "local-zone:"); found {
+			// Extract local zone name for domain suffix removal
+			// This is needed because unbound appends the local zone to hostnames
 			after = strings.TrimSpace(after)
 			fields := strings.Fields(after)
 			if len(fields) > 1 {
@@ -176,6 +179,8 @@ func parseHostEntriesConfFromReader(r io.Reader) map[string][]string {
 		if !found {
 			continue
 		}
+		// Clean up the parsed data by removing whitespace and quotes
+		// This ensures consistent formatting for hostname processing
 		after = strings.TrimSpace(after)
 		after = strings.Trim(after, `"`)
 		fields := strings.Fields(after)
@@ -183,6 +188,8 @@ func parseHostEntriesConfFromReader(r io.Reader) map[string][]string {
 			continue
 		}
 		ip := fields[0]
+		// Remove local zone suffix from hostname for cleaner lookups
+		// Unbound adds the local zone to hostnames, but we want just the base name
 		name := strings.TrimSuffix(fields[1], "."+localZone)
 		hostsMap[ip] = append(hostsMap[ip], name)
 	}

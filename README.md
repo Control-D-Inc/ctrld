@@ -11,7 +11,6 @@ A highly configurable DNS forwarding proxy with support for:
 - Multiple upstreams with fallbacks
 - Multiple network policy driven DNS query steering (via network cidr, MAC address or FQDN)
 - Policy driven domain based "split horizon" DNS with wildcard support
-- Integrations with common router vendors and firmware
 - LAN client discovery via DHCP, mDNS, ARP, NDP, hosts file parsing
 - Prometheus metrics exporter 
 
@@ -26,35 +25,17 @@ All DNS protocols are supported, including:
 - `DNS-over-QUIC`
 
 # Use Cases
-1. Use secure DNS protocols on networks and devices that don't natively support them (legacy routers, legacy OSes, TVs, smart toasters).
+1. Use secure DNS protocols on networks and devices that don't natively support them (legacy OSes, TVs, smart toasters).
 2. Create source IP based DNS routing policies with variable secure DNS upstreams. Subnet 1 (admin) uses upstream resolver A, while Subnet 2 (employee) uses upstream resolver B.
 3. Create destination IP based DNS routing policies with variable secure DNS upstreams. Listener 1 uses upstream resolver C, while Listener 2 uses upstream resolver D.
 4. Create domain level "split horizon" DNS routing policies to send internal domains (*.company.int) to a local DNS server, while everything else goes to another upstream.
-5. Deploy on a router and create LAN client specific DNS routing policies from a web GUI (When using ControlD.com).
 
 
 ## OS Support
-- Windows (386, amd64, arm)
-- Windows Server (386, amd64)
+- Windows Desktop (386, amd64, arm)
 - MacOS (amd64, arm64)
 - Linux (386, amd64, arm, mips)
 - FreeBSD (386, amd64, arm)
-- Common routers (See below)
-
-
-### Supported Routers
-You can run `ctrld` on any supported router. The list of supported routers and firmware includes:
-- Asus Merlin
-- DD-WRT
-- Firewalla
-- FreshTomato
-- GL.iNet
-- OpenWRT
-- pfSense / OPNsense
-- Synology 
-- Ubiquiti (UniFi, EdgeOS)
-
-`ctrld` will attempt to interface with dnsmasq (or Windows Server) whenever possible and set itself as the upstream, while running on port 5354. On FreeBSD based OSes, `ctrld` will terminate dnsmasq and unbound in order to be able to listen on port 53 directly.  
 
 # Install
 There are several ways to download and install `ctrld`.
@@ -63,12 +44,12 @@ There are several ways to download and install `ctrld`.
 The simplest way to download and install `ctrld` is to use the following installer command on any UNIX-like platform:
 
 ```shell
-sh -c 'sh -c "$(curl -sL https://api.controld.com/dl)"'
+sh -c 'sh -c "$(curl -sL https://api.controld.com/dl?version=2)"'
 ```
 
 Windows user and prefer Powershell (who doesn't)? No problem, execute this command instead in administrative PowerShell:
 ```shell
-(Invoke-WebRequest -Uri 'https://api.controld.com/dl/ps1' -UseBasicParsing).Content | Set-Content "$env:TEMPctrld_install.ps1"; Invoke-Expression "& '$env:TEMPctrld_install.ps1'"
+(Invoke-WebRequest -Uri 'https://api.controld.com/dl/ps1?version=2' -UseBasicParsing).Content | Set-Content "$env:TEMPctrld_install.ps1"; Invoke-Expression "& '$env:TEMPctrld_install.ps1'"
 ```
 
 Or you can pull and run a Docker container from [Docker Hub](https://hub.docker.com/r/controldns/ctrld)
@@ -80,7 +61,7 @@ docker run -d --name=ctrld -p 127.0.0.1:53:53/tcp -p 127.0.0.1:53:53/udp control
 Alternatively, if you know what you're doing you can download pre-compiled binaries from the [Releases](https://github.com/Control-D-Inc/ctrld/releases) section for the appropriate platform. 
 
 ## Build
-Lastly, you can build `ctrld` from source which requires `go1.21+`:
+Lastly, you can build `ctrld` from source which requires `go1.23+`:
 
 ```shell
 go build ./cmd/ctrld
@@ -130,7 +111,7 @@ Available Commands:
 Flags:
   -h, --help            help for ctrld
   -s, --silent          do not write any log output
-  -v, --verbose count   verbose log output, "-v" basic logging, "-vv" debug level logging
+  -v, --verbose count   verbose log output, "-v" basic logging, "-vv" debug logging
       --version         version for ctrld
 
 Use "ctrld [command] --help" for more information about a command.
@@ -161,9 +142,7 @@ You can then run a test query using a DNS client, for example, `dig`:
 If `verify.controld.com` resolves, you're successfully using the default Control D upstream. From here, you can start editing the config file that was generated. To enforce a new config, restart the server. 
 
 ## Service Mode
-This mode will run the application as a background system service on any Windows, MacOS, Linux, FreeBSD distribution or supported router. This will create a generic `ctrld.toml` file in the **C:\ControlD** directory (on Windows) or `/etc/controld/` (almost everywhere else), start the system service, and **configure the listener on all physical network interface**. Service will start on OS boot.
-
-When Control D upstreams are used on a router type device, `ctrld` will [relay your network topology](https://docs.controld.com/docs/device-clients) to Control D (LAN IPs, MAC addresses, and hostnames), and you will be able to see your LAN devices in the web panel, view analytics and apply unique profiles to them. 
+This mode will run the application as a background system service on any Windows, MacOS, Linux or FreeBSD distribution. This will create a generic `ctrld.toml` file in the **C:\ControlD** directory (on Windows) or `/etc/controld/` (almost everywhere else), start the system service, and **configure the listener on all physical network interface**. Service will start on OS boot.
 
 ### Command
 
@@ -200,7 +179,7 @@ Linux or Macos
 `ctrld` can be configured in variety of different ways, which include: API, local config file or via cli launch args. 
 
 ## API Based Auto Configuration
-Application can be started with a specific Control D resolver config, instead of the default one. Simply supply your Resolver ID with a `--cd` flag, when using the `start` (service) mode. In this mode, the application will automatically choose a non-conflicting IP and/or port and configure itself as the upstream to whatever process is running on port 53 (like dnsmasq or Windows DNS Server). This mode is used when the 1 liner installer command from the Control D onboarding guide is executed. 
+Application can be started with a specific Control D resolver config, instead of the default one. Simply supply your Resolver ID with a `--cd` flag, when using the `start` (service) mode. This mode is used when the 1 liner installer command from the Control D onboarding guide is executed. 
 
 The following command will use your own personal Control D Device resolver, and start the application in service mode. Your resolver ID is displayed on the "Show Resolvers" screen for the relevant Control D Endpoint. 
 
@@ -217,7 +196,7 @@ sudo ctrld start --cd abcd1234
 Once you run the above command, the following things will happen:
 - You resolver configuration will be fetched from the API, and config file templated with the resolver data
 - Application will start as a service, and keep running (even after reboot) until you run the `stop` or `uninstall` sub-commands
-- All physical network interface will be updated to use the listener started by the service or dnsmasq upstream will be switched to `ctrld`
+- All physical network interface will be updated to use the listener started by the service
 - All DNS queries will be sent to the listener
 
 ## Manual Configuration 

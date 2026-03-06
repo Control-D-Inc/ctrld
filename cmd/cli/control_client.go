@@ -8,10 +8,12 @@ import (
 	"time"
 )
 
+// controlClient represents an HTTP client for communicating with the control server
 type controlClient struct {
 	c *http.Client
 }
 
+// newControlClient creates a new control client with Unix socket transport
 func newControlClient(addr string) *controlClient {
 	return &controlClient{c: &http.Client{
 		Transport: &http.Transport{

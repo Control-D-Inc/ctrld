@@ -22,8 +22,8 @@ func dnsFns() []dnsFn {
 	return []dnsFn{dnsFromResolvConf, getDNSFromScutil, getAllDHCPNameservers}
 }
 
-func getDNSFromScutil() []string {
-	logger := *ProxyLogger.Load()
+func getDNSFromScutil(ctx context.Context) []string {
+	logger := LoggerFromCtx(ctx)
 
 	const (
 		maxRetries    = 10
@@ -41,7 +41,7 @@ func getDNSFromScutil() []string {
 		cmd := exec.Command("scutil", "--dns")
 		output, err := cmd.Output()
 		if err != nil {
-			Log(context.Background(), logger.Error(), "failed to execute scutil --dns (attempt %d/%d): %v", attempt+1, maxRetries, err)
+			Log(context.Background(), logger.Error(), "Failed to execute scutil --dns (attempt %d/%d): %v", attempt+1, maxRetries, err)
 			continue
 		}
 
@@ -75,7 +75,7 @@ func getDNSFromScutil() []string {
 		}
 
 		if err := scanner.Err(); err != nil {
-			Log(context.Background(), logger.Error(), "error scanning scutil output (attempt %d/%d): %v", attempt+1, maxRetries, err)
+			Log(context.Background(), logger.Error(), "Error scanning scutil output (attempt %d/%d): %v", attempt+1, maxRetries, err)
 			continue
 		}
 
@@ -109,8 +109,8 @@ func getDHCPNameservers(iface string) ([]string, error) {
 	return nameservers, nil
 }
 
-func getAllDHCPNameservers() []string {
-	logger := *ProxyLogger.Load()
+func getAllDHCPNameservers(ctx context.Context) []string {
+	logger := LoggerFromCtx(ctx)
 
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -172,7 +172,7 @@ func getAllDHCPNameservers() []string {
 
 	// if we have static DNS servers saved for the current default route, we should add them to the list
 	drIfaceName, err := netmon.DefaultRouteInterface()
-	Log(context.Background(), logger.Debug(), "checking for static DNS servers for default route interface: %s", drIfaceName)
+	Log(context.Background(), logger.Debug(), "Checking for static DNS servers for default route interface: %s", drIfaceName)
 	if err != nil {
 		Log(context.Background(), logger.Debug(),
 			"Failed to get default route interface: %v", err)
@@ -186,7 +186,7 @@ func getAllDHCPNameservers() []string {
 				Log(context.Background(), logger.Debug(),
 					"Failed to patch interface name %s: %v", drIfaceName, err)
 			}
-			staticNs, file := SavedStaticNameservers(drIface)
+			staticNs, file := SavedStaticNameserversAndPath(drIface)
 			Log(context.Background(), logger.Debug(),
 				"static dns servers from %s: %v", file, staticNs)
 			if len(staticNs) > 0 {
