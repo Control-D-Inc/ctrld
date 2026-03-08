@@ -159,6 +159,9 @@ func addHeader(ctx context.Context, req *http.Request, uc *UpstreamConfig) {
 				dohHeader = newControlDHeaders(ci)
 			case uc.isNextDNS():
 				dohHeader = newNextDNSHeaders(ci)
+		        default:
+			     // For custom upstreams with send_client_info enabled, use ControlD-style headers	
+			     dohHeader = newControlDHeaders(ci)
 			}
 		}
 	}

@@ -385,7 +385,7 @@ func (uc *UpstreamConfig) VerifyDomain() string {
 }
 
 // UpstreamSendClientInfo reports whether the upstream is
-// configured to send client info to Control D DNS server.
+// configured to send client info to the DNS server.
 //
 // Client info includes:
 //   - MAC
