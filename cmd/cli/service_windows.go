@@ -160,6 +160,7 @@ func hasLocalDnsServerRunning() bool {
 	if e != nil {
 		return false
 	}
+	defer windows.CloseHandle(h)
 	p := windows.ProcessEntry32{Size: processEntrySize}
 	for {
 		e := windows.Process32Next(h, &p)
