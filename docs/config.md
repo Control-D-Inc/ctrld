@@ -18,10 +18,6 @@ The config file allows for advanced configuration of the `ctrld` utility to cove
 
  - `/etc/controld` on *nix.
  - User's home directory on Windows.
- - Same directory with `ctrld` binary on these routers:
-   - `ddwrt`
-   - `merlin`
-   - `freshtomato`
  - Current directory.
 
 The user can choose to override default value using command line `--config` or `-c`:
@@ -293,7 +289,7 @@ If a remote upstream fails to resolve a query or is unreachable, `ctrld` will fo
 
 - Type: boolean
 - Required: no
-- Default: true on Windows, MacOS and non-router Linux.
+- Default: true on Windows, MacOS and Linux.
 
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.

@@ -17,10 +17,14 @@ func (a *arpDiscover) scan() {
 			continue // empty lines
 		}
 		if line[0] != ' ' {
+			// Mark that we've found an interface header line
+			// Windows "arp -a" output has interface headers followed by ARP entries
 			header = true // "Interface:" lines, next is header line.
 			continue
 		}
 		if header {
+			// Skip the header line that follows interface names
+			// These lines contain column headers like "Internet Address" and "Physical Address"
 			header = false // header lines
 			continue
 		}
