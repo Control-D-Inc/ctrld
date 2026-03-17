@@ -34,6 +34,12 @@ func (c *controlClient) post(path string, data io.Reader) (*http.Response, error
 	return c.c.Post("http://unix"+path, contentTypeJson, data)
 }
 
+// postStream sends a POST request with no timeout, suitable for long-lived streaming connections.
+func (c *controlClient) postStream(path string, data io.Reader) (*http.Response, error) {
+	c.c.Timeout = 0
+	return c.c.Post("http://unix"+path, contentTypeJson, data)
+}
+
 // deactivationRequest represents request for validating deactivation pin.
 type deactivationRequest struct {
 	Pin int64 `json:"pin"`

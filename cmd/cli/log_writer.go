@@ -103,12 +103,18 @@ type logReader struct {
 	size int64
 }
 
+// logSubscriber represents a subscriber to live log output.
+type logSubscriber struct {
+	ch chan []byte
+}
+
 // logWriter is an internal buffer to keep track of runtime log when no logging is enabled.
 // This provides in-memory log storage for debugging and monitoring purposes
 type logWriter struct {
-	mu   sync.Mutex
-	buf  bytes.Buffer
-	size int
+	mu          sync.Mutex
+	buf         bytes.Buffer
+	size        int
+	subscribers []*logSubscriber
 }
 
 // newLogWriter creates an internal log writer.
@@ -130,11 +136,71 @@ func newLogWriterWithSize(size int) *logWriter {
 	return lw
 }
 
+// Subscribe returns a channel that receives new log data as it's written,
+// and an unsubscribe function to clean up when done.
+func (lw *logWriter) Subscribe() (<-chan []byte, func()) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	sub := &logSubscriber{ch: make(chan []byte, 256)}
+	lw.subscribers = append(lw.subscribers, sub)
+	unsub := func() {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		for i, s := range lw.subscribers {
+			if s == sub {
+				lw.subscribers = append(lw.subscribers[:i], lw.subscribers[i+1:]...)
+				close(sub.ch)
+				break
+			}
+		}
+	}
+	return sub.ch, unsub
+}
+
+// tailLastLines returns the last n lines from the current buffer.
+func (lw *logWriter) tailLastLines(n int) []byte {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	data := lw.buf.Bytes()
+	if n <= 0 || len(data) == 0 {
+		return nil
+	}
+	// Find the last n newlines from the end.
+	count := 0
+	pos := len(data)
+	for pos > 0 {
+		pos--
+		if data[pos] == '\n' {
+			count++
+			if count == n+1 {
+				pos++ // move past this newline
+				break
+			}
+		}
+	}
+	result := make([]byte, len(data)-pos)
+	copy(result, data[pos:])
+	return result
+}
+
 // Write implements io.Writer interface for logWriter
 // This manages buffer overflow by discarding old data while preserving important markers
 func (lw *logWriter) Write(p []byte) (int, error) {
 	lw.mu.Lock()
 	defer lw.mu.Unlock()
+
+	// Fan-out to subscribers (non-blocking).
+	if len(lw.subscribers) > 0 {
+		cp := make([]byte, len(p))
+		copy(cp, p)
+		for _, sub := range lw.subscribers {
+			select {
+			case sub.ch <- cp:
+			default:
+				// Drop if subscriber is slow to avoid blocking the logger.
+			}
+		}
+	}
 
 	// If writing p causes overflows, discard old data.
 	// This prevents unbounded memory growth while maintaining recent logs

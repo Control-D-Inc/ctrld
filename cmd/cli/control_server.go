@@ -10,6 +10,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/kardianos/service"
@@ -29,6 +30,7 @@ const (
 	ifacePath        = "/iface"
 	viewLogsPath     = "/log/view"
 	sendLogsPath     = "/log/send"
+	tailLogsPath     = "/log/tail"
 )
 
 type ifaceResponse struct {
@@ -348,6 +350,170 @@ func (p *prog) registerControlServerHandler() {
 		}
 		p.internalLogSent = time.Now()
 	}))
+	p.cs.register(tailLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		// Determine logging mode and validate before starting the stream.
+		var lw *logWriter
+		useInternalLog := p.needInternalLogging()
+		if useInternalLog {
+			p.mu.Lock()
+			lw = p.internalLogWriter
+			p.mu.Unlock()
+			if lw == nil {
+				w.WriteHeader(http.StatusMovedPermanently)
+				return
+			}
+		} else if p.cfg.Service.LogPath == "" {
+			// No logging configured at all.
+			w.WriteHeader(http.StatusMovedPermanently)
+			return
+		}
+
+		// Parse optional "lines" query param for initial context.
+		numLines := 10
+		if v := request.URL.Query().Get("lines"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				numLines = n
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+
+		if useInternalLog {
+			// Internal logging mode: subscribe to the logWriter.
+
+			// Send last N lines as initial context.
+			if numLines > 0 {
+				if tail := lw.tailLastLines(numLines); len(tail) > 0 {
+					w.Write(tail)
+					flusher.Flush()
+				}
+			}
+
+			ch, unsub := lw.Subscribe()
+			defer unsub()
+			for {
+				select {
+				case data, ok := <-ch:
+					if !ok {
+						return
+					}
+					if _, err := w.Write(data); err != nil {
+						return
+					}
+					flusher.Flush()
+				case <-request.Context().Done():
+					return
+				}
+			}
+		} else {
+			// File-based logging mode: tail the log file.
+			logFile := normalizeLogFilePath(p.cfg.Service.LogPath)
+			f, err := os.Open(logFile)
+			if err != nil {
+				// Already committed 200, just return.
+				return
+			}
+			defer f.Close()
+
+			// Seek to show last N lines.
+			if numLines > 0 {
+				if tail := tailFileLastLines(f, numLines); len(tail) > 0 {
+					w.Write(tail)
+					flusher.Flush()
+				}
+			} else {
+				// Seek to end.
+				f.Seek(0, io.SeekEnd)
+			}
+
+			// Poll for new data.
+			buf := make([]byte, 4096)
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					n, err := f.Read(buf)
+					if n > 0 {
+						if _, werr := w.Write(buf[:n]); werr != nil {
+							return
+						}
+						flusher.Flush()
+					}
+					if err != nil && err != io.EOF {
+						return
+					}
+				case <-request.Context().Done():
+					return
+				}
+			}
+		}
+	}))
+}
+
+// tailFileLastLines reads the last n lines from a file and returns them.
+// The file position is left at the end of the file after this call.
+func tailFileLastLines(f *os.File, n int) []byte {
+	stat, err := f.Stat()
+	if err != nil || stat.Size() == 0 {
+		return nil
+	}
+
+	// Read from the end in chunks to find the last n lines.
+	const chunkSize = 4096
+	fileSize := stat.Size()
+	var lines []byte
+	offset := fileSize
+	count := 0
+
+	for offset > 0 && count <= n {
+		readSize := int64(chunkSize)
+		if readSize > offset {
+			readSize = offset
+		}
+		offset -= readSize
+		buf := make([]byte, readSize)
+		nRead, err := f.ReadAt(buf, offset)
+		if err != nil && err != io.EOF {
+			break
+		}
+		buf = buf[:nRead]
+		lines = append(buf, lines...)
+
+		// Count newlines in this chunk.
+		for _, b := range buf {
+			if b == '\n' {
+				count++
+			}
+		}
+	}
+
+	// Trim to last n lines.
+	idx := 0
+	nlCount := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i] == '\n' {
+			nlCount++
+			if nlCount == n+1 {
+				idx = i + 1
+				break
+			}
+		}
+	}
+	lines = lines[idx:]
+
+	// Seek to end of file for subsequent reads.
+	f.Seek(0, io.SeekEnd)
+	return lines
 }
 
 // jsonResponse wraps an HTTP handler to set JSON content type
