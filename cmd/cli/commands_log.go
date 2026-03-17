@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/docker/go-units"
 	"github.com/kardianos/service"
@@ -131,6 +135,76 @@ func (lc *LogCommand) ViewLogs(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// TailLogs streams live runtime debug logs to the terminal
+func (lc *LogCommand) TailLogs(cmd *cobra.Command, args []string) error {
+	sc := NewServiceCommand()
+	s, _, err := sc.initializeServiceManager()
+	if err != nil {
+		return err
+	}
+
+	status, err := s.Status()
+	if errors.Is(err, service.ErrNotInstalled) {
+		mainLog.Load().Warn().Msg("Service not installed")
+		return nil
+	}
+	if status == service.StatusStopped {
+		mainLog.Load().Warn().Msg("Service is not running")
+		return nil
+	}
+
+	tailLines, _ := cmd.Flags().GetInt("lines")
+	tailPath := fmt.Sprintf("%s?lines=%d", tailLogsPath, tailLines)
+	resp, err := lc.controlClient.postStream(tailPath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect for log tailing: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusMovedPermanently:
+		lc.warnRuntimeLoggingNotEnabled()
+		return nil
+	case http.StatusOK:
+	default:
+		return fmt.Errorf("unexpected response status: %d", resp.StatusCode)
+	}
+
+	// Set up signal handling for clean shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Stream output to stdout.
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				os.Stdout.Write(buf[:n])
+			}
+			if readErr != nil {
+				if readErr != io.EOF {
+					mainLog.Load().Error().Err(readErr).Msg("Error reading log stream")
+				}
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.Canceled) {
+			msg := fmt.Sprintf("\nexiting: %s\n", context.Cause(ctx).Error())
+			os.Stdout.WriteString(msg)
+		}
+	case <-done:
+	}
+
+	return nil
+}
+
 // InitLogCmd creates the log command with proper logic
 func InitLogCmd(rootCmd *cobra.Command) *cobra.Command {
 	lc, err := NewLogCommand()
@@ -158,6 +232,18 @@ func InitLogCmd(rootCmd *cobra.Command) *cobra.Command {
 		RunE: lc.ViewLogs,
 	}
 
+	logTailCmd := &cobra.Command{
+		Use:   "tail",
+		Short: "Tail live runtime debug logs",
+		Long:  "Stream live runtime debug logs to the terminal, similar to tail -f. Press Ctrl+C to stop.",
+		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			checkHasElevatedPrivilege()
+		},
+		RunE: lc.TailLogs,
+	}
+	logTailCmd.Flags().IntP("lines", "n", 10, "Number of historical lines to show on connect")
+
 	logCmd := &cobra.Command{
 		Use:   "log",
 		Short: "Manage runtime debug logs",
@@ -165,10 +251,12 @@ func InitLogCmd(rootCmd *cobra.Command) *cobra.Command {
 		ValidArgs: []string{
 			logSendCmd.Use,
 			logViewCmd.Use,
+			logTailCmd.Use,
 		},
 	}
 	logCmd.AddCommand(logSendCmd)
 	logCmd.AddCommand(logViewCmd)
+	logCmd.AddCommand(logTailCmd)
 	rootCmd.AddCommand(logCmd)
 
 	return logCmd
