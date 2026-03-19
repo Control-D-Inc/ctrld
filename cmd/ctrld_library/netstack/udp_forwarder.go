@@ -29,7 +29,6 @@ type UDPForwarder struct {
 type udpConn struct {
 	tunEP        *gonet.UDPConn
 	upstreamConn *net.UDPConn
-	lastActivity time.Time
 	cancel       context.CancelFunc
 }
 
@@ -43,9 +42,6 @@ func NewUDPForwarder(s *stack.Stack, protectSocket func(fd int) error, ctx conte
 
 	// Create gVisor UDP forwarder with handler callback
 	f.forwarder = udp.NewForwarder(s, f.handlePacket)
-
-	// Start cleanup goroutine
-	go f.cleanupStaleConnections()
 
 	return f
 }
@@ -85,7 +81,6 @@ func (f *UDPForwarder) handlePacket(req *udp.ForwarderRequest) {
 		ctrld.ProxyLogger.Load().Debug().Msgf("[UDP] New session: %s:%d -> %s:%d (total: %d)",
 			srcAddr, id.RemotePort, dstAddr, id.LocalPort, len(f.connections))
 	}
-	conn.lastActivity = time.Now()
 	f.mu.Unlock()
 }
 
@@ -144,7 +139,6 @@ func (f *UDPForwarder) createConnection(req *udp.ForwarderRequest, connKey strin
 	udpConnection := &udpConn{
 		tunEP:        tunConn,
 		upstreamConn: upstreamConn,
-		lastActivity: time.Now(),
 		cancel:       cancel,
 	}
 
@@ -176,10 +170,6 @@ func (f *UDPForwarder) forwardTunToUpstream(conn *udpConn, ctx context.Context) 
 		if err != nil {
 			return
 		}
-
-		f.mu.Lock()
-		conn.lastActivity = time.Now()
-		f.mu.Unlock()
 	}
 }
 
@@ -218,34 +208,6 @@ func (f *UDPForwarder) forwardUpstreamToTun(conn *udpConn, ctx context.Context, 
 		_, err = conn.tunEP.Write(buffer[:n])
 		if err != nil {
 			return
-		}
-
-		f.mu.Lock()
-		conn.lastActivity = time.Now()
-		f.mu.Unlock()
-	}
-}
-
-func (f *UDPForwarder) cleanupStaleConnections() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-f.ctx.Done():
-			return
-		case <-ticker.C:
-			f.mu.Lock()
-			now := time.Now()
-			for key, conn := range f.connections {
-				if now.Sub(conn.lastActivity) > 60*time.Second {
-					conn.cancel()
-					conn.tunEP.Close()
-					conn.upstreamConn.Close()
-					delete(f.connections, key)
-				}
-			}
-			f.mu.Unlock()
 		}
 	}
 }

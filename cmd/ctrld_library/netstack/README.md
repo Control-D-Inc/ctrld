@@ -90,12 +90,14 @@ NEDNSSettings(servers: ["10.0.0.1"])
 includedRoutes = [NEIPv4Route.default()]
 
 func protectSocket(_ fd: Int) throws {
-    let index = Int32(if_nametoindex("en0"))
-    setsockopt(Int32(fd), IPPROTO_IP, IP_BOUND_IF, &index, ...)
+    // No action needed - iOS Network Extension sockets
+    // automatically bypass VPN tunnel
 }
 
 // DNS Proxy: 127.0.0.1:53
 ```
+
+**Note:** iOS Network Extensions run in separate process - sockets automatically bypass VPN.
 
 ## Protocol Support
 
