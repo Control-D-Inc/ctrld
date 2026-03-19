@@ -287,6 +287,23 @@ func (nc *NetstackController) readPackets() {
 				// Drop it - return packets come through forwarder's upstream connection
 				continue
 			}
+
+			// Block QUIC protocol (UDP on port 443)
+			// QUIC runs over UDP and bypasses DNS, so we block it to force HTTP/2 or HTTP/3 over TCP
+			protocol := packet[9]
+			if protocol == 17 { // UDP
+				// Get IP header length
+				ihl := int(packet[0]&0x0f) * 4
+				if len(packet) >= ihl+4 {
+					// Parse UDP destination port (bytes 2-3 of UDP header)
+					dstPort := uint16(packet[ihl+2])<<8 | uint16(packet[ihl+3])
+					if dstPort == 443 || dstPort == 80 {
+						// Block QUIC (UDP/443) and HTTP/3 (UDP/80)
+						// Apps will fallback to TCP automatically
+						continue
+					}
+				}
+			}
 		}
 
 		// Create packet buffer
