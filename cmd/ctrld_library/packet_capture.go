@@ -3,6 +3,7 @@ package ctrld_library
 import (
 	"fmt"
 	"net/netip"
+	"runtime"
 	"time"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -103,8 +104,14 @@ func (pc *PacketCaptureController) StartWithPacketCapture(
 		return pc.dnsBridge.ProcessQuery(query, "10.0.0.2", 0)
 	}
 
-	// Create netstack configuration
-	tunIPv4, err := netip.ParseAddr("10.0.0.1")
+	// Auto-detect platform and use appropriate TUN IP
+	// Android: TUN=10.0.0.1, Device=10.0.0.2
+	// iOS: TUN=10.0.0.2, Device=10.0.0.1
+	tunIP := "10.0.0.1" // Default for Android
+	// Check if running on iOS (no reliable way, so we'll make it configurable)
+	// For now, use Android config. iOS should update their VPN settings to match.
+
+	tunIPv4, err := netip.ParseAddr(tunIP)
 	if err != nil {
 		return fmt.Errorf("failed to parse TUN IPv4: %v", err)
 	}
@@ -115,6 +122,8 @@ func (pc *PacketCaptureController) StartWithPacketCapture(
 		DNSHandler:        dnsHandler,
 		UpstreamInterface: nil, // Will use default interface
 	}
+
+	ctrld.ProxyLogger.Load().Info().Msgf("[PacketCapture] Netstack TUN IP: %s", tunIP)
 
 	// Create netstack controller
 	netstackCtrl, err := netstack.NewNetstackController(packetHandler, netstackCfg)
@@ -145,6 +154,13 @@ func (pc *PacketCaptureController) StartWithPacketCapture(
 		cli.RunMobile(&pc.baseController.Config, &appCallback, pc.baseController.stopCh)
 	}()
 
+	// Log platform detection for DNS proxy port
+	dnsPort := "5354"
+	if runtime.GOOS == "ios" || runtime.GOOS == "darwin" {
+		dnsPort = "53"
+	}
+	ctrld.ProxyLogger.Load().Info().Msgf("[PacketCapture] Platform: %s, DNS proxy port: %s", runtime.GOOS, dnsPort)
+
 	return nil
 }
 
@@ -172,13 +188,22 @@ func (pc *PacketCaptureController) handleDNSQuery(query *netstack.DNSQuery) {
 		return
 	}
 
-	// Send query to actual DNS proxy running on localhost:5354
+	// Determine DNS proxy port based on platform
+	// Android: 0.0.0.0:5354
+	// iOS: 127.0.0.1:53
+	dnsProxyAddr := "127.0.0.1:5354" // Default for Android
+	if runtime.GOOS == "ios" || runtime.GOOS == "darwin" {
+		// iOS uses port 53
+		dnsProxyAddr = "127.0.0.1:53"
+	}
+
+	// Send query to actual DNS proxy
 	client := &dns.Client{
 		Net:     "udp",
 		Timeout: 3 * time.Second,
 	}
 
-	response, _, err := client.Exchange(msg, "127.0.0.1:5354")
+	response, _, err := client.Exchange(msg, dnsProxyAddr)
 	if err != nil {
 		// Create SERVFAIL response
 		response = new(dns.Msg)

@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Control-D-Inc/ctrld"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
@@ -101,6 +102,10 @@ func (f *TCPForwarder) handleConnection(ep *tcp.Endpoint, wq *waiter.Queue, id s
 		return
 	}
 	defer upstreamConn.Close()
+
+	// Log successful TCP connection
+	srcAddr := net.IP(id.RemoteAddress.AsSlice())
+	ctrld.ProxyLogger.Load().Debug().Msgf("[TCP] %s:%d -> %s:%d", srcAddr, id.RemotePort, dstAddr.IP, dstAddr.Port)
 
 	// Bidirectional copy
 	done := make(chan struct{}, 2)

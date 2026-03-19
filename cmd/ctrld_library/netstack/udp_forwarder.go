@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Control-D-Inc/ctrld"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -77,6 +78,12 @@ func (f *UDPForwarder) handlePacket(req *udp.ForwarderRequest) {
 			return
 		}
 		f.connections[connKey] = conn
+
+		// Log new UDP session
+		srcAddr := net.IP(id.RemoteAddress.AsSlice())
+		dstAddr := net.IP(id.LocalAddress.AsSlice())
+		ctrld.ProxyLogger.Load().Debug().Msgf("[UDP] New session: %s:%d -> %s:%d (total: %d)",
+			srcAddr, id.RemotePort, dstAddr, id.LocalPort, len(f.connections))
 	}
 	conn.lastActivity = time.Now()
 	f.mu.Unlock()

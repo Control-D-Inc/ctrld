@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Control-D-Inc/ctrld"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -182,6 +183,8 @@ func NewNetstackController(handler PacketHandler, cfg *Config) (*NetstackControl
 		started:       false,
 	}
 
+	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Controller created with TCP/UDP forwarders")
+
 	return nc, nil
 }
 
@@ -203,6 +206,8 @@ func (nc *NetstackController) Start() error {
 	// Start packet writer goroutine (netstack -> TUN)
 	nc.wg.Add(1)
 	go nc.writePackets()
+
+	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Packet processing started (read/write goroutines)")
 
 	return nil
 }
@@ -269,6 +274,7 @@ func (nc *NetstackController) readPackets() {
 		if isDNS && response != nil {
 			// DNS packet was handled, send response back to TUN
 			nc.packetHandler.WritePacket(response)
+			ctrld.ProxyLogger.Load().Debug().Msgf("[Netstack] DNS response sent (%d bytes)", len(response))
 			continue
 		}
 
@@ -300,6 +306,8 @@ func (nc *NetstackController) readPackets() {
 					if dstPort == 443 || dstPort == 80 {
 						// Block QUIC (UDP/443) and HTTP/3 (UDP/80)
 						// Apps will fallback to TCP automatically
+						dstIP := net.IPv4(packet[16], packet[17], packet[18], packet[19])
+						ctrld.ProxyLogger.Load().Debug().Msgf("[Netstack] Blocked QUIC packet to %s:%d", dstIP, dstPort)
 						continue
 					}
 				}
