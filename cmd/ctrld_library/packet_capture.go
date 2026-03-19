@@ -120,7 +120,8 @@ func (pc *PacketCaptureController) StartWithPacketCapture(
 		MTU:               1500,
 		TUNIPv4:           tunIPv4,
 		DNSHandler:        dnsHandler,
-		UpstreamInterface: nil, // Will use default interface
+		UpstreamInterface: nil,  // Will use default interface
+		EnableIPBlocking:  true, // Enable IP whitelisting in firewall mode
 	}
 
 	ctrld.ProxyLogger.Load().Info().Msgf("[PacketCapture] Netstack TUN IP: %s", tunIP)
@@ -223,41 +224,66 @@ func (pc *PacketCaptureController) handleDNSQuery(query *netstack.DNSQuery) {
 
 // Stop stops the packet capture controller
 func (pc *PacketCaptureController) Stop(restart bool, pin int64) int {
+	ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() called - starting shutdown")
 	var errorCode = 0
 
 	// Clear global socket protector
+	ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - clearing socket protector")
 	ctrld.SetSocketProtector(nil)
 
 	// Stop DNS bridge
 	if pc.dnsBridge != nil {
+		ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - stopping DNS bridge")
 		pc.dnsBridge.Stop()
 		pc.dnsBridge = nil
+		ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - DNS bridge stopped")
 	}
 
 	// Stop netstack
 	if pc.netstackCtrl != nil {
+		ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - stopping netstack controller")
 		if err := pc.netstackCtrl.Stop(); err != nil {
 			// Log error but continue shutdown
-			fmt.Printf("Error stopping netstack: %v\n", err)
+			ctrld.ProxyLogger.Load().Error().Msgf("[PacketCapture] Stop() - error stopping netstack: %v", err)
 		}
 		pc.netstackCtrl = nil
+		ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - netstack controller stopped")
 	}
 
 	// Close packet stop channel
 	if pc.packetStopCh != nil {
-		close(pc.packetStopCh)
+		ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - closing packet stop channel")
+		select {
+		case <-pc.packetStopCh:
+			// Already closed
+			ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - packet stop channel already closed")
+		default:
+			close(pc.packetStopCh)
+			ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - packet stop channel closed")
+		}
 		pc.packetStopCh = make(chan struct{})
 	}
 
 	// Stop base controller
+	ctrld.ProxyLogger.Load().Info().Msgf("[PacketCapture] Stop() - stopping base controller (restart=%v, pin=%d)", restart, pin)
 	if !restart {
 		errorCode = cli.CheckDeactivationPin(pin, pc.baseController.stopCh)
+		ctrld.ProxyLogger.Load().Info().Msgf("[PacketCapture] Stop() - deactivation pin check returned: %d", errorCode)
 	}
 	if errorCode == 0 && pc.baseController.stopCh != nil {
-		close(pc.baseController.stopCh)
+		ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - closing base controller stop channel")
+		select {
+		case <-pc.baseController.stopCh:
+			// Already closed
+			ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - base controller stop channel already closed")
+		default:
+			close(pc.baseController.stopCh)
+			ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - base controller stop channel closed")
+		}
 		pc.baseController.stopCh = nil
 	}
 
+	ctrld.ProxyLogger.Load().Info().Msgf("[PacketCapture] Stop() - shutdown complete, errorCode=%d", errorCode)
 	return errorCode
 }
 
@@ -269,4 +295,16 @@ func (pc *PacketCaptureController) IsRunning() bool {
 // IsPacketMode returns true (always in packet mode for this controller)
 func (pc *PacketCaptureController) IsPacketMode() bool {
 	return true
+}
+
+// SetFirewallMode enables or disables firewall mode (IP whitelisting) at runtime
+func (pc *PacketCaptureController) SetFirewallMode(enabled bool) {
+	if pc.netstackCtrl != nil {
+		pc.netstackCtrl.SetFirewallMode(enabled)
+		if enabled {
+			ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Firewall mode ENABLED - IP whitelisting active")
+		} else {
+			ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Firewall mode DISABLED - all IPs allowed")
+		}
+	}
 }

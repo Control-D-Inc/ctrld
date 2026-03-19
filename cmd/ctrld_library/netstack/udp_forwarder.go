@@ -20,6 +20,7 @@ type UDPForwarder struct {
 	protectSocket func(fd int) error
 	ctx           context.Context
 	forwarder     *udp.Forwarder
+	ipTracker     *IPTracker
 
 	// Track UDP "connections" (address pairs)
 	connections map[string]*udpConn
@@ -33,10 +34,11 @@ type udpConn struct {
 }
 
 // NewUDPForwarder creates a new UDP forwarder
-func NewUDPForwarder(s *stack.Stack, protectSocket func(fd int) error, ctx context.Context) *UDPForwarder {
+func NewUDPForwarder(s *stack.Stack, protectSocket func(fd int) error, ctx context.Context, ipTracker *IPTracker) *UDPForwarder {
 	f := &UDPForwarder{
 		protectSocket: protectSocket,
 		ctx:           ctx,
+		ipTracker:     ipTracker,
 		connections:   make(map[string]*udpConn),
 	}
 
@@ -102,9 +104,26 @@ func (f *UDPForwarder) createConnection(req *udp.ForwarderRequest, connKey strin
 	// Extract destination address
 	// LocalAddress/LocalPort = destination (where packet is going TO)
 	// RemoteAddress/RemotePort = source (where packet is coming FROM)
+	dstIP := net.IP(id.LocalAddress.AsSlice())
 	dstAddr := &net.UDPAddr{
-		IP:   net.IP(id.LocalAddress.AsSlice()),
+		IP:   dstIP,
 		Port: int(id.LocalPort),
+	}
+
+	// Check if IP blocking is enabled (firewall mode only)
+	// Skip blocking for internal VPN subnet (10.0.0.0/24)
+	if f.ipTracker != nil && f.ipTracker.IsEnabled() {
+		// Allow internal VPN traffic (10.0.0.0/24)
+		if !(dstIP[0] == 10 && dstIP[1] == 0 && dstIP[2] == 0) {
+			// Check if destination IP was resolved through ControlD DNS
+			// ONLY allow connections to IPs that went through DNS (whitelist approach)
+			if !f.ipTracker.IsTracked(dstIP) {
+				srcAddr := net.IP(id.RemoteAddress.AsSlice())
+				ctrld.ProxyLogger.Load().Info().Msgf("[UDP] BLOCKED hardcoded IP: %s:%d -> %s:%d (not resolved via DNS)",
+					srcAddr, id.RemotePort, dstIP, id.LocalPort)
+				return nil
+			}
+		}
 	}
 
 	// Create dialer with socket protection DURING dial
@@ -214,13 +233,18 @@ func (f *UDPForwarder) forwardUpstreamToTun(conn *udpConn, ctx context.Context, 
 
 // Close closes all UDP connections
 func (f *UDPForwarder) Close() {
+	ctrld.ProxyLogger.Load().Info().Msg("[UDP] Close() called - closing all connections")
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	for _, conn := range f.connections {
+	ctrld.ProxyLogger.Load().Info().Msgf("[UDP] Close() - closing %d connections", len(f.connections))
+	for key, conn := range f.connections {
+		ctrld.ProxyLogger.Load().Debug().Msgf("[UDP] Close() - closing connection: %s", key)
 		conn.cancel()
 		conn.tunEP.Close()
 		conn.upstreamConn.Close()
 	}
 	f.connections = make(map[string]*udpConn)
+	ctrld.ProxyLogger.Load().Info().Msg("[UDP] Close() - all connections closed")
 }

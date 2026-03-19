@@ -19,13 +19,15 @@ type TCPForwarder struct {
 	protectSocket func(fd int) error
 	ctx           context.Context
 	forwarder     *tcp.Forwarder
+	ipTracker     *IPTracker
 }
 
 // NewTCPForwarder creates a new TCP forwarder
-func NewTCPForwarder(s *stack.Stack, protectSocket func(fd int) error, ctx context.Context) *TCPForwarder {
+func NewTCPForwarder(s *stack.Stack, protectSocket func(fd int) error, ctx context.Context, ipTracker *IPTracker) *TCPForwarder {
 	f := &TCPForwarder{
 		protectSocket: protectSocket,
 		ctx:           ctx,
+		ipTracker:     ipTracker,
 	}
 
 	// Create gVisor TCP forwarder with handler callback
@@ -78,9 +80,26 @@ func (f *TCPForwarder) handleConnection(ep *tcp.Endpoint, wq *waiter.Queue, id s
 	// - LocalAddress/LocalPort = the destination (where packet is going TO)
 	// - RemoteAddress/RemotePort = the source (where packet is coming FROM)
 	// We want to dial the DESTINATION (LocalAddress/LocalPort)
+	dstIP := net.IP(id.LocalAddress.AsSlice())
 	dstAddr := net.TCPAddr{
-		IP:   net.IP(id.LocalAddress.AsSlice()),
+		IP:   dstIP,
 		Port: int(id.LocalPort),
+	}
+
+	// Check if IP blocking is enabled (firewall mode only)
+	// Skip blocking for internal VPN subnet (10.0.0.0/24)
+	if f.ipTracker != nil && f.ipTracker.IsEnabled() {
+		// Allow internal VPN traffic (10.0.0.0/24)
+		if !(dstIP[0] == 10 && dstIP[1] == 0 && dstIP[2] == 0) {
+			// Check if destination IP was resolved through ControlD DNS
+			// ONLY allow connections to IPs that went through DNS (whitelist approach)
+			if !f.ipTracker.IsTracked(dstIP) {
+				srcAddr := net.IP(id.RemoteAddress.AsSlice())
+				ctrld.ProxyLogger.Load().Info().Msgf("[TCP] BLOCKED hardcoded IP: %s:%d -> %s:%d (not resolved via DNS)",
+					srcAddr, id.RemotePort, dstIP, id.LocalPort)
+				return
+			}
+		}
 	}
 
 	// Create outbound connection with socket protection DURING dial

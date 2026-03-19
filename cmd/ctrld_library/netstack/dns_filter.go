@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/miekg/dns"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -12,12 +13,14 @@ import (
 // DNSFilter intercepts and processes DNS packets.
 type DNSFilter struct {
 	dnsHandler func([]byte) ([]byte, error)
+	ipTracker  *IPTracker
 }
 
 // NewDNSFilter creates a new DNS filter with the given handler.
-func NewDNSFilter(handler func([]byte) ([]byte, error)) *DNSFilter {
+func NewDNSFilter(handler func([]byte) ([]byte, error), ipTracker *IPTracker) *DNSFilter {
 	return &DNSFilter{
 		dnsHandler: handler,
+		ipTracker:  ipTracker,
 	}
 }
 
@@ -101,6 +104,11 @@ func (df *DNSFilter) processIPv4(packet []byte) (bool, []byte, error) {
 		return true, nil, fmt.Errorf("DNS handler error: %v", err)
 	}
 
+	// Track IPs from DNS response
+	if df.ipTracker != nil {
+		df.extractAndTrackIPs(dnsResponse)
+	}
+
 	// Build response packet
 	responsePacket := df.buildIPv4UDPPacket(
 		dstIP.As4(), // Swap src/dst
@@ -164,6 +172,11 @@ func (df *DNSFilter) processIPv6(packet []byte) (bool, []byte, error) {
 	dnsResponse, err := df.dnsHandler(dnsQuery)
 	if err != nil {
 		return true, nil, fmt.Errorf("DNS handler error: %v", err)
+	}
+
+	// Track IPs from DNS response
+	if df.ipTracker != nil {
+		df.extractAndTrackIPs(dnsResponse)
 	}
 
 	// Build response packet
@@ -321,4 +334,32 @@ func parseUDP(udpHeader []byte) (srcPort, dstPort uint16, ok bool) {
 	dstPort = binary.BigEndian.Uint16(udpHeader[2:4])
 	ok = true
 	return
+}
+
+// extractAndTrackIPs parses DNS response and tracks resolved IP addresses
+func (df *DNSFilter) extractAndTrackIPs(dnsResponse []byte) {
+	if len(dnsResponse) < 12 {
+		return // Invalid DNS response
+	}
+
+	msg := new(dns.Msg)
+	if err := msg.Unpack(dnsResponse); err != nil {
+		return // Failed to parse DNS response
+	}
+
+	// Extract IPs from answer section
+	for _, answer := range msg.Answer {
+		switch rr := answer.(type) {
+		case *dns.A:
+			// IPv4 address
+			if rr.A != nil {
+				df.ipTracker.TrackIP(rr.A)
+			}
+		case *dns.AAAA:
+			// IPv6 address
+			if rr.AAAA != nil {
+				df.ipTracker.TrackIP(rr.AAAA)
+			}
+		}
+	}
 }

@@ -37,6 +37,7 @@ type NetstackController struct {
 	linkEP        *channel.Endpoint
 	packetHandler PacketHandler
 	dnsFilter     *DNSFilter
+	ipTracker     *IPTracker
 	tcpForwarder  *TCPForwarder
 	udpForwarder  *UDPForwarder
 
@@ -64,6 +65,9 @@ type Config struct {
 
 	// UpstreamInterface is the real network interface for routing non-DNS traffic
 	UpstreamInterface *net.Interface
+
+	// EnableIPBlocking enables IP whitelisting (firewall mode only)
+	EnableIPBlocking bool
 }
 
 // NewNetstackController creates a new netstack controller.
@@ -100,14 +104,17 @@ func NewNetstackController(handler PacketHandler, cfg *Config) (*NetstackControl
 	// Create link endpoint
 	linkEP := channel.New(channelCapacity, cfg.MTU, "")
 
-	// Create DNS filter
-	dnsFilter := NewDNSFilter(cfg.DNSHandler)
+	// Create IP tracker (5 minute TTL for tracked IPs, enabled based on config)
+	ipTracker := NewIPTracker(5*time.Minute, cfg.EnableIPBlocking)
 
-	// Create TCP forwarder
-	tcpForwarder := NewTCPForwarder(s, handler.ProtectSocket, ctx)
+	// Create DNS filter with IP tracker
+	dnsFilter := NewDNSFilter(cfg.DNSHandler, ipTracker)
 
-	// Create UDP forwarder
-	udpForwarder := NewUDPForwarder(s, handler.ProtectSocket, ctx)
+	// Create TCP forwarder with IP tracker
+	tcpForwarder := NewTCPForwarder(s, handler.ProtectSocket, ctx, ipTracker)
+
+	// Create UDP forwarder with IP tracker
+	udpForwarder := NewUDPForwarder(s, handler.ProtectSocket, ctx, ipTracker)
 
 	// Create NIC
 	if err := s.CreateNIC(NICID, linkEP); err != nil {
@@ -176,6 +183,7 @@ func NewNetstackController(handler PacketHandler, cfg *Config) (*NetstackControl
 		linkEP:        linkEP,
 		packetHandler: handler,
 		dnsFilter:     dnsFilter,
+		ipTracker:     ipTracker,
 		tcpForwarder:  tcpForwarder,
 		udpForwarder:  udpForwarder,
 		ctx:           ctx,
@@ -199,6 +207,9 @@ func (nc *NetstackController) Start() error {
 
 	nc.started = true
 
+	// Start IP tracker
+	nc.ipTracker.Start()
+
 	// Start packet reader goroutine (TUN -> netstack)
 	nc.wg.Add(1)
 	go nc.readPackets()
@@ -207,36 +218,82 @@ func (nc *NetstackController) Start() error {
 	nc.wg.Add(1)
 	go nc.writePackets()
 
-	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Packet processing started (read/write goroutines)")
+	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Packet processing started (read/write goroutines + IP tracker)")
 
 	return nil
 }
 
+// SetFirewallMode enables or disables IP whitelisting at runtime
+func (nc *NetstackController) SetFirewallMode(enabled bool) {
+	if nc == nil {
+		return
+	}
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+
+	if nc.ipTracker != nil {
+		nc.ipTracker.SetEnabled(enabled)
+	}
+}
+
 // Stop stops the netstack controller and waits for all goroutines to finish.
 func (nc *NetstackController) Stop() error {
+	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() called - starting shutdown")
+
 	nc.mu.Lock()
 	if !nc.started {
 		nc.mu.Unlock()
+		ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - already stopped, returning")
 		return nil
 	}
 	nc.mu.Unlock()
 
+	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - canceling context")
 	nc.cancel()
-	nc.wg.Wait()
+
+	// Close packet handler FIRST to unblock all pending reads
+	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - closing packet handler to unblock goroutines")
+	if err := nc.packetHandler.Close(); err != nil {
+		ctrld.ProxyLogger.Load().Error().Msgf("[Netstack] Stop() - failed to close packet handler: %v", err)
+		// Continue shutdown even if close fails
+	}
+	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - packet handler closed")
+
+	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - waiting for goroutines (max 2 seconds)")
+
+	// Wait for goroutines with timeout
+	done := make(chan struct{})
+	go func() {
+		nc.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - all goroutines finished")
+	case <-time.After(2 * time.Second):
+		ctrld.ProxyLogger.Load().Warn().Msg("[Netstack] Stop() - timeout waiting for goroutines, proceeding anyway")
+	}
+
+	// Stop IP tracker
+	if nc.ipTracker != nil {
+		ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - stopping IP tracker")
+		nc.ipTracker.Stop()
+		ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - IP tracker stopped")
+	}
 
 	// Close UDP forwarder
 	if nc.udpForwarder != nil {
+		ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - closing UDP forwarder")
 		nc.udpForwarder.Close()
-	}
-
-	if err := nc.packetHandler.Close(); err != nil {
-		return fmt.Errorf("failed to close packet handler: %v", err)
+		ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - UDP forwarder closed")
 	}
 
 	nc.mu.Lock()
 	nc.started = false
 	nc.mu.Unlock()
 
+	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Stop() - shutdown complete")
 	return nil
 }
 
