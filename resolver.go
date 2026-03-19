@@ -62,7 +62,28 @@ var (
 	or               *osResolver
 	defaultLocalIPv4 atomic.Value // holds net.IP (IPv4)
 	defaultLocalIPv6 atomic.Value // holds net.IP (IPv6)
+
+	// socketProtector is a global function that can be set by mobile apps to protect
+	// sockets from being routed through the VPN. This prevents routing loops.
+	socketProtector atomic.Value // holds func(int) error
 )
+
+// SetSocketProtector sets the global socket protection function.
+// This should be called by mobile VPN apps to prevent routing loops.
+func SetSocketProtector(protectFunc func(int) error) {
+	socketProtector.Store(protectFunc)
+}
+
+// ProtectSocket protects a socket using the globally set protector.
+// Returns nil if no protector is set.
+func ProtectSocket(fd int) error {
+	if v := socketProtector.Load(); v != nil {
+		if protectFunc, ok := v.(func(int) error); ok {
+			return protectFunc(fd)
+		}
+	}
+	return nil
+}
 
 func newLocalResolver() Resolver {
 	var nss []string

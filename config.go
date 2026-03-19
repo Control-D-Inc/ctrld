@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ameshkov/dnsstamps"
@@ -555,7 +556,24 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		_, port, _ := net.SplitHostPort(addr)
 		if uc.BootstrapIP != "" {
-			dialer := net.Dialer{Timeout: dialerTimeout, KeepAlive: dialerTimeout}
+			// Create custom dialer with socket protection - matches working example pattern
+			dialer := &net.Dialer{
+				Timeout:   dialerTimeout,
+				KeepAlive: dialerTimeout,
+			}
+			// Access underlying socket fd before connecting to it
+			dialer.Control = func(network, address string, c syscall.RawConn) error {
+				return c.Control(func(fd uintptr) {
+					Log(ctx, ProxyLogger.Load().Debug(), "Received DoH socket fd %d for %s", fd, address)
+					i := int(fd)
+					// Protect socket from VPN routing
+					if err := ProtectSocket(i); err != nil {
+						Log(ctx, ProxyLogger.Load().Warn(), "Failed to protect DoH socket fd=%d: %v", i, err)
+					} else {
+						Log(ctx, ProxyLogger.Load().Debug(), "Protected DoH socket fd=%d", i)
+					}
+				})
+			}
 			addr := net.JoinHostPort(uc.BootstrapIP, port)
 			Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", addr)
 			return dialer.DialContext(ctx, network, addr)
@@ -571,6 +589,21 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 		if err != nil {
 			return nil, err
 		}
+
+		// Protect DoH socket from VPN routing
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			if rawConn, err := tcpConn.SyscallConn(); err == nil {
+				rawConn.Control(func(fd uintptr) {
+					i := int(fd)
+					if err := ProtectSocket(i); err != nil {
+						Log(ctx, ProxyLogger.Load().Warn(), "Failed to protect DoH socket fd=%d: %v", i, err)
+					} else {
+						Log(ctx, ProxyLogger.Load().Debug(), "Protected DoH socket fd=%d", i)
+					}
+				})
+			}
+		}
+
 		Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", conn.RemoteAddr())
 		return conn, nil
 	}

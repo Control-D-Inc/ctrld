@@ -13,11 +13,11 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/certs"
-	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
 )
@@ -244,8 +244,38 @@ func apiTransport(cdDev bool) *http.Transport {
 		}
 
 		dial := func(ctx context.Context, network string, addrs []string) (net.Conn, error) {
-			d := &ctrldnet.ParallelDialer{}
-			return d.DialContext(ctx, network, addrs, ctrld.ProxyLogger.Load())
+			// Create custom dialer with socket protection - matches working example pattern
+			baseDialer := &net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}
+
+			// Access underlying socket fd before connecting to it
+			baseDialer.Control = func(network, address string, c syscall.RawConn) error {
+				return c.Control(func(fd uintptr) {
+					ctrld.ProxyLogger.Load().Debug().Msgf("Received API socket fd %d for %s", fd, address)
+					i := int(fd)
+					// Protect socket from VPN routing
+					if err := ctrld.ProtectSocket(i); err != nil {
+						ctrld.ProxyLogger.Load().Warn().Err(err).Msgf("Failed to protect API socket fd=%d", i)
+					} else {
+						ctrld.ProxyLogger.Load().Debug().Msgf("Protected API socket fd=%d", i)
+					}
+				})
+			}
+
+			// Try each address with the protected dialer
+			var lastErr error
+			for _, addr := range addrs {
+				ctrld.ProxyLogger.Load().Debug().Msgf("dialing to %s", addr)
+				conn, err := baseDialer.DialContext(ctx, network, addr)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+				ctrld.ProxyLogger.Load().Debug().Err(err).Msgf("failed to dial %s", addr)
+			}
+			return nil, lastErr
 		}
 		_, port, _ := net.SplitHostPort(addr)
 
