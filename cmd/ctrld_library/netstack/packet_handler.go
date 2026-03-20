@@ -17,20 +17,14 @@ type PacketHandler interface {
 
 	// Close closes the packet handler and releases resources.
 	Close() error
-
-	// ProtectSocket protects a socket file descriptor from being routed through the VPN.
-	// This is required on Android/iOS to prevent routing loops.
-	// Returns nil if successful, error otherwise.
-	ProtectSocket(fd int) error
 }
 
 // MobilePacketHandler implements PacketHandler using callbacks from mobile platforms.
 // This bridges Go Mobile interface with the netstack implementation.
 type MobilePacketHandler struct {
-	readFunc    func() ([]byte, error)
-	writeFunc   func([]byte) error
-	closeFunc   func() error
-	protectFunc func(int) error
+	readFunc  func() ([]byte, error)
+	writeFunc func([]byte) error
+	closeFunc func() error
 
 	mu     sync.Mutex
 	closed bool
@@ -41,14 +35,12 @@ func NewMobilePacketHandler(
 	readFunc func() ([]byte, error),
 	writeFunc func([]byte) error,
 	closeFunc func() error,
-	protectFunc func(int) error,
 ) *MobilePacketHandler {
 	return &MobilePacketHandler{
-		readFunc:    readFunc,
-		writeFunc:   writeFunc,
-		closeFunc:   closeFunc,
-		protectFunc: protectFunc,
-		closed:      false,
+		readFunc:  readFunc,
+		writeFunc: writeFunc,
+		closeFunc: closeFunc,
+		closed:    false,
 	}
 }
 
@@ -102,14 +94,4 @@ func (m *MobilePacketHandler) Close() error {
 	}
 
 	return nil
-}
-
-// ProtectSocket protects a socket file descriptor from VPN routing.
-func (m *MobilePacketHandler) ProtectSocket(fd int) error {
-	if m.protectFunc == nil {
-		// No protect function provided - this is okay for non-VPN scenarios
-		return nil
-	}
-
-	return m.protectFunc(fd)
 }

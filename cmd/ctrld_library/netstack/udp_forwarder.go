@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -17,10 +16,9 @@ import (
 
 // UDPForwarder handles UDP packets from the TUN interface
 type UDPForwarder struct {
-	protectSocket func(fd int) error
-	ctx           context.Context
-	forwarder     *udp.Forwarder
-	ipTracker     *IPTracker
+	ctx       context.Context
+	forwarder *udp.Forwarder
+	ipTracker *IPTracker
 
 	// Track UDP "connections" (address pairs)
 	connections map[string]*udpConn
@@ -34,12 +32,11 @@ type udpConn struct {
 }
 
 // NewUDPForwarder creates a new UDP forwarder
-func NewUDPForwarder(s *stack.Stack, protectSocket func(fd int) error, ctx context.Context, ipTracker *IPTracker) *UDPForwarder {
+func NewUDPForwarder(s *stack.Stack, ctx context.Context, ipTracker *IPTracker) *UDPForwarder {
 	f := &UDPForwarder{
-		protectSocket: protectSocket,
-		ctx:           ctx,
-		ipTracker:     ipTracker,
-		connections:   make(map[string]*udpConn),
+		ctx:         ctx,
+		ipTracker:   ipTracker,
+		connections: make(map[string]*udpConn),
 	}
 
 	// Create gVisor UDP forwarder with handler callback
@@ -112,7 +109,7 @@ func (f *UDPForwarder) createConnection(req *udp.ForwarderRequest, connKey strin
 
 	// Check if IP blocking is enabled (firewall mode only)
 	// Skip blocking for internal VPN subnet (10.0.0.0/24)
-	if f.ipTracker != nil && f.ipTracker.IsEnabled() {
+	if f.ipTracker != nil {
 		// Allow internal VPN traffic (10.0.0.0/24)
 		if !(dstIP[0] == 10 && dstIP[1] == 0 && dstIP[2] == 0) {
 			// Check if destination IP was resolved through ControlD DNS
@@ -126,17 +123,8 @@ func (f *UDPForwarder) createConnection(req *udp.ForwarderRequest, connKey strin
 		}
 	}
 
-	// Create dialer with socket protection DURING dial
+	// Create dialer
 	dialer := &net.Dialer{}
-
-	// CRITICAL: Protect socket BEFORE connect() is called
-	if f.protectSocket != nil {
-		dialer.Control = func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				f.protectSocket(int(fd))
-			})
-		}
-	}
 
 	// Create outbound UDP connection
 	dialConn, dialErr := dialer.Dial("udp", dstAddr.String())

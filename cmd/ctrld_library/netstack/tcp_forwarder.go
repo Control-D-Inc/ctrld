@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"syscall"
 	"time"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -16,22 +15,20 @@ import (
 
 // TCPForwarder handles TCP connections from the TUN interface
 type TCPForwarder struct {
-	protectSocket func(fd int) error
-	ctx           context.Context
-	forwarder     *tcp.Forwarder
-	ipTracker     *IPTracker
+	ctx       context.Context
+	forwarder *tcp.Forwarder
+	ipTracker *IPTracker
 }
 
 // NewTCPForwarder creates a new TCP forwarder
-func NewTCPForwarder(s *stack.Stack, protectSocket func(fd int) error, ctx context.Context, ipTracker *IPTracker) *TCPForwarder {
+func NewTCPForwarder(s *stack.Stack, ctx context.Context, ipTracker *IPTracker) *TCPForwarder {
 	f := &TCPForwarder{
-		protectSocket: protectSocket,
-		ctx:           ctx,
-		ipTracker:     ipTracker,
+		ctx:       ctx,
+		ipTracker: ipTracker,
 	}
 
 	// Create gVisor TCP forwarder with handler callback
-	// rcvWnd=0 (default), maxInFlight=1024
+	// rcvWnd=0 (use default), maxInFlight=1024
 	f.forwarder = tcp.NewForwarder(s, 0, 1024, f.handleRequest)
 
 	return f
@@ -88,7 +85,7 @@ func (f *TCPForwarder) handleConnection(ep *tcp.Endpoint, wq *waiter.Queue, id s
 
 	// Check if IP blocking is enabled (firewall mode only)
 	// Skip blocking for internal VPN subnet (10.0.0.0/24)
-	if f.ipTracker != nil && f.ipTracker.IsEnabled() {
+	if f.ipTracker != nil {
 		// Allow internal VPN traffic (10.0.0.0/24)
 		if !(dstIP[0] == 10 && dstIP[1] == 0 && dstIP[2] == 0) {
 			// Check if destination IP was resolved through ControlD DNS
@@ -102,18 +99,9 @@ func (f *TCPForwarder) handleConnection(ep *tcp.Endpoint, wq *waiter.Queue, id s
 		}
 	}
 
-	// Create outbound connection with socket protection DURING dial
+	// Create outbound connection
 	dialer := &net.Dialer{
 		Timeout: 30 * time.Second,
-	}
-
-	// CRITICAL: Protect socket BEFORE connect() is called
-	if f.protectSocket != nil {
-		dialer.Control = func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				f.protectSocket(int(fd))
-			})
-		}
 	}
 
 	upstreamConn, err := dialer.DialContext(f.ctx, "tcp", dstAddr.String())

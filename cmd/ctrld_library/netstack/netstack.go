@@ -28,7 +28,7 @@ const (
 	NICID = 1
 
 	// Channel capacity for packet buffers
-	channelCapacity = 256
+	channelCapacity = 512
 )
 
 // NetstackController manages the gVisor netstack integration for mobile packet capture.
@@ -65,9 +65,6 @@ type Config struct {
 
 	// UpstreamInterface is the real network interface for routing non-DNS traffic
 	UpstreamInterface *net.Interface
-
-	// EnableIPBlocking enables IP whitelisting (firewall mode only)
-	EnableIPBlocking bool
 }
 
 // NewNetstackController creates a new netstack controller.
@@ -104,17 +101,19 @@ func NewNetstackController(handler PacketHandler, cfg *Config) (*NetstackControl
 	// Create link endpoint
 	linkEP := channel.New(channelCapacity, cfg.MTU, "")
 
-	// Create IP tracker (5 minute TTL for tracked IPs, enabled based on config)
-	ipTracker := NewIPTracker(5*time.Minute, cfg.EnableIPBlocking)
+	// Always create IP tracker (5 minute TTL for tracked IPs)
+	// In firewall mode (default routes): blocks direct IP connections
+	// In DNS-only mode: no non-DNS traffic to block
+	ipTracker := NewIPTracker(5 * time.Minute)
 
 	// Create DNS filter with IP tracker
 	dnsFilter := NewDNSFilter(cfg.DNSHandler, ipTracker)
 
 	// Create TCP forwarder with IP tracker
-	tcpForwarder := NewTCPForwarder(s, handler.ProtectSocket, ctx, ipTracker)
+	tcpForwarder := NewTCPForwarder(s, ctx, ipTracker)
 
 	// Create UDP forwarder with IP tracker
-	udpForwarder := NewUDPForwarder(s, handler.ProtectSocket, ctx, ipTracker)
+	udpForwarder := NewUDPForwarder(s, ctx, ipTracker)
 
 	// Create NIC
 	if err := s.CreateNIC(NICID, linkEP); err != nil {
@@ -221,19 +220,6 @@ func (nc *NetstackController) Start() error {
 	ctrld.ProxyLogger.Load().Info().Msg("[Netstack] Packet processing started (read/write goroutines + IP tracker)")
 
 	return nil
-}
-
-// SetFirewallMode enables or disables IP whitelisting at runtime
-func (nc *NetstackController) SetFirewallMode(enabled bool) {
-	if nc == nil {
-		return
-	}
-	nc.mu.Lock()
-	defer nc.mu.Unlock()
-
-	if nc.ipTracker != nil {
-		nc.ipTracker.SetEnabled(enabled)
-	}
 }
 
 // Stop stops the netstack controller and waits for all goroutines to finish.

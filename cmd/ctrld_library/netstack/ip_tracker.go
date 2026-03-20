@@ -16,17 +16,14 @@ type IPTracker struct {
 	// TTL for tracked IPs (how long to remember them)
 	ttl time.Duration
 
-	// Enable IP blocking (only in firewall mode)
-	enabled bool
-
 	// Running state
 	running bool
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
 }
 
-// NewIPTracker creates a new IP tracker with the specified TTL and enabled flag
-func NewIPTracker(ttl time.Duration, enabled bool) *IPTracker {
+// NewIPTracker creates a new IP tracker with the specified TTL
+func NewIPTracker(ttl time.Duration) *IPTracker {
 	if ttl == 0 {
 		ttl = 5 * time.Minute // Default 5 minutes
 	}
@@ -34,29 +31,8 @@ func NewIPTracker(ttl time.Duration, enabled bool) *IPTracker {
 	return &IPTracker{
 		resolvedIPs: make(map[string]time.Time),
 		ttl:         ttl,
-		enabled:     enabled,
 		stopCh:      make(chan struct{}),
 	}
-}
-
-// IsEnabled returns whether IP blocking is enabled
-func (t *IPTracker) IsEnabled() bool {
-	if t == nil {
-		return false
-	}
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.enabled
-}
-
-// SetEnabled sets whether IP blocking is enabled
-func (t *IPTracker) SetEnabled(enabled bool) {
-	if t == nil {
-		return
-	}
-	t.mu.Lock()
-	t.enabled = enabled
-	t.mu.Unlock()
 }
 
 // Start starts the IP tracker cleanup routine
@@ -119,6 +95,7 @@ func (t *IPTracker) TrackIP(ip net.IP) {
 }
 
 // IsTracked checks if an IP address is in the tracking list
+// Optimized to minimize lock contention by avoiding write locks in the hot path
 func (t *IPTracker) IsTracked(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -134,16 +111,10 @@ func (t *IPTracker) IsTracked(ip net.IP) bool {
 		return false
 	}
 
-	// Check if expired
-	if time.Now().After(expiration) {
-		// Clean up expired entry
-		t.mu.Lock()
-		delete(t.resolvedIPs, ipStr)
-		t.mu.Unlock()
-		return false
-	}
-
-	return true
+	// Check if expired - but DON'T delete here to avoid write lock
+	// Let the cleanup goroutine handle expired entries
+	// This keeps IsTracked fast with only read locks
+	return !time.Now().After(expiration)
 }
 
 // GetTrackedCount returns the number of currently tracked IPs

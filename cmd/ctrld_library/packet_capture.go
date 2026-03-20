@@ -3,7 +3,6 @@ package ctrld_library
 import (
 	"fmt"
 	"net/netip"
-	"runtime"
 	"time"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -26,12 +25,6 @@ type PacketAppCallback interface {
 
 	// ClosePacketIO closes packet I/O resources.
 	ClosePacketIO() error
-
-	// ProtectSocket protects a socket file descriptor from being routed through the VPN.
-	// On Android, this calls VpnService.protect() to prevent routing loops.
-	// On iOS, this marks the socket to bypass the VPN.
-	// Returns nil on success, error on failure.
-	ProtectSocket(fd int) error
 }
 
 // PacketCaptureController holds state for packet capture mode
@@ -39,9 +32,10 @@ type PacketCaptureController struct {
 	baseController *Controller
 
 	// Packet capture mode fields
-	netstackCtrl *netstack.NetstackController
-	dnsBridge    *netstack.DNSBridge
-	packetStopCh chan struct{}
+	netstackCtrl    *netstack.NetstackController
+	dnsBridge       *netstack.DNSBridge
+	packetStopCh    chan struct{}
+	dnsProxyAddress string
 }
 
 // NewPacketCaptureController creates a new packet capture controller
@@ -57,6 +51,10 @@ func NewPacketCaptureController(appCallback PacketAppCallback) *PacketCaptureCon
 // It requires a PacketAppCallback that provides packet read/write capabilities.
 func (pc *PacketCaptureController) StartWithPacketCapture(
 	packetCallback PacketAppCallback,
+	tunAddress string,
+	deviceAddress string,
+	mtu int64,
+	dnsProxyAddress string,
 	CdUID string,
 	ProvisionID string,
 	CustomHostname string,
@@ -67,6 +65,14 @@ func (pc *PacketCaptureController) StartWithPacketCapture(
 ) error {
 	if pc.baseController.stopCh != nil {
 		return fmt.Errorf("controller already running")
+	}
+
+	// Store DNS proxy address for handleDNSQuery
+	pc.dnsProxyAddress = dnsProxyAddress
+
+	// Set defaults
+	if mtu == 0 {
+		mtu = 1500
 	}
 
 	// Set up configuration
@@ -81,10 +87,6 @@ func (pc *PacketCaptureController) StartWithPacketCapture(
 	}
 	pc.baseController.AppCallback = packetCallback
 
-	// Set global socket protector for HTTP client sockets (API calls, etc)
-	// This prevents routing loops when ctrld makes HTTP requests to api.controld.com
-	ctrld.SetSocketProtector(packetCallback.ProtectSocket)
-
 	// Create DNS bridge for communication between netstack and DNS proxy
 	pc.dnsBridge = netstack.NewDNSBridge()
 	pc.dnsBridge.Start()
@@ -94,37 +96,29 @@ func (pc *PacketCaptureController) StartWithPacketCapture(
 		packetCallback.ReadPacket,
 		packetCallback.WritePacket,
 		packetCallback.ClosePacketIO,
-		packetCallback.ProtectSocket,
 	)
 
 	// Create DNS handler that uses the bridge
 	dnsHandler := func(query []byte) ([]byte, error) {
-		// Extract source IP from query context if available
-		// For now, use a placeholder
-		return pc.dnsBridge.ProcessQuery(query, "10.0.0.2", 0)
+		// Use device address as the source of DNS queries
+		return pc.dnsBridge.ProcessQuery(query, deviceAddress, 0)
 	}
 
-	// Auto-detect platform and use appropriate TUN IP
-	// Android: TUN=10.0.0.1, Device=10.0.0.2
-	// iOS: TUN=10.0.0.2, Device=10.0.0.1
-	tunIP := "10.0.0.1" // Default for Android
-	// Check if running on iOS (no reliable way, so we'll make it configurable)
-	// For now, use Android config. iOS should update their VPN settings to match.
-
-	tunIPv4, err := netip.ParseAddr(tunIP)
+	// Parse TUN IP address
+	tunIPv4, err := netip.ParseAddr(tunAddress)
 	if err != nil {
-		return fmt.Errorf("failed to parse TUN IPv4: %v", err)
+		return fmt.Errorf("failed to parse TUN IPv4 address '%s': %v", tunAddress, err)
 	}
 
 	netstackCfg := &netstack.Config{
-		MTU:               1500,
+		MTU:               uint32(mtu),
 		TUNIPv4:           tunIPv4,
 		DNSHandler:        dnsHandler,
-		UpstreamInterface: nil,  // Will use default interface
-		EnableIPBlocking:  true, // Enable IP whitelisting in firewall mode
+		UpstreamInterface: nil, // Will use default interface
 	}
 
-	ctrld.ProxyLogger.Load().Info().Msgf("[PacketCapture] Netstack TUN IP: %s", tunIP)
+	ctrld.ProxyLogger.Load().Info().Msgf("[PacketCapture] Network config - TUN: %s, Device: %s, MTU: %d, DNS Proxy: %s",
+		tunAddress, deviceAddress, mtu, dnsProxyAddress)
 
 	// Create netstack controller
 	netstackCtrl, err := netstack.NewNetstackController(packetHandler, netstackCfg)
@@ -155,12 +149,10 @@ func (pc *PacketCaptureController) StartWithPacketCapture(
 		cli.RunMobile(&pc.baseController.Config, &appCallback, pc.baseController.stopCh)
 	}()
 
-	// Log platform detection for DNS proxy port
-	dnsPort := "5354"
-	if runtime.GOOS == "ios" || runtime.GOOS == "darwin" {
-		dnsPort = "53"
-	}
-	ctrld.ProxyLogger.Load().Info().Msgf("[PacketCapture] Platform: %s, DNS proxy port: %s", runtime.GOOS, dnsPort)
+	// BLOCK here until stopped (critical - Swift expects this to block!)
+	ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Blocking until stop signal...")
+	<-pc.baseController.stopCh
+	ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop signal received, exiting")
 
 	return nil
 }
@@ -189,22 +181,13 @@ func (pc *PacketCaptureController) handleDNSQuery(query *netstack.DNSQuery) {
 		return
 	}
 
-	// Determine DNS proxy port based on platform
-	// Android: 0.0.0.0:5354
-	// iOS: 127.0.0.1:53
-	dnsProxyAddr := "127.0.0.1:5354" // Default for Android
-	if runtime.GOOS == "ios" || runtime.GOOS == "darwin" {
-		// iOS uses port 53
-		dnsProxyAddr = "127.0.0.1:53"
-	}
-
-	// Send query to actual DNS proxy
+	// Send query to actual DNS proxy using configured address
 	client := &dns.Client{
 		Net:     "udp",
 		Timeout: 3 * time.Second,
 	}
 
-	response, _, err := client.Exchange(msg, dnsProxyAddr)
+	response, _, err := client.Exchange(msg, pc.dnsProxyAddress)
 	if err != nil {
 		// Create SERVFAIL response
 		response = new(dns.Msg)
@@ -226,10 +209,6 @@ func (pc *PacketCaptureController) handleDNSQuery(query *netstack.DNSQuery) {
 func (pc *PacketCaptureController) Stop(restart bool, pin int64) int {
 	ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() called - starting shutdown")
 	var errorCode = 0
-
-	// Clear global socket protector
-	ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Stop() - clearing socket protector")
-	ctrld.SetSocketProtector(nil)
 
 	// Stop DNS bridge
 	if pc.dnsBridge != nil {
@@ -295,16 +274,4 @@ func (pc *PacketCaptureController) IsRunning() bool {
 // IsPacketMode returns true (always in packet mode for this controller)
 func (pc *PacketCaptureController) IsPacketMode() bool {
 	return true
-}
-
-// SetFirewallMode enables or disables firewall mode (IP whitelisting) at runtime
-func (pc *PacketCaptureController) SetFirewallMode(enabled bool) {
-	if pc.netstackCtrl != nil {
-		pc.netstackCtrl.SetFirewallMode(enabled)
-		if enabled {
-			ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Firewall mode ENABLED - IP whitelisting active")
-		} else {
-			ctrld.ProxyLogger.Load().Info().Msg("[PacketCapture] Firewall mode DISABLED - all IPs allowed")
-		}
-	}
 }
