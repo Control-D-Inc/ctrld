@@ -9,8 +9,6 @@ import (
 	"strings"
 
 	"github.com/kardianos/service"
-
-	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 func init() {
@@ -23,6 +21,7 @@ func init() {
 	}
 }
 
+// setDependencies sets service dependencies for Linux
 func setDependencies(svc *service.Config) {
 	svc.Dependencies = []string{
 		"Wants=network-online.target",
@@ -37,11 +36,9 @@ func setDependencies(svc *service.Config) {
 			svc.Dependencies = append(svc.Dependencies, "Wants=systemd-networkd-wait-online.service")
 		}
 	}
-	if routerDeps := router.ServiceDependencies(); len(routerDeps) > 0 {
-		svc.Dependencies = append(svc.Dependencies, routerDeps...)
-	}
 }
 
+// setWorkingDirectory sets the working directory for the service
 func setWorkingDirectory(svc *service.Config, dir string) {
 	svc.WorkingDirectory = dir
 }

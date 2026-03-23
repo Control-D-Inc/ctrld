@@ -23,66 +23,67 @@ systemd-resolved=false
 var networkManagerCtrldConfFile = filepath.Join(nmConfDir, nmCtrldConfFilename)
 
 // hasNetworkManager reports whether NetworkManager executable found.
+// hasNetworkManager checks if NetworkManager is available on the system
 func hasNetworkManager() bool {
 	exe, _ := exec.LookPath("NetworkManager")
 	return exe != ""
 }
 
-func setupNetworkManager() error {
+func (p *prog) setupNetworkManager() error {
 	if !hasNetworkManager() {
 		return nil
 	}
 	if content, _ := os.ReadFile(nmCtrldConfContent); string(content) == nmCtrldConfContent {
-		mainLog.Load().Debug().Msg("NetworkManager already setup, nothing to do")
+		p.Debug().Msg("NetworkManager already setup, nothing to do")
 		return nil
 	}
 	err := os.WriteFile(networkManagerCtrldConfFile, []byte(nmCtrldConfContent), os.FileMode(0644))
 	if os.IsNotExist(err) {
-		mainLog.Load().Debug().Msg("NetworkManager is not available")
+		p.Debug().Msg("NetworkManager is not available")
 		return nil
 	}
 	if err != nil {
-		mainLog.Load().Debug().Err(err).Msg("could not write NetworkManager ctrld config file")
+		p.Debug().Err(err).Msg("Could not write NetworkManager ctrld config file")
 		return err
 	}
 
-	reloadNetworkManager()
-	mainLog.Load().Debug().Msg("setup NetworkManager done")
+	p.reloadNetworkManager()
+			p.Debug().Msg("Setup NetworkManager done")
 	return nil
 }
 
-func restoreNetworkManager() error {
+func (p *prog) restoreNetworkManager() error {
 	if !hasNetworkManager() {
 		return nil
 	}
 	err := os.Remove(networkManagerCtrldConfFile)
 	if os.IsNotExist(err) {
-		mainLog.Load().Debug().Msg("NetworkManager is not available")
+		p.Debug().Msg("NetworkManager is not available")
 		return nil
 	}
 	if err != nil {
-		mainLog.Load().Debug().Err(err).Msg("could not remove NetworkManager ctrld config file")
+		p.Debug().Err(err).Msg("Could not remove NetworkManager ctrld config file")
 		return err
 	}
 
-	reloadNetworkManager()
-	mainLog.Load().Debug().Msg("restore NetworkManager done")
+	p.reloadNetworkManager()
+			p.Debug().Msg("Restore NetworkManager done")
 	return nil
 }
 
-func reloadNetworkManager() {
+func (p *prog) reloadNetworkManager() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 	conn, err := dbus.NewSystemConnectionContext(ctx)
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("could not create new system connection")
+		p.Error().Err(err).Msg("Could not create new system connection")
 		return
 	}
 	defer conn.Close()
 
 	waitCh := make(chan string)
 	if _, err := conn.ReloadUnitContext(ctx, nmSystemdUnitName, "ignore-dependencies", waitCh); err != nil {
-		mainLog.Load().Debug().Err(err).Msg("could not reload NetworkManager")
+		p.Debug().Err(err).Msg("Could not reload NetworkManager")
 		return
 	}
 	<-waitCh

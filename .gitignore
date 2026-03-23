@@ -12,3 +12,5 @@ ctrld-*
 
 # generated file
 cmd/cli/rsrc_*.syso
+ctrld
+ctrld.exe
