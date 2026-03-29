@@ -1812,7 +1812,7 @@ func cdUIDFromProvToken() string {
 	// Process provision token if provided.
 	resolverConfig, err := controld.FetchResolverUID(loggerCtx, req, appVersion, cdDev)
 	if err != nil {
-		mainLog.Load().Fatal().Err(err).Msgf("Failed to fetch resolver uid with provision token: %s", cdOrg)
+		mainLog.Load().Fatal().Err(err).Msgf("Failed to fetch resolver uid with provision token: %s", redactToken(cdOrg))
 	}
 	return resolverConfig.UID
 }
@@ -2256,4 +2256,13 @@ func uninstallInvalidCdUID(p *prog, logger *ctrld.Logger, doStop bool) bool {
 		return true
 	}
 	return false
+}
+
+// redactToken returns the first 4 characters of a token followed by ***,
+// or just *** if the token is 4 characters or shorter.
+func redactToken(s string) string {
+	if len(s) <= 4 {
+		return "***"
+	}
+	return s[:4] + "***"
 }
