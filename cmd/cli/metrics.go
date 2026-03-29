@@ -120,6 +120,22 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 	}
 
 	addr := p.cfg.Service.MetricsListener
+	if addr != "" {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			mainLog.Load().Warn().Err(err).Msgf("Invalid metrics listener address (%s); expected host:port", addr)
+		} else {
+			if host == "" {
+				host = "127.0.0.1"
+				addr = net.JoinHostPort(host, port)
+			}
+			ip := net.ParseIP(host)
+			if (ip != nil && !ip.IsLoopback()) || (ip == nil && host != "localhost") {
+				mainLog.Load().Warn().Msgf("Metrics server is bound to a non-loopback address (%s). This exposes sensitive data without authentication.", addr)
+			}
+		}
+	}
+
 	ms, err := newMetricsServer(addr, reg)
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("Could not create new metrics server")
