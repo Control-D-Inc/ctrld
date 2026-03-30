@@ -211,7 +211,11 @@ func (p *prog) serveDNS(listenerNum string) error {
 		proto := proto
 		if needLocalIPv6Listener(p.cfg.Service.InterceptMode) {
 			g.Go(func() error {
-				s, errCh := runDNSServer(net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)), proto, handler)
+				ipv6Handler := handler
+				if proto == "udp" {
+					ipv6Handler = wrapIPv6Handler(handler)
+				}
+				s, errCh := runDNSServer(net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)), proto, ipv6Handler)
 				defer s.Shutdown()
 				select {
 				case <-p.stopCh:
