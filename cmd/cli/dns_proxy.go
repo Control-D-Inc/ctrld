@@ -211,7 +211,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		proto := proto
 		if needLocalIPv6Listener(p.cfg.Service.InterceptMode) {
 			g.Go(func() error {
-				ipv6Handler := handler
+				var ipv6Handler dns.Handler = handler
 				if proto == "udp" {
 					ipv6Handler = wrapIPv6Handler(handler)
 				}
