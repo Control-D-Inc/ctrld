@@ -211,11 +211,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		proto := proto
 		if needLocalIPv6Listener(p.cfg.Service.InterceptMode) {
 			g.Go(func() error {
-				var ipv6Handler dns.Handler = handler
-				if proto == "udp" {
-					ipv6Handler = wrapIPv6Handler(handler)
-				}
-				s, errCh := runDNSServer(net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)), proto, ipv6Handler)
+				s, errCh := runDNSServer(net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)), proto, handler)
 				defer s.Shutdown()
 				select {
 				case <-p.stopCh:
@@ -907,16 +903,13 @@ func needLocalIPv6Listener(interceptMode string) bool {
 		mainLog.Load().Debug().Msg("IPv6 listener: enabled (Windows)")
 		return true
 	}
-	// On macOS in intercept mode, pf can't redirect IPv6 DNS to an IPv4 listener (cross-AF rdr
-	// not supported), and blocking IPv6 DNS causes ~1s timeouts (BSD doesn't deliver ICMP errors
-	// to unconnected UDP sockets). Listening on [::1] lets us intercept IPv6 DNS directly.
-	//
-	// NOTE: We accept the intercept mode string as a parameter instead of reading the global
-	// dnsIntercept bool, because dnsIntercept is derived later in prog.run() — after the
-	// listener goroutines are already spawned. Same pattern as the port 5354 fallback fix (MR !860).
-	if (interceptMode == "dns" || interceptMode == "hard") && runtime.GOOS == "darwin" {
-		mainLog.Load().Debug().Msg("IPv6 listener: enabled (macOS intercept mode)")
-		return true
+	// macOS: IPv6 DNS is blocked at the pf level (not intercepted). The [::1] listener
+	// is not needed — macOS falls back to IPv4 DNS automatically. See #507 and
+	// docs/pf-dns-intercept.md for why IPv6 interception on macOS is not feasible
+	// (sendmsg EINVAL from ::1 to global unicast, nat-on-lo0 doesn't fire for route-to).
+	if runtime.GOOS == "darwin" {
+		mainLog.Load().Debug().Msg("IPv6 listener: not needed (macOS — IPv6 DNS blocked at pf, fallback to IPv4)")
+		return false
 	}
 	mainLog.Load().Debug().Str("os", runtime.GOOS).Str("interceptMode", interceptMode).Msg("IPv6 listener: not needed")
 	return false

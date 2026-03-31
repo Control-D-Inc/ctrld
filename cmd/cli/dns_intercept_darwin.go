@@ -796,11 +796,11 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	// proven by commit 51cf029 where responses were silently dropped.
 	rules.WriteString("# --- Translation rules (rdr) ---\n")
 
-	listenerAddr6 := fmt.Sprintf("::1 port %d", listenerPort)
 	rules.WriteString("# Redirect DNS on loopback to ctrld's listener.\n")
 	rules.WriteString(fmt.Sprintf("rdr on lo0 inet proto udp from any to ! %s port 53 -> %s\n", listenerIP, listenerAddr))
 	rules.WriteString(fmt.Sprintf("rdr on lo0 inet proto tcp from any to ! %s port 53 -> %s\n", listenerIP, listenerAddr))
-	rules.WriteString(fmt.Sprintf("rdr on lo0 inet6 proto udp from any to ! ::1 port 53 -> %s\n\n", listenerAddr6))
+	// No IPv6 rdr — IPv6 DNS is blocked at the filter level (see below).
+	rules.WriteString("\n")
 
 	// --- Filtering rules ---
 	rules.WriteString("# --- Filtering rules (pass) ---\n\n")
@@ -962,7 +962,7 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 			}
 			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet proto udp from any to ! %s port 53\n", iface, listenerIP))
 			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet proto tcp from any to ! %s port 53\n", iface, listenerIP))
-			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet6 proto udp from any to ! ::1 port 53\n", iface))
+			// No IPv6 route-to — IPv6 DNS is blocked, not intercepted.
 		}
 		rules.WriteString("\n")
 	}
@@ -982,13 +982,14 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	rules.WriteString(fmt.Sprintf("pass out quick on ! lo0 route-to lo0 inet proto udp from any to ! %s port 53\n", listenerIP))
 	rules.WriteString(fmt.Sprintf("pass out quick on ! lo0 route-to lo0 inet proto tcp from any to ! %s port 53\n\n", listenerIP))
 
-	// Force remaining outbound IPv6 UDP DNS through loopback for interception.
-	// IPv6 TCP DNS is blocked instead — raw socket response injection only handles UDP,
-	// and TCP DNS is rare (truncated responses, zone transfers). Apps fall back to IPv4 TCP.
-	rules.WriteString("# Force remaining outbound IPv6 UDP DNS through loopback for interception.\n")
-	rules.WriteString("pass out quick on ! lo0 route-to lo0 inet6 proto udp from any to ! ::1 port 53\n")
-	rules.WriteString("# Block IPv6 TCP DNS — raw socket can't handle TCP; apps fall back to IPv4.\n")
-	rules.WriteString("block return out quick on ! lo0 inet6 proto tcp from any to ! ::1 port 53\n\n")
+	// Block all outbound IPv6 DNS. ctrld only intercepts IPv4 DNS via the loopback
+	// redirect. IPv6 DNS interception on macOS is not feasible because the kernel rejects
+	// sendmsg from [::1] to global unicast IPv6 (EINVAL), and pf's nat-on-lo0 doesn't
+	// fire for route-to'd packets. Blocking forces macOS to fall back to IPv4 DNS,
+	// which is fully intercepted. See docs/pf-dns-intercept.md for details.
+	rules.WriteString("# Block outbound IPv6 DNS — ctrld intercepts IPv4 only.\n")
+	rules.WriteString("# macOS falls back to IPv4 DNS automatically.\n")
+	rules.WriteString("block out quick on ! lo0 inet6 proto { udp, tcp } from any to any port 53\n\n")
 
 	// Allow route-to'd DNS packets to pass outbound on lo0.
 	// Without this, VPN firewalls with "block drop all" (e.g., Windscribe) drop the packet
@@ -1000,7 +1001,8 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	rules.WriteString("# Pass route-to'd DNS outbound on lo0 — no state to avoid bypassing rdr inbound.\n")
 	rules.WriteString(fmt.Sprintf("pass out quick on lo0 inet proto udp from any to ! %s port 53 no state\n", listenerIP))
 	rules.WriteString(fmt.Sprintf("pass out quick on lo0 inet proto tcp from any to ! %s port 53 no state\n", listenerIP))
-	rules.WriteString("pass out quick on lo0 inet6 proto udp from any to ! ::1 port 53 no state\n\n")
+	// No IPv6 lo0 pass — IPv6 DNS is blocked, not routed through lo0.
+	rules.WriteString("\n")
 
 	// Allow the redirected traffic through on loopback (inbound after rdr).
 	//
@@ -1015,7 +1017,7 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	// (source 127.0.0.1 → original DNS server IP, e.g., 10.255.255.3).
 	rules.WriteString("# Accept redirected DNS — reply-to lo0 forces response through loopback.\n")
 	rules.WriteString(fmt.Sprintf("pass in quick on lo0 reply-to lo0 inet proto { udp, tcp } from any to %s\n", listenerAddr))
-	rules.WriteString(fmt.Sprintf("pass in quick on lo0 reply-to lo0 inet6 proto udp from any to %s\n", listenerAddr6))
+	// No IPv6 pass-in — IPv6 DNS is blocked, not redirected to [::1].
 
 	return rules.String()
 }
