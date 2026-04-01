@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -222,10 +223,12 @@ func (m *vpnDNSManager) Routes() map[string][]string {
 
 // upstreamConfigFor creates a legacy upstream configuration for the given VPN DNS server.
 func (m *vpnDNSManager) upstreamConfigFor(server string) *ctrld.UpstreamConfig {
-	endpoint := server
-	if !strings.Contains(server, ":") {
-		endpoint = server + ":53"
-	}
+	// Use net.JoinHostPort to correctly handle both IPv4 and IPv6 addresses.
+	// Previously, the strings.Contains(":") check would skip appending ":53"
+	// for IPv6 addresses (they contain colons), leaving a bare address like
+	// "2a0d:6fc0:9b0:3600::1" which net.Dial rejects with "too many colons".
+	// net.JoinHostPort produces "[2a0d:6fc0:9b0:3600::1]:53" as required.
+	endpoint := net.JoinHostPort(server, "53")
 
 	return &ctrld.UpstreamConfig{
 		Name:     "VPN DNS",
