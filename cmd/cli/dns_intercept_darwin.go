@@ -291,7 +291,12 @@ func (p *prog) startDNSIntercept() error {
 	p.lastTunnelIfaces = discoverTunnelInterfaces()
 	p.mu.Unlock()
 
-	mainLog.Load().Info().Msgf("DNS intercept: pf redirect active — all outbound DNS (port 53) redirected to 127.0.0.1:53 via anchor %q", pfAnchorName)
+	lc := p.cfg.FirstListener()
+	if lc != nil {
+		mainLog.Load().Info().Msgf("DNS intercept: pf redirect active — all outbound DNS (port 53) redirected to %s:%d via anchor %q", lc.IP, lc.Port, pfAnchorName)
+	} else {
+		mainLog.Load().Info().Msgf("DNS intercept: pf redirect active — all outbound DNS (port 53) redirected via anchor %q", pfAnchorName)
+	}
 
 	// Start the pf watchdog to detect and restore rules if another program
 	// (e.g., Windscribe desktop, macOS configd) replaces the pf ruleset.
@@ -738,13 +743,31 @@ func (p *prog) validateDNSIntercept() error {
 //
 // pf requires strict rule ordering: translation (rdr) BEFORE filtering (pass).
 func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
+	// Read the actual listener address from config. In intercept mode, ctrld may
+	// be on a non-standard port (e.g., 127.0.0.1:5354) if mDNSResponder holds *:53.
+	// The pf rdr rules must redirect to wherever ctrld is actually listening.
+	listenerIP := "127.0.0.1"
+	listenerPort := 53
+	if lc := p.cfg.FirstListener(); lc != nil {
+		if lc.IP != "" && lc.IP != "0.0.0.0" && lc.IP != "::" {
+			listenerIP = lc.IP
+		} else if lc.IP == "0.0.0.0" || lc.IP == "::" {
+			mainLog.Load().Warn().Str("configured_ip", lc.IP).
+				Msg("DNS intercept: listener configured with wildcard IP, using 127.0.0.1 for pf rules")
+		}
+		if lc.Port != 0 {
+			listenerPort = lc.Port
+		}
+	}
+	listenerAddr := fmt.Sprintf("%s port %d", listenerIP, listenerPort)
+
 	var rules strings.Builder
 	rules.WriteString("# ctrld DNS Intercept Mode\n")
 	rules.WriteString("# Intercepts locally-originated DNS (port 53) via route-to + rdr on lo0.\n")
 	rules.WriteString("#\n")
 	rules.WriteString("# How it works:\n")
 	rules.WriteString("#   1. \"pass out route-to lo0\" forces outbound DNS through the loopback interface\n")
-	rules.WriteString("#   2. \"rdr on lo0\" catches it on loopback and redirects to ctrld at 127.0.0.1:53\n")
+	rules.WriteString(fmt.Sprintf("#   2. \"rdr on lo0\" catches it on loopback and redirects to ctrld at %s\n", listenerAddr))
 	rules.WriteString("#\n")
 	rules.WriteString("# All ctrld traffic is blanket-exempted via \"pass out quick group " + pfGroupName + "\",\n")
 	rules.WriteString("# ensuring ctrld's DoH/DoT upstream connections and DNS queries are never\n")
@@ -759,10 +782,9 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	// evaluation, and its implicit state alone is insufficient for response delivery —
 	// proven by commit 51cf029 where responses were silently dropped.
 	rules.WriteString("# --- Translation rules (rdr) ---\n")
-	rules.WriteString("# Redirect DNS traffic arriving on loopback (from route-to) to ctrld's listener.\n")
-	rules.WriteString("# Uses rdr (not rdr pass) — filter rules must evaluate to create response state.\n")
-	rules.WriteString("rdr on lo0 inet proto udp from any to ! 127.0.0.1 port 53 -> 127.0.0.1 port 53\n")
-	rules.WriteString("rdr on lo0 inet proto tcp from any to ! 127.0.0.1 port 53 -> 127.0.0.1 port 53\n\n")
+	rules.WriteString("# Redirect DNS on loopback to ctrld's listener.\n")
+	rules.WriteString(fmt.Sprintf("rdr on lo0 inet proto udp from any to ! %s port 53 -> %s\n", listenerIP, listenerAddr))
+	rules.WriteString(fmt.Sprintf("rdr on lo0 inet proto tcp from any to ! %s port 53 -> %s\n\n", listenerIP, listenerAddr))
 
 	// --- Filtering rules ---
 	rules.WriteString("# --- Filtering rules (pass) ---\n\n")
@@ -899,8 +921,8 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 				rules.WriteString(fmt.Sprintf("# Skipped %s — VPN DNS interface (passthrough rules handle this)\n", iface))
 				continue
 			}
-			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet proto udp from any to ! 127.0.0.1 port 53\n", iface))
-			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet proto tcp from any to ! 127.0.0.1 port 53\n", iface))
+			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet proto udp from any to ! %s port 53\n", iface, listenerIP))
+			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet proto tcp from any to ! %s port 53\n", iface, listenerIP))
 		}
 		rules.WriteString("\n")
 	}
@@ -910,8 +932,8 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	// (matches on any interface), but "pass out on lo0 no state" below ensures no state
 	// is created on the lo0 outbound path, allowing rdr to fire on lo0 inbound.
 	rules.WriteString("# Force remaining outbound IPv4 DNS through loopback for interception.\n")
-	rules.WriteString("pass out quick on ! lo0 route-to lo0 inet proto udp from any to ! 127.0.0.1 port 53\n")
-	rules.WriteString("pass out quick on ! lo0 route-to lo0 inet proto tcp from any to ! 127.0.0.1 port 53\n\n")
+	rules.WriteString(fmt.Sprintf("pass out quick on ! lo0 route-to lo0 inet proto udp from any to ! %s port 53\n", listenerIP))
+	rules.WriteString(fmt.Sprintf("pass out quick on ! lo0 route-to lo0 inet proto tcp from any to ! %s port 53\n\n", listenerIP))
 
 	// Allow route-to'd DNS packets to pass outbound on lo0.
 	// Without this, VPN firewalls with "block drop all" (e.g., Windscribe) drop the packet
@@ -921,8 +943,8 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	// the packet when it reflects inbound on lo0, causing pf to fast-path it and bypass
 	// rdr entirely. With "no state", the inbound packet gets fresh evaluation and rdr fires.
 	rules.WriteString("# Pass route-to'd DNS outbound on lo0 — no state to avoid bypassing rdr inbound.\n")
-	rules.WriteString("pass out quick on lo0 inet proto udp from any to ! 127.0.0.1 port 53 no state\n")
-	rules.WriteString("pass out quick on lo0 inet proto tcp from any to ! 127.0.0.1 port 53 no state\n\n")
+	rules.WriteString(fmt.Sprintf("pass out quick on lo0 inet proto udp from any to ! %s port 53 no state\n", listenerIP))
+	rules.WriteString(fmt.Sprintf("pass out quick on lo0 inet proto tcp from any to ! %s port 53 no state\n\n", listenerIP))
 
 	// Allow the redirected traffic through on loopback (inbound after rdr).
 	//
@@ -936,7 +958,7 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	// the response. The rdr NAT state handles the address rewrite on the response
 	// (source 127.0.0.1 → original DNS server IP, e.g., 10.255.255.3).
 	rules.WriteString("# Accept redirected DNS — reply-to lo0 forces response through loopback.\n")
-	rules.WriteString("pass in quick on lo0 reply-to lo0 inet proto { udp, tcp } from any to 127.0.0.1 port 53\n")
+	rules.WriteString(fmt.Sprintf("pass in quick on lo0 reply-to lo0 inet proto { udp, tcp } from any to %s\n", listenerAddr))
 
 	return rules.String()
 }
