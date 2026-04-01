@@ -310,7 +310,7 @@ func (p *prog) startDNSIntercept() error {
 //	options → normalization (scrub) → queueing → translation (nat/rdr) → filtering (pass/block/anchor)
 //
 // "pfctl -sr" returns BOTH scrub-anchor (normalization) AND anchor/pass/block (filter) rules.
-// "pfctl -sn" returns nat-anchor AND rdr-anchor (translation) rules.
+// "pfctl -sn" returns rdr-anchor (translation) rules.
 // Both commands emit "No ALTQ support in kernel" warnings on stderr.
 //
 // We must reassemble in correct order: scrub → nat/rdr → filter.
