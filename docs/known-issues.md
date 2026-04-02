@@ -22,6 +22,34 @@ This document outlines known issues with ctrld and their current status, workaro
 
 ---
 
+## Merlin Issues
+
+### Daemon Crashing on `Ctrl+C`
+
+**Issue**: `ctrld` daemon terminates unexpectedly after stopping a log tailing command. This typically occurs when running the daemon and the log viewer within the same SSH session on ASUSWRT-Merlin routers.
+
+**Description**
+
+The issue is caused by `Signal Propagation` within a shared `Process Group (PGID)`.
+
+Steps to reproduce:
+
+1. You start the daemon manually: `ctrld start --cd=<uid>`.
+2. You view internal logs in the same terminal: `ctrld log tail`.
+3. You press `Ctrl+C` to stop viewing logs.
+4. The `ctrld` daemon service stops immediately along with the log command.
+
+When you execute commands sequentially in a single interactive SSH session on Merlin, the shell often assigns them to the same Process Group. In Linux, the `SIGINT` signal (triggered by `Ctrl+C`) is not just sent to the foreground application, but is frequently propagated to every process belonging to that specific process group.
+
+Because the `ctrld` daemon remains "attached" to the terminal session's process group, it "hears" the interrupt signal intended for the `log tail` command and shuts down.
+
+**Workarounds**:
+
+To isolate the signals, avoid running the log viewer in the same window as the daemon:
+* **Window A:** Start the daemon and leave it running.
+* **Window B:** Open a new SSH connection to run `ctrld log tail`.
+Because Window B has a different **Session ID** and **Process Group ID**, pressing `Ctrl+C` in Window B will not affect the process in Window A.
+
 ## Contributing to Known Issues
 
 If you encounter an issue not listed here, please:
