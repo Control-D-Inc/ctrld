@@ -100,8 +100,9 @@ func newDOQConnPool(_ context.Context, uc *UpstreamConfig, addrs []string) *doqC
 
 // Resolve performs a DNS query using a pooled QUIC connection.
 func (p *doqConnPool) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	// Retry logic for transient errors: io.EOF (connection reset) and
-	// IdleTimeoutError (stale pooled connection timed out).
+	// Retry logic for transient errors: io.EOF (connection reset),
+	// IdleTimeoutError (stale pooled connection timed out), and
+	// StreamLimitReachedError (stream credit exhausted before server MAX_STREAMS arrived).
 	for range 5 {
 		answer, err := p.doResolve(ctx, msg)
 		if err == io.EOF {
@@ -109,6 +110,10 @@ func (p *doqConnPool) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 		}
 		var idleErr *quic.IdleTimeoutError
 		if errors.As(err, &idleErr) {
+			continue
+		}
+		var streamLimitErr quic.StreamLimitReachedError
+		if errors.As(err, &streamLimitErr) {
 			continue
 		}
 		if err != nil {
@@ -135,17 +140,24 @@ func (p *doqConnPool) doResolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 		return nil, err
 	}
 
-	// Open a new stream for this query
-	stream, err := conn.OpenStream()
+	// Ensure the context has a deadline before calling OpenStreamSync, which
+	// blocks until the server sends a MAX_STREAMS update. Without a deadline the
+	// call could block indefinitely when the server never sends the update.
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		deadline, _ = ctx.Deadline()
+	}
+
+	// OpenStreamSync blocks until the server's MAX_STREAMS credit arrives,
+	// avoiding the StreamLimitReachedError race that OpenStream (non-blocking)
+	// triggers when the credit replenishment frame is still in flight.
+	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		p.putConn(conn, false)
 		return nil, err
-	}
-
-	// Set deadline
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(5 * time.Second)
 	}
 	_ = stream.SetDeadline(deadline)
 
