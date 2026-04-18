@@ -173,6 +173,14 @@ func (t *Table) SetSelfIP(ip string) {
 	t.selfIPLock.Lock()
 	defer t.selfIPLock.Unlock()
 	t.selfIP = ip
+	// init() only assigns t.dhcp when DHCP discovery is enabled and there is
+	// no custom client ID, so on configs with discover_dhcp = "false" this
+	// method is called with a nil dhcp table. The previous code dereferenced
+	// it unconditionally and crashed every time the netmon goroutine
+	// observed a carrier / address change.
+	if t.dhcp == nil {
+		return
+	}
 	t.dhcp.selfIP = t.selfIP
 	t.dhcp.addSelf()
 }
