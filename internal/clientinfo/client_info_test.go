@@ -1,10 +1,65 @@
 package clientinfo
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/Control-D-Inc/ctrld"
 )
+
+// TestTable_SetSelfIP_NilDHCP ensures SetSelfIP does not panic when t.dhcp is
+// nil, which happens when DHCP discovery is disabled and the network-change
+// callback fires before or without initialisation.
+func TestTable_SetSelfIP_NilDHCP(t *testing.T) {
+	table := &Table{} // dhcp is nil
+	// Must not panic.
+	table.SetSelfIP("192.168.1.1")
+	if got := table.SelfIP(); got != "192.168.1.1" {
+		t.Fatalf("SelfIP() = %q, want %q", got, "192.168.1.1")
+	}
+}
+
+// TestTable_SetSelfIP_UpdatesDHCP ensures SetSelfIP propagates the new IP to
+// the dhcp discover and calls addSelf when dhcp is initialised.
+func TestTable_SetSelfIP_UpdatesDHCP(t *testing.T) {
+	table := &Table{
+		dhcp: &dhcp{selfIP: "10.0.0.1"},
+	}
+	table.SetSelfIP("10.0.0.2")
+	if got := table.SelfIP(); got != "10.0.0.2" {
+		t.Fatalf("SelfIP() = %q, want %q", got, "10.0.0.2")
+	}
+	if table.dhcp.selfIP != "10.0.0.2" {
+		t.Fatalf("dhcp.selfIP = %q, want %q", table.dhcp.selfIP, "10.0.0.2")
+	}
+}
+
+// TestTable_SetSelfIP_Concurrent ensures concurrent calls to SetSelfIP do not
+// race, regardless of whether dhcp is nil or not.
+func TestTable_SetSelfIP_Concurrent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		table *Table
+	}{
+		{"nil dhcp", &Table{}},
+		{"with dhcp", &Table{dhcp: &dhcp{}}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var wg sync.WaitGroup
+			for range 10 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					tc.table.SetSelfIP("192.168.1.1")
+					_ = tc.table.SelfIP()
+				}()
+			}
+			wg.Wait()
+		})
+	}
+}
 
 func Test_normalizeIP(t *testing.T) {
 	tests := []struct {

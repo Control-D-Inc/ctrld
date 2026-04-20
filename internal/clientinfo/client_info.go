@@ -180,8 +180,10 @@ func (t *Table) SetSelfIP(ip string) {
 	t.selfIPLock.Lock()
 	defer t.selfIPLock.Unlock()
 	t.selfIP = ip
-	t.dhcp.selfIP = t.selfIP
-	t.dhcp.addSelf()
+	if t.dhcp != nil {
+		t.dhcp.selfIP = t.selfIP
+		t.dhcp.addSelf()
+	}
 }
 
 // initSelfDiscover initializes necessary client metadata for self query.
