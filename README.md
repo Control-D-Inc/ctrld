@@ -24,7 +24,7 @@ All DNS protocols are supported, including:
 - `DNS-over-HTTP/3` (DOH3)
 - `DNS-over-QUIC`
 
-# Use Cases
+## Use Cases
 1. Use secure DNS protocols on networks and devices that don't natively support them (legacy OSes, TVs, smart toasters).
 2. Create source IP based DNS routing policies with variable secure DNS upstreams. Subnet 1 (admin) uses upstream resolver A, while Subnet 2 (employee) uses upstream resolver B.
 3. Create destination IP based DNS routing policies with variable secure DNS upstreams. Listener 1 uses upstream resolver C, while Listener 2 uses upstream resolver D.
@@ -32,12 +32,12 @@ All DNS protocols are supported, including:
 
 
 ## OS Support
-- Windows Desktop (386, amd64, arm)
+- Windows Desktop (386, amd64, arm64)
 - MacOS (amd64, arm64)
-- Linux (386, amd64, arm, mips)
-- FreeBSD (386, amd64, arm)
+- Linux (386, amd64, arm, arm64, mips, mipsle, mips64)
+- FreeBSD (386, amd64, arm, arm64)
 
-# Install
+## Install
 There are several ways to download and install `ctrld`.
 
 ## Quick Install
@@ -49,7 +49,7 @@ sh -c 'sh -c "$(curl -sL https://api.controld.com/dl?version=2)"'
 
 Windows user and prefer Powershell (who doesn't)? No problem, execute this command instead in administrative PowerShell:
 ```shell
-(Invoke-WebRequest -Uri 'https://api.controld.com/dl/ps1?version=2' -UseBasicParsing).Content | Set-Content "$env:TEMPctrld_install.ps1"; Invoke-Expression "& '$env:TEMPctrld_install.ps1'"
+(Invoke-WebRequest -Uri 'https://api.controld.com/dl/ps1?version=2' -UseBasicParsing).Content | Set-Content "$env:TEMP\ctrld_install.ps1"; Invoke-Expression "& '$env:TEMP\ctrld_install.ps1'"
 ```
 
 Or you can pull and run a Docker container from [Docker Hub](https://hub.docker.com/r/controldns/ctrld)
@@ -61,7 +61,7 @@ docker run -d --name=ctrld -p 127.0.0.1:53:53/tcp -p 127.0.0.1:53:53/udp control
 Alternatively, if you know what you're doing you can download pre-compiled binaries from the [Releases](https://github.com/Control-D-Inc/ctrld/releases) section for the appropriate platform. 
 
 ## Build
-Lastly, you can build `ctrld` from source which requires `go1.23+`:
+Lastly, you can build `ctrld` from source which requires `go1.24+`:
 
 ```shell
 go build ./cmd/ctrld
@@ -80,7 +80,7 @@ docker build -t controldns/ctrld . -f docker/Dockerfile
 ```
 
 
-# Usage
+## Usage
 The cli is self documenting, so feel free to run `--help` on any sub-command to get specific usages. 
 
 ## Arguments
@@ -175,7 +175,7 @@ Linux or Macos
   sudo ctrld service start
   ```
 
-# Configuration
+## Configuration
 `ctrld` can be configured in variety of different ways, which include: API, local config file or via cli launch args. 
 
 ## API Based Auto Configuration
