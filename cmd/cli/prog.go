@@ -133,6 +133,12 @@ type prog struct {
 	recoveryCancelMu sync.Mutex
 	recoveryCancel   context.CancelFunc
 	recoveryRunning  atomic.Bool
+
+	// recoveryDebounceTimer coalesces rapid NetworkChange recovery triggers
+	// into a single handleRecovery call. Only handleRecovery is debounced —
+	// all other state updates (IP, pf anchor, VPN DNS) run immediately.
+	recoveryDebounceMu    sync.Mutex
+	recoveryDebounceTimer *time.Timer
 	// recoveryBypass is set when dns-intercept mode enters recovery.
 	// While true, proxy() forwards all queries to the OS/DHCP resolver
 	// instead of the configured upstreams. This allows captive portal
@@ -1017,10 +1023,10 @@ func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 		if err := p.stopDNSIntercept(); err != nil {
 			p.Error().Err(err).Msg("Failed to stop DNS intercept mode during reset")
 		}
-		
+
 		// Clean up VPN DNS manager
 		p.vpnDNS = nil
-		
+
 		return
 	}
 	netIfaceName := ""

@@ -638,27 +638,27 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		domain := req.msg.Question[0].Name
 		if vpnServers := p.vpnDNS.UpstreamForDomain(domain); len(vpnServers) > 0 {
 			ctrld.Log(ctx, p.Debug(), "VPN DNS route matched for domain %s, using servers: %v", domain, vpnServers)
-			
+
 			// Try each VPN DNS server
 			for _, server := range vpnServers {
 				upstreamConfig := p.vpnDNS.upstreamConfigFor(server)
 				ctrld.Log(ctx, p.Debug(), "Querying VPN DNS server: %s", server)
-				
+
 				answer := p.queryUpstream(ctx, req, "vpn-dns", upstreamConfig)
 				if answer != nil {
 					ctrld.Log(ctx, p.Debug(), "VPN DNS query successful")
-					
+
 					// Update cache if enabled
 					if p.cache != nil {
 						p.updateCache(ctx, req, answer, "vpn-dns")
 					}
-					
+
 					return &proxyResponse{answer: answer, cached: false}
 				} else {
 					ctrld.Log(ctx, p.Debug(), "VPN DNS server %s failed", server)
 				}
 			}
-			
+
 			ctrld.Log(ctx, p.Debug(), "All VPN DNS servers failed, falling back to normal upstreams")
 		}
 	}
@@ -1733,7 +1733,7 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		}
 		p.Debug().Msgf("Set default local IPv4: %s, IPv6: %s", selfIP, ipv6)
 
-		p.handleRecovery(RecoveryReasonNetworkChange)
+		p.debounceRecovery()
 
 		// After network changes, verify our pf anchor is still active and
 		// refresh VPN DNS state. Order matters: tunnel checks first (may rebuild
@@ -1850,12 +1850,58 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 // waits for upstream recovery with timeout, and completes the recovery process.
 // The method is designed to be called from a goroutine and handles different recovery reasons
 // (network changes, regular failures, OS failures) with appropriate logic for each.
+// recoveryDebounceWindow is the time to wait after the last network change
+// before triggering handleRecovery. This coalesces rapid consecutive network
+// changes (e.g., hotspot→LAN causing en1 drop + en0 pickup + en1 re-pickup)
+// into a single recovery pass, avoiding the cancel-and-restart race that
+// leaves DoH transports in a stale state.
+const recoveryDebounceWindow = 500 * time.Millisecond
+
+// debounceRecovery schedules a handleRecovery(NetworkChange) call after a debounce
+// window. If called again before the window expires, the timer is reset so that
+// recovery runs once with the final network state. All other state updates (IP,
+// pf anchor, VPN DNS, tunnel checks) run immediately — only the recovery flow
+// with its upstream probing and DHCP bypass logic is debounced.
+func (p *prog) debounceRecovery() {
+	p.recoveryDebounceMu.Lock()
+	defer p.recoveryDebounceMu.Unlock()
+
+	if p.recoveryDebounceTimer != nil {
+		p.recoveryDebounceTimer.Stop()
+		p.Debug().Msg("Recovery debounce: resetting timer (rapid network change)")
+	}
+	p.recoveryDebounceTimer = time.AfterFunc(recoveryDebounceWindow, func() {
+		p.recoveryDebounceMu.Lock()
+		p.recoveryDebounceTimer = nil
+		p.recoveryDebounceMu.Unlock()
+		p.handleRecovery(RecoveryReasonNetworkChange)
+	})
+	p.Debug().Msg("Recovery debounce: scheduled (500ms window)")
+}
+
 func (p *prog) handleRecovery(reason RecoveryReason) {
 	p.Debug().Msg("Starting recovery process: removing DNS settings")
 
 	// Handle recovery cancellation based on reason
 	if !p.shouldStartRecovery(reason) {
 		return
+	}
+
+	// For network changes, force-reset all upstream transports synchronously.
+	// The lazy ReBootstrap() called earlier in the network change callback only
+	// sets a flag — the old transport's dead connections can still be used by
+	// recovery probes, causing context deadline timeouts. ForceReBootstrap()
+	// closes old connections and creates fresh transports so probes succeed on
+	// first attempt. This runs outside recoveryCancelMu to avoid holding the
+	// mutex during transport work.
+	if reason == RecoveryReasonNetworkChange {
+		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
+		for _, uc := range p.cfg.Upstream {
+			if uc != nil {
+				uc.ForceReBootstrap(loggerCtx)
+			}
+		}
+		p.Info().Msg("Force-reset upstream transports for network change recovery")
 	}
 
 	// Create recovery context and cleanup function
