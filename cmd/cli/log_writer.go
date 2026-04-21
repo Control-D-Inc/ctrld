@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,9 @@ const (
 	logWriterSentInterval  = time.Minute
 	logWriterInitEndMarker = "\n\n=== INIT_END ===\n\n"
 	logWriterLogEndMarker  = "\n\n=== LOG_END ===\n\n"
+
+	logFileName    = "ctrld.log"
+	logFileMaxSize = 1024 * 1024 * 5 // 5 MB
 )
 
 type logViewResponse struct {
@@ -44,11 +48,18 @@ type logSubscriber struct {
 }
 
 // logWriter is an internal buffer to keep track of runtime log when no logging is enabled.
+// When a file path is configured via setLogFile, writes are also persisted to
+// a rotated file on disk (max logFileMaxSize, 1 backup) so logs survive restarts.
 type logWriter struct {
 	mu          sync.Mutex
 	buf         bytes.Buffer
 	size        int
 	subscribers []*logSubscriber
+
+	// File persistence fields.
+	logFile     *os.File
+	logFilePath string
+	logFileSize int64
 }
 
 // newLogWriter creates an internal log writer.
@@ -65,6 +76,80 @@ func newSmallLogWriter() *logWriter {
 func newLogWriterWithSize(size int) *logWriter {
 	lw := &logWriter{size: size}
 	return lw
+}
+
+// setLogFile configures file-backed persistence for the log writer.
+// The directory is created if it does not exist. An existing file is
+// opened in append mode and its current size is tracked for rotation.
+func (lw *logWriter) setLogFile(path string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return fmt.Errorf("creating log directory: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+	if err != nil {
+		return fmt.Errorf("opening log file: %w", err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("stat log file: %w", err)
+	}
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	lw.logFile = f
+	lw.logFilePath = path
+	lw.logFileSize = st.Size()
+	return nil
+}
+
+// rotateLogFile rotates the current log file to a .1 backup.
+// It returns true if lw.logFile is usable after the call, false otherwise.
+// Must be called with lw.mu held.
+func (lw *logWriter) rotateLogFile() bool {
+	if lw.logFile == nil {
+		return false
+	}
+	lw.logFile.Close()
+	backupPath := lw.logFilePath + ".1"
+	// Best effort: rename current to backup (overwrites old backup).
+	os.Rename(lw.logFilePath, backupPath)
+	f, err := os.OpenFile(lw.logFilePath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0600)
+	if err != nil {
+		// If we can't reopen, disable file logging.
+		lw.logFile = nil
+		lw.logFileSize = 0
+		return false
+	}
+	lw.logFile = f
+	lw.logFileSize = 0
+	return true
+}
+
+// closeLogFile closes the backing file if open.
+func (lw *logWriter) closeLogFile() {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if lw.logFile != nil {
+		lw.logFile.Close()
+		lw.logFile = nil
+	}
+}
+
+// logFilePaths returns the paths to the current log file and its backup
+// (if they exist) for inclusion in log send payloads.
+func (lw *logWriter) logFilePaths() (current, backup string) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if lw.logFilePath == "" {
+		return "", ""
+	}
+	current = lw.logFilePath
+	bp := lw.logFilePath + ".1"
+	if _, err := os.Stat(bp); err == nil {
+		backup = bp
+	}
+	return current, backup
 }
 
 // Subscribe returns a channel that receives new log data as it's written,
@@ -131,6 +216,16 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 		}
 	}
 
+	// Write to backing file if configured.
+	if lw.logFile != nil {
+		needsRotation := lw.logFileSize+int64(len(p)) > logFileMaxSize
+		if !needsRotation || lw.rotateLogFile() {
+			if n, err := lw.logFile.Write(p); err == nil {
+				lw.logFileSize += int64(n)
+			}
+		}
+	}
+
 	// If writing p causes overflows, discard old data.
 	if lw.buf.Len()+len(p) > lw.size {
 		buf := lw.buf.Bytes()
@@ -168,6 +263,12 @@ func (p *prog) initLogging(backup bool) {
 	p.initInternalLogging(logWriters)
 }
 
+// internalLogFilePath returns the path for persisted internal logs.
+// The file lives in the ctrld home directory alongside other runtime state.
+func internalLogFilePath() string {
+	return absHomeDir(logFileName)
+}
+
 // initInternalLogging performs internal logging if there's no log enabled.
 func (p *prog) initInternalLogging(writers []io.Writer) {
 	if !p.needInternalLogging() {
@@ -178,6 +279,14 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 		p.internalLogWriter = newLogWriter()
 		p.internalLogSent = time.Now().Add(-logWriterSentInterval)
 		p.internalWarnLogWriter = newSmallLogWriter()
+		// Persist internal logs to disk so they survive restarts.
+		if path := internalLogFilePath(); path != "" {
+			if err := p.internalLogWriter.setLogFile(path); err != nil {
+				mainLog.Load().Warn().Err(err).Msg("could not enable persistent internal logging")
+			} else {
+				mainLog.Load().Notice().Msgf("internal log file: %s", path)
+			}
+		}
 	})
 	p.mu.Lock()
 	lw := p.internalLogWriter
@@ -232,7 +341,15 @@ func (p *prog) logReader() (*logReader, error) {
 		if wlw == nil {
 			return nil, errors.New("nil internal warn log writer")
 		}
-		// Normal log content.
+
+		// If we have a persisted log file, read from disk (includes data
+		// from previous runs that the in-memory buffer wouldn't have).
+		current, backup := lw.logFilePaths()
+		if current != "" {
+			return p.logReaderFromFiles(current, backup, wlw)
+		}
+
+		// Fall back to in-memory buffer.
 		lw.mu.Lock()
 		lwReader := bytes.NewReader(lw.buf.Bytes())
 		lwSize := lw.buf.Len()
@@ -267,4 +384,84 @@ func (p *prog) logReader() (*logReader, error) {
 		return nil, errors.New("log file is empty")
 	}
 	return lr, nil
+}
+
+// logReaderFromFiles builds a logReader that concatenates the backup file
+// (if it exists), the current log file, and the in-memory warn log buffer.
+func (p *prog) logReaderFromFiles(current, backup string, wlw *logWriter) (*logReader, error) {
+	var rcs []io.ReadCloser
+	var totalSize int64
+
+	closeAll := func() {
+		for _, rc := range rcs {
+			rc.Close()
+		}
+	}
+
+	// Read backup file first (older entries).
+	if backup != "" {
+		if bf, err := os.Open(backup); err == nil {
+			if st, err := bf.Stat(); err == nil {
+				totalSize += st.Size()
+			}
+			rcs = append(rcs, bf)
+		}
+	}
+
+	// Read current file.
+	cf, err := os.Open(current)
+	if err != nil {
+		closeAll()
+		return nil, fmt.Errorf("opening current log file: %w", err)
+	}
+	if st, err := cf.Stat(); err == nil {
+		totalSize += st.Size()
+	}
+	rcs = append(rcs, cf)
+
+	// Append warn log content from memory.
+	wlw.mu.Lock()
+	warnData := make([]byte, wlw.buf.Len())
+	copy(warnData, wlw.buf.Bytes())
+	wlw.mu.Unlock()
+
+	if len(warnData) > 0 {
+		rcs = append(rcs, io.NopCloser(bytes.NewReader([]byte(logWriterLogEndMarker))))
+		rcs = append(rcs, io.NopCloser(bytes.NewReader(warnData)))
+		totalSize += int64(len(logWriterLogEndMarker) + len(warnData))
+	}
+
+	if totalSize == 0 {
+		closeAll()
+		return nil, errors.New("internal log is empty")
+	}
+
+	readers := make([]io.Reader, len(rcs))
+	closers := make([]io.Closer, len(rcs))
+	for i, rc := range rcs {
+		readers[i] = rc
+		closers[i] = rc
+	}
+	combined := io.MultiReader(readers...)
+	lr := &logReader{
+		r:    &multiCloser{Reader: combined, closers: closers},
+		size: totalSize,
+	}
+	return lr, nil
+}
+
+// multiCloser wraps an io.Reader and closes multiple underlying closers.
+type multiCloser struct {
+	io.Reader
+	closers []io.Closer
+}
+
+func (mc *multiCloser) Close() error {
+	var firstErr error
+	for _, c := range mc.closers {
+		if err := c.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
