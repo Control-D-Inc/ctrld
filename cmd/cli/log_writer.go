@@ -338,7 +338,7 @@ func (p *prog) initLogging(backup bool) {
 // internalLogFilePath returns the path for persisted internal logs.
 // The file lives in the ctrld home directory alongside other runtime state.
 func internalLogFilePath() string {
-	return absHomeDir(logFileName)
+	return ctrld.AbsHomeDir(logFileName)
 }
 
 // initInternalLogging performs internal logging if there's no log enabled.

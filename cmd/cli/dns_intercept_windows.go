@@ -9,6 +9,7 @@ import (
 	"net"
 	"os/exec"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -118,6 +119,14 @@ const (
 
 	// DNS port.
 	dnsPort uint16 = 53
+
+	// FWPM_FILTER_FLAG constants from fwpmtypes.h.
+	// See: https://learn.microsoft.com/en-us/windows/win32/api/fwpmtypes/ns-fwpmtypes-fwpm_filter0
+	//
+	// FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT (0x08) prevents lower-weight sublayers
+	// from overriding this filter's PERMIT action ("hard permit"). Used in DNS
+	// mode to override third-party WFP blocks (e.g., OpenVPN's block-outside-dns).
+	fwpmFilterFlagClearActionRight uint32 = 0x00000008
 )
 
 // WFP API structures. These mirror the C structures from fwpmtypes.h and fwptypes.h.
@@ -261,6 +270,17 @@ type wfpState struct {
 	listenerIP string
 	// stopCh is used to shut down the NRPT health monitor goroutine.
 	stopCh chan struct{}
+	// mu protects loopbackProtectActive, loopbackPermitIDs, and engineHandle
+	// from concurrent access between nrptProbeAndHeal (goroutine) and
+	// stopDNSIntercept / cleanupWFPFilters (main goroutine).
+	mu sync.Mutex
+	// loopbackProtectActive is true when DNS mode has activated a minimal WFP
+	// session to permit loopback DNS. This counters third-party WFP block filters
+	// (e.g., OpenVPN's block-outside-dns) that prevent NRPT from routing queries
+	// to ctrld's listener on 127.0.0.1. See issue #526.
+	loopbackProtectActive bool
+	// loopbackPermitIDs stores the filter IDs for the loopback protect permits.
+	loopbackPermitIDs []uint64
 }
 
 // Lazy-loaded WFP DLL procedures.
@@ -684,6 +704,17 @@ func (p *prog) startDNSIntercept() error {
 		}
 	} else {
 		mainLog.Load().Info().Msg("DNS intercept: dns mode — NRPT only, no WFP filters (graceful)")
+		// Proactively add loopback WFP permit filters to protect the NRPT
+		// → 127.0.0.1 path from third-party DNS block filters (e.g., OpenVPN's
+		// block-outside-dns). These are narrowly scoped (port 53 to localhost
+		// only) and use CLEAR_ACTION_RIGHT to override any block from other
+		// sublayers. Adding them at startup eliminates the DNS outage window
+		// that would otherwise occur between VPN connect and reactive activation.
+		if err := p.activateLoopbackWFPProtect(state); err != nil {
+			// Non-fatal: loopback protect is a defense-in-depth measure.
+			// NRPT still works when no third-party WFP blocks are present.
+			mainLog.Load().Warn().Err(err).Msg("DNS intercept: failed to activate proactive loopback WFP protect — will retry on probe failure")
+		}
 	}
 
 	p.dnsInterceptState = state
@@ -955,13 +986,12 @@ func (p *prog) addWFPPermitLocalhostFilter(engineHandle uintptr, name string, la
 	return filterID, nil
 }
 
-// addWFPPermitSubnetFilter adds a WFP filter that permits outbound DNS to a given
-// IPv4 subnet (addr/mask in host byte order). Used to exempt RFC1918 and CGNAT ranges
-// so VPN DNS servers on private IPs are not blocked.
-func (p *prog) addWFPPermitSubnetFilter(engineHandle uintptr, name string, proto uint8, addr, mask uint32) (uint64, error) {
+// addWFPPermitDNSFilter is the unified helper for adding a WFP permit filter for
+// outbound DNS (port 53) with caller-specified address condition, flags, and weight.
+// Both subnet permits (RFC1918/CGNAT, flags=0, weight=10) and hard loopback permits
+// (CLEAR_ACTION_RIGHT, weight=15) use this to avoid code drift.
+func (p *prog) addWFPPermitDNSFilter(engineHandle uintptr, name string, layerKey windows.GUID, proto uint8, addrCond fwpmFilterCondition0, flags uint32, weight uint8) (uint64, error) {
 	filterName, _ := windows.UTF16PtrFromString("ctrld: " + name)
-
-	addrMask := fwpV4AddrAndMask{addr: addr, mask: mask}
 
 	conditions := make([]fwpmFilterCondition0, 3)
 
@@ -979,22 +1009,18 @@ func (p *prog) addWFPPermitSubnetFilter(engineHandle uintptr, name string, proto
 	conditions[1].condValue.valueType = fwpUint16
 	conditions[1].condValue.value = uint64(dnsPort)
 
-	conditions[2] = fwpmFilterCondition0{
-		fieldKey:  fwpmConditionIPRemoteAddress,
-		matchType: fwpMatchEqual,
-	}
-	conditions[2].condValue.valueType = fwpV4AddrMask
-	conditions[2].condValue.value = uint64(uintptr(unsafe.Pointer(&addrMask)))
+	conditions[2] = addrCond
 
 	filter := fwpmFilter0{
-		layerKey:        fwpmLayerALEAuthConnectV4,
+		flags:           flags,
+		layerKey:        layerKey,
 		subLayerKey:     ctrldSubLayerGUID,
 		numFilterConds:  3,
 		filterCondition: &conditions[0],
 	}
 	filter.displayData.name = filterName
 	filter.weight.valueType = fwpUint8
-	filter.weight.value = 10
+	filter.weight.value = uint64(weight)
 	filter.action.actionType = fwpActionPermit
 
 	var filterID uint64
@@ -1004,12 +1030,29 @@ func (p *prog) addWFPPermitSubnetFilter(engineHandle uintptr, name string, proto
 		0,
 		uintptr(unsafe.Pointer(&filterID)),
 	)
-	runtime.KeepAlive(&addrMask)
 	runtime.KeepAlive(conditions)
 	if r1 != 0 {
 		return 0, fmt.Errorf("FwpmFilterAdd0 failed: HRESULT 0x%x", r1)
 	}
 	return filterID, nil
+}
+
+// addWFPPermitSubnetFilter adds a WFP filter that permits outbound DNS to a given
+// IPv4 subnet (addr/mask in host byte order). Used to exempt RFC1918 and CGNAT ranges
+// so VPN DNS servers on private IPs are not blocked.
+func (p *prog) addWFPPermitSubnetFilter(engineHandle uintptr, name string, proto uint8, addr, mask uint32) (uint64, error) {
+	addrMask := fwpV4AddrAndMask{addr: addr, mask: mask}
+
+	addrCond := fwpmFilterCondition0{
+		fieldKey:  fwpmConditionIPRemoteAddress,
+		matchType: fwpMatchEqual,
+	}
+	addrCond.condValue.valueType = fwpV4AddrMask
+	addrCond.condValue.value = uint64(uintptr(unsafe.Pointer(&addrMask)))
+
+	filterID, err := p.addWFPPermitDNSFilter(engineHandle, name, fwpmLayerALEAuthConnectV4, proto, addrCond, 0, 10)
+	runtime.KeepAlive(&addrMask)
+	return filterID, err
 }
 
 // wfpSublayerExists checks whether our WFP sublayer still exists in the engine.
@@ -1036,6 +1079,21 @@ func wfpSublayerExists(engineHandle uintptr) bool {
 func (p *prog) cleanupWFPFilters(state *wfpState) {
 	if state == nil || state.engineHandle == 0 {
 		return
+	}
+
+	// Clean up loopback protect filters (DNS mode VPN workaround).
+	state.mu.Lock()
+	loopbackIDs := state.loopbackPermitIDs
+	state.loopbackPermitIDs = nil
+	state.loopbackProtectActive = false
+	state.mu.Unlock()
+	for _, filterID := range loopbackIDs {
+		r1, _, _ := procFwpmFilterDeleteById0.Call(state.engineHandle, uintptr(filterID))
+		if r1 != 0 {
+			mainLog.Load().Warn().Msgf("DNS intercept: failed to remove loopback protect filter (ID: %d, code: 0x%x)", filterID, r1)
+		} else {
+			mainLog.Load().Debug().Msgf("DNS intercept: removed loopback protect filter (ID: %d)", filterID)
+		}
 	}
 
 	for _, filterID := range state.vpnPermitFilterIDs {
@@ -1100,6 +1158,154 @@ func (p *prog) cleanupWFPFilters(state *wfpState) {
 	}
 }
 
+// activateLoopbackWFPProtect opens a minimal WFP session and adds "hard permit"
+// filters for DNS to localhost. This is used in DNS mode when NRPT probe failures
+// are detected, typically caused by third-party VPN software (e.g., OpenVPN) that
+// installs WFP block filters via block-outside-dns. The hard permit (with
+// FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT) in a max-weight sublayer overrides the
+// third-party blocks without affecting their protection for non-loopback DNS.
+//
+// See: https://gitlab.int.windscribe.com/controld/clients/ctrld/-/issues/526
+func (p *prog) activateLoopbackWFPProtect(state *wfpState) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if state.loopbackProtectActive {
+		mainLog.Load().Debug().Msg("DNS intercept: loopback WFP protect already active")
+		return nil
+	}
+	// Only activate in DNS mode. Hard mode manages its own full WFP state
+	// (block + permit filters in the same sublayer). Activating loopback
+	// protect would delete the hard mode sublayer and all its filters.
+	if hardIntercept {
+		mainLog.Load().Debug().Msg("DNS intercept: skipping loopback WFP protect in hard mode")
+		return nil
+	}
+
+	mainLog.Load().Info().Msg("DNS intercept: activating loopback WFP protect (countering third-party DNS block filters)")
+
+	// Open WFP engine if not already open (DNS mode doesn't open it normally).
+	if state.engineHandle == 0 {
+		var engineHandle uintptr
+		session := fwpmSession0{}
+		sessionName, _ := windows.UTF16PtrFromString("ctrld DNS Loopback Protect")
+		session.displayData.name = sessionName
+
+		const rpcCAuthnDefault = 0xFFFFFFFF
+		r1, _, _ := procFwpmEngineOpen0.Call(
+			0,
+			uintptr(rpcCAuthnDefault),
+			0,
+			uintptr(unsafe.Pointer(&session)),
+			uintptr(unsafe.Pointer(&engineHandle)),
+		)
+		if r1 != 0 {
+			return fmt.Errorf("FwpmEngineOpen0 failed: HRESULT 0x%x", r1)
+		}
+		mainLog.Load().Info().Msgf("DNS intercept: WFP engine opened for loopback protect (handle: 0x%x)", engineHandle)
+		state.engineHandle = engineHandle
+	}
+
+	// Clean up any stale sublayer from a previous session.
+	procFwpmSubLayerDeleteByKey0.Call(
+		state.engineHandle,
+		uintptr(unsafe.Pointer(&ctrldSubLayerGUID)),
+	)
+
+	// Create sublayer at maximum priority.
+	sublayer := fwpmSublayer0{
+		subLayerKey: ctrldSubLayerGUID,
+		weight:      0xFFFF,
+	}
+	sublayerName, _ := windows.UTF16PtrFromString("ctrld DNS Loopback Protect Sublayer")
+	sublayerDesc, _ := windows.UTF16PtrFromString("Permits DNS to localhost, overriding third-party VPN block filters")
+	sublayer.displayData.name = sublayerName
+	sublayer.displayData.description = sublayerDesc
+
+	r1, _, _ := procFwpmSubLayerAdd0.Call(
+		state.engineHandle,
+		uintptr(unsafe.Pointer(&sublayer)),
+		0,
+	)
+	if r1 != 0 {
+		return fmt.Errorf("FwpmSubLayerAdd0 failed: HRESULT 0x%x", r1)
+	}
+
+	// Add hard permit filters for loopback DNS (v4+v6, UDP+TCP).
+	permitFilters := []struct {
+		name  string
+		layer windows.GUID
+		proto uint8
+	}{
+		{"Loopback Protect: Permit DNS to localhost (IPv4/UDP)", fwpmLayerALEAuthConnectV4, ipprotoUDP},
+		{"Loopback Protect: Permit DNS to localhost (IPv4/TCP)", fwpmLayerALEAuthConnectV4, ipprotoTCP},
+		{"Loopback Protect: Permit DNS to localhost (IPv6/UDP)", fwpmLayerALEAuthConnectV6, ipprotoUDP},
+		{"Loopback Protect: Permit DNS to localhost (IPv6/TCP)", fwpmLayerALEAuthConnectV6, ipprotoTCP},
+	}
+
+	for _, pf := range permitFilters {
+		filterID, err := p.addWFPHardPermitLocalhostFilter(state.engineHandle, pf.name, pf.layer, pf.proto, state.listenerIP)
+		if err != nil {
+			// Partial failure — clean up what we added (already holding mu).
+			p.deactivateLoopbackWFPProtectLocked(state)
+			return fmt.Errorf("failed to add loopback protect filter %q: %w", pf.name, err)
+		}
+		state.loopbackPermitIDs = append(state.loopbackPermitIDs, filterID)
+		mainLog.Load().Debug().Str("filter", pf.name).Uint64("id", filterID).Msg("DNS intercept: added loopback protect filter")
+	}
+
+	state.loopbackProtectActive = true
+	mainLog.Load().Info().Int("filters", len(state.loopbackPermitIDs)).
+		Msg("DNS intercept: loopback WFP protect activated — localhost DNS permitted with CLEAR_ACTION_RIGHT")
+	return nil
+}
+
+// deactivateLoopbackWFPProtectLocked is the lock-free inner implementation.
+// Caller must hold state.mu.
+func (p *prog) deactivateLoopbackWFPProtectLocked(state *wfpState) {
+	if !state.loopbackProtectActive && len(state.loopbackPermitIDs) == 0 {
+		return
+	}
+
+	for _, filterID := range state.loopbackPermitIDs {
+		if state.engineHandle != 0 {
+			r1, _, _ := procFwpmFilterDeleteById0.Call(state.engineHandle, uintptr(filterID))
+			if r1 != 0 {
+				mainLog.Load().Warn().Msgf("DNS intercept: failed to remove loopback protect filter (ID: %d, code: 0x%x)", filterID, r1)
+			}
+		}
+	}
+	state.loopbackPermitIDs = nil
+	state.loopbackProtectActive = false
+	mainLog.Load().Info().Msg("DNS intercept: loopback WFP protect deactivated")
+}
+
+// addWFPHardPermitLocalhostFilter adds a WFP permit filter for DNS to localhost with
+// FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT. This "hard permit" prevents lower-priority
+// sublayers (e.g., OpenVPN's block-outside-dns sublayer) from blocking DNS to
+// ctrld's loopback listener. Weight is set to 15 (above hard mode's permit=10).
+// For IPv4, the address is derived from listenerIP (e.g., 127.0.0.1 or 127.0.0.2).
+func (p *prog) addWFPHardPermitLocalhostFilter(engineHandle uintptr, name string, layerKey windows.GUID, proto uint8, listenerIP string) (uint64, error) {
+	addrCond := fwpmFilterCondition0{
+		fieldKey:  fwpmConditionIPRemoteAddress,
+		matchType: fwpMatchEqual,
+	}
+
+	ipv6Loopback := [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+
+	if layerKey == fwpmLayerALEAuthConnectV4 {
+		addrCond.condValue.valueType = fwpUint32
+		addrCond.condValue.value = uint64(parseIPv4AsUint32(listenerIP))
+	} else {
+		addrCond.condValue.valueType = fwpByteArray16Type
+		addrCond.condValue.value = uint64(uintptr(unsafe.Pointer(&ipv6Loopback)))
+	}
+
+	filterID, err := p.addWFPPermitDNSFilter(engineHandle, name, layerKey, proto, addrCond, fwpmFilterFlagClearActionRight, 15)
+	runtime.KeepAlive(&ipv6Loopback)
+	return filterID, err
+}
+
 // stopDNSIntercept removes all WFP filters and shuts down the DNS interception.
 func (p *prog) stopDNSIntercept() error {
 	if p.dnsInterceptState == nil {
@@ -1126,7 +1332,7 @@ func (p *prog) stopDNSIntercept() error {
 		state.nrptActive = false
 	}
 
-	// Only clean up WFP if we actually opened the engine (hard mode).
+	// Clean up WFP if the engine was opened (hard mode or loopback protect).
 	if state.engineHandle != 0 {
 		mainLog.Load().Info().Msg("DNS intercept: shutting down WFP filters")
 		p.cleanupWFPFilters(state)
@@ -1158,10 +1364,13 @@ func (p *prog) exemptVPNDNSServers(exemptions []vpnDNSExemption) error {
 	if !ok || state == nil {
 		return fmt.Errorf("DNS intercept state not available")
 	}
-	// In dns mode (no WFP), VPN DNS exemptions are not needed — there are no
-	// block filters to exempt from.
-	if state.engineHandle == 0 {
-		mainLog.Load().Debug().Msg("DNS intercept: dns mode — skipping VPN DNS exemptions (no WFP filters)")
+	// In dns mode (no WFP) or loopback-protect-only mode, VPN DNS exemptions
+	// are not needed — there are no ctrld block filters to exempt from.
+	// Loopback protect only adds hard-permit filters for localhost DNS;
+	// VPN DNS traffic uses the tunnel interface and is already permitted by
+	// the VPN's own WFP rules.
+	if state.engineHandle == 0 || state.loopbackProtectActive {
+		mainLog.Load().Debug().Msg("DNS intercept: dns mode — skipping VPN DNS exemptions (no WFP block filters)")
 		return nil
 	}
 
@@ -1625,6 +1834,40 @@ func (p *prog) nrptProbeAndHeal() {
 	}
 
 	logNRPTParentKeyState("probe-failed-final")
-	mainLog.Load().Error().Msg("DNS intercept: NRPT verification failed after all retries including two-phase recovery — " +
+	mainLog.Load().Warn().Msg("DNS intercept: NRPT verification failed after all retries including two-phase recovery")
+
+	// Last resort: activate WFP loopback protection.
+	// Third-party VPN software (e.g., OpenVPN with block-outside-dns) may have
+	// installed WFP filters that block DNS to non-tunnel interfaces, including
+	// loopback. A high-priority "hard permit" for localhost DNS overrides these
+	// blocks and restores NRPT routing to ctrld's listener.
+	// See: https://gitlab.int.windscribe.com/controld/clients/ctrld/-/issues/526
+	loopbackState, ok := p.dnsInterceptState.(*wfpState)
+	if !ok || loopbackState == nil {
+		mainLog.Load().Error().Msg("DNS intercept: no state available for loopback WFP protect")
+		return
+	}
+
+	// Bail out if shutdown is in progress — avoid racing with cleanupWFPFilters.
+	select {
+	case <-loopbackState.stopCh:
+		mainLog.Load().Info().Msg("DNS intercept: shutdown in progress, skipping loopback WFP protect activation")
+		return
+	default:
+	}
+
+	if err := p.activateLoopbackWFPProtect(loopbackState); err != nil {
+		mainLog.Load().Error().Err(err).Msg("DNS intercept: failed to activate loopback WFP protect — " +
+			"DNS queries may not be routed through ctrld. A network interface toggle may be needed.")
+		return
+	}
+
+	// Retry NRPT probe now that loopback DNS is explicitly permitted through WFP.
+	time.Sleep(500 * time.Millisecond)
+	if p.probeNRPT() {
+		mainLog.Load().Info().Msg("DNS intercept: NRPT verified working after loopback WFP protect activation")
+		return
+	}
+	mainLog.Load().Error().Msg("DNS intercept: NRPT probe still failing after loopback WFP protect — " +
 		"DNS queries may not be routed through ctrld. A network interface toggle may be needed.")
 }

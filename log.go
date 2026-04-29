@@ -90,6 +90,11 @@ func (e *LogEvent) Int64(key string, val int64) *LogEvent {
 	return e
 }
 
+func (e *LogEvent) Uint64(key string, val uint64) *LogEvent {
+	e.fields = append(e.fields, zap.Uint64(key, val))
+	return e
+}
+
 // Err adds an error field to the event
 func (e *LogEvent) Err(err error) *LogEvent {
 	if err != nil {
