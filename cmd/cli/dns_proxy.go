@@ -1580,7 +1580,7 @@ func (p *prog) monitorNetworkChanges() error {
 
 		// we only trigger recovery flow for network changes on non router devices
 		if router.Name() == "" {
-			p.handleRecovery(RecoveryReasonNetworkChange)
+			p.debounceRecovery()
 		}
 
 		// After network changes, verify our pf anchor is still active and
@@ -1693,6 +1693,35 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 	return err
 }
 
+// recoveryDebounceWindow is the time to wait after the last network change
+// before triggering handleRecovery. This coalesces rapid consecutive network
+// changes (e.g., hotspot→LAN causing en1 drop + en0 pickup + en1 re-pickup)
+// into a single recovery pass, avoiding the cancel-and-restart race that
+// leaves DoH transports in a stale state.
+const recoveryDebounceWindow = 500 * time.Millisecond
+
+// debounceRecovery schedules a handleRecovery(NetworkChange) call after a debounce
+// window. If called again before the window expires, the timer is reset so that
+// recovery runs once with the final network state. All other state updates (IP,
+// pf anchor, VPN DNS, tunnel checks) run immediately — only the recovery flow
+// with its upstream probing and DHCP bypass logic is debounced.
+func (p *prog) debounceRecovery() {
+	p.recoveryDebounceMu.Lock()
+	defer p.recoveryDebounceMu.Unlock()
+
+	if p.recoveryDebounceTimer != nil {
+		p.recoveryDebounceTimer.Stop()
+		mainLog.Load().Debug().Msg("Recovery debounce: resetting timer (rapid network change)")
+	}
+	p.recoveryDebounceTimer = time.AfterFunc(recoveryDebounceWindow, func() {
+		p.recoveryDebounceMu.Lock()
+		p.recoveryDebounceTimer = nil
+		p.recoveryDebounceMu.Unlock()
+		p.handleRecovery(RecoveryReasonNetworkChange)
+	})
+	mainLog.Load().Debug().Msg("Recovery debounce: scheduled (500ms window)")
+}
+
 // handleRecovery performs a unified recovery by removing DNS settings,
 // canceling existing recovery checks for network changes, but coalescing duplicate
 // upstream failure recoveries, waiting for recovery to complete (using a cancellable context without timeout),
@@ -1718,6 +1747,21 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 			return
 		}
 		p.recoveryCancelMu.Unlock()
+	}
+
+	// For network changes, force-reset all upstream transports synchronously.
+	// The lazy ReBootstrap() called earlier in the network change callback only
+	// sets a flag — the old transport's dead connections can still be used by
+	// recovery probes, causing context deadline timeouts. ForceReBootstrap()
+	// closes old connections and creates fresh transports so probes succeed on
+	// first attempt.
+	if reason == RecoveryReasonNetworkChange {
+		for _, uc := range p.cfg.Upstream {
+			if uc != nil {
+				uc.ForceReBootstrap()
+			}
+		}
+		mainLog.Load().Info().Msg("Force-reset upstream transports for network change recovery")
 	}
 
 	// Create a new recovery context without a fixed timeout.
