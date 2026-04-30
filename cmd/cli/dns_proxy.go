@@ -744,6 +744,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				var reason RecoveryReason
 				if upstreams[0] == upstreamOS {
 					reason = RecoveryReasonOSFailure
+
 				} else {
 					reason = RecoveryReasonRegularFailure
 				}
@@ -1657,6 +1658,8 @@ func interfaceIPsEqual(a, b []netip.Prefix) bool {
 	return true
 }
 
+var errOsHealthcheckSuppressed = errors.New("upstream os health check suppressed")
+
 // checkUpstreamOnce sends a test query to the specified upstream.
 // Returns nil if the upstream responds successfully.
 func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) error {
@@ -1686,11 +1689,19 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 	duration := time.Since(start)
 
 	if err != nil {
+		// Demote upstream.os check failures to debug while WFP loopback
+		// protect is active: an external WFP block filter is interfering
+		// with plain DNS so repeated failures here are expected. Other
+		// upstreams keep error level so real outages stay visible.
+		if upstream == upstreamOS && p.osHealthcheckSuppressed() {
+			mainLog.Load().Debug().Err(err).Msgf("Upstream %s check failed after %v (WFP loopback protect active)", upstream, duration)
+			return errOsHealthcheckSuppressed
+		}
 		mainLog.Load().Error().Err(err).Msgf("Upstream %s check failed after %v", upstream, duration)
-	} else {
-		mainLog.Load().Debug().Msgf("Upstream %s responded successfully in %v", upstream, duration)
+		return err
 	}
-	return err
+	mainLog.Load().Debug().Msgf("Upstream %s responded successfully in %v", upstream, duration)
+	return nil
 }
 
 // recoveryDebounceWindow is the time to wait after the last network change
@@ -1909,7 +1920,8 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 				default:
 					attempts++
 					// checkUpstreamOnce will reset any failure counters on success.
-					if err := p.checkUpstreamOnce(name, uc); err == nil {
+					err := p.checkUpstreamOnce(name, uc)
+					if err == nil || errors.Is(err, errOsHealthcheckSuppressed) {
 						mainLog.Load().Debug().Msgf("Upstream %s recovered successfully", name)
 						select {
 						case recoveredCh <- name:
