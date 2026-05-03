@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -89,6 +90,15 @@ func supportListenIPv6Local() bool {
 }
 
 func probeStack() {
+	// On Android, skip network probing to avoid blocking the VPN service initialization.
+	// Android VPN services manage their own network state and will fail gracefully
+	// if network is unavailable when actual DNS queries are made.
+	if runtime.GOOS == "android" {
+		hasNetworkUp = true
+		canListenIPv6Local = false
+		return
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
