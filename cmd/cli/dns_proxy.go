@@ -744,6 +744,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				var reason RecoveryReason
 				if upstreams[0] == upstreamOS {
 					reason = RecoveryReasonOSFailure
+
 				} else {
 					reason = RecoveryReasonRegularFailure
 				}
@@ -903,16 +904,13 @@ func needLocalIPv6Listener(interceptMode string) bool {
 		mainLog.Load().Debug().Msg("IPv6 listener: enabled (Windows)")
 		return true
 	}
-	// On macOS in intercept mode, pf can't redirect IPv6 DNS to an IPv4 listener (cross-AF rdr
-	// not supported), and blocking IPv6 DNS causes ~1s timeouts (BSD doesn't deliver ICMP errors
-	// to unconnected UDP sockets). Listening on [::1] lets us intercept IPv6 DNS directly.
-	//
-	// NOTE: We accept the intercept mode string as a parameter instead of reading the global
-	// dnsIntercept bool, because dnsIntercept is derived later in prog.run() — after the
-	// listener goroutines are already spawned. Same pattern as the port 5354 fallback fix (MR !860).
-	if (interceptMode == "dns" || interceptMode == "hard") && runtime.GOOS == "darwin" {
-		mainLog.Load().Debug().Msg("IPv6 listener: enabled (macOS intercept mode)")
-		return true
+	// macOS: IPv6 DNS is blocked at the pf level (not intercepted). The [::1] listener
+	// is not needed — macOS falls back to IPv4 DNS automatically. See #507 and
+	// docs/pf-dns-intercept.md for why IPv6 interception on macOS is not feasible
+	// (sendmsg EINVAL from ::1 to global unicast, nat-on-lo0 doesn't fire for route-to).
+	if runtime.GOOS == "darwin" {
+		mainLog.Load().Debug().Msg("IPv6 listener: not needed (macOS — IPv6 DNS blocked at pf, fallback to IPv4)")
+		return false
 	}
 	mainLog.Load().Debug().Str("os", runtime.GOOS).Str("interceptMode", interceptMode).Msg("IPv6 listener: not needed")
 	return false
@@ -1583,7 +1581,7 @@ func (p *prog) monitorNetworkChanges() error {
 
 		// we only trigger recovery flow for network changes on non router devices
 		if router.Name() == "" {
-			p.handleRecovery(RecoveryReasonNetworkChange)
+			p.debounceRecovery()
 		}
 
 		// After network changes, verify our pf anchor is still active and
@@ -1660,6 +1658,8 @@ func interfaceIPsEqual(a, b []netip.Prefix) bool {
 	return true
 }
 
+var errOsHealthcheckSuppressed = errors.New("upstream os health check suppressed")
+
 // checkUpstreamOnce sends a test query to the specified upstream.
 // Returns nil if the upstream responds successfully.
 func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) error {
@@ -1689,11 +1689,48 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 	duration := time.Since(start)
 
 	if err != nil {
+		// Demote upstream.os check failures to debug while WFP loopback
+		// protect is active: an external WFP block filter is interfering
+		// with plain DNS so repeated failures here are expected. Other
+		// upstreams keep error level so real outages stay visible.
+		if upstream == upstreamOS && p.osHealthcheckSuppressed() {
+			mainLog.Load().Debug().Err(err).Msgf("Upstream %s check failed after %v (WFP loopback protect active)", upstream, duration)
+			return errOsHealthcheckSuppressed
+		}
 		mainLog.Load().Error().Err(err).Msgf("Upstream %s check failed after %v", upstream, duration)
-	} else {
-		mainLog.Load().Debug().Msgf("Upstream %s responded successfully in %v", upstream, duration)
+		return err
 	}
-	return err
+	mainLog.Load().Debug().Msgf("Upstream %s responded successfully in %v", upstream, duration)
+	return nil
+}
+
+// recoveryDebounceWindow is the time to wait after the last network change
+// before triggering handleRecovery. This coalesces rapid consecutive network
+// changes (e.g., hotspot→LAN causing en1 drop + en0 pickup + en1 re-pickup)
+// into a single recovery pass, avoiding the cancel-and-restart race that
+// leaves DoH transports in a stale state.
+const recoveryDebounceWindow = 500 * time.Millisecond
+
+// debounceRecovery schedules a handleRecovery(NetworkChange) call after a debounce
+// window. If called again before the window expires, the timer is reset so that
+// recovery runs once with the final network state. All other state updates (IP,
+// pf anchor, VPN DNS, tunnel checks) run immediately — only the recovery flow
+// with its upstream probing and DHCP bypass logic is debounced.
+func (p *prog) debounceRecovery() {
+	p.recoveryDebounceMu.Lock()
+	defer p.recoveryDebounceMu.Unlock()
+
+	if p.recoveryDebounceTimer != nil {
+		p.recoveryDebounceTimer.Stop()
+		mainLog.Load().Debug().Msg("Recovery debounce: resetting timer (rapid network change)")
+	}
+	p.recoveryDebounceTimer = time.AfterFunc(recoveryDebounceWindow, func() {
+		p.recoveryDebounceMu.Lock()
+		p.recoveryDebounceTimer = nil
+		p.recoveryDebounceMu.Unlock()
+		p.handleRecovery(RecoveryReasonNetworkChange)
+	})
+	mainLog.Load().Debug().Msg("Recovery debounce: scheduled (500ms window)")
 }
 
 // handleRecovery performs a unified recovery by removing DNS settings,
@@ -1721,6 +1758,21 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 			return
 		}
 		p.recoveryCancelMu.Unlock()
+	}
+
+	// For network changes, force-reset all upstream transports synchronously.
+	// The lazy ReBootstrap() called earlier in the network change callback only
+	// sets a flag — the old transport's dead connections can still be used by
+	// recovery probes, causing context deadline timeouts. ForceReBootstrap()
+	// closes old connections and creates fresh transports so probes succeed on
+	// first attempt.
+	if reason == RecoveryReasonNetworkChange {
+		for _, uc := range p.cfg.Upstream {
+			if uc != nil {
+				uc.ForceReBootstrap()
+			}
+		}
+		mainLog.Load().Info().Msg("Force-reset upstream transports for network change recovery")
 	}
 
 	// Create a new recovery context without a fixed timeout.
@@ -1868,7 +1920,8 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 				default:
 					attempts++
 					// checkUpstreamOnce will reset any failure counters on success.
-					if err := p.checkUpstreamOnce(name, uc); err == nil {
+					err := p.checkUpstreamOnce(name, uc)
+					if err == nil || errors.Is(err, errOsHealthcheckSuppressed) {
 						mainLog.Load().Debug().Msgf("Upstream %s recovered successfully", name)
 						select {
 						case recoveredCh <- name:

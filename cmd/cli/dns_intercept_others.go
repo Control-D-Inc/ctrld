@@ -37,3 +37,7 @@ func (p *prog) scheduleDelayedRechecks() {}
 
 // pfInterceptMonitor is a no-op on unsupported platforms.
 func (p *prog) pfInterceptMonitor() {}
+
+// osHealthcheckSuppressed always returns false on non-Windows platforms —
+// WFP loopback protect (the trigger for suppression) is Windows-only.
+func (p *prog) osHealthcheckSuppressed() bool { return false }

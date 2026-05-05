@@ -321,14 +321,13 @@ func (p *prog) startDNSIntercept() error {
 //	options → normalization (scrub) → queueing → translation (nat/rdr) → filtering (pass/block/anchor)
 //
 // "pfctl -sr" returns BOTH scrub-anchor (normalization) AND anchor/pass/block (filter) rules.
-// "pfctl -sn" returns nat-anchor AND rdr-anchor (translation) rules.
+// "pfctl -sn" returns rdr-anchor (translation) rules.
 // Both commands emit "No ALTQ support in kernel" warnings on stderr.
 //
 // We must reassemble in correct order: scrub → nat/rdr → filter.
 //
 // The anchor reference does not survive a reboot, but ctrld re-adds it on every start.
 func (p *prog) ensurePFAnchorReference() error {
-	natAnchorRef := fmt.Sprintf("nat-anchor \"%s\"", pfAnchorName)
 	rdrAnchorRef := fmt.Sprintf("rdr-anchor \"%s\"", pfAnchorName)
 	anchorRef := fmt.Sprintf("anchor \"%s\"", pfAnchorName)
 
@@ -347,11 +346,10 @@ func (p *prog) ensurePFAnchorReference() error {
 	natLines := pfFilterRuleLines(string(natOut))
 	filterLines := pfFilterRuleLines(string(filterOut))
 
-	hasNatAnchor := pfContainsRule(natLines, natAnchorRef)
 	hasRdrAnchor := pfContainsRule(natLines, rdrAnchorRef)
 	hasAnchor := pfContainsRule(filterLines, anchorRef)
 
-	if hasNatAnchor && hasRdrAnchor && hasAnchor {
+	if hasRdrAnchor && hasAnchor {
 		// Verify anchor ordering: our anchor should appear before other anchors
 		// for reliable DNS interception priority. Log a warning if out of order,
 		// but don't force a reload (the interface-specific rules in our anchor
@@ -380,15 +378,8 @@ func (p *prog) ensurePFAnchorReference() error {
 	// rules in whichever anchor appears first win. By prepending, our DNS
 	// intercept rules match port 53 traffic before a VPN app's broader
 	// "pass out quick on <iface> all" rules in their anchor.
-	if !hasNatAnchor || !hasRdrAnchor {
-		var newRefs []string
-		if !hasNatAnchor {
-			newRefs = append(newRefs, natAnchorRef)
-		}
-		if !hasRdrAnchor {
-			newRefs = append(newRefs, rdrAnchorRef)
-		}
-		natLines = append(newRefs, natLines...)
+	if !hasRdrAnchor {
+		natLines = append([]string{rdrAnchorRef}, natLines...)
 	}
 	if !hasAnchor {
 		pureFilterLines = append([]string{anchorRef}, pureFilterLines...)
@@ -590,7 +581,6 @@ func (p *prog) stopDNSIntercept() error {
 // The anchor itself is already flushed by stopDNSIntercept, so even if removal
 // fails, the empty anchor is a no-op.
 func (p *prog) removePFAnchorReference() error {
-	natAnchorRef := fmt.Sprintf("nat-anchor \"%s\"", pfAnchorName)
 	rdrAnchorRef := fmt.Sprintf("rdr-anchor \"%s\"", pfAnchorName)
 	anchorRef := fmt.Sprintf("anchor \"%s\"", pfAnchorName)
 
@@ -609,7 +599,7 @@ func (p *prog) removePFAnchorReference() error {
 
 	var cleanNat []string
 	for _, line := range natLines {
-		if !strings.Contains(line, rdrAnchorRef) && !strings.Contains(line, natAnchorRef) {
+		if !strings.Contains(line, rdrAnchorRef) {
 			cleanNat = append(cleanNat, line)
 		}
 	}
@@ -804,23 +794,13 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	// a stateful entry that handles response routing. Using "rdr pass" would skip filter
 	// evaluation, and its implicit state alone is insufficient for response delivery —
 	// proven by commit 51cf029 where responses were silently dropped.
-	rules.WriteString("# --- Translation rules (nat + rdr) ---\n")
-
-	// NAT source to ::1 for IPv6 DNS on loopback. macOS/BSD rejects sendmsg from
-	// [::1] to a global unicast IPv6 address (EINVAL), unlike IPv4 where sendmsg from
-	// 127.0.0.1 to local private IPs works fine. The rdr rewrites the destination but
-	// preserves the original source (machine's global IPv6). Without nat, ctrld cannot
-	// reply. pf reverses both translations on the response path.
-	// Note: nat must appear before rdr (pf evaluates nat first in translation phase).
-	listenerAddr6 := fmt.Sprintf("::1 port %d", listenerPort)
-	rules.WriteString("nat on lo0 inet6 proto udp from ! ::1 to ! ::1 port 53 -> ::1\n")
-	rules.WriteString("nat on lo0 inet6 proto tcp from ! ::1 to ! ::1 port 53 -> ::1\n")
+	rules.WriteString("# --- Translation rules (rdr) ---\n")
 
 	rules.WriteString("# Redirect DNS on loopback to ctrld's listener.\n")
 	rules.WriteString(fmt.Sprintf("rdr on lo0 inet proto udp from any to ! %s port 53 -> %s\n", listenerIP, listenerAddr))
 	rules.WriteString(fmt.Sprintf("rdr on lo0 inet proto tcp from any to ! %s port 53 -> %s\n", listenerIP, listenerAddr))
-	rules.WriteString(fmt.Sprintf("rdr on lo0 inet6 proto udp from any to ! ::1 port 53 -> %s\n", listenerAddr6))
-	rules.WriteString(fmt.Sprintf("rdr on lo0 inet6 proto tcp from any to ! ::1 port 53 -> %s\n\n", listenerAddr6))
+	// No IPv6 rdr — IPv6 DNS is blocked at the filter level (see below).
+	rules.WriteString("\n")
 
 	// --- Filtering rules ---
 	rules.WriteString("# --- Filtering rules (pass) ---\n\n")
@@ -982,8 +962,7 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 			}
 			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet proto udp from any to ! %s port 53\n", iface, listenerIP))
 			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet proto tcp from any to ! %s port 53\n", iface, listenerIP))
-			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet6 proto udp from any to ! ::1 port 53\n", iface))
-			rules.WriteString(fmt.Sprintf("pass out quick on %s route-to lo0 inet6 proto tcp from any to ! ::1 port 53\n", iface))
+			// No IPv6 route-to — IPv6 DNS is blocked, not intercepted.
 		}
 		rules.WriteString("\n")
 	}
@@ -1003,10 +982,14 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	rules.WriteString(fmt.Sprintf("pass out quick on ! lo0 route-to lo0 inet proto udp from any to ! %s port 53\n", listenerIP))
 	rules.WriteString(fmt.Sprintf("pass out quick on ! lo0 route-to lo0 inet proto tcp from any to ! %s port 53\n\n", listenerIP))
 
-	// Force remaining outbound IPv6 DNS through loopback for interception.
-	rules.WriteString("# Force remaining outbound IPv6 DNS through loopback for interception.\n")
-	rules.WriteString("pass out quick on ! lo0 route-to lo0 inet6 proto udp from any to ! ::1 port 53\n")
-	rules.WriteString("pass out quick on ! lo0 route-to lo0 inet6 proto tcp from any to ! ::1 port 53\n\n")
+	// Block all outbound IPv6 DNS. ctrld only intercepts IPv4 DNS via the loopback
+	// redirect. IPv6 DNS interception on macOS is not feasible because the kernel rejects
+	// sendmsg from [::1] to global unicast IPv6 (EINVAL), and pf's nat-on-lo0 doesn't
+	// fire for route-to'd packets. Blocking forces macOS to fall back to IPv4 DNS,
+	// which is fully intercepted. See docs/pf-dns-intercept.md for details.
+	rules.WriteString("# Block outbound IPv6 DNS — ctrld intercepts IPv4 only.\n")
+	rules.WriteString("# macOS falls back to IPv4 DNS automatically.\n")
+	rules.WriteString("block out quick on ! lo0 inet6 proto { udp, tcp } from any to any port 53\n\n")
 
 	// Allow route-to'd DNS packets to pass outbound on lo0.
 	// Without this, VPN firewalls with "block drop all" (e.g., Windscribe) drop the packet
@@ -1018,8 +1001,8 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	rules.WriteString("# Pass route-to'd DNS outbound on lo0 — no state to avoid bypassing rdr inbound.\n")
 	rules.WriteString(fmt.Sprintf("pass out quick on lo0 inet proto udp from any to ! %s port 53 no state\n", listenerIP))
 	rules.WriteString(fmt.Sprintf("pass out quick on lo0 inet proto tcp from any to ! %s port 53 no state\n", listenerIP))
-	rules.WriteString("pass out quick on lo0 inet6 proto udp from any to ! ::1 port 53 no state\n")
-	rules.WriteString("pass out quick on lo0 inet6 proto tcp from any to ! ::1 port 53 no state\n\n")
+	// No IPv6 lo0 pass — IPv6 DNS is blocked, not routed through lo0.
+	rules.WriteString("\n")
 
 	// Allow the redirected traffic through on loopback (inbound after rdr).
 	//
@@ -1034,7 +1017,7 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	// (source 127.0.0.1 → original DNS server IP, e.g., 10.255.255.3).
 	rules.WriteString("# Accept redirected DNS — reply-to lo0 forces response through loopback.\n")
 	rules.WriteString(fmt.Sprintf("pass in quick on lo0 reply-to lo0 inet proto { udp, tcp } from any to %s\n", listenerAddr))
-	rules.WriteString(fmt.Sprintf("pass in quick on lo0 reply-to lo0 inet6 proto { udp, tcp } from any to %s\n", listenerAddr6))
+	// No IPv6 pass-in — IPv6 DNS is blocked, not redirected to [::1].
 
 	return rules.String()
 }
@@ -1043,12 +1026,11 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 // It verifies both the anchor references in the main ruleset and the rules within
 // our anchor. Failures are logged at ERROR level to make them impossible to miss.
 func (p *prog) verifyPFState() {
-	natAnchorRef := fmt.Sprintf("nat-anchor \"%s\"", pfAnchorName)
 	rdrAnchorRef := fmt.Sprintf("rdr-anchor \"%s\"", pfAnchorName)
 	anchorRef := fmt.Sprintf("anchor \"%s\"", pfAnchorName)
 	verified := true
 
-	// Check main ruleset for anchor references (nat-anchor + rdr-anchor in translation rules).
+	// Check main ruleset for anchor references (rdr-anchor in translation rules).
 	natOut, err := exec.Command("pfctl", "-sn").CombinedOutput()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("DNS intercept: VERIFICATION FAILED — could not dump NAT rules")
@@ -1057,10 +1039,6 @@ func (p *prog) verifyPFState() {
 		natStr := string(natOut)
 		if !strings.Contains(natStr, rdrAnchorRef) {
 			mainLog.Load().Error().Msg("DNS intercept: VERIFICATION FAILED — rdr-anchor reference missing from running NAT rules")
-			verified = false
-		}
-		if !strings.Contains(natStr, natAnchorRef) {
-			mainLog.Load().Error().Msg("DNS intercept: VERIFICATION FAILED — nat-anchor reference missing from running NAT rules")
 			verified = false
 		}
 	}
@@ -1229,6 +1207,7 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
+
 // pfStartStabilization enters stabilization mode, suppressing all pf restores
 // until the VPN's ruleset stops changing. This prevents a death spiral where
 // ctrld and the VPN repeatedly overwrite each other's pf rules.
@@ -1347,7 +1326,6 @@ func (p *prog) ensurePFAnchorActive() bool {
 		}
 	}
 
-	natAnchorRef := fmt.Sprintf("nat-anchor \"%s\"", pfAnchorName)
 	rdrAnchorRef := fmt.Sprintf("rdr-anchor \"%s\"", pfAnchorName)
 	anchorRef := fmt.Sprintf("anchor \"%s\"", pfAnchorName)
 	needsRestore := false
@@ -1361,10 +1339,6 @@ func (p *prog) ensurePFAnchorActive() bool {
 	natStr := string(natOut)
 	if !strings.Contains(natStr, rdrAnchorRef) {
 		mainLog.Load().Warn().Msg("DNS intercept watchdog: rdr-anchor reference missing from running ruleset")
-		needsRestore = true
-	}
-	if !strings.Contains(natStr, natAnchorRef) {
-		mainLog.Load().Warn().Msg("DNS intercept watchdog: nat-anchor reference missing from running ruleset")
 		needsRestore = true
 	}
 
@@ -1762,7 +1736,6 @@ func (p *prog) pfInterceptMonitor() {
 // The reload is safe for VPN interop because it reassembles from the current running
 // ruleset (pfctl -sr/-sn), preserving all existing anchors and rules.
 func (p *prog) forceReloadPFMainRuleset() {
-	natAnchorRef := fmt.Sprintf("nat-anchor \"%s\"", pfAnchorName)
 	rdrAnchorRef := fmt.Sprintf("rdr-anchor \"%s\"", pfAnchorName)
 	anchorRef := fmt.Sprintf("anchor \"%s\"", pfAnchorName)
 
@@ -1793,9 +1766,6 @@ func (p *prog) forceReloadPFMainRuleset() {
 	}
 
 	// Ensure our anchor references are present (they may have been wiped).
-	if !pfContainsRule(natLines, natAnchorRef) {
-		natLines = append([]string{natAnchorRef}, natLines...)
-	}
 	if !pfContainsRule(natLines, rdrAnchorRef) {
 		natLines = append([]string{rdrAnchorRef}, natLines...)
 	}
@@ -1846,3 +1816,7 @@ func (p *prog) forceReloadPFMainRuleset() {
 
 	mainLog.Load().Info().Msg("DNS intercept: force reload — pf ruleset and anchor reloaded successfully")
 }
+
+// osHealthcheckSuppressed always returns false on darwin — WFP loopback
+// protect (the trigger for suppression) is Windows-only.
+func (p *prog) osHealthcheckSuppressed() bool { return false }

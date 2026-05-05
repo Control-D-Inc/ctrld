@@ -17,7 +17,7 @@ options (set) → normalization (scrub) → queueing → translation (nat/rdr) �
 | Anchor Type | Section | Purpose |
 |-------------|---------|---------|
 | `scrub-anchor` | Normalization | Packet normalization |
-| `nat-anchor` | Translation | NAT rules |
+| `nat-anchor` | Translation | NAT rules (not used by ctrld) |
 | `rdr-anchor` | Translation | Redirect rules |
 | `anchor` | Filtering | Pass/block rules |
 
@@ -122,69 +122,31 @@ Three problems prevent a simple "mirror the IPv4 rules" approach:
 
 3. **sendmsg from `[::1]` to global unicast fails**: Unlike IPv4 where the kernel allows `sendmsg` from `127.0.0.1` to local private IPs (e.g., `10.x.x.x`), macOS/BSD rejects `sendmsg` from `[::1]` to a global unicast IPv6 address with `EINVAL`. Since pf's `rdr` preserves the original source IP (the machine's global IPv6 address), ctrld's reply would fail.
 
-### Solution: nat + rdr + [::1] Listener
+### Solution: Block IPv6 DNS, Fallback to IPv4
+
+After extensive testing (#507), IPv6 DNS interception on macOS is not feasible with current pf capabilities. The solution is to block all outbound IPv6 DNS:
 
 ```
-# NAT: rewrite source to ::1 so ctrld can reply
-nat on lo0 inet6 proto udp from ! ::1 to ! ::1 port 53 -> ::1
-nat on lo0 inet6 proto tcp from ! ::1 to ! ::1 port 53 -> ::1
-
-# RDR: redirect destination to ctrld's IPv6 listener
-rdr on lo0 inet6 proto udp from any to ! ::1 port 53 -> ::1 port 53
-rdr on lo0 inet6 proto tcp from any to ! ::1 port 53 -> ::1 port 53
-
-# Filter: route-to forces IPv6 DNS to loopback (mirrors IPv4 rules)
-pass out quick on ! lo0 route-to lo0 inet6 proto udp from any to ! ::1 port 53
-pass out quick on ! lo0 route-to lo0 inet6 proto tcp from any to ! ::1 port 53
-
-# Pass on lo0 without state (mirrors IPv4)
-pass out quick on lo0 inet6 proto udp from any to ! ::1 port 53 no state
-pass out quick on lo0 inet6 proto tcp from any to ! ::1 port 53 no state
-
-# Accept redirected IPv6 DNS with reply-to (mirrors IPv4)
-pass in quick on lo0 reply-to lo0 inet6 proto { udp, tcp } from any to ::1 port 53
+block out quick on ! lo0 inet6 proto { udp, tcp } from any to any port 53
 ```
 
-### IPv6 Packet Flow
+macOS automatically retries DNS over IPv4 when the IPv6 path is blocked. The IPv4 path is fully intercepted via the normal route-to + rdr mechanism. Impact is minimal — at most ~1s latency on the very first DNS query while the IPv6 attempt is blocked.
 
-```
-Application queries [2607:f0c8:8000:8210::1]:53 (IPv6 DNS server)
-    ↓
-pf filter: "pass out route-to lo0 inet6 ... port 53" → redirects to lo0
-    ↓
-pf (outbound lo0): "pass out on lo0 inet6 ... no state" → passes
-    ↓
-Loopback reflects packet inbound on lo0
-    ↓
-pf nat: rewrites source 2607:f0c8:...:ec6e → ::1
-pf rdr: rewrites dest [2607:f0c8:8000:8210::1]:53 → [::1]:53
-    ↓
-ctrld receives query from [::1]:port → [::1]:53
-    ↓
-ctrld resolves via DoH, replies to [::1]:port (kernel accepts ::1 → ::1)
-    ↓
-pf reverses both translations:
-  - nat reverse: dest ::1 → 2607:f0c8:...:ec6e (original client)
-  - rdr reverse: src ::1 → 2607:f0c8:8000:8210::1 (original DNS server)
-    ↓
-Application receives response from [2607:f0c8:8000:8210::1]:53 ✓
-```
+### What Was Tried and Why It Failed
 
-### Client IP Recovery
-
-The `nat` rewrites the source to `::1`, so ctrld sees the client as `::1` (loopback). The existing `spoofLoopbackIpInClientInfo()` logic detects this and replaces it with the machine's real RFC1918 IPv4 address (e.g., `10.0.10.211`). This is the same mechanism used when queries arrive from `127.0.0.1` — no client identity is lost.
+| Approach | Result |
+|----------|--------|
+| `nat on lo0 inet6` to rewrite source to `::1` | pf skips translation on second interface pass — nat doesn't fire for route-to'd packets arriving on lo0 |
+| ULA address on lo0 (`fd00:53::1`) | Kernel rejects: `EHOSTUNREACH` — lo0's routing table is segregated from global unicast |
+| Raw IPv6 socket (`SOCK_RAW` + `IPPROTO_UDP`) | Bypasses sendmsg validation, but pf doesn't match raw socket packets against rdr state — response arrives from `::1` not the original server |
+| `DIOCNATLOOK` to get original dest + raw socket from that addr | Can't `bind()` to a non-local address (`EADDRNOTAVAIL`) — macOS has no `IPV6_HDRINCL` for source spoofing |
+| BPF packet injection on lo0 | Theoretically possible but extremely complex — not justified for the marginal benefit |
 
 ### IPv6 Listener
 
-The `[::1]` listener reuses the existing infrastructure from Windows (where it was added for the same reason — can't suppress IPv6 DNS resolvers from the system config). The `needLocalIPv6Listener()` function gates it, returning `true` on:
-- **Windows**: Always (if IPv6 is available)
-- **macOS**: Only in intercept mode
-
-If the `[::1]` listener fails to bind, it logs a warning and continues — the IPv4 listener is primary.
-
-### nat-anchor Requirement
-
-The `nat` rules in our anchor require a `nat-anchor "com.controld.ctrld"` reference in the main pf ruleset, in addition to the existing `rdr-anchor` and `anchor` references. All pf management functions (inject, remove, verify, watchdog, force-reload) handle all three anchor types.
+The `[::1]` listener is used on:
+- **Windows**: Always (if IPv6 is available) — Windows can't easily suppress IPv6 DNS resolvers
+- **macOS**: **Not used** — IPv6 DNS is blocked at pf, no listener needed
 
 ## Rule Ordering Within the Anchor
 
@@ -236,7 +198,7 @@ The trickiest part. macOS only processes anchors declared in the active pf rules
 
 1. Read `/etc/pf.conf`
 2. If our anchor reference already exists, reload as-is
-3. Otherwise, inject `nat-anchor "com.controld.ctrld"` and `rdr-anchor "com.controld.ctrld"` in the translation section and `anchor "com.controld.ctrld"` in the filter section
+3. Otherwise, inject `rdr-anchor "com.controld.ctrld"` in the translation section and `anchor "com.controld.ctrld"` in the filter section
 4. Write to a **temp file** and load with `pfctl -f <tmpfile>`
 5. **We never modify `/etc/pf.conf` on disk** — changes are runtime-only and don't survive reboot (ctrld re-injects on every start)
 
@@ -376,5 +338,8 @@ We chose `route-to + rdr` as the best balance of effectiveness and deployability
 9. **`pass out quick` exemptions work with route-to** — they fire in the same phase (filter), so `quick` + rule ordering means exempted packets never hit the route-to rule
 10. **pf cannot cross-AF redirect** — `rdr on lo0 inet6 ... -> 127.0.0.1` is invalid. IPv6 DNS must be handled by an `[::1]` listener.
 11. **`block return` doesn't work for IPv6 DNS** — BSD doesn't deliver ICMPv6 unreachable to unconnected UDP sockets (`sendto`). Apps timeout waiting for a response that never comes.
-12. **sendmsg from `::1` to global unicast fails on macOS** — unlike IPv4 where `127.0.0.1` can send to any local address, `::1` cannot send to the machine's own global IPv6 address. `nat` on lo0 is required to rewrite the source.
-13. **`nat-anchor` is separate from `rdr-anchor`** — pf requires both in the main ruleset for nat and rdr rules in an anchor to be evaluated. `rdr-anchor` alone does not cover nat rules.
+12. **sendmsg from `::1` to global unicast fails on macOS** — unlike IPv4 where `127.0.0.1` can send to any local address, `::1` cannot send to the machine's own global IPv6 address (`EINVAL`). This is the fundamental asymmetry that makes IPv6 DNS interception infeasible.
+13. **`nat on lo0` doesn't fire for `route-to`'d packets** — pf runs translation on the original outbound interface (en0), then skips it on lo0's outbound pass. `rdr` works because lo0 inbound is a genuinely new direction. Any lo0 address (including ULAs) can't route to global unicast — the kernel segregates lo0's routing table.
+14. **Raw IPv6 sockets bypass routing validation but pf doesn't match them** — `SOCK_RAW` can send from `::1` to global unicast, but pf treats raw socket packets as new connections (not matching rdr state), so reverse-translation doesn't happen. The client sees `::1` as the source, not the original DNS server.
+15. **`DIOCNATLOOK` can find the original dest but you can't use it** — The ioctl returns the pre-rdr destination, but `bind()` fails with `EADDRNOTAVAIL` because it's not a local address. macOS IPv6 raw sockets don't support `IPV6_HDRINCL` for source spoofing.
+16. **Blocking IPv6 DNS is the pragmatic solution** — macOS automatically retries over IPv4. The ~1s penalty on the first blocked query is negligible compared to the complexity of working around the kernel's IPv6 loopback restrictions.
