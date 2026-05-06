@@ -1260,6 +1260,26 @@ func (p *prog) activateLoopbackWFPProtect(state *wfpState) error {
 	return nil
 }
 
+// osHealthcheckSuppressed reports whether the upstream.os healthcheck should
+// be skipped because DNS intercept mode is active and the WFP loopback protect
+// has been engaged. Loopback protect is only activated when an external WFP
+// block filter (e.g. OpenVPN's block-outside-dns) is interfering with DNS,
+// which is the same condition that makes the OS resolver healthcheck fail
+// every 2s with i/o timeout — so suppressing the check avoids the log spam
+// described in issue #526.
+func (p *prog) osHealthcheckSuppressed() bool {
+	if !dnsIntercept || p.dnsInterceptState == nil {
+		return false
+	}
+	state, ok := p.dnsInterceptState.(*wfpState)
+	if !ok || state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.loopbackProtectActive
+}
+
 // deactivateLoopbackWFPProtectLocked is the lock-free inner implementation.
 // Caller must hold state.mu.
 func (p *prog) deactivateLoopbackWFPProtectLocked(state *wfpState) {

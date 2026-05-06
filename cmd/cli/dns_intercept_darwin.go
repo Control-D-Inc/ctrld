@@ -1742,3 +1742,7 @@ func (p *prog) forceReloadPFMainRuleset() {
 
 	mainLog.Load().Info().Msg("DNS intercept: force reload — pf ruleset and anchor reloaded successfully")
 }
+
+// osHealthcheckSuppressed always returns false on darwin — WFP loopback
+// protect (the trigger for suppression) is Windows-only.
+func (p *prog) osHealthcheckSuppressed() bool { return false }
