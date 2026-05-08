@@ -1964,17 +1964,25 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	} else {
 		if errors.As(cfgErr, &viper.ConfigParseError{}) {
 			if configStr, _ := base64.StdEncoding.DecodeString(rc.Ctrld.CustomConfig); len(configStr) > 0 {
-				tmpDir := os.TempDir()
-				tmpConfFile := filepath.Join(tmpDir, "ctrld.toml")
 				errorLogged := false
-				// Write remote config to a temporary file to get details error.
-				if we := os.WriteFile(tmpConfFile, configStr, 0600); we == nil {
+				// Write remote config to a uniquely named temporary file to get detailed error.
+				if tmpFile, tmpErr := os.CreateTemp("", "ctrld-*.toml"); tmpErr == nil {
+					tmpConfFile := tmpFile.Name()
+					if _, err := tmpFile.Write(configStr); err != nil {
+						mainLog.Load().Error().Err(err).Msg("failed to write temporary config file")
+					}
+					if err := tmpFile.Close(); err != nil {
+						mainLog.Load().Error().Err(err).Msg("failed to save temporary config file")
+
+					}
 					if de := decoderErrorFromTomlFile(tmpConfFile); de != nil {
 						row, col := de.Position()
 						mainLog.Load().Error().Msgf("Failed to parse custom config at line: %d, column: %d, error: %s", row, col, de.Error())
 						errorLogged = true
 					}
-					_ = os.Remove(tmpConfFile)
+					if err := os.Remove(tmpConfFile); err != nil {
+						mainLog.Load().Error().Err(err).Msg("failed to remove temporary config file")
+					}
 				}
 				// If we could not log details error, emit what we have already got.
 				if !errorLogged {
