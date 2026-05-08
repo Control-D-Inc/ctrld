@@ -351,7 +351,7 @@ func apiTransport(loggerCtx context.Context, cdDev bool) *http.Transport {
 		return dial(ctx, "tcp6", addrsFromPort(apiIpsV6, port))
 	}
 	if runtime.GOOS == "android" {
-		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
+		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool(), MinVersion: tls.VersionTLS12}
 	}
 	return transport
 }

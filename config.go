@@ -611,6 +611,7 @@ func (uc *UpstreamConfig) newDOHTransport(ctx context.Context, addrs []string) *
 	transport.TLSClientConfig = &tls.Config{
 		RootCAs:            uc.certPool,
 		ClientSessionCache: tls.NewLRUClientSessionCache(0),
+		MinVersion:         tls.VersionTLS12,
 	}
 
 	// Prevent bad tcp connection hanging the requests for too long.

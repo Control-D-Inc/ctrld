@@ -73,7 +73,8 @@ func newDOTClientPool(_ context.Context, uc *UpstreamConfig, addrs []string) *do
 	dialer := newDialer(net.JoinHostPort(controldPublicDns, "53"))
 
 	tlsConfig := &tls.Config{
-		RootCAs: uc.certPool,
+		RootCAs:    uc.certPool,
+		MinVersion: tls.VersionTLS12,
 	}
 
 	if uc.BootstrapIP != "" {

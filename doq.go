@@ -73,6 +73,7 @@ func newDOQConnPool(_ context.Context, uc *UpstreamConfig, addrs []string) *doqC
 		NextProtos: []string{"doq"},
 		RootCAs:    uc.certPool,
 		ServerName: uc.Domain,
+		MinVersion: tls.VersionTLS12,
 	}
 
 	quicConfig := &quic.Config{

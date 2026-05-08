@@ -18,7 +18,7 @@ func (uc *UpstreamConfig) newDOH3Transport(ctx context.Context, addrs []string) 
 		return nil
 	}
 	rt := &http3.Transport{}
-	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
+	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool, MinVersion: tls.VersionTLS12}
 	logger := LoggerFromCtx(ctx)
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 		_, port, _ := net.SplitHostPort(addr)
