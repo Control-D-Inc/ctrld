@@ -18,7 +18,7 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 		return nil
 	}
 	rt := &http3.Transport{}
-	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
+	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool, MinVersion: tls.VersionTLS12}
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 		_, port, _ := net.SplitHostPort(addr)
 		// if we have a bootstrap ip set, use it to avoid DNS lookup

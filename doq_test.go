@@ -99,6 +99,7 @@ func newTestQUICServer(t *testing.T) *testQUICServer {
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{testCert.tlsCert},
 		NextProtos:   []string{"doq"},
+		MinVersion:   tls.VersionTLS12,
 	}
 
 	// Create QUIC listener
