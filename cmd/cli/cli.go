@@ -650,6 +650,19 @@ const defaultDeactivationPin = -1
 // cdDeactivationPin is used in cd mode to decide whether stop and uninstall commands can be run.
 var cdDeactivationPin atomic.Int64
 
+// Brute-force protection for the deactivation PIN endpoint on the control socket.
+// After deactivationMaxFailedAttempts consecutive wrong PINs, further attempts are
+// rejected for deactivationLockoutSeconds. Counter resets on a correct PIN.
+const (
+	deactivationMaxFailedAttempts = 5
+	deactivationLockoutSeconds    = 60
+)
+
+var (
+	deactivationFailedAttempts atomic.Int64
+	deactivationLockedUntil    atomic.Int64
+)
+
 func init() {
 	cdDeactivationPin.Store(defaultDeactivationPin)
 }
@@ -1788,6 +1801,9 @@ var errInvalidDeactivationPin = errors.New("deactivation pin is invalid")
 // errRequiredDeactivationPin indicates that the deactivation pin is required but not provided by users.
 var errRequiredDeactivationPin = errors.New("deactivation pin is required to stop or uninstall the service")
 
+// errTooManyDeactivationPin represents an error indicating excessive deactivation PIN request attempts.
+var errTooManyDeactivationPin = errors.New("too many request attempts")
+
 // checkDeactivationPin validates if the deactivation pin matches one in ControlD config.
 func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	mainLog.Load().Debug().Msg("Checking deactivation pin")
@@ -1816,6 +1832,9 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 		case http.StatusBadRequest:
 			mainLog.Load().Error().Msg(errRequiredDeactivationPin.Error())
 			return errRequiredDeactivationPin // pin is required
+		case http.StatusTooManyRequests:
+			mainLog.Load().Error().Msg(errTooManyDeactivationPin.Error())
+			return errTooManyDeactivationPin
 		case http.StatusOK:
 			return nil // valid pin
 		case http.StatusNotFound:
@@ -1828,7 +1847,9 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 
 // isCheckDeactivationPinErr reports whether there is an error during check deactivation pin process.
 func isCheckDeactivationPinErr(err error) bool {
-	return errors.Is(err, errInvalidDeactivationPin) || errors.Is(err, errRequiredDeactivationPin)
+	return errors.Is(err, errInvalidDeactivationPin) ||
+		errors.Is(err, errRequiredDeactivationPin) ||
+		errors.Is(err, errTooManyDeactivationPin)
 }
 
 // ensureUninstall ensures that s.Uninstall will remove ctrld service from system completely.

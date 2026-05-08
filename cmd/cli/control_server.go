@@ -61,11 +61,17 @@ func newControlServer(addr string) (*controlServer, error) {
 func (s *controlServer) start() error {
 	_ = os.Remove(s.addr)
 	unixListener, err := net.Listen("unix", s.addr)
-	if l, ok := unixListener.(*net.UnixListener); ok {
-		l.SetUnlinkOnClose(true)
-	}
 	if err != nil {
 		return err
+	}
+	// Restrict socket permissions to owner-only (0600) so that only the
+	// process owner (typically root) can connect. Defense-in-depth since
+	// the control server endpoints carry no authentication of their own.
+	if err := os.Chmod(s.addr, 0600); err != nil {
+		return err
+	}
+	if l, ok := unixListener.(*net.UnixListener); ok {
+		l.SetUnlinkOnClose(true)
 	}
 	go s.server.Serve(unixListener)
 	return nil
@@ -222,6 +228,13 @@ func (p *prog) registerControlServerHandler() {
 		}
 
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
+
+		// Reject further attempts while locked out due to repeated wrong PINs.
+		if now := time.Now().Unix(); now < deactivationLockedUntil.Load() {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+
 		// Re-fetch pin code from API.
 		rcReq := &controld.ResolverConfigRequest{
 			RawUID:   cdUID,
@@ -255,6 +268,7 @@ func (p *prog) registerControlServerHandler() {
 		switch req.Pin {
 		case cdDeactivationPin.Load():
 			code = http.StatusOK
+			deactivationFailedAttempts.Store(0)
 			select {
 			case p.pinCodeValidCh <- struct{}{}:
 			default:
@@ -262,6 +276,11 @@ func (p *prog) registerControlServerHandler() {
 		case defaultDeactivationPin:
 			// If the pin code was set, but users do not provide --pin, return proper code to client.
 			code = http.StatusBadRequest
+		default:
+			if deactivationFailedAttempts.Add(1) >= deactivationMaxFailedAttempts {
+				deactivationLockedUntil.Store(time.Now().Unix() + deactivationLockoutSeconds)
+				deactivationFailedAttempts.Store(0)
+			}
 		}
 		w.WriteHeader(code)
 	}))
