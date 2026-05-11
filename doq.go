@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"runtime"
@@ -181,22 +182,37 @@ func (p *doqConnPool) doResolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 	buf, err := io.ReadAll(stream)
 	stream.Close()
 
-	// Return connection to pool (mark as potentially bad if error occurred)
-	isGood := err == nil && len(buf) > 0
-	p.putConn(conn, isGood)
-
 	if err != nil {
+		p.putConn(conn, false)
 		return nil, err
 	}
 
-	// io.ReadAll hides io.EOF error, so check for empty buffer
+	// io.ReadAll hides io.EOF error, so check for empty buffer.
 	if len(buf) == 0 {
+		p.putConn(conn, false)
 		return nil, io.EOF
 	}
 
-	// Unpack DNS response (skip 2-byte length prefix)
+	// RFC 9250: each DoQ DNS message is encoded as a 2-octet length field
+	// followed by the DNS message. Reject responses that are shorter than
+	// the prefix or whose prefix declares more bytes than were received,
+	// and retire the misbehaving connection. Without this guard, buf[2:]
+	// would panic when len(buf) < 2.
+	if len(buf) < 2 {
+		p.putConn(conn, false)
+		return nil, fmt.Errorf("malformed DoQ response: %d byte(s), need >= 2 for length prefix", len(buf))
+	}
+	respLen := int(buf[0])<<8 | int(buf[1])
+	if 2+respLen > len(buf) {
+		p.putConn(conn, false)
+		return nil, fmt.Errorf("malformed DoQ response: length prefix %d exceeds payload %d", respLen, len(buf)-2)
+	}
+
+	p.putConn(conn, true)
+
+	// Unpack DNS response (skip 2-byte length prefix).
 	answer := new(dns.Msg)
-	if err := answer.Unpack(buf[2:]); err != nil {
+	if err := answer.Unpack(buf[2 : 2+respLen]); err != nil {
 		return nil, err
 	}
 	answer.SetReply(msg)
