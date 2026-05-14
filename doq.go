@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -51,6 +52,10 @@ func (r *doqResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 const doqPoolSize = 16
 
 // doqConnPool manages a pool of QUIC connections for DoQ queries using a buffered channel.
+// A single quic.Transport (and its UDP socket) is shared by every connection in the pool,
+// so the OS socket lifecycle is tied to the pool rather than to each dial. Without this
+// ownership model, a strict DoQ upstream that triggers reconnect churn would leak one
+// caller-owned UDP socket per dial — see github.com/Control-D-Inc/ctrld/issues/309.
 type doqConnPool struct {
 	uc         *UpstreamConfig
 	addrs      []string
@@ -58,6 +63,13 @@ type doqConnPool struct {
 	tlsConfig  *tls.Config
 	quicConfig *quic.Config
 	conns      chan *doqConn
+
+	transportMu   sync.Mutex
+	transport     *quic.Transport
+	transportConn *net.UDPConn
+	transportErr  error
+	transportInit bool
+	closed        bool
 }
 
 type doqConn struct {
@@ -178,10 +190,17 @@ func (p *doqConnPool) doResolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 		return nil, err
 	}
 
-	// Read response
-	buf, err := io.ReadAll(stream)
-	stream.Close()
+	// RFC 9250 section 4.2 requires the client to indicate end-of-request by
+	// closing the send side of the stream (STREAM FIN). Servers may defer
+	// processing until FIN arrives, so the close must happen before reading.
+	// Stream.Close closes only the send direction; the receive direction
+	// remains open for the response.
+	if err := stream.Close(); err != nil {
+		p.putConn(conn, false)
+		return nil, err
+	}
 
+	buf, err := io.ReadAll(stream)
 	if err != nil {
 		p.putConn(conn, false)
 		return nil, err
@@ -259,25 +278,26 @@ func (p *doqConnPool) putConn(conn *quic.Conn, isGood bool) {
 }
 
 // dialConn creates a new QUIC connection using parallel dialing like DoH3.
+// All connections from the pool multiplex on a single pool-owned UDP socket,
+// so reconnect churn cannot grow the host's FD count.
 func (p *doqConnPool) dialConn(ctx context.Context) (string, *quic.Conn, error) {
 	logger := LoggerFromCtx(ctx)
+
+	tr, err := p.getOrInitTransport()
+	if err != nil {
+		return "", nil, err
+	}
 
 	// If we have a bootstrap IP, use it directly
 	if p.uc.BootstrapIP != "" {
 		addr := net.JoinHostPort(p.uc.BootstrapIP, p.port)
 		Log(ctx, logger.Debug(), "Sending DoQ request to: %s", addr)
-		udpConn, err := net.ListenUDP("udp", nil)
-		if err != nil {
-			return "", nil, err
-		}
 		remoteAddr, err := net.ResolveUDPAddr("udp", addr)
 		if err != nil {
-			udpConn.Close()
 			return "", nil, err
 		}
-		conn, err := quic.DialEarly(ctx, udpConn, remoteAddr, p.tlsConfig, p.quicConfig)
+		conn, err := tr.DialEarly(ctx, remoteAddr, p.tlsConfig, p.quicConfig)
 		if err != nil {
-			udpConn.Close()
 			return "", nil, err
 		}
 		return addr, conn, nil
@@ -289,7 +309,7 @@ func (p *doqConnPool) dialConn(ctx context.Context) (string, *quic.Conn, error) 
 		dialAddrs[i] = net.JoinHostPort(p.addrs[i], p.port)
 	}
 
-	pd := &quicParallelDialer{}
+	pd := &quicParallelDialer{transport: tr}
 	conn, err := pd.Dial(ctx, dialAddrs, p.tlsConfig, p.quicConfig)
 	if err != nil {
 		return "", nil, err
@@ -300,9 +320,35 @@ func (p *doqConnPool) dialConn(ctx context.Context) (string, *quic.Conn, error) 
 	return addr, conn, nil
 }
 
-// CloseIdleConnections closes all connections in the pool.
-// Connections currently checked out (in use) are not closed.
+// getOrInitTransport returns the pool's shared quic.Transport, initialising it
+// on first call. Once the pool has been closed it permanently returns an error
+// so that callers cannot resurrect a dead pool.
+func (p *doqConnPool) getOrInitTransport() (*quic.Transport, error) {
+	p.transportMu.Lock()
+	defer p.transportMu.Unlock()
+	if p.closed {
+		return nil, errors.New("doq pool closed")
+	}
+	if p.transportInit {
+		return p.transport, p.transportErr
+	}
+	p.transportInit = true
+	udpConn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		p.transportErr = err
+		return nil, err
+	}
+	p.transportConn = udpConn
+	p.transport = &quic.Transport{Conn: udpConn}
+	return p.transport, nil
+}
+
+// CloseIdleConnections closes all idle connections, the shared quic.Transport,
+// and the pool's UDP socket. Connections currently checked out (in use) get
+// terminated by the transport close as well — without that, the OS socket
+// would remain bound to a goroutine that the caller cannot reach to clean up.
 func (p *doqConnPool) CloseIdleConnections() {
+drain:
 	for {
 		select {
 		case dc := <-p.conns:
@@ -310,7 +356,22 @@ func (p *doqConnPool) CloseIdleConnections() {
 				dc.conn.CloseWithError(quic.ApplicationErrorCode(quic.NoError), "")
 			}
 		default:
-			return
+			break drain
 		}
+	}
+	p.transportMu.Lock()
+	if p.closed {
+		p.transportMu.Unlock()
+		return
+	}
+	p.closed = true
+	tr := p.transport
+	udpConn := p.transportConn
+	p.transportMu.Unlock()
+	if tr != nil {
+		_ = tr.Close()
+	}
+	if udpConn != nil {
+		_ = udpConn.Close()
 	}
 }

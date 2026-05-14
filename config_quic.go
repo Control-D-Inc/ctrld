@@ -78,7 +78,17 @@ type parallelDialerResult struct {
 	err  error
 }
 
-type quicParallelDialer struct{}
+// quicParallelDialer races DialEarly across a list of remote addresses and
+// returns the first successful connection. When transport is non-nil, all
+// dials share that transport's UDP socket, which removes both the per-dial
+// socket allocation and the winner-path socket leak that an owner-of-the-conn
+// receiver cannot clean up. When transport is nil, the dialer falls back to a
+// fresh UDP socket per attempt (compat path used where no shared transport is
+// available yet); the loser paths close their sockets, and the winner path's
+// socket is owned by quic.DialEarly's internal transport.
+type quicParallelDialer struct {
+	transport *quic.Transport
+}
 
 // Dial performs parallel dialing to the given address list.
 func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
@@ -106,12 +116,24 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 				ch <- &parallelDialerResult{conn: nil, err: err}
 				return
 			}
-			udpConn, err := net.ListenUDP("udp", nil)
-			if err != nil {
-				ch <- &parallelDialerResult{conn: nil, err: err}
-				return
+			var (
+				conn    *quic.Conn
+				udpConn *net.UDPConn
+			)
+			if d.transport != nil {
+				conn, err = d.transport.DialEarly(ctx, remoteAddr, tlsCfg, cfg)
+			} else {
+				udpConn, err = net.ListenUDP("udp", nil)
+				if err != nil {
+					ch <- &parallelDialerResult{conn: nil, err: err}
+					return
+				}
+				conn, err = quic.DialEarly(ctx, udpConn, remoteAddr, tlsCfg, cfg)
+				if err != nil {
+					udpConn.Close()
+					udpConn = nil
+				}
 			}
-			conn, err := quic.DialEarly(ctx, udpConn, remoteAddr, tlsCfg, cfg)
 			select {
 			case ch <- &parallelDialerResult{conn: conn, err: err}:
 			case <-done:
