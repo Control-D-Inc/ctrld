@@ -8,14 +8,9 @@ import (
 	"strings"
 )
 
-var homedir string
-
-// absHomeDir returns the absolute path to given filename using home directory as root dir.
-func absHomeDir(filename string) string {
-	if homedir != "" {
-		return filepath.Join(homedir, filename)
-	}
-	dir, err := userHomeDir()
+// AbsHomeDir returns the absolute path to given filename using home directory as root dir.
+func AbsHomeDir(filename string) string {
+	dir, err := UserHomeDir()
 	if err != nil {
 		return filename
 	}
@@ -31,7 +26,8 @@ func dirWritable(dir string) (bool, error) {
 	return true, f.Close()
 }
 
-func userHomeDir() (string, error) {
+// UserHomeDir returns the home directory for user who is running ctrld.
+func UserHomeDir() (string, error) {
 	// viper will expand for us.
 	if runtime.GOOS == "windows" {
 		// If we're on windows, use the install path for this.
@@ -54,13 +50,18 @@ func userHomeDir() (string, error) {
 
 // SavedStaticDnsSettingsFilePath returns the file path where the static DNS settings
 // for the provided interface are saved.
+//
+// The caller must ensure iface is non-nil.
 func SavedStaticDnsSettingsFilePath(iface *net.Interface) string {
 	// The file is stored in the user home directory under a hidden file.
-	return absHomeDir(".dns_" + iface.Name)
+	return AbsHomeDir(".dns_" + iface.Name)
 }
 
-// SavedStaticNameservers returns the stored static nameservers for the given interface.
-func SavedStaticNameservers(iface *net.Interface) ([]string, string) {
+// SavedStaticNameserversAndPath returns the stored static nameservers for the given interface,
+// and the absolute path to file that stored the settings.
+//
+// The caller must ensure iface is non-nil.
+func SavedStaticNameserversAndPath(iface *net.Interface) ([]string, string) {
 	file := SavedStaticDnsSettingsFilePath(iface)
 	data, err := os.ReadFile(file)
 	if err != nil || len(data) == 0 {
@@ -76,4 +77,10 @@ func SavedStaticNameservers(iface *net.Interface) ([]string, string) {
 		ns = append(ns, v)
 	}
 	return ns, file
+}
+
+// SavedStaticNameservers is like SavedStaticNameserversAndPath, but only returns the static nameservers.
+func SavedStaticNameservers(iface *net.Interface) []string {
+	nss, _ := SavedStaticNameserversAndPath(iface)
+	return nss
 }

@@ -3,14 +3,14 @@ package ctrld
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"os/exec"
 	"strings"
 )
 
-// validInterfaces returns a set of all valid hardware ports.
-// TODO: deduplicated with cmd/cli/net_darwin.go in v2.
-func validInterfaces() map[string]struct{} {
+// ValidInterfaces returns a set of all valid hardware ports.
+func ValidInterfaces(_ context.Context) map[string]struct{} {
 	b, err := exec.Command("networksetup", "-listallhardwareports").Output()
 	if err != nil {
 		return nil

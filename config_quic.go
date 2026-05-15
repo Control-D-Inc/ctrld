@@ -9,39 +9,23 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
 
-func (uc *UpstreamConfig) setupDOH3Transport() {
-	switch uc.IPStack {
-	case IpStackBoth, "":
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
-	case IpStackV4:
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs4)
-	case IpStackV6:
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs6)
-	case IpStackSplit:
-		uc.http3RoundTripper4 = uc.newDOH3Transport(uc.bootstrapIPs4)
-		if HasIPv6() {
-			uc.http3RoundTripper6 = uc.newDOH3Transport(uc.bootstrapIPs6)
-		} else {
-			uc.http3RoundTripper6 = uc.http3RoundTripper4
-		}
-		uc.http3RoundTripper = uc.newDOH3Transport(uc.bootstrapIPs)
+func (uc *UpstreamConfig) newDOH3Transport(ctx context.Context, addrs []string) http.RoundTripper {
+	if uc.Type != ResolverTypeDOH3 {
+		return nil
 	}
-}
-
-func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 	rt := &http3.Transport{}
-	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool}
+	rt.TLSClientConfig = &tls.Config{RootCAs: uc.certPool, MinVersion: tls.VersionTLS12}
+	logger := LoggerFromCtx(ctx)
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 		_, port, _ := net.SplitHostPort(addr)
 		// if we have a bootstrap ip set, use it to avoid DNS lookup
 		if uc.BootstrapIP != "" {
 			addr = net.JoinHostPort(uc.BootstrapIP, port)
-			ProxyLogger.Load().Debug().Msgf("sending doh3 request to: %s", addr)
+			Log(ctx, logger.Debug(), "Sending doh3 request to: %s", addr)
 			udpConn, err := net.ListenUDP("udp", nil)
 			if err != nil {
 				return nil, err
@@ -61,7 +45,7 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 		if err != nil {
 			return nil, err
 		}
-		ProxyLogger.Load().Debug().Msgf("sending doh3 request to: %s", conn.RemoteAddr())
+		Log(ctx, logger.Debug(), "Sending doh3 request to: %s", conn.RemoteAddr())
 		return conn, err
 	}
 	runtime.SetFinalizer(rt, func(rt *http3.Transport) {
@@ -70,25 +54,19 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 	return rt
 }
 
-func (uc *UpstreamConfig) doh3Transport(dnsType uint16) http.RoundTripper {
-	uc.transportOnce.Do(func() {
-		uc.SetupTransport()
-	})
-	if uc.rebootstrap.CompareAndSwap(true, false) {
-		uc.SetupTransport()
-	}
-	switch uc.IPStack {
-	case IpStackBoth, IpStackV4, IpStackV6:
-		return uc.http3RoundTripper
-	case IpStackSplit:
-		switch dnsType {
-		case dns.TypeA:
-			return uc.http3RoundTripper4
-		default:
-			return uc.http3RoundTripper6
-		}
-	}
-	return uc.http3RoundTripper
+func (uc *UpstreamConfig) doh3Transport(ctx context.Context, dnsType uint16) http.RoundTripper {
+	uc.ensureSetupTransport(ctx)
+	return transportByIpStack(uc.IPStack, dnsType, uc.http3RoundTripper, uc.http3RoundTripper4, uc.http3RoundTripper6)
+}
+
+func (uc *UpstreamConfig) doqTransport(ctx context.Context, dnsType uint16) *doqConnPool {
+	uc.ensureSetupTransport(ctx)
+	return transportByIpStack(uc.IPStack, dnsType, uc.doqConnPool, uc.doqConnPool4, uc.doqConnPool6)
+}
+
+func (uc *UpstreamConfig) dotTransport(ctx context.Context, dnsType uint16) *dotConnPool {
+	uc.ensureSetupTransport(ctx)
+	return transportByIpStack(uc.IPStack, dnsType, uc.dotClientPool, uc.dotClientPool4, uc.dotClientPool6)
 }
 
 // Putting the code for quic parallel dialer here:
@@ -100,7 +78,17 @@ type parallelDialerResult struct {
 	err  error
 }
 
-type quicParallelDialer struct{}
+// quicParallelDialer races DialEarly across a list of remote addresses and
+// returns the first successful connection. When transport is non-nil, all
+// dials share that transport's UDP socket, which removes both the per-dial
+// socket allocation and the winner-path socket leak that an owner-of-the-conn
+// receiver cannot clean up. When transport is nil, the dialer falls back to a
+// fresh UDP socket per attempt (compat path used where no shared transport is
+// available yet); the loser paths close their sockets, and the winner path's
+// socket is owned by quic.DialEarly's internal transport.
+type quicParallelDialer struct {
+	transport *quic.Transport
+}
 
 // Dial performs parallel dialing to the given address list.
 func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
@@ -128,12 +116,24 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 				ch <- &parallelDialerResult{conn: nil, err: err}
 				return
 			}
-			udpConn, err := net.ListenUDP("udp", nil)
-			if err != nil {
-				ch <- &parallelDialerResult{conn: nil, err: err}
-				return
+			var (
+				conn    *quic.Conn
+				udpConn *net.UDPConn
+			)
+			if d.transport != nil {
+				conn, err = d.transport.DialEarly(ctx, remoteAddr, tlsCfg, cfg)
+			} else {
+				udpConn, err = net.ListenUDP("udp", nil)
+				if err != nil {
+					ch <- &parallelDialerResult{conn: nil, err: err}
+					return
+				}
+				conn, err = quic.DialEarly(ctx, udpConn, remoteAddr, tlsCfg, cfg)
+				if err != nil {
+					udpConn.Close()
+					udpConn = nil
+				}
 			}
-			conn, err := quic.DialEarly(ctx, udpConn, remoteAddr, tlsCfg, cfg)
 			select {
 			case ch <- &parallelDialerResult{conn: conn, err: err}:
 			case <-done:
@@ -157,4 +157,18 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 	}
 
 	return nil, errors.Join(errs...)
+}
+
+func (uc *UpstreamConfig) newDOQConnPool(ctx context.Context, addrs []string) *doqConnPool {
+	if uc.Type != ResolverTypeDOQ {
+		return nil
+	}
+	return newDOQConnPool(ctx, uc, addrs)
+}
+
+func (uc *UpstreamConfig) newDOTClientPool(ctx context.Context, addrs []string) *dotConnPool {
+	if uc.Type != ResolverTypeDOT {
+		return nil
+	}
+	return newDOTClientPool(ctx, uc, addrs)
 }

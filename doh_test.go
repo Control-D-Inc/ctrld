@@ -157,20 +157,21 @@ func Test_ClientCertificateVerificationError(t *testing.T) {
 		},
 	}
 
+	ctx := context.Background()
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tc.uc.Init()
-			tc.uc.SetupBootstrapIP()
-			r, err := NewResolver(tc.uc)
+			tc.uc.Init(ctx)
+			tc.uc.SetupBootstrapIP(ctx)
+			r, err := NewResolver(ctx, tc.uc)
 			if err != nil {
 				t.Fatal(err)
 			}
 			msg := new(dns.Msg)
 			msg.SetQuestion("verify.controld.com.", dns.TypeA)
 			msg.RecursionDesired = true
-			_, err = r.Resolve(context.Background(), msg)
+			_, err = r.Resolve(ctx, msg)
 			// Verify the error contains the expected certificate information
 			if err == nil {
 				t.Fatal("expected certificate verification error, got nil")
@@ -196,6 +197,7 @@ func testTLSServer(t *testing.T, handler http.Handler) (*httptest.Server, *x509.
 	server := httptest.NewUnstartedServer(handler)
 	server.TLS = &tls.Config{
 		Certificates: []tls.Certificate{testCert.tlsCert},
+		MinVersion:   tls.VersionTLS12,
 	}
 	server.StartTLS()
 
@@ -232,6 +234,7 @@ func newTestHTTP3Server(t *testing.T, handler http.Handler) *testHTTP3Server {
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{testCert.tlsCert},
 		NextProtos:   []string{"h3"}, // HTTP/3 protocol identifier
+		MinVersion:   tls.VersionTLS12,
 	}
 
 	// Create HTTP/3 server

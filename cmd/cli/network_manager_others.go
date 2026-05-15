@@ -2,14 +2,14 @@
 
 package cli
 
-func setupNetworkManager() error {
-	reloadNetworkManager()
+func (p *prog) setupNetworkManager() error {
+	p.reloadNetworkManager()
 	return nil
 }
 
-func restoreNetworkManager() error {
-	reloadNetworkManager()
+func (p *prog) restoreNetworkManager() error {
+	p.reloadNetworkManager()
 	return nil
 }
 
-func reloadNetworkManager() {}
+func (p *prog) reloadNetworkManager() {}
