@@ -56,7 +56,7 @@ ctrld run --intercept-mode hard --cd <resolver-uid>
 
 Windows DNS intercept uses a two-tier architecture with mode-dependent enforcement:
 
-- **`dns` mode**: NRPT only — graceful DNS routing through the Windows DNS Client service. At worst, a VPN overwrites NRPT and queries bypass ctrld temporarily. DNS never breaks.
+- **`dns` mode**: NRPT + loopback WFP protect — graceful DNS routing through the Windows DNS Client service, with proactive WFP permit filters that protect the NRPT → localhost path from third-party DNS block filters (e.g., OpenVPN's `block-outside-dns`).
 - **`hard` mode**: NRPT + WFP — same NRPT routing, plus WFP kernel-level block filters that prevent any outbound DNS bypass. Equivalent enforcement to macOS pf.
 
 #### Why This Design?
@@ -70,8 +70,9 @@ Separating them into modes means most users get `dns` mode (safe, can never brea
 1. Creates NRPT catch-all registry rule (`.` → `127.0.0.1`) under `HKLM\...\DnsPolicyConfig\CtrldCatchAll`
 2. Triggers Group Policy refresh via `RefreshPolicyEx` (userenv.dll) so DNS Client loads NRPT immediately
 3. Flushes DNS cache to clear stale entries
-4. Starts NRPT health monitor (30s periodic check)
-5. Launches async NRPT probe-and-heal to verify NRPT is actually routing queries
+4. **Activates loopback WFP protect** — adds 4 permit filters (IPv4/IPv6 × UDP/TCP) for DNS to localhost with `FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT`. These prevent third-party WFP block filters from blocking the NRPT → `127.0.0.1` path (see [Loopback WFP Protect](#loopback-wfp-protect) below). Non-fatal if this fails.
+5. Starts NRPT health monitor (30s periodic check)
+6. Launches async NRPT probe-and-heal to verify NRPT is actually routing queries
 
 #### Startup Sequence (hard mode)
 
@@ -111,6 +112,32 @@ The **Name Resolution Policy Table** is a Windows feature (originally for Direct
 **RFC1918 + CGNAT permits**: Static subnet permit filters allow DNS to private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10). This means VPN DNS servers on private IPs (Tailscale MagicDNS on 100.100.100.100, corporate VPN DNS on 10.x.x.x, etc.) work without needing dynamic per-server exemptions.
 
 **VPN coexistence**: VPN software can set DNS to whatever it wants on the interface — for public IPs, the WFP block filter prevents those servers from being reached on port 53. For private IPs, the subnet permits allow it. ctrld handles all DNS routing through NRPT and can forward VPN-specific domains to VPN DNS servers through its own upstream mechanism.
+
+#### Loopback WFP Protect (dns mode)
+
+Third-party VPN software (e.g., OpenVPN, Securepoint SSL VPN) can install WFP block filters via `block-outside-dns` that block **all** DNS traffic to non-tunnel interfaces — including loopback. This breaks the NRPT → `127.0.0.1:53` path that ctrld depends on, causing DNS resolution to time out.
+
+ctrld proactively adds 4 WFP "hard permit" filters at startup:
+
+| Filter | Layer | Protocol |
+|---|---|---|
+| Permit DNS to localhost (IPv4/UDP) | ALE_AUTH_CONNECT_V4 | UDP |
+| Permit DNS to localhost (IPv4/TCP) | ALE_AUTH_CONNECT_V4 | TCP |
+| Permit DNS to localhost (IPv6/UDP) | ALE_AUTH_CONNECT_V6 | UDP |
+| Permit DNS to localhost (IPv6/TCP) | ALE_AUTH_CONNECT_V6 | TCP |
+
+**Key properties:**
+- **Scope**: Port 53 to `127.0.0.1` (or configured listener IP) and `::1` only
+- **Flag**: `FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT` (0x08) — "hard permit" that overrides BLOCK decisions from other sublayers regardless of weight or insertion order
+- **Weight**: 15 (above hard mode's permit=10)
+- **Sublayer**: ctrld's sublayer at maximum priority (0xFFFF)
+- **Lifetime**: Process lifetime — added at startup, removed on shutdown/uninstall
+
+Because `CLEAR_ACTION_RIGHT` is a cross-sublayer override, the order of filter installation doesn't matter — even if a VPN connects hours later and adds its own WFP block filters, ctrld's hard permit for loopback DNS is never overridden.
+
+The reactive fallback in `nrptProbeAndHeal()` is preserved as defense-in-depth for edge cases where proactive activation fails at startup.
+
+See: [Issue #526](https://gitlab.int.windscribe.com/controld/clients/ctrld/-/issues/526)
 
 #### NRPT Probe and Auto-Heal
 

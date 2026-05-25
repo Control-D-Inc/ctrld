@@ -42,11 +42,12 @@ const doqPoolSize = 16
 
 // doqConnPool manages a pool of QUIC connections for DoQ queries using a buffered channel.
 type doqConnPool struct {
-	uc        *UpstreamConfig
-	addrs     []string
-	port      string
-	tlsConfig *tls.Config
-	conns     chan *doqConn
+	uc         *UpstreamConfig
+	addrs      []string
+	port       string
+	tlsConfig  *tls.Config
+	quicConfig *quic.Config
+	conns      chan *doqConn
 }
 
 type doqConn struct {
@@ -65,12 +66,17 @@ func newDOQConnPool(uc *UpstreamConfig, addrs []string) *doqConnPool {
 		ServerName: uc.Domain,
 	}
 
+	quicConfig := &quic.Config{
+		KeepAlivePeriod: 15 * time.Second,
+	}
+
 	pool := &doqConnPool{
-		uc:        uc,
-		addrs:     addrs,
-		port:      port,
-		tlsConfig: tlsConfig,
-		conns:     make(chan *doqConn, doqPoolSize),
+		uc:         uc,
+		addrs:      addrs,
+		port:       port,
+		tlsConfig:  tlsConfig,
+		quicConfig: quicConfig,
+		conns:      make(chan *doqConn, doqPoolSize),
 	}
 
 	// Use SetFinalizer here because we need to call a method on the pool itself.
@@ -85,10 +91,20 @@ func newDOQConnPool(uc *UpstreamConfig, addrs []string) *doqConnPool {
 
 // Resolve performs a DNS query using a pooled QUIC connection.
 func (p *doqConnPool) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
-	// Retry logic for io.EOF errors (as per original implementation)
+	// Retry logic for transient errors: io.EOF (connection reset),
+	// IdleTimeoutError (stale pooled connection timed out), and
+	// StreamLimitReachedError (stream credit exhausted before server MAX_STREAMS arrived).
 	for range 5 {
 		answer, err := p.doResolve(ctx, msg)
 		if err == io.EOF {
+			continue
+		}
+		var idleErr *quic.IdleTimeoutError
+		if errors.As(err, &idleErr) {
+			continue
+		}
+		var streamLimitErr quic.StreamLimitReachedError
+		if errors.As(err, &streamLimitErr) {
 			continue
 		}
 		if err != nil {
@@ -115,17 +131,24 @@ func (p *doqConnPool) doResolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 		return nil, err
 	}
 
-	// Open a new stream for this query
-	stream, err := conn.OpenStream()
+	// Ensure the context has a deadline before calling OpenStreamSync, which
+	// blocks until the server sends a MAX_STREAMS update. Without a deadline the
+	// call could block indefinitely when the server never sends the update.
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		deadline, _ = ctx.Deadline()
+	}
+
+	// OpenStreamSync blocks until the server's MAX_STREAMS credit arrives,
+	// avoiding the StreamLimitReachedError race that OpenStream (non-blocking)
+	// triggers when the credit replenishment frame is still in flight.
+	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		p.putConn(conn, false)
 		return nil, err
-	}
-
-	// Set deadline
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(5 * time.Second)
 	}
 	_ = stream.SetDeadline(deadline)
 
@@ -226,7 +249,7 @@ func (p *doqConnPool) dialConn(ctx context.Context) (string, *quic.Conn, error) 
 			udpConn.Close()
 			return "", nil, err
 		}
-		conn, err := quic.DialEarly(ctx, udpConn, remoteAddr, p.tlsConfig, nil)
+		conn, err := quic.DialEarly(ctx, udpConn, remoteAddr, p.tlsConfig, p.quicConfig)
 		if err != nil {
 			udpConn.Close()
 			return "", nil, err
@@ -241,7 +264,7 @@ func (p *doqConnPool) dialConn(ctx context.Context) (string, *quic.Conn, error) 
 	}
 
 	pd := &quicParallelDialer{}
-	conn, err := pd.Dial(ctx, dialAddrs, p.tlsConfig, nil)
+	conn, err := pd.Dial(ctx, dialAddrs, p.tlsConfig, p.quicConfig)
 	if err != nil {
 		return "", nil, err
 	}

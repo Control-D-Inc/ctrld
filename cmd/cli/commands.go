@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/docker/go-units"
@@ -146,6 +148,88 @@ func initLogCmd() *cobra.Command {
 			fmt.Println(logs.Data)
 		},
 	}
+	var tailLines int
+	logTailCmd := &cobra.Command{
+		Use:   "tail",
+		Short: "Tail live runtime debug logs",
+		Long:  "Stream live runtime debug logs to the terminal, similar to tail -f. Press Ctrl+C to stop.",
+		Args:  cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			checkHasElevatedPrivilege()
+		},
+		Run: func(cmd *cobra.Command, args []string) {
+
+			p := &prog{router: router.New(&cfg, false)}
+			s, _ := newService(p, svcConfig)
+
+			status, err := s.Status()
+			if errors.Is(err, service.ErrNotInstalled) {
+				mainLog.Load().Warn().Msg("service not installed")
+				return
+			}
+			if status == service.StatusStopped {
+				mainLog.Load().Warn().Msg("service is not running")
+				return
+			}
+
+			dir, err := socketDir()
+			if err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
+			}
+			cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
+			tailPath := fmt.Sprintf("%s?lines=%d", tailLogsPath, tailLines)
+			resp, err := cc.postStream(tailPath, nil)
+			if err != nil {
+				mainLog.Load().Fatal().Err(err).Msg("failed to connect for log tailing")
+			}
+			defer resp.Body.Close()
+
+			switch resp.StatusCode {
+			case http.StatusMovedPermanently:
+				warnRuntimeLoggingNotEnabled()
+				return
+			case http.StatusOK:
+			default:
+				mainLog.Load().Fatal().Msgf("unexpected response status: %d", resp.StatusCode)
+				return
+			}
+
+			// Set up signal handling for clean shutdown.
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				// Stream output to stdout.
+				buf := make([]byte, 4096)
+				for {
+					n, readErr := resp.Body.Read(buf)
+					if n > 0 {
+						os.Stdout.Write(buf[:n])
+					}
+					if readErr != nil {
+						if readErr != io.EOF {
+							mainLog.Load().Error().Err(readErr).Msg("error reading log stream")
+						}
+						return
+					}
+				}
+			}()
+
+			select {
+			case <-ctx.Done():
+				if errors.Is(ctx.Err(), context.Canceled) {
+					msg := fmt.Sprintf("\nexiting: %s\n", context.Cause(ctx).Error())
+					os.Stdout.WriteString(msg)
+				}
+			case <-done:
+			}
+
+		},
+	}
+	logTailCmd.Flags().IntVarP(&tailLines, "lines", "n", 10, "Number of historical lines to show on connect")
+
 	logCmd := &cobra.Command{
 		Use:   "log",
 		Short: "Manage runtime debug logs",
@@ -156,6 +240,7 @@ func initLogCmd() *cobra.Command {
 	}
 	logCmd.AddCommand(logSendCmd)
 	logCmd.AddCommand(logViewCmd)
+	logCmd.AddCommand(logTailCmd)
 	rootCmd.AddCommand(logCmd)
 
 	return logCmd

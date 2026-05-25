@@ -15,10 +15,14 @@ the same enforcement guarantees as macOS pf.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     dns mode (NRPT only)                        │
+│              dns mode (NRPT + loopback WFP protect)             │
 │                                                                 │
 │  App DNS query → DNS Client service → NRPT lookup               │
 │     → "." catch-all matches → forward to 127.0.0.1 (ctrld)    │
+│                                                                 │
+│  Loopback WFP protect: 4 hard-permit filters (port 53 to       │
+│  localhost, CLEAR_ACTION_RIGHT) prevent third-party VPN WFP     │
+│  blocks (e.g., OpenVPN block-outside-dns) from breaking NRPT.   │
 │                                                                 │
 │  If VPN clears NRPT: health monitor re-adds within 30s         │
 │  Worst case: queries go to VPN DNS until NRPT restored          │
@@ -182,8 +186,10 @@ When `vpnDNSManager.Refresh()` discovers VPN DNS servers on public IPs:
    - Both UDP and TCP for each IP
 3. Store new filter IDs for next cleanup cycle
 
-**In `dns` mode, VPN DNS exemptions are skipped** — there are no WFP block
-filters to exempt from.
+**In `dns` mode, VPN DNS exemptions are skipped** — there are no ctrld WFP block
+filters to exempt from. The loopback WFP protect filters only permit localhost
+DNS; VPN DNS traffic goes through the tunnel interface and is already permitted
+by the VPN's own WFP rules.
 
 ### Session Lifecycle
 
@@ -202,8 +208,8 @@ filters to exempt from.
 **Startup (dns mode):**
 ```
 1. Add NRPT catch-all rule + GP refresh + DNS flush
-2. Start NRPT health monitor goroutine
-3. (No WFP — done)
+2. Activate loopback WFP protect (4 hard-permit filters for localhost DNS)
+3. Start NRPT health monitor goroutine
 ```
 
 **Shutdown:**
@@ -338,9 +344,9 @@ breaking DNS.
 | Aspect | macOS (pf) | Windows dns mode | Windows hard mode |
 |--------|-----------|------------------|-------------------|
 | **Routing** | `rdr` redirect | NRPT policy | NRPT policy |
-| **Enforcement** | `route-to` + block rules | None (graceful) | WFP block filters |
+| **Enforcement** | `route-to` + block rules | Loopback WFP protect | WFP block filters |
 | **Can break DNS?** | Yes (pf corruption) | No | Yes (if NRPT lost) |
-| **VPN coexistence** | Watchdog + stabilization | NRPT most-specific-match | Same + WFP permits |
+| **VPN coexistence** | Watchdog + stabilization | NRPT + loopback hard-permit | Same + WFP permits |
 | **Bypass protection** | pf catches all packets | None | WFP catches all connections |
 | **Recovery** | Probe + auto-heal | Health monitor re-adds | Full restart on sublayer loss |
 

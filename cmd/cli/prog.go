@@ -146,6 +146,12 @@ type prog struct {
 	recoveryCancel   context.CancelFunc
 	recoveryRunning  atomic.Bool
 
+	// recoveryDebounceTimer coalesces rapid NetworkChange recovery triggers
+	// into a single handleRecovery call. Only handleRecovery is debounced —
+	// all other state updates (IP, pf anchor, VPN DNS) run immediately.
+	recoveryDebounceMu    sync.Mutex
+	recoveryDebounceTimer *time.Timer
+
 	// recoveryBypass is set when dns-intercept mode enters recovery.
 	// When true, proxy() forwards all queries to OS/DHCP resolver
 	// instead of using the normal upstream flow.

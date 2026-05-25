@@ -4,6 +4,7 @@ package ctrld
 
 import (
 	"net"
+	"net/netip"
 	"slices"
 	"time"
 
@@ -15,6 +16,31 @@ import (
 // currentNameserversFromResolvconf returns the current nameservers set from /etc/resolv.conf file.
 func currentNameserversFromResolvconf() []string {
 	return resolvconffile.NameServers()
+}
+
+// localNameservers filters a list of nameserver strings, returning only those
+// that are not loopback or local machine IP addresses.
+func localNameservers(nss []string, regularIPs, loopbackIPs []netip.Addr) []string {
+	var result []string
+	seen := make(map[string]bool)
+
+	for _, ns := range nss {
+		if ip := net.ParseIP(ns); ip != nil {
+			// skip loopback and local IPs
+			isLocal := false
+			for _, v := range slices.Concat(regularIPs, loopbackIPs) {
+				if ip.String() == v.String() {
+					isLocal = true
+					break
+				}
+			}
+			if !isLocal && !seen[ip.String()] {
+				seen[ip.String()] = true
+				result = append(result, ip.String())
+			}
+		}
+	}
+	return result
 }
 
 // dnsFromResolvConf reads usable nameservers from /etc/resolv.conf file.
@@ -35,24 +61,7 @@ func dnsFromResolvConf() []string {
 		}
 
 		nss := resolvconffile.NameServers()
-		var localDNS []string
-		seen := make(map[string]bool)
-
-		for _, ns := range nss {
-			if ip := net.ParseIP(ns); ip != nil {
-				// skip loopback IPs
-				for _, v := range slices.Concat(regularIPs, loopbackIPs) {
-					ipStr := v.String()
-					if ip.String() == ipStr {
-						continue
-					}
-				}
-				if !seen[ip.String()] {
-					seen[ip.String()] = true
-					localDNS = append(localDNS, ip.String())
-				}
-			}
-		}
+		localDNS := localNameservers(nss, regularIPs, loopbackIPs)
 
 		// If we successfully read the file and found nameservers, return them
 		if len(localDNS) > 0 {
