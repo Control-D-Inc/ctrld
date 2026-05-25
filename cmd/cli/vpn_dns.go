@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -10,6 +11,8 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 )
+
+var vpnDNSSettlingEnabled = runtime.GOOS == "windows"
 
 // vpnDNSExemption represents a VPN DNS server that needs pf/WFP exemption,
 // including the interface it was discovered on. The interface is used on macOS
@@ -38,6 +41,11 @@ type vpnDNSManager struct {
 	// as additional nameservers for queries that match split-DNS rules
 	// (from ctrld config, AD domain, or VPN suffix config).
 	domainlessServers []string
+	// retainedAfterEmptyDiscovery means Windows reported an empty VPN DNS
+	// snapshot once while previous VPN DNS state existed. We keep that last-known
+	// state for one guarded refresh cycle because Windows can briefly report an
+	// intermediate empty adapter/DNS state after sleep/wake or reconnect.
+	retainedAfterEmptyDiscovery bool
 	// Called when VPN DNS server list changes, to update intercept exemptions.
 	onServersChanged vpnDNSExemptFunc
 }
@@ -78,6 +86,29 @@ func (m *vpnDNSManager) Refresh(guardAgainstNoNameservers bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if vpnDNSSettlingEnabled && len(configs) == 0 && guardAgainstNoNameservers && m.hasVPNDNSStateLocked() {
+		if !m.retainedAfterEmptyDiscovery {
+			exemptions := m.currentExemptionsLocked()
+			m.retainedAfterEmptyDiscovery = true
+			logger.Debug().Msgf(
+				"VPN DNS discovery empty; retaining last-known VPN DNS state for one guarded refresh (%d domainless servers, %d exemptions)",
+				len(m.domainlessServers), len(exemptions))
+			if m.onServersChanged != nil {
+				if err := m.onServersChanged(exemptions); err != nil {
+					logger.Error().Err(err).Msg("Failed to re-apply retained VPN DNS exemptions")
+				}
+			}
+			return
+		}
+		logger.Debug().Msgf(
+			"VPN DNS discovery still empty on next guarded refresh; clearing retained VPN DNS state (%d domainless servers)",
+			len(m.domainlessServers))
+	}
+
+	// Any discovery path that does not return with retained state clears the
+	// settling marker: non-empty discovery replaces old servers immediately, and
+	// an unguarded/second empty discovery clears stale state below.
+	m.retainedAfterEmptyDiscovery = false
 	m.configs = configs
 	m.routes = make(map[string][]string)
 
@@ -151,6 +182,63 @@ func (m *vpnDNSManager) Refresh(guardAgainstNoNameservers bool) {
 	}
 }
 
+func (m *vpnDNSManager) hasVPNDNSStateLocked() bool {
+	return len(m.configs) > 0 || len(m.routes) > 0 || len(m.domainlessServers) > 0
+}
+
+func (m *vpnDNSManager) currentExemptionsLocked() []vpnDNSExemption {
+	type key struct{ server, iface string }
+	seen := make(map[key]bool)
+	var exemptions []vpnDNSExemption
+	for _, config := range m.configs {
+		for _, server := range config.Servers {
+			k := key{server, config.InterfaceName}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			exemptions = append(exemptions, vpnDNSExemption{
+				Server:     server,
+				Interface:  config.InterfaceName,
+				IsExitMode: config.IsExitMode,
+			})
+		}
+	}
+	return exemptions
+}
+
+// ShouldFailClosedAfterVPNDNSTransportFailure reports whether split-rule
+// queries should fail closed instead of falling back to OS/public DNS after
+// every candidate VPN DNS server failed before returning a DNS packet. This is
+// Windows-only and only active while serving retained VPN DNS state from a
+// guarded empty discovery, which is the short window where Windows can report
+// VPN DNS before routes to those servers are usable after wake/reconnect.
+func (m *vpnDNSManager) ShouldFailClosedAfterVPNDNSTransportFailure(domain string, servers []string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if !vpnDNSSettlingEnabled || len(servers) == 0 || !m.retainedAfterEmptyDiscovery || !m.hasVPNDNSStateLocked() {
+		return false
+	}
+
+	mainLog.Load().Debug().Msgf(
+		"VPN DNS transport failed for %s while retained VPN DNS state is active; suppressing OS fallback for this query (servers=%v)",
+		domain, servers)
+	return true
+}
+
+// VPNDNSReachable records that a VPN DNS server returned a DNS response. The
+// response may be negative (NXDOMAIN/SERVFAIL); the important signal is that
+// the VPN DNS transport is reachable again.
+func (m *vpnDNSManager) VPNDNSReachable() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.retainedAfterEmptyDiscovery {
+		mainLog.Load().Debug().Msg("VPN DNS transport recovered; clearing retained-empty-discovery state")
+	}
+	m.retainedAfterEmptyDiscovery = false
+}
+
 // UpstreamForDomain checks if the domain matches any VPN search domain.
 // Returns VPN DNS servers if matched, nil otherwise.
 func (m *vpnDNSManager) UpstreamForDomain(domain string) []string {
@@ -208,24 +296,7 @@ func (m *vpnDNSManager) CurrentServers() []string {
 func (m *vpnDNSManager) CurrentExemptions() []vpnDNSExemption {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	type key struct{ server, iface string }
-	seen := make(map[key]bool)
-	var exemptions []vpnDNSExemption
-	for _, config := range m.configs {
-		for _, server := range config.Servers {
-			k := key{server, config.InterfaceName}
-			if !seen[k] {
-				seen[k] = true
-				exemptions = append(exemptions, vpnDNSExemption{
-					Server:     server,
-					Interface:  config.InterfaceName,
-					IsExitMode: config.IsExitMode,
-				})
-			}
-		}
-	}
-	return exemptions
+	return m.currentExemptionsLocked()
 }
 
 // Routes returns a copy of the current VPN DNS routes for debugging.
