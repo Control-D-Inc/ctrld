@@ -17,6 +17,12 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
+// doqMaxResponseSize caps the bytes read from a DoQ stream: a 2-byte
+// length prefix plus a DNS message bounded by dns.MaxMsgSize. Anything
+// larger cannot be a valid response and is rejected before buffering more
+// data from the upstream.
+const doqMaxResponseSize = 2 + dns.MaxMsgSize
+
 type doqResolver struct {
 	uc *UpstreamConfig
 }
@@ -191,7 +197,13 @@ func (p *doqConnPool) doResolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 		return nil, err
 	}
 
-	buf, err := io.ReadAll(stream)
+	// A DoQ response is a 2-byte length prefix followed by a DNS message.
+	// The DNS message is bounded by the protocol at dns.MaxMsgSize, so a
+	// well-formed response is at most doqMaxResponseSize bytes. Read one
+	// byte past that cap to distinguish "at limit" from "over limit" and
+	// reject oversized responses before they can drive memory growth from
+	// a malicious or compromised upstream.
+	buf, err := io.ReadAll(io.LimitReader(stream, doqMaxResponseSize+1))
 	if err != nil {
 		p.putConn(conn, false)
 		return nil, err
@@ -201,6 +213,11 @@ func (p *doqConnPool) doResolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 	if len(buf) == 0 {
 		p.putConn(conn, false)
 		return nil, io.EOF
+	}
+
+	if len(buf) > doqMaxResponseSize {
+		p.putConn(conn, false)
+		return nil, fmt.Errorf("DoQ response exceeds %d-byte maximum", doqMaxResponseSize)
 	}
 
 	// RFC 9250: each DoQ DNS message is encoded as a 2-octet length field
