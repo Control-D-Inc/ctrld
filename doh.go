@@ -25,6 +25,16 @@ const (
 	dohOsHeader           = "x-cd-os"
 	dohClientIDPrefHeader = "x-cd-cpref"
 	headerApplicationDNS  = "application/dns-message"
+
+	// dohMaxResponseSize caps the response body read from a DoH/DoH3
+	// upstream. A DNS message is bounded by the protocol's 16-bit length
+	// field; anything larger cannot be a valid response. The cap stops a
+	// malicious or compromised upstream from driving ctrld into unbounded
+	// memory growth via io.ReadAll on attacker-controlled bytes.
+	dohMaxResponseSize = dns.MaxMsgSize
+	// dohMaxErrorBodySize bounds how much of a non-200 response body is
+	// read for inclusion in the returned error.
+	dohMaxErrorBodySize = 1024
 )
 
 // EncodeOsNameMap provides mapping from OS name to a shorter string, used for encoding x-cd-os value.
@@ -142,15 +152,18 @@ func (r *dohResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 	}
 	defer resp.Body.Close()
 
-	buf, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, dohMaxErrorBodySize))
+		return nil, fmt.Errorf("wrong response from DOH server, got: %s, status: %d", string(body), resp.StatusCode)
+	}
+
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, dohMaxResponseSize+1))
 	if err != nil {
 		Log(ctx, logger.Error().Err(err), "Could not read response body")
 		return nil, fmt.Errorf("could not read message from response: %w", err)
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		Log(ctx, logger.Error(), "Wrong response from DOH server, got: %s, status: %d", string(buf), resp.StatusCode)
-		return nil, fmt.Errorf("wrong response from DOH server, got: %s, status: %d", string(buf), resp.StatusCode)
+	if len(buf) > dohMaxResponseSize {
+		return nil, fmt.Errorf("DoH response exceeds %d-byte maximum DNS message size", dohMaxResponseSize)
 	}
 
 	answer := new(dns.Msg)

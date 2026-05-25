@@ -670,3 +670,47 @@ func countOpenFDs(t *testing.T) int {
 	}
 	return len(entries)
 }
+
+// TestDoQResolve_OversizedResponse_Rejected locks in the fix for
+// github.com/Control-D-Inc/ctrld/issues/312 on the DoQ transport: a
+// malicious upstream that writes a response larger than the DNS protocol
+// allows must be rejected with an explicit size error, not buffered
+// without bound into ctrld memory.
+func TestDoQResolve_OversizedResponse_Rejected(t *testing.T) {
+	t.Parallel()
+
+	// doqMaxResponseSize is 2 + dns.MaxMsgSize. Send something well past
+	// that. 256 KiB is enough to exceed the cap while keeping the test
+	// fast on loopback.
+	response := make([]byte, 256*1024)
+	// A well-formed length prefix isn't required: the size cap should
+	// fire before any framing check runs. Use a non-zero prefix so the
+	// test also documents that the order of validation is "size first,
+	// framing later."
+	response[0] = 0xFF
+	response[1] = 0xFF
+
+	server := newMalformedDoQServer(t, response)
+	uc := newMalformedDoQUpstream(t, server.cert, server.addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool := newDOQConnPool(context.Background(), uc, []string{"127.0.0.1"})
+	t.Cleanup(pool.CloseIdleConnections)
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("example.com.", dns.TypeA)
+	msg.RecursionDesired = true
+
+	answer, err := pool.Resolve(ctx, msg)
+	if err == nil {
+		t.Fatalf("Resolve unexpectedly succeeded for oversized response; answer=%v", answer)
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error %q does not surface the size cap", err)
+	}
+	if answer != nil {
+		t.Fatalf("Resolve returned non-nil answer alongside error: %v", answer)
+	}
+}
