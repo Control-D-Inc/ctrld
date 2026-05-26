@@ -8,11 +8,12 @@
 # - Non-cgo ctrld binary.
 #
 # CI_COMMIT_TAG is used to set the version of ctrld binary.
-FROM golang:1.20-bullseye as base
+FROM golang:1.25-bookworm AS base
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y upx-ucl
+RUN echo "deb http://deb.debian.org/debian bookworm-backports main" | tee /etc/apt/sources.list.d/backports.list
+RUN apt update && apt install -t bookworm-backports upx-ucl
 
 COPY . .
 
