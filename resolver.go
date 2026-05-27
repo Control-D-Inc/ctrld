@@ -139,6 +139,66 @@ func OsResolverNameservers() []string {
 	return nss
 }
 
+// AppendOsResolverNameservers adds additional nameservers to the existing OS resolver
+// without reinitializing it. This is used for late-arriving nameservers such as AD
+// domain controller IPs discovered via background retry.
+// Returns true if nameservers were actually added.
+func AppendOsResolverNameservers(servers []string) bool {
+	if len(servers) == 0 {
+		return false
+	}
+	resolverMutex.Lock()
+	defer resolverMutex.Unlock()
+	if or == nil {
+		return false
+	}
+
+	// Collect existing nameservers to avoid duplicates.
+	existing := make(map[string]bool)
+	if lan := or.lanServers.Load(); lan != nil {
+		for _, server := range *lan {
+			existing[server] = true
+		}
+	}
+	if pub := or.publicServers.Load(); pub != nil {
+		for _, server := range *pub {
+			existing[server] = true
+		}
+	}
+
+	var added bool
+	for _, server := range servers {
+		// Normalize to host:port format.
+		if _, _, err := net.SplitHostPort(server); err != nil {
+			server = net.JoinHostPort(server, "53")
+		}
+		if existing[server] {
+			continue
+		}
+		existing[server] = true
+		added = true
+
+		ip, _, _ := net.SplitHostPort(server)
+		addr, _ := netip.ParseAddr(ip)
+		if isLanAddr(addr) {
+			var newLan []string
+			if lan := or.lanServers.Load(); lan != nil {
+				newLan = append(newLan, (*lan)...)
+			}
+			newLan = append(newLan, server)
+			or.lanServers.Store(&newLan)
+		} else {
+			var newPub []string
+			if pub := or.publicServers.Load(); pub != nil {
+				newPub = append(newPub, (*pub)...)
+			}
+			newPub = append(newPub, server)
+			or.publicServers.Store(&newPub)
+		}
+	}
+	return added
+}
+
 // initializeOsResolver performs logic for choosing OS resolver nameserver.
 // The logic:
 //

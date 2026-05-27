@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 )
+
+var vpnDNSSettlingEnabled = runtime.GOOS == "windows"
 
 // vpnDNSExemption represents a VPN DNS server that needs pf/WFP exemption,
 // including the interface it was discovered on. The interface is used on macOS
@@ -39,6 +42,16 @@ type vpnDNSManager struct {
 	// Map of domain suffix → DNS servers for fast lookup
 	routes map[string][]string
 	logger *atomic.Pointer[ctrld.Logger]
+	// DNS servers from VPN interfaces that have no domain/suffix config.
+	// These are NOT added to the global OS resolver. They're only used
+	// as additional nameservers for queries that match split-DNS rules
+	// (from ctrld config, AD domain, or VPN suffix config).
+	domainlessServers []string
+	// retainedAfterEmptyDiscovery means Windows reported an empty VPN DNS
+	// snapshot once while previous VPN DNS state existed. We keep that last-known
+	// state for one guarded refresh cycle because Windows can briefly report an
+	// intermediate empty adapter/DNS state after sleep/wake or reconnect.
+	retainedAfterEmptyDiscovery bool
 	// Called when VPN DNS server list changes, to update intercept exemptions.
 	onServersChanged vpnDNSExemptFunc
 }
@@ -56,8 +69,9 @@ func newVPNDNSManager(logger *atomic.Pointer[ctrld.Logger], exemptFunc vpnDNSExe
 
 // Refresh re-discovers VPN DNS configs from the OS.
 // Called on network change events.
-func (m *vpnDNSManager) Refresh(ctx context.Context) {
+func (m *vpnDNSManager) Refresh(ctx context.Context, guardAgainstNoNameservers ...bool) {
 	logger := ctrld.LoggerFromCtx(ctx)
+	guardedRefresh := len(guardAgainstNoNameservers) > 0 && guardAgainstNoNameservers[0]
 
 	ctrld.Log(ctx, logger.Debug(), "Refreshing VPN DNS configurations")
 	configs := ctrld.DiscoverVPNDNS(ctx)
@@ -80,6 +94,29 @@ func (m *vpnDNSManager) Refresh(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if vpnDNSSettlingEnabled && len(configs) == 0 && guardedRefresh && m.hasVPNDNSStateLocked() {
+		if !m.retainedAfterEmptyDiscovery {
+			exemptions := m.currentExemptionsLocked()
+			m.retainedAfterEmptyDiscovery = true
+			ctrld.Log(ctx, logger.Debug(),
+				"VPN DNS discovery empty; retaining last-known VPN DNS state for one guarded refresh (%d domainless servers, %d exemptions)",
+				len(m.domainlessServers), len(exemptions))
+			if m.onServersChanged != nil {
+				if err := m.onServersChanged(exemptions); err != nil {
+					ctrld.Log(ctx, logger.Error().Err(err), "Failed to re-apply retained VPN DNS exemptions")
+				}
+			}
+			return
+		}
+		ctrld.Log(ctx, logger.Debug(),
+			"VPN DNS discovery still empty on next guarded refresh; clearing retained VPN DNS state (%d domainless servers)",
+			len(m.domainlessServers))
+	}
+
+	// Any discovery path that does not return with retained state clears the
+	// settling marker: non-empty discovery replaces old servers immediately, and
+	// an unguarded/second empty discovery clears stale state below.
+	m.retainedAfterEmptyDiscovery = false
 	m.configs = configs
 	m.routes = make(map[string][]string)
 
@@ -122,8 +159,28 @@ func (m *vpnDNSManager) Refresh(ctx context.Context) {
 		}
 	}
 
-	ctrld.Log(ctx, logger.Debug(), "VPN DNS refresh completed: %d configs, %d routes, %d unique exemptions",
-		len(m.configs), len(m.routes), len(exemptions))
+	// Collect domain-less VPN DNS servers. These are NOT added to the global
+	// OS resolver (that would pollute captive portal / DHCP flows). Instead,
+	// they're stored separately and only used for queries that match existing
+	// split-DNS rules (from ctrld config, AD domain, or VPN suffix config).
+	var domainlessServers []string
+	seenDomainless := make(map[string]bool)
+	for _, config := range configs {
+		if len(config.Domains) == 0 && len(config.Servers) > 0 {
+			ctrld.Log(ctx, logger.Debug(), "VPN interface %s has DNS servers but no domains, storing as split-rule fallback: %v",
+				config.InterfaceName, config.Servers)
+			for _, server := range config.Servers {
+				if !seenDomainless[server] {
+					seenDomainless[server] = true
+					domainlessServers = append(domainlessServers, server)
+				}
+			}
+		}
+	}
+	m.domainlessServers = domainlessServers
+
+	ctrld.Log(ctx, logger.Debug(), "VPN DNS refresh completed: %d configs, %d routes, %d domainless servers, %d unique exemptions",
+		len(m.configs), len(m.routes), len(m.domainlessServers), len(exemptions))
 
 	// Update intercept rules to permit VPN DNS traffic.
 	// Always call onServersChanged — including when exemptions is empty — so that
@@ -133,6 +190,69 @@ func (m *vpnDNSManager) Refresh(ctx context.Context) {
 			ctrld.Log(ctx, logger.Error().Err(err), "Failed to update intercept exemptions for VPN DNS servers")
 		}
 	}
+}
+
+func (m *vpnDNSManager) hasVPNDNSStateLocked() bool {
+	return len(m.configs) > 0 || len(m.routes) > 0 || len(m.domainlessServers) > 0
+}
+
+func (m *vpnDNSManager) currentExemptionsLocked() []vpnDNSExemption {
+	type key struct{ server, iface string }
+	seen := make(map[key]bool)
+	var exemptions []vpnDNSExemption
+	for _, config := range m.configs {
+		for _, server := range config.Servers {
+			k := key{server, config.InterfaceName}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			exemptions = append(exemptions, vpnDNSExemption{
+				Server:     server,
+				Interface:  config.InterfaceName,
+				IsExitMode: config.IsExitMode,
+			})
+		}
+	}
+	return exemptions
+}
+
+// ShouldFailClosedAfterVPNDNSTransportFailure reports whether split-rule
+// queries should fail closed instead of falling back to OS/public DNS after
+// every candidate VPN DNS server failed before returning a DNS packet. This is
+// Windows-only and only active while serving retained VPN DNS state from a
+// guarded empty discovery, which is the short window where Windows can report
+// VPN DNS before routes to those servers are usable after wake/reconnect.
+func (m *vpnDNSManager) ShouldFailClosedAfterVPNDNSTransportFailure(domain string, servers []string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if !vpnDNSSettlingEnabled || len(servers) == 0 || !m.retainedAfterEmptyDiscovery || !m.hasVPNDNSStateLocked() {
+		return false
+	}
+
+	logger := m.logger.Load()
+	if logger != nil {
+		logger.Debug().Msgf(
+			"VPN DNS transport failed for %s while retained VPN DNS state is active; suppressing OS fallback for this query (servers=%v)",
+			domain, servers)
+	}
+	return true
+}
+
+// VPNDNSReachable records that a VPN DNS server returned a DNS response. The
+// response may be negative (NXDOMAIN/SERVFAIL); the important signal is that
+// the VPN DNS transport is reachable again.
+func (m *vpnDNSManager) VPNDNSReachable() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.retainedAfterEmptyDiscovery {
+		logger := m.logger.Load()
+		if logger != nil {
+			logger.Debug().Msg("VPN DNS transport recovered; clearing retained-empty-discovery state")
+		}
+	}
+	m.retainedAfterEmptyDiscovery = false
 }
 
 // UpstreamForDomain checks if the domain matches any VPN search domain.
@@ -165,6 +285,15 @@ func (m *vpnDNSManager) UpstreamForDomain(domain string) []string {
 	return nil
 }
 
+// DomainlessServers returns VPN DNS servers that have no associated domains.
+// These should only be used for queries matching split-DNS rules, not for
+// general OS resolver queries (to avoid polluting captive portal / DHCP flows).
+func (m *vpnDNSManager) DomainlessServers() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]string{}, m.domainlessServers...)
+}
+
 // CurrentServers returns the current set of unique VPN DNS server IPs.
 // Used by pf anchor rebuild to include VPN DNS exemptions without a full Refresh().
 func (m *vpnDNSManager) CurrentServers() []string {
@@ -189,24 +318,7 @@ func (m *vpnDNSManager) CurrentServers() []string {
 func (m *vpnDNSManager) CurrentExemptions() []vpnDNSExemption {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
-	type key struct{ server, iface string }
-	seen := make(map[key]bool)
-	var exemptions []vpnDNSExemption
-	for _, config := range m.configs {
-		for _, server := range config.Servers {
-			k := key{server, config.InterfaceName}
-			if !seen[k] {
-				seen[k] = true
-				exemptions = append(exemptions, vpnDNSExemption{
-					Server:     server,
-					Interface:  config.InterfaceName,
-					IsExitMode: config.IsExitMode,
-				})
-			}
-		}
-	}
-	return exemptions
+	return m.currentExemptionsLocked()
 }
 
 // Routes returns a copy of the current VPN DNS routes for debugging.

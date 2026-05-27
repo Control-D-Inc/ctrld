@@ -1623,7 +1623,7 @@ func (p *prog) scheduleDelayedRechecks() {
 			ctx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 			ctrld.InitializeOsResolver(ctx, true)
 			if p.vpnDNS != nil {
-				p.vpnDNS.Refresh(ctx)
+				p.vpnDNS.Refresh(ctx, true)
 			}
 
 			// NRPT watchdog: some VPN software clears NRPT policy rules on
