@@ -134,12 +134,35 @@ func Test_prog_upstreamFor(t *testing.T) {
 				})
 				assert.Equal(t, tc.matched, ufr.matched)
 				assert.Equal(t, tc.upstreams, ufr.upstreams)
+				assert.Equal(t, ctrld.UpstreamStrategySequential, ufr.upstreamStrategy)
 				if tc.testLogMsg != "" {
 					assert.Contains(t, logOutput.String(), tc.testLogMsg)
 				}
 			}
 		})
 	}
+}
+
+func Test_prog_upstreamForPolicyUpstreamStrategy(t *testing.T) {
+	cfg := testhelper.SampleConfig(t)
+	cfg.Listener["0"].Policy.UpstreamStrategy = ctrld.UpstreamStrategyRandom
+	p := &prog{cfg: cfg}
+	for _, nc := range p.cfg.Network {
+		for _, cidr := range nc.Cidrs {
+			_, ipNet, err := net.ParseCIDR(cidr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nc.IPNets = append(nc.IPNets, ipNet)
+		}
+	}
+	addr, err := net.ResolveUDPAddr("udp", "192.168.0.1:0")
+	require.NoError(t, err)
+
+	ufr := p.upstreamFor(context.Background(), "0", p.cfg.Listener["0"], addr, "", "abc.xyz")
+
+	assert.Equal(t, ctrld.UpstreamStrategyRandom, ufr.upstreamStrategy)
+	assert.Equal(t, []string{"upstream.1", "upstream.0"}, ufr.upstreams)
 }
 
 func TestCache(t *testing.T) {

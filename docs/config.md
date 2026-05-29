@@ -593,6 +593,22 @@ Note that the domain comparisons are done in case in-sensitive manner following 
 - Required: no
 - Default: []
 
+### upstream_strategy
+`upstream_strategy` controls the order in which matched upstreams are tried for each query.
+
+Valid values:
+
+- `sequential`: try upstreams in the configured order.
+- `random`: randomly reorder the matched upstreams for each query, then try them in that order.
+
+Both strategies use the same sequential failover behavior. Timeouts, `failover_rcodes`, cache behavior, stale cache behavior, recovery, and `leak_on_upstream_failure` are unchanged.
+
+Use `random` only with equivalent upstreams, since any matched upstream may be tried first.
+
+- Type: string
+- Required: no
+- Default: `sequential`
+
 ### failover_rcodes
 For non success response, `failover_rcodes` allows the request to be forwarded to next upstream, if the response `RCODE` matches any value defined in `failover_rcodes`.
 

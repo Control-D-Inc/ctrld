@@ -76,12 +76,13 @@ type proxyResponse struct {
 
 // upstreamForResult represents the result of processing rules for a request.
 type upstreamForResult struct {
-	upstreams      []string
-	matchedPolicy  string
-	matchedNetwork string
-	matchedRule    string
-	matched        bool
-	srcAddr        string
+	upstreams        []string
+	upstreamStrategy string
+	matchedPolicy    string
+	matchedNetwork   string
+	matchedRule      string
+	matched          bool
+	srcAddr          string
 }
 
 func (p *prog) serveDNS(listenerNum string) error {
@@ -257,6 +258,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 // is disregarded in favor of the domain level rule.
 func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *ctrld.ListenerConfig, addr net.Addr, srcMac, domain string) (res *upstreamForResult) {
 	upstreams := []string{upstreamPrefix + defaultUpstreamNum}
+	upstreamStrategy := ctrld.UpstreamStrategySequential
 	matchedPolicy := "no policy"
 	matchedNetwork := "no network"
 	matchedRule := "no rule"
@@ -265,6 +267,7 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 
 	defer func() {
 		res.upstreams = upstreams
+		res.upstreamStrategy = upstreamStrategy
 		res.matched = matched
 		res.matchedPolicy = matchedPolicy
 		res.matchedNetwork = matchedNetwork
@@ -274,6 +277,7 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 	if lc.Policy == nil {
 		return
 	}
+	upstreamStrategy = lc.Policy.UpstreamStrategyOrDefault()
 
 	do := func(policyUpstreams []string) {
 		upstreams = append([]string(nil), policyUpstreams...)
@@ -486,6 +490,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 	}
 
+	if !isLanOrPtrQuery {
+		upstreams, upstreamConfigs = orderUpstreams(req.ufr.upstreamStrategy, upstreams, upstreamConfigs)
+	}
 	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
 	if p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR {
 		for _, upstream := range upstreams {

@@ -49,6 +49,11 @@ const (
 	// depending on the record type of the DNS query.
 	IpStackSplit = "split"
 
+	// UpstreamStrategySequential tries matched upstreams in configured order.
+	UpstreamStrategySequential = "sequential"
+	// UpstreamStrategyRandom randomly reorders matched upstreams before trying them.
+	UpstreamStrategyRandom = "random"
+
 	// FreeDnsDomain is the domain name of free ControlD service.
 	FreeDnsDomain = "freedns.controld.com"
 	// FreeDNSBoostrapIP is the IP address of freedns.controld.com.
@@ -315,8 +320,18 @@ type ListenerPolicyConfig struct {
 	Networks             []Rule   `mapstructure:"networks" toml:"networks,omitempty,inline,multiline" validate:"dive,len=1"`
 	Rules                []Rule   `mapstructure:"rules" toml:"rules,omitempty,inline,multiline" validate:"dive,len=1"`
 	Macs                 []Rule   `mapstructure:"macs" toml:"macs,omitempty,inline,multiline" validate:"dive,len=1"`
+	UpstreamStrategy     string   `mapstructure:"upstream_strategy" toml:"upstream_strategy,omitempty" validate:"omitempty,oneof=sequential random"`
 	FailoverRcodes       []string `mapstructure:"failover_rcodes" toml:"failover_rcodes,omitempty" validate:"dive,dnsrcode"`
 	FailoverRcodeNumbers []int    `mapstructure:"-" toml:"-"`
+}
+
+// UpstreamStrategyOrDefault returns the configured upstream strategy, or the
+// sequential strategy if no policy or strategy is configured.
+func (pc *ListenerPolicyConfig) UpstreamStrategyOrDefault() string {
+	if pc == nil || pc.UpstreamStrategy == "" {
+		return UpstreamStrategySequential
+	}
+	return pc.UpstreamStrategy
 }
 
 // Rule is a map from source to list of upstreams.

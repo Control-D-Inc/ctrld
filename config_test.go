@@ -131,6 +131,40 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+func TestConfigValidationUpstreamStrategy(t *testing.T) {
+	tests := []struct {
+		name     string
+		strategy string
+		wantErr  bool
+	}{
+		{"omitted", "", false},
+		{"sequential", ctrld.UpstreamStrategySequential, false},
+		{"random", ctrld.UpstreamStrategyRandom, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaultConfig(t)
+			cfg.Listener["0"].Policy.UpstreamStrategy = tc.strategy
+			validate := validator.New()
+
+			err := ctrld.ValidateConfig(validate, cfg)
+
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestListenerPolicyConfigUpstreamStrategyOrDefault(t *testing.T) {
+	assert.Equal(t, ctrld.UpstreamStrategySequential, (*ctrld.ListenerPolicyConfig)(nil).UpstreamStrategyOrDefault())
+	assert.Equal(t, ctrld.UpstreamStrategySequential, (&ctrld.ListenerPolicyConfig{}).UpstreamStrategyOrDefault())
+	assert.Equal(t, ctrld.UpstreamStrategyRandom, (&ctrld.ListenerPolicyConfig{UpstreamStrategy: ctrld.UpstreamStrategyRandom}).UpstreamStrategyOrDefault())
+}
+
 func TestConfigValidationDoNotChangeEndpoint(t *testing.T) {
 	cfg := configWithInvalidDoHEndpoint(t)
 	endpointMap := map[string]struct{}{}
