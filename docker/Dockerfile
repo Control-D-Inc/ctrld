@@ -1,4 +1,4 @@
-# Using Debian bullseye for building regular image.
+# Using Debian bookworm for building regular image.
 # Using scratch image for minimal image size.
 # The final image has:
 #
