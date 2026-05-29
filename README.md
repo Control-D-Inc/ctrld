@@ -1,4 +1,4 @@
-# ctrld
+# ctrld (ClientID Patch Fork)
 
 ![Test](https://github.com/Control-D-Inc/ctrld/actions/workflows/ci.yml/badge.svg)
 [![Go Reference](https://pkg.go.dev/badge/github.com/Control-D-Inc/ctrld.svg)](https://pkg.go.dev/github.com/Control-D-Inc/ctrld)
@@ -14,6 +14,9 @@ A highly configurable DNS forwarding proxy with support for:
 - Integrations with common router vendors and firmware
 - LAN client discovery via DHCP, mDNS, ARP, NDP, hosts file parsing
 - Prometheus metrics exporter 
+
+## Fork Features
+- Adds `client_id_type` to allows end users to select how client_id is sent to DOH upstream
 
 ## TLDR
 Proxy legacy DNS traffic to secure DNS upstreams in highly configurable ways. 
