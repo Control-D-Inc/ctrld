@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"testing"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -20,6 +21,7 @@ func TestVPNDNSRefreshRetainsStateForOneGuardedEmptyDiscovery(t *testing.T) {
 		gotExemptions = exemptions
 		return nil
 	})
+	m.discoverVPNDNS = func(context.Context) []ctrld.VPNDNSConfig { return nil }
 	m.configs = []ctrld.VPNDNSConfig{{
 		InterfaceName: "Ethernet 6",
 		Servers:       []string{"10.25.37.21", "10.25.37.22"},
@@ -46,6 +48,7 @@ func TestVPNDNSRefreshClearsOnSecondGuardedEmptyDiscovery(t *testing.T) {
 		gotExemptions = exemptions
 		return nil
 	})
+	m.discoverVPNDNS = func(context.Context) []ctrld.VPNDNSConfig { return nil }
 	m.configs = []ctrld.VPNDNSConfig{{
 		InterfaceName: "Ethernet 6",
 		Servers:       []string{"10.25.37.21"},
