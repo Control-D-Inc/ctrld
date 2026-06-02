@@ -548,6 +548,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		if vpnServers := p.vpnDNS.UpstreamForDomain(domain); len(vpnServers) > 0 {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "VPN DNS route matched for domain %s, using servers: %v", domain, vpnServers)
 
+			var gotTransportFailure bool
 			for _, server := range vpnServers {
 				upstreamConfig := p.vpnDNS.upstreamConfigFor(server)
 				ctrld.Log(ctx, mainLog.Load().Debug(), "Querying VPN DNS server: %s", server)
@@ -561,6 +562,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				answer, err := dnsResolver.Resolve(resolveCtx, req.msg)
 				cancel()
 				if answer != nil {
+					p.vpnDNS.VPNDNSReachable()
 					ctrld.Log(ctx, mainLog.Load().Debug(), "VPN DNS query successful")
 					if p.cache != nil {
 						ttl := 60 * time.Second
@@ -573,7 +575,20 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 					}
 					return &proxyResponse{answer: answer}
 				}
+				gotTransportFailure = true
 				ctrld.Log(ctx, mainLog.Load().Debug().Err(err), "VPN DNS server %s failed", server)
+			}
+
+			// Explicit VPN DNS routes are authoritative for their suffix. If all
+			// routed servers fail at the transport layer while Windows is serving
+			// retained VPN DNS state, fail closed instead of leaking VPN/internal
+			// names to normal upstreams.
+			if gotTransportFailure && p.vpnDNS.ShouldFailClosedAfterVPNDNSTransportFailure(domain, vpnServers) {
+				ctrld.Log(ctx, mainLog.Load().Debug(),
+					"All VPN DNS servers had transport failures for %s; returning SERVFAIL while retained VPN DNS state is active", domain)
+				answer := new(dns.Msg)
+				answer.SetRcode(req.msg, dns.RcodeServerFailure)
+				return &proxyResponse{answer: answer}
 			}
 
 			ctrld.Log(ctx, mainLog.Load().Debug(), "All VPN DNS servers failed, falling back to normal upstreams")
@@ -589,13 +604,15 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// polluting captive portal / DHCP flows.
 	if dnsIntercept && p.vpnDNS != nil && req.ufr.matched &&
 		len(upstreams) > 0 && upstreams[0] == upstreamOS &&
-		len(req.msg.Question) > 0 && !p.isAdDomainQuery(req.msg) {
+		len(req.msg.Question) > 0 {
 		if dlServers := p.vpnDNS.DomainlessServers(); len(dlServers) > 0 {
 			domain := req.msg.Question[0].Name
 			ctrld.Log(ctx, mainLog.Load().Debug(),
 				"Split-rule query %s going to upstream.os, trying %d domain-less VPN DNS servers first: %v",
 				domain, len(dlServers), dlServers)
 
+			var gotDNSAnswer bool
+			var gotTransportFailure bool
 			for _, server := range dlServers {
 				upstreamCfg := p.vpnDNS.upstreamConfigFor(server)
 				ctrld.Log(ctx, mainLog.Load().Debug(), "Querying domain-less VPN DNS server: %s", server)
@@ -608,6 +625,10 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				resolveCtx, cancel := upstreamCfg.Context(ctx)
 				answer, err := dnsResolver.Resolve(resolveCtx, req.msg)
 				cancel()
+				if answer != nil {
+					gotDNSAnswer = true
+					p.vpnDNS.VPNDNSReachable()
+				}
 				if answer != nil && answer.Rcode == dns.RcodeSuccess {
 					ctrld.Log(ctx, mainLog.Load().Debug(),
 						"Domain-less VPN DNS server %s answered %s successfully", server, domain)
@@ -618,10 +639,25 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 						"Domain-less VPN DNS server %s returned %s for %s, trying next",
 						server, dns.RcodeToString[answer.Rcode], domain)
 				} else {
+					gotTransportFailure = true
 					ctrld.Log(ctx, mainLog.Load().Debug().Err(err),
 						"Domain-less VPN DNS server %s failed for %s", server, domain)
 				}
 			}
+
+			// If every domainless VPN DNS attempt failed before receiving a DNS
+			// packet while Windows is serving retained VPN DNS state, fail closed
+			// instead of asking LAN/public DNS about internal split-rule names and
+			// caching false negatives. Reachable negative DNS responses still fall
+			// through to the old OS fallback behavior below.
+			if !gotDNSAnswer && gotTransportFailure && p.vpnDNS.ShouldFailClosedAfterVPNDNSTransportFailure(domain, dlServers) {
+				ctrld.Log(ctx, mainLog.Load().Debug(),
+					"All domain-less VPN DNS servers had transport failures for %s; returning SERVFAIL while retained VPN DNS state is active", domain)
+				answer := new(dns.Msg)
+				answer.SetRcode(req.msg, dns.RcodeServerFailure)
+				return &proxyResponse{answer: answer}
+			}
+
 			ctrld.Log(ctx, mainLog.Load().Debug(),
 				"All domain-less VPN DNS servers failed for %s, falling back to OS resolver", domain)
 		}
