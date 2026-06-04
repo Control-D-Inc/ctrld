@@ -1266,7 +1266,7 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 		return false, true
 	}
 
-	hasExplicitConfig := lc.IP != "" && lc.IP != "0.0.0.0" && lc.Port != 0
+	hasExplicitConfig := isExplicitInterceptListener(lc.IP, lc.Port)
 	if !hasExplicitConfig {
 		// Set defaults for intercept mode
 		if lc.IP == "" || lc.IP == "0.0.0.0" {
@@ -1322,6 +1322,16 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 		mainLog.Load().Fatal().Msg("DNS intercept: cannot bind 127.0.0.1:53 or 127.0.0.1:5354")
 	}
 	return updated, false
+}
+
+func isExplicitInterceptListener(ip string, port int) bool {
+	if ip == "" || ip == "0.0.0.0" || port == 0 {
+		return false
+	}
+	// 127.0.0.1:53 is the default macOS DNS-intercept listener. It can appear
+	// in generated/custom Control D configs, but it should still be allowed to
+	// fall back to 127.0.0.1:5354 when mDNSResponder already owns port 53.
+	return !(ip == "127.0.0.1" && port == 53)
 }
 
 // tryUpdateListenerConfig tries updating listener config with a working one.
