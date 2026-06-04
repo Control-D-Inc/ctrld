@@ -1823,7 +1823,14 @@ func (p *prog) forceReloadPFMainRuleset() {
 		mainLog.Load().Error().Err(err).Msgf("DNS intercept: force reload — failed to load anchor (output: %s)", strings.TrimSpace(string(out)))
 	}
 
-	// Reset upstream transports — pf reload flushes state table, killing DoH connections.
+	// Flush stale rdr/reply states after the forced ruleset + anchor reload.
+	// Without this, macOS can keep using pre-reload state and try to send
+	// redirected DNS replies directly from loopback to tunnel client addresses
+	// (for example, 127.0.0.1:<listener> -> 100.64.0.0/10), which fails with
+	// "sendmsg: can't assign requested address".
+	flushPFStates()
+
+	// Reset upstream transports — pf reload/state flush kills existing DoH connections.
 	p.resetUpstreamTransports()
 
 	mainLog.Load().Info().Msg("DNS intercept: force reload — pf ruleset and anchor reloaded successfully")
