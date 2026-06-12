@@ -1164,8 +1164,6 @@ func (p *prog) cleanupWFPFilters(state *wfpState) {
 // installs WFP block filters via block-outside-dns. The hard permit (with
 // FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT) in a max-weight sublayer overrides the
 // third-party blocks without affecting their protection for non-loopback DNS.
-//
-// See: https://gitlab.int.windscribe.com/controld/clients/ctrld/-/issues/526
 func (p *prog) activateLoopbackWFPProtect(state *wfpState) error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -1861,7 +1859,6 @@ func (p *prog) nrptProbeAndHeal() {
 	// installed WFP filters that block DNS to non-tunnel interfaces, including
 	// loopback. A high-priority "hard permit" for localhost DNS overrides these
 	// blocks and restores NRPT routing to ctrld's listener.
-	// See: https://gitlab.int.windscribe.com/controld/clients/ctrld/-/issues/526
 	loopbackState, ok := p.dnsInterceptState.(*wfpState)
 	if !ok || loopbackState == nil {
 		mainLog.Load().Error().Msg("DNS intercept: no state available for loopback WFP protect")

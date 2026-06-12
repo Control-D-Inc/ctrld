@@ -1221,6 +1221,10 @@ func (p *prog) pfStabilizationLoop(ctx context.Context, stableRequired time.Dura
 			p.pfStabilizing.Store(false)
 			mainLog.Load().Info().Msgf("DNS intercept: pf stable for %s — restoring anchor rules", stableRequired)
 			p.ensurePFAnchorActive()
+			routes, domainlessServers, exemptions := p.refreshDNSAfterVPNSettle("pf_stabilized")
+			if routes == 0 && domainlessServers == 0 && exemptions == 0 {
+				p.scheduleDNSAfterVPNSettleRefresh("pf_stabilized_followup", pfAnchorRecheckDelayLong)
+			}
 			p.pfLastRestoreTime.Store(time.Now().UnixMilli())
 			return
 		}
@@ -1380,6 +1384,15 @@ func (p *prog) ensurePFAnchorActive() bool {
 	p.pfLastRestoreTime.Store(time.Now().UnixMilli())
 	mainLog.Load().Info().Msg("DNS intercept watchdog: pf anchor restored successfully")
 	return true
+}
+
+func (p *prog) scheduleDNSAfterVPNSettleRefresh(reason string, delay time.Duration) {
+	time.AfterFunc(delay, func() {
+		if p.dnsInterceptState == nil {
+			return
+		}
+		p.refreshDNSAfterVPNSettle(reason)
+	})
 }
 
 // pfWatchdog periodically checks that our pf anchor is still active.
