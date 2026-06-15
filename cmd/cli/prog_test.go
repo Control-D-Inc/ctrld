@@ -262,6 +262,8 @@ func Test_performUpgrade(t *testing.T) {
 		},
 	}
 
+	// newUpgradeCmd is stubbed in TestMain so performUpgrade does not re-exec
+	// (and fork-bomb) the test binary; see the comment there.
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
