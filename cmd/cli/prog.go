@@ -1574,6 +1574,19 @@ func shouldUpgrade(vt string, cv *semver.Version, logger *ctrld.Logger) bool {
 	return true
 }
 
+// newUpgradeCmd builds the detached command used to self-upgrade. It is a
+// package-level variable so tests can stub it. With the real implementation a
+// *test* binary would re-exec itself — os.Executable() is the test binary, and
+// because `go test` stops flag parsing at the first positional arg ("upgrade")
+// it ignores the args and re-runs the entire suite. That child hits the same
+// upgrade test and spawns another child, recursively: a fork bomb of detached
+// processes that pins the host and locks the test binary's image file.
+var newUpgradeCmd = func(exe string) *exec.Cmd {
+	cmd := exec.Command(exe, "upgrade", "prod", "-vv")
+	cmd.SysProcAttr = sysProcAttrForDetachedChildProcess()
+	return cmd
+}
+
 // performUpgrade executes the self-upgrade command.
 // Returns true if upgrade was initiated successfully, false otherwise.
 func performUpgrade(vt string, logger *ctrld.Logger) bool {
@@ -1582,8 +1595,7 @@ func performUpgrade(vt string, logger *ctrld.Logger) bool {
 		logger.Error().Err(err).Msg("Failed to get executable path, skipped self-upgrade")
 		return false
 	}
-	cmd := exec.Command(exe, "upgrade", "prod", "-vv")
-	cmd.SysProcAttr = sysProcAttrForDetachedChildProcess()
+	cmd := newUpgradeCmd(exe)
 	if err := cmd.Start(); err != nil {
 		logger.Error().Err(err).Msg("Failed to start self-upgrade")
 		return false
