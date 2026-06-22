@@ -2,11 +2,11 @@ package dnsmasq
 
 import (
 	"errors"
-	"html/template"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 
 	"github.com/Control-D-Inc/ctrld"
 )

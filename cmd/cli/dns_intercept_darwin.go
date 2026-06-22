@@ -1207,7 +1207,6 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
-
 // pfStartStabilization enters stabilization mode, suppressing all pf restores
 // until the VPN's ruleset stops changing. This prevents a death spiral where
 // ctrld and the VPN repeatedly overwrite each other's pf rules.
@@ -1284,6 +1283,10 @@ func (p *prog) pfStabilizationLoop(ctx context.Context, stableRequired time.Dura
 			p.pfStabilizing.Store(false)
 			mainLog.Load().Info().Msgf("DNS intercept: pf stable for %s — restoring anchor rules", stableRequired)
 			p.ensurePFAnchorActive()
+			routes, domainlessServers, exemptions := p.refreshDNSAfterVPNSettle("pf_stabilized")
+			if routes == 0 && domainlessServers == 0 && exemptions == 0 {
+				p.scheduleDNSAfterVPNSettleRefresh("pf_stabilized_followup", pfAnchorRecheckDelayLong)
+			}
 			p.pfLastRestoreTime.Store(time.Now().UnixMilli())
 			return
 		}
@@ -1444,6 +1447,15 @@ func (p *prog) ensurePFAnchorActive() bool {
 	p.pfLastRestoreTime.Store(time.Now().UnixMilli())
 	mainLog.Load().Info().Msg("DNS intercept watchdog: pf anchor restored successfully")
 	return true
+}
+
+func (p *prog) scheduleDNSAfterVPNSettleRefresh(reason string, delay time.Duration) {
+	time.AfterFunc(delay, func() {
+		if p.dnsInterceptState == nil {
+			return
+		}
+		p.refreshDNSAfterVPNSettle(reason)
+	})
 }
 
 // pfWatchdog periodically checks that our pf anchor is still active.
@@ -1811,7 +1823,14 @@ func (p *prog) forceReloadPFMainRuleset() {
 		mainLog.Load().Error().Err(err).Msgf("DNS intercept: force reload — failed to load anchor (output: %s)", strings.TrimSpace(string(out)))
 	}
 
-	// Reset upstream transports — pf reload flushes state table, killing DoH connections.
+	// Flush stale rdr/reply states after the forced ruleset + anchor reload.
+	// Without this, macOS can keep using pre-reload state and try to send
+	// redirected DNS replies directly from loopback to tunnel client addresses
+	// (for example, 127.0.0.1:<listener> -> 100.64.0.0/10), which fails with
+	// "sendmsg: can't assign requested address".
+	flushPFStates()
+
+	// Reset upstream transports — pf reload/state flush kills existing DoH connections.
 	p.resetUpstreamTransports()
 
 	mainLog.Load().Info().Msg("DNS intercept: force reload — pf ruleset and anchor reloaded successfully")

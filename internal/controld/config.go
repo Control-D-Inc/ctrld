@@ -293,7 +293,7 @@ func apiTransport(cdDev bool) *http.Transport {
 		return dial(ctx, "tcp6", addrsFromPort(apiIpsV6, port))
 	}
 	if router.Name() == ddwrt.Name || runtime.GOOS == "android" {
-		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool()}
+		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool(), MinVersion: tls.VersionTLS12}
 	}
 	return transport
 }

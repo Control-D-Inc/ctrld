@@ -638,6 +638,19 @@ const defaultDeactivationPin = -1
 // cdDeactivationPin is used in cd mode to decide whether stop and uninstall commands can be run.
 var cdDeactivationPin atomic.Int64
 
+// Brute-force protection for the deactivation PIN endpoint on the control socket.
+// After deactivationMaxFailedAttempts consecutive wrong PINs, further attempts are
+// rejected for deactivationLockoutSeconds. Counter resets on a correct PIN.
+const (
+	deactivationMaxFailedAttempts = 5
+	deactivationLockoutSeconds    = 60
+)
+
+var (
+	deactivationFailedAttempts atomic.Int64
+	deactivationLockedUntil    atomic.Int64
+)
+
 func init() {
 	cdDeactivationPin.Store(defaultDeactivationPin)
 }
@@ -1245,7 +1258,7 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 		return false, true
 	}
 
-	hasExplicitConfig := lc.IP != "" && lc.IP != "0.0.0.0" && lc.Port != 0
+	hasExplicitConfig := isExplicitInterceptListener(lc.IP, lc.Port)
 	if !hasExplicitConfig {
 		// Set defaults for intercept mode
 		if lc.IP == "" || lc.IP == "0.0.0.0" {
@@ -1301,6 +1314,16 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 		mainLog.Load().Fatal().Msg("DNS intercept: cannot bind 127.0.0.1:53 or 127.0.0.1:5354")
 	}
 	return updated, false
+}
+
+func isExplicitInterceptListener(ip string, port int) bool {
+	if ip == "" || ip == "0.0.0.0" || port == 0 {
+		return false
+	}
+	// 127.0.0.1:53 is the default macOS DNS-intercept listener. It can appear
+	// in generated/custom Control D configs, but it should still be allowed to
+	// fall back to 127.0.0.1:5354 when mDNSResponder already owns port 53.
+	return !(ip == "127.0.0.1" && port == 53)
 }
 
 // tryUpdateListenerConfig tries updating listener config with a working one.
@@ -1809,6 +1832,9 @@ var errInvalidDeactivationPin = errors.New("deactivation pin is invalid")
 // errRequiredDeactivationPin indicates that the deactivation pin is required but not provided by users.
 var errRequiredDeactivationPin = errors.New("deactivation pin is required to stop or uninstall the service")
 
+// errTooManyDeactivationPin represents an error indicating excessive deactivation PIN request attempts.
+var errTooManyDeactivationPin = errors.New("too many request attempts")
+
 // checkDeactivationPin validates if the deactivation pin matches one in ControlD config.
 func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	mainLog.Load().Debug().Msg("Checking deactivation pin")
@@ -1837,6 +1863,9 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 		case http.StatusBadRequest:
 			mainLog.Load().Error().Msg(errRequiredDeactivationPin.Error())
 			return errRequiredDeactivationPin // pin is required
+		case http.StatusTooManyRequests:
+			mainLog.Load().Error().Msg(errTooManyDeactivationPin.Error())
+			return errTooManyDeactivationPin
 		case http.StatusOK:
 			return nil // valid pin
 		case http.StatusNotFound:
@@ -1849,7 +1878,9 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 
 // isCheckDeactivationPinErr reports whether there is an error during check deactivation pin process.
 func isCheckDeactivationPinErr(err error) bool {
-	return errors.Is(err, errInvalidDeactivationPin) || errors.Is(err, errRequiredDeactivationPin)
+	return errors.Is(err, errInvalidDeactivationPin) ||
+		errors.Is(err, errRequiredDeactivationPin) ||
+		errors.Is(err, errTooManyDeactivationPin)
 }
 
 // ensureUninstall ensures that s.Uninstall will remove ctrld service from system completely.
@@ -2002,17 +2033,25 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	} else {
 		if errors.As(cfgErr, &viper.ConfigParseError{}) {
 			if configStr, _ := base64.StdEncoding.DecodeString(rc.Ctrld.CustomConfig); len(configStr) > 0 {
-				tmpDir := os.TempDir()
-				tmpConfFile := filepath.Join(tmpDir, "ctrld.toml")
 				errorLogged := false
-				// Write remote config to a temporary file to get details error.
-				if we := os.WriteFile(tmpConfFile, configStr, 0600); we == nil {
+				// Write remote config to a uniquely named temporary file to get detailed error.
+				if tmpFile, tmpErr := os.CreateTemp("", "ctrld-*.toml"); tmpErr == nil {
+					tmpConfFile := tmpFile.Name()
+					if _, err := tmpFile.Write(configStr); err != nil {
+						mainLog.Load().Error().Err(err).Msg("failed to write temporary config file")
+					}
+					if err := tmpFile.Close(); err != nil {
+						mainLog.Load().Error().Err(err).Msg("failed to save temporary config file")
+
+					}
 					if de := decoderErrorFromTomlFile(tmpConfFile); de != nil {
 						row, col := de.Position()
 						mainLog.Load().Error().Msgf("failed to parse custom config at line: %d, column: %d, error: %s", row, col, de.Error())
 						errorLogged = true
 					}
-					_ = os.Remove(tmpConfFile)
+					if err := os.Remove(tmpConfFile); err != nil {
+						mainLog.Load().Error().Err(err).Msg("failed to remove temporary config file")
+					}
 				}
 				// If we could not log details error, emit what we have already got.
 				if !errorLogged {

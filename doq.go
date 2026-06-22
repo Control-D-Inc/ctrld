@@ -6,14 +6,22 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 )
+
+// doqMaxResponseSize caps the bytes read from a DoQ stream: a 2-byte
+// length prefix plus a DNS message bounded by dns.MaxMsgSize. Anything
+// larger cannot be a valid response and is rejected before buffering more
+// data from the upstream.
+const doqMaxResponseSize = 2 + dns.MaxMsgSize
 
 type doqResolver struct {
 	uc *UpstreamConfig
@@ -41,6 +49,10 @@ func (r *doqResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, erro
 const doqPoolSize = 16
 
 // doqConnPool manages a pool of QUIC connections for DoQ queries using a buffered channel.
+// A single quic.Transport (and its UDP socket) is shared by every connection in the pool,
+// so the OS socket lifecycle is tied to the pool rather than to each dial. Without this
+// ownership model, a strict DoQ upstream that triggers reconnect churn would leak one
+// caller-owned UDP socket per dial — see github.com/Control-D-Inc/ctrld/issues/309.
 type doqConnPool struct {
 	uc         *UpstreamConfig
 	addrs      []string
@@ -48,6 +60,13 @@ type doqConnPool struct {
 	tlsConfig  *tls.Config
 	quicConfig *quic.Config
 	conns      chan *doqConn
+
+	transportMu   sync.Mutex
+	transport     *quic.Transport
+	transportConn *net.UDPConn
+	transportErr  error
+	transportInit bool
+	closed        bool
 }
 
 type doqConn struct {
@@ -64,6 +83,7 @@ func newDOQConnPool(uc *UpstreamConfig, addrs []string) *doqConnPool {
 		NextProtos: []string{"doq"},
 		RootCAs:    uc.certPool,
 		ServerName: uc.Domain,
+		MinVersion: tls.VersionTLS12,
 	}
 
 	quicConfig := &quic.Config{
@@ -167,26 +187,59 @@ func (p *doqConnPool) doResolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 		return nil, err
 	}
 
-	// Read response
-	buf, err := io.ReadAll(stream)
-	stream.Close()
-
-	// Return connection to pool (mark as potentially bad if error occurred)
-	isGood := err == nil && len(buf) > 0
-	p.putConn(conn, isGood)
-
-	if err != nil {
+	// RFC 9250 section 4.2 requires the client to indicate end-of-request by
+	// closing the send side of the stream (STREAM FIN). Servers may defer
+	// processing until FIN arrives, so the close must happen before reading.
+	// Stream.Close closes only the send direction; the receive direction
+	// remains open for the response.
+	if err := stream.Close(); err != nil {
+		p.putConn(conn, false)
 		return nil, err
 	}
 
-	// io.ReadAll hides io.EOF error, so check for empty buffer
+	// A DoQ response is a 2-byte length prefix followed by a DNS message.
+	// The DNS message is bounded by the protocol at dns.MaxMsgSize, so a
+	// well-formed response is at most doqMaxResponseSize bytes. Read one
+	// byte past that cap to distinguish "at limit" from "over limit" and
+	// reject oversized responses before they can drive memory growth from
+	// a malicious or compromised upstream.
+	buf, err := io.ReadAll(io.LimitReader(stream, doqMaxResponseSize+1))
+	if err != nil {
+		p.putConn(conn, false)
+		return nil, err
+	}
+
+	// io.ReadAll hides io.EOF error, so check for empty buffer.
 	if len(buf) == 0 {
+		p.putConn(conn, false)
 		return nil, io.EOF
 	}
 
-	// Unpack DNS response (skip 2-byte length prefix)
+	if len(buf) > doqMaxResponseSize {
+		p.putConn(conn, false)
+		return nil, fmt.Errorf("DoQ response exceeds %d-byte maximum", doqMaxResponseSize)
+	}
+
+	// RFC 9250: each DoQ DNS message is encoded as a 2-octet length field
+	// followed by the DNS message. Reject responses that are shorter than
+	// the prefix or whose prefix declares more bytes than were received,
+	// and retire the misbehaving connection. Without this guard, buf[2:]
+	// would panic when len(buf) < 2.
+	if len(buf) < 2 {
+		p.putConn(conn, false)
+		return nil, fmt.Errorf("malformed DoQ response: %d byte(s), need >= 2 for length prefix", len(buf))
+	}
+	respLen := int(buf[0])<<8 | int(buf[1])
+	if 2+respLen > len(buf) {
+		p.putConn(conn, false)
+		return nil, fmt.Errorf("malformed DoQ response: length prefix %d exceeds payload %d", respLen, len(buf)-2)
+	}
+
+	p.putConn(conn, true)
+
+	// Unpack DNS response (skip 2-byte length prefix).
 	answer := new(dns.Msg)
-	if err := answer.Unpack(buf[2:]); err != nil {
+	if err := answer.Unpack(buf[2 : 2+respLen]); err != nil {
 		return nil, err
 	}
 	answer.SetReply(msg)
@@ -233,25 +286,26 @@ func (p *doqConnPool) putConn(conn *quic.Conn, isGood bool) {
 }
 
 // dialConn creates a new QUIC connection using parallel dialing like DoH3.
+// All connections from the pool multiplex on a single pool-owned UDP socket,
+// so reconnect churn cannot grow the host's FD count.
 func (p *doqConnPool) dialConn(ctx context.Context) (string, *quic.Conn, error) {
 	logger := ProxyLogger.Load()
+
+	tr, err := p.getOrInitTransport()
+	if err != nil {
+		return "", nil, err
+	}
 
 	// If we have a bootstrap IP, use it directly
 	if p.uc.BootstrapIP != "" {
 		addr := net.JoinHostPort(p.uc.BootstrapIP, p.port)
 		Log(ctx, logger.Debug(), "Sending DoQ request to: %s", addr)
-		udpConn, err := net.ListenUDP("udp", nil)
-		if err != nil {
-			return "", nil, err
-		}
 		remoteAddr, err := net.ResolveUDPAddr("udp", addr)
 		if err != nil {
-			udpConn.Close()
 			return "", nil, err
 		}
-		conn, err := quic.DialEarly(ctx, udpConn, remoteAddr, p.tlsConfig, p.quicConfig)
+		conn, err := tr.DialEarly(ctx, remoteAddr, p.tlsConfig, p.quicConfig)
 		if err != nil {
-			udpConn.Close()
 			return "", nil, err
 		}
 		return addr, conn, nil
@@ -263,7 +317,7 @@ func (p *doqConnPool) dialConn(ctx context.Context) (string, *quic.Conn, error) 
 		dialAddrs[i] = net.JoinHostPort(p.addrs[i], p.port)
 	}
 
-	pd := &quicParallelDialer{}
+	pd := &quicParallelDialer{transport: tr}
 	conn, err := pd.Dial(ctx, dialAddrs, p.tlsConfig, p.quicConfig)
 	if err != nil {
 		return "", nil, err
@@ -274,9 +328,35 @@ func (p *doqConnPool) dialConn(ctx context.Context) (string, *quic.Conn, error) 
 	return addr, conn, nil
 }
 
-// CloseIdleConnections closes all connections in the pool.
-// Connections currently checked out (in use) are not closed.
+// getOrInitTransport returns the pool's shared quic.Transport, initialising it
+// on first call. Once the pool has been closed it permanently returns an error
+// so that callers cannot resurrect a dead pool.
+func (p *doqConnPool) getOrInitTransport() (*quic.Transport, error) {
+	p.transportMu.Lock()
+	defer p.transportMu.Unlock()
+	if p.closed {
+		return nil, errors.New("doq pool closed")
+	}
+	if p.transportInit {
+		return p.transport, p.transportErr
+	}
+	p.transportInit = true
+	udpConn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		p.transportErr = err
+		return nil, err
+	}
+	p.transportConn = udpConn
+	p.transport = &quic.Transport{Conn: udpConn}
+	return p.transport, nil
+}
+
+// CloseIdleConnections closes all idle connections, the shared quic.Transport,
+// and the pool's UDP socket. Connections currently checked out (in use) get
+// terminated by the transport close as well — without that, the OS socket
+// would remain bound to a goroutine that the caller cannot reach to clean up.
 func (p *doqConnPool) CloseIdleConnections() {
+drain:
 	for {
 		select {
 		case dc := <-p.conns:
@@ -284,7 +364,22 @@ func (p *doqConnPool) CloseIdleConnections() {
 				dc.conn.CloseWithError(quic.ApplicationErrorCode(quic.NoError), "")
 			}
 		default:
-			return
+			break drain
 		}
+	}
+	p.transportMu.Lock()
+	if p.closed {
+		p.transportMu.Unlock()
+		return
+	}
+	p.closed = true
+	tr := p.transport
+	udpConn := p.transportConn
+	p.transportMu.Unlock()
+	if tr != nil {
+		_ = tr.Close()
+	}
+	if udpConn != nil {
+		_ = udpConn.Close()
 	}
 }
