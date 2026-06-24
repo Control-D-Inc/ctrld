@@ -268,6 +268,15 @@ func validInterceptMode(mode string) bool {
 	return false
 }
 
+// validFirewallMode reports whether the given value is a recognized --firewall-mode.
+func validFirewallMode(mode string) bool {
+	switch mode {
+	case "off", "on":
+		return true
+	}
+	return false
+}
+
 // onlyInterceptFlags reports whether args contain only intercept mode
 // flags (--intercept-mode <value>) and flags that are auto-added by the
 // start command alias (--iface). This is used to detect "ctrld start --intercept-mode dns"

@@ -112,6 +112,7 @@ const (
 	fwpUint32          uint32 = 3     // FWP_UINT32
 	fwpByteArray16Type uint32 = 11    // FWP_BYTE_ARRAY16_TYPE
 	fwpV4AddrMask      uint32 = 0x100 // FWP_V4_ADDR_MASK (after FWP_SINGLE_DATA_TYPE_MAX=0xff)
+	fwpV6AddrMask      uint32 = 0x101 // FWP_V6_ADDR_MASK
 
 	// IP protocol numbers.
 	ipprotoUDP uint8 = 17
@@ -226,6 +227,12 @@ type fwpConditionValue0 struct {
 type fwpV4AddrAndMask struct {
 	addr uint32
 	mask uint32
+}
+
+// fwpV6AddrAndMask represents FWP_V6_ADDR_AND_MASK for IPv6 subnet matching.
+type fwpV6AddrAndMask struct {
+	addr         [16]byte
+	prefixLength uint8
 }
 
 // fwpmAction0 represents FWPM_ACTION0 for specifying what happens on match.

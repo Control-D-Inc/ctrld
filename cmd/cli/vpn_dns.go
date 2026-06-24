@@ -102,8 +102,6 @@ func (m *vpnDNSManager) Refresh(ctx context.Context, guardAgainstNoNameservers .
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	previousExemptions := m.currentExemptionsLocked()
-
 	if vpnDNSSettlingEnabled && len(configs) == 0 && guardedRefresh && m.hasVPNDNSStateLocked() {
 		if !m.retainedAfterEmptyDiscovery {
 			exemptions := m.currentExemptionsLocked()
@@ -192,85 +190,14 @@ func (m *vpnDNSManager) Refresh(ctx context.Context, guardAgainstNoNameservers .
 	ctrld.Log(ctx, logger.Debug(), "VPN DNS refresh completed: %d configs, %d routes, %d domainless servers, %d unique exemptions",
 		len(m.configs), len(m.routes), len(m.domainlessServers), len(exemptions))
 
-	// Update intercept rules to permit VPN DNS traffic only when the exemption set
-	// actually changes. Network-change events can fire repeatedly while macOS/VPN
-	// state is otherwise identical; rewriting pf for identical exemptions can feed
-	// a self-triggering network-change loop. Empty exemptions are still applied
-	// when they differ from the previous set, so stale VPN exemptions are cleared
-	// on disconnect.
-	m.updateInterceptExemptionsIfChanged(ctx, logger, previousExemptions, exemptions, "VPN DNS")
-}
-
-func (m *vpnDNSManager) updateInterceptExemptionsIfChanged(ctx context.Context, logger *ctrld.Logger, before, after []vpnDNSExemption, reason string) {
-	if m.onServersChanged == nil {
-		return
-	}
-	if vpnDNSExemptionsEqual(before, after) {
-		ctrld.Log(ctx, logger.Debug(), "VPN DNS exemptions unchanged after %s refresh; skipping intercept rule update", reason)
-		return
-	}
-	if err := m.onServersChanged(after); err != nil {
-		ctrld.Log(ctx, logger.Error().Err(err), "Failed to update intercept exemptions for VPN DNS servers")
-	}
-}
-
-// RefreshRoutesOnly re-discovers VPN DNS configs and updates only ctrld's
-// in-memory split-DNS routes. It intentionally does not call onServersChanged,
-// so it does not rewrite/reload pf/WFP rules. Use this for post-settle discovery
-// checks where we only need to learn late-published VPN search domains.
-func (m *vpnDNSManager) RefreshRoutesOnly() (routes, domainlessServers, exemptions int) {
-	logger := mainLog.Load()
-
-	logger.Debug().Msg("Refreshing VPN DNS route state only")
-	discoverVPNDNS := m.discoverVPNDNS
-	if discoverVPNDNS == nil {
-		discoverVPNDNS = ctrld.DiscoverVPNDNS
-	}
-	configs := discoverVPNDNS(context.Background())
-
-	if dri, err := netmon.DefaultRouteInterface(); err == nil && dri != "" {
-		for i := range configs {
-			if configs[i].InterfaceName == dri {
-				configs[i].IsExitMode = true
-			}
+	// Update intercept rules to permit VPN DNS traffic.
+	// Always call onServersChanged — including when exemptions is empty — so that
+	// stale exemptions from a previous VPN session get cleared on disconnect.
+	if m.onServersChanged != nil {
+		if err := m.onServersChanged(exemptions); err != nil {
+			ctrld.Log(ctx, logger.Error().Err(err), "Failed to update intercept exemptions for VPN DNS servers")
 		}
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.retainedAfterEmptyDiscovery = false
-	m.configs = configs
-	m.routes = make(map[string][]string)
-
-	for _, config := range configs {
-		for _, domain := range config.Domains {
-			domain = strings.TrimPrefix(domain, "~")
-			domain = strings.TrimPrefix(domain, ".")
-			domain = strings.ToLower(domain)
-			if domain != "" {
-				m.routes[domain] = append([]string{}, config.Servers...)
-			}
-		}
-	}
-
-	var domainless []string
-	seenDomainless := make(map[string]bool)
-	for _, config := range configs {
-		if len(config.Domains) == 0 && len(config.Servers) > 0 {
-			for _, server := range config.Servers {
-				if !seenDomainless[server] {
-					seenDomainless[server] = true
-					domainless = append(domainless, server)
-				}
-			}
-		}
-	}
-	m.domainlessServers = domainless
-
-	logger.Debug().Msgf("VPN DNS route-only refresh completed: %d configs, %d routes, %d domainless servers, %d exemptions",
-		len(m.configs), len(m.routes), len(m.domainlessServers), len(m.currentExemptionsLocked()))
-	return len(m.routes), len(m.domainlessServers), len(m.currentExemptionsLocked())
 }
 
 func (m *vpnDNSManager) hasVPNDNSStateLocked() bool {

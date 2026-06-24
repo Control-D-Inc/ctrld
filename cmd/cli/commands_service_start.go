@@ -23,6 +23,7 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	logger := mainLog.Load()
 	logger.Debug().Msg("Service start command started")
 
+	firewallModeFlagChanged = cmd.Flags().Changed("firewall-mode")
 	checkStrFlagEmpty(cmd, cdUidFlagName)
 	checkStrFlagEmpty(cmd, cdOrgFlagName)
 	validateCdAndNextDNSFlags()
@@ -42,6 +43,9 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	// then uninstall — confusing and destructive.
 	if interceptMode != "" && !validInterceptMode(interceptMode) {
 		logger.Fatal().Msgf("invalid --intercept-mode value %q: must be 'off', 'dns', or 'hard'", interceptMode)
+	}
+	if firewallModeFlagChanged && !validFirewallMode(firewallMode) {
+		logger.Fatal().Msgf("invalid --firewall-mode value %q: must be 'off' or 'on'", firewallMode)
 	}
 
 	// Initialize service manager with proper configuration
@@ -421,6 +425,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	_ = startCmd.Flags().MarkHidden("start_only")
 	startCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
 	startCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'dns' (with VPN split routing) or 'hard' (all DNS through ctrld, no VPN split routing)")
+	startCmd.Flags().StringVarP(&firewallMode, "firewall-mode", "", "off", "DNS-resolved IP allowlist: 'on' blocks connections to IPs not resolved by ctrld, 'off' allows all")
 
 	// Start command alias
 	startCmdAlias := &cobra.Command{

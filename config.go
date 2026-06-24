@@ -247,8 +247,14 @@ type ServiceConfig struct {
 	ForceRefetchWaitTime    *int           `mapstructure:"force_refetch_wait_time" toml:"force_refetch_wait_time,omitempty"`
 	LeakOnUpstreamFailure   *bool          `mapstructure:"leak_on_upstream_failure" toml:"leak_on_upstream_failure,omitempty"`
 	InterceptMode           string         `mapstructure:"intercept_mode" toml:"intercept_mode,omitempty" validate:"omitempty,oneof=off dns hard"`
-	Daemon                  bool           `mapstructure:"-" toml:"-"`
-	AllocateIP              bool           `mapstructure:"-" toml:"-"`
+	// FirewallMode controls the DNS-resolved IP allowlist. When "on", only IPs
+	// that were successfully resolved by ctrld are allowed for outbound connections.
+	// This closes the "DNS gap" where apps bypass DNS policy using hardcoded IPs.
+	// Requires intercept mode to be active for enforcement on desktop platforms.
+	// On mobile, the netstack layer uses the allowlist directly.
+	FirewallMode string `mapstructure:"firewall_mode" toml:"firewall_mode,omitempty" validate:"omitempty,oneof=off on"`
+	Daemon       bool   `mapstructure:"-" toml:"-"`
+	AllocateIP   bool   `mapstructure:"-" toml:"-"`
 }
 
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.

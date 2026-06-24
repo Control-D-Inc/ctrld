@@ -318,6 +318,13 @@ func (p *prog) processStandardQuery(req *standardQueryRequest) {
 		rtt := time.Since(startTime)
 		ctrld.Log(req.ctx, p.Debug(), "Received response of %d bytes in %s", pr.answer.Len(), rtt)
 
+		// Firewall mode must learn resolved IPs before the DNS response is sent
+		// back to the client. Otherwise the app can receive the answer and attempt
+		// the first connection before the platform allowlist has been updated.
+		if p.firewallModeEnabled() && pr.answer != nil {
+			p.firewallRecordResolvedIPs(pr.answer, canonicalName(q.Name))
+		}
+
 		go p.postProcessStandardQuery(ci, req.listenerConfig, q, pr)
 		answer = pr.answer
 	}
@@ -335,6 +342,7 @@ func (p *prog) postProcessStandardQuery(ci *ctrld.ClientInfo, listenerConfig *ct
 	p.doSelfUninstall(pr)
 	p.recordMetrics(ci, listenerConfig, q, pr)
 	p.forceFetchingAPI(canonicalName(q.Name))
+
 }
 
 // getFailoverRcodes retrieves the failover response codes from the provided ListenerConfig. Returns nil if no policy exists.
@@ -796,6 +804,17 @@ func (p *prog) checkCache(ctx context.Context, req *proxyRequest, upstream strin
 	if cachedValue.Expire.After(now) {
 		ctrld.Log(ctx, p.Debug(), "Hit cached response")
 		setCachedAnswerTTL(answer, now, cachedValue.Expire)
+
+		// Firewall mode: refresh allowlist entries from cached responses.
+		// Even though these IPs were already added when the response was first
+		// resolved, the allowlist entries may have expired (TTL-based reaper)
+		// while the DNS cache entry is still valid. Refreshing here ensures
+		// the allowlist stays populated for as long as the cached DNS entry is served.
+		if p.firewallModeEnabled() {
+			domain := canonicalName(req.msg.Question[0].Name)
+			p.firewallRecordResolvedIPs(answer, domain)
+		}
+
 		return &proxyResponse{answer: answer, cached: true}
 	}
 
@@ -1807,6 +1826,11 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 		p.Debug().Msgf("Set default local IPv4: %s, IPv6: %s", selfIP, ipv6)
 
 		p.debounceRecovery()
+
+		// Firewall mode: flush allowlist on network changes. Stale IPs from
+		// the old network may no longer be routable. DNS queries on the new
+		// network will repopulate the allowlist.
+		p.firewallOnNetworkChange()
 
 		// After network changes, verify our pf anchor is still active and
 		// refresh VPN DNS state. Order matters: tunnel checks first (may rebuild

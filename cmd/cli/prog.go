@@ -34,6 +34,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
+	"github.com/Control-D-Inc/ctrld/internal/firewall"
 )
 
 const (
@@ -185,6 +186,16 @@ type prog struct {
 	// VPN DNS manager for split DNS routing when intercept mode is active.
 	vpnDNS *vpnDNSManager
 
+	// allowList tracks IPs resolved by ctrld for firewall mode enforcement.
+	// When firewall_mode is "on", only IPs in this list (plus permanent entries)
+	// are allowed for outbound connections. nil when firewall mode is off.
+	allowList *firewall.AllowList
+
+	// platformFirewallState stores the OS-specific firewall state used to keep
+	// platform enforcement synchronized with allowList.
+	// On Windows: *wfpFirewallState. On macOS: *pfFirewallState.
+	platformFirewallState any //lint:ignore U1000 used on darwin/windows
+
 	started       chan struct{}
 	onStartedDone chan struct{}
 	onStarted     []func()
@@ -326,6 +337,9 @@ func (p *prog) postRun() {
 		ns := ctrld.InitializeOsResolver(ctrld.LoggerCtx(context.Background(), p.logger.Load()), false)
 		p.Debug().Msgf("Initialized os resolver with nameservers: %v", ns)
 		p.setDNS()
+		if p.allowList != nil {
+			p.initPlatformFirewall()
+		}
 		p.csSetDnsDone <- struct{}{}
 		close(p.csSetDnsDone)
 		p.logInterfacesState()
@@ -405,6 +419,7 @@ func (p *prog) apiConfigReload() {
 
 		if noCustomConfig && !noExcludeListChanged {
 			logger.Debug().Msg("Exclude list changes detected, reloading...")
+			p.firewallOnConfigReload()
 			p.apiReloadCh <- nil
 			return
 		}
@@ -426,6 +441,9 @@ func (p *prog) apiConfigReload() {
 				return
 			}
 			logger.Debug().Msg("Custom config changes detected, reloading...")
+			// Firewall mode: flush allowlist so DNS queries against the new
+			// config repopulate it with IPs allowed under the updated policy.
+			p.firewallOnConfigReload()
 			p.apiReloadCh <- cfg
 		} else {
 			logger.Debug().Msg("Custom config does not change")
@@ -512,6 +530,12 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	p.ptrLoopGuard = newLoopGuard()
 	p.cacheFlushDomainsMap = nil
 	p.metricsQueryStats.Store(p.cfg.Service.MetricsQueryStats)
+
+	// context for managing spawned goroutines. Firewall mode needs it before
+	// listeners start so its TTL reaper can run from the first DNS response.
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
 		if err != nil {
@@ -524,6 +548,9 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			}
 		}
 	}
+
+	// Synchronize firewall mode before listeners process DNS responses.
+	p.syncFirewallMode(ctx)
 
 	var wg sync.WaitGroup
 	wg.Add(len(p.cfg.Listener))
@@ -554,10 +581,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		p.setupUpstream(p.cfg)
 		p.setupClientInfoDiscover()
 	}
-
-	// context for managing spawn goroutines.
-	ctx, cancelFunc := context.WithCancel(context.Background())
-	defer cancelFunc()
 
 	// Newer versions of android and iOS denies permission which breaks connectivity.
 	if !isMobile() && !reload {
@@ -1574,19 +1597,6 @@ func shouldUpgrade(vt string, cv *semver.Version, logger *ctrld.Logger) bool {
 	return true
 }
 
-// newUpgradeCmd builds the detached command used to self-upgrade. It is a
-// package-level variable so tests can stub it. With the real implementation a
-// *test* binary would re-exec itself — os.Executable() is the test binary, and
-// because `go test` stops flag parsing at the first positional arg ("upgrade")
-// it ignores the args and re-runs the entire suite. That child hits the same
-// upgrade test and spawns another child, recursively: a fork bomb of detached
-// processes that pins the host and locks the test binary's image file.
-var newUpgradeCmd = func(exe string) *exec.Cmd {
-	cmd := exec.Command(exe, "upgrade", "prod", "-vv")
-	cmd.SysProcAttr = sysProcAttrForDetachedChildProcess()
-	return cmd
-}
-
 // performUpgrade executes the self-upgrade command.
 // Returns true if upgrade was initiated successfully, false otherwise.
 func performUpgrade(vt string, logger *ctrld.Logger) bool {
@@ -1595,7 +1605,8 @@ func performUpgrade(vt string, logger *ctrld.Logger) bool {
 		logger.Error().Err(err).Msg("Failed to get executable path, skipped self-upgrade")
 		return false
 	}
-	cmd := newUpgradeCmd(exe)
+	cmd := exec.Command(exe, "upgrade", "prod", "-vv")
+	cmd.SysProcAttr = sysProcAttrForDetachedChildProcess()
 	if err := cmd.Start(); err != nil {
 		logger.Error().Err(err).Msg("Failed to start self-upgrade")
 		return false

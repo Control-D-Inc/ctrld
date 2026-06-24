@@ -69,31 +69,6 @@ func TestVPNDNSRefreshClearsOnSecondGuardedEmptyDiscovery(t *testing.T) {
 	}
 }
 
-func TestVPNDNSRefreshSkipsUnchangedInterceptExemptions(t *testing.T) {
-	var updates [][]vpnDNSExemption
-	m := newVPNDNSManager(&mainLog, func(exemptions []vpnDNSExemption) error {
-		updates = append(updates, append([]vpnDNSExemption{}, exemptions...))
-		return nil
-	})
-	m.discoverVPNDNS = func(context.Context) []ctrld.VPNDNSConfig {
-		return []ctrld.VPNDNSConfig{{
-			InterfaceName: "utun-test",
-			Servers:       []string{"10.102.26.10"},
-			Domains:       []string{"example.internal"},
-		}}
-	}
-
-	m.Refresh(context.Background(), true)
-	m.Refresh(context.Background(), true)
-
-	if len(updates) != 1 {
-		t.Fatalf("expected exactly one intercept exemption update for unchanged VPN DNS state, got %d", len(updates))
-	}
-	if len(updates[0]) != 1 || updates[0][0].Server != "10.102.26.10" || updates[0][0].Interface != "utun-test" {
-		t.Fatalf("unexpected exemption update: %+v", updates[0])
-	}
-}
-
 func TestVPNDNSTransportFailureSuppressesFallbackOnlyWhileRetainingState(t *testing.T) {
 	withVPNDNSSettlingEnabled(t)
 	m := newVPNDNSManager(&mainLog, nil)

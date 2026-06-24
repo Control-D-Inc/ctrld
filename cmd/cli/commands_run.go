@@ -52,6 +52,7 @@ func InitRunCmd(rootCmd *cobra.Command) *cobra.Command {
 	runCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 	runCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
 	runCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'dns' (with VPN split routing) or 'hard' (all DNS through ctrld, no VPN split routing)")
+	runCmd.Flags().StringVarP(&firewallMode, "firewall-mode", "", "off", "DNS-resolved IP allowlist: 'on' blocks connections to IPs not resolved by ctrld, 'off' allows all")
 
 	runCmd.FParseErrWhitelist = cobra.FParseErrWhitelist{UnknownFlags: true}
 	rootCmd.AddCommand(runCmd)

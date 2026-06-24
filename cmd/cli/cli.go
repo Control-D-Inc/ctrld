@@ -168,6 +168,7 @@ func isStableVersion(vs string) bool {
 // RunCobraCommand runs ctrld cli.
 func RunCobraCommand(cmd *cobra.Command) {
 	noConfigStart = isNoConfigStart(cmd)
+	firewallModeFlagChanged = cmd.Flags().Changed("firewall-mode")
 	checkStrFlagEmpty(cmd, cdUidFlagName)
 	checkStrFlagEmpty(cmd, cdOrgFlagName)
 	run(nil, make(chan struct{}))
@@ -350,6 +351,26 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			updated = true
 			p.Info().Msgf("writing intercept_mode = %q to config", interceptMode)
 		}
+	}
+
+	// Persist firewall_mode to config only when provided via CLI flag.
+	// The flag defaults to "off" for help output, so use Changed() to avoid
+	// clobbering a config-file value of firewall_mode = "on" on normal starts.
+	if firewallModeFlagChanged {
+		if !validFirewallMode(firewallMode) {
+			notifyExitToLogServer()
+			p.Fatal().Msgf("invalid --firewall-mode value %q: must be 'off' or 'on'", firewallMode)
+		}
+		if cfg.Service.FirewallMode != firewallMode {
+			cfg.Service.FirewallMode = firewallMode
+			updated = true
+			p.Info().Msgf("writing firewall_mode = %q to config", firewallMode)
+		}
+	} else if cfg.Service.FirewallMode != "" {
+		// If firewall_mode is set in config but not via flag, use config value.
+		firewallMode = cfg.Service.FirewallMode
+	} else {
+		firewallMode = "off"
 	}
 
 	if updated {
@@ -1266,7 +1287,7 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 		return false, true
 	}
 
-	hasExplicitConfig := isExplicitInterceptListener(lc.IP, lc.Port)
+	hasExplicitConfig := lc.IP != "" && lc.IP != "0.0.0.0" && lc.Port != 0
 	if !hasExplicitConfig {
 		// Set defaults for intercept mode
 		if lc.IP == "" || lc.IP == "0.0.0.0" {
@@ -1322,16 +1343,6 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 		mainLog.Load().Fatal().Msg("DNS intercept: cannot bind 127.0.0.1:53 or 127.0.0.1:5354")
 	}
 	return updated, false
-}
-
-func isExplicitInterceptListener(ip string, port int) bool {
-	if ip == "" || ip == "0.0.0.0" || port == 0 {
-		return false
-	}
-	// 127.0.0.1:53 is the default macOS DNS-intercept listener. It can appear
-	// in generated/custom Control D configs, but it should still be allowed to
-	// fall back to 127.0.0.1:5354 when mDNSResponder already owns port 53.
-	return !(ip == "127.0.0.1" && port == 53)
 }
 
 // tryUpdateListenerConfig tries updating listener config with a working one.

@@ -19,35 +19,37 @@ import (
 // Global variables for CLI configuration and state management
 // These are used across multiple commands and need to persist throughout the application lifecycle
 var (
-	configPath        string
-	configBase64      string
-	daemon            bool
-	listenAddress     string
-	primaryUpstream   string
-	secondaryUpstream string
-	domains           []string
-	logPath           string
-	homedir           string
-	cacheSize         int
-	cfg               ctrld.Config
-	verbose           int
-	silent            bool
-	cdUID             string
-	cdOrg             string
-	customHostname    string
-	cdDev             bool
-	iface             string
-	ifaceStartStop    string
-	nextdns           string
-	cdUpstreamProto   string
-	deactivationPin   int64
-	skipSelfChecks    bool
-	cleanup           bool
-	startOnly         bool
-	rfc1918           bool
-	interceptMode     string // "", "dns", or "hard" — set via --intercept-mode flag or config
-	dnsIntercept      bool   // derived: interceptMode == "dns" || interceptMode == "hard"
-	hardIntercept     bool   // derived: interceptMode == "hard"
+	configPath              string
+	configBase64            string
+	daemon                  bool
+	listenAddress           string
+	primaryUpstream         string
+	secondaryUpstream       string
+	domains                 []string
+	logPath                 string
+	homedir                 string
+	cacheSize               int
+	cfg                     ctrld.Config
+	verbose                 int
+	silent                  bool
+	cdUID                   string
+	cdOrg                   string
+	customHostname          string
+	cdDev                   bool
+	iface                   string
+	ifaceStartStop          string
+	nextdns                 string
+	cdUpstreamProto         string
+	deactivationPin         int64
+	skipSelfChecks          bool
+	cleanup                 bool
+	startOnly               bool
+	rfc1918                 bool
+	interceptMode           string // "", "dns", or "hard" — set via --intercept-mode flag or config
+	dnsIntercept            bool   // derived: interceptMode == "dns" || interceptMode == "hard"
+	hardIntercept           bool   // derived: interceptMode == "hard"
+	firewallMode            string // "off" or "on" — set via --firewall-mode flag or config
+	firewallModeFlagChanged bool   // true when --firewall-mode was explicitly provided
 
 	mainLog            atomic.Pointer[ctrld.Logger]
 	consoleWriter      zapcore.Core
