@@ -33,6 +33,15 @@ func TestSleepWithContext(t *testing.T) {
 	assert.Less(t, time.Since(start), 100*time.Millisecond)
 }
 
+func TestUnreachableRecoveryBackoff(t *testing.T) {
+	// Streak starts at the base cadence and doubles each attempt, capped at the max.
+	assert.Equal(t, checkUpstreamBackoffSleep, unreachableRecoveryBackoff(0))
+	assert.Equal(t, checkUpstreamBackoffSleep, unreachableRecoveryBackoff(1))
+	assert.Equal(t, 2*checkUpstreamBackoffSleep, unreachableRecoveryBackoff(2))
+	assert.Equal(t, 4*checkUpstreamBackoffSleep, unreachableRecoveryBackoff(3))
+	assert.Equal(t, checkUpstreamUnreachableBackoffMax, unreachableRecoveryBackoff(100))
+}
+
 func Test_prog_dnsWatchdogEnabled(t *testing.T) {
 	p := &prog{cfg: &ctrld.Config{}}
 

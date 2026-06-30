@@ -1733,6 +1733,15 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 			mainLog.Load().Debug().Err(err).Msgf("Upstream %s check failed after %v (WFP loopback protect active)", upstream, duration)
 			return errOsHealthcheckSuppressed
 		}
+		// A no-route/network-unreachable failure means the endpoint's address
+		// family is available locally but unroutable (e.g. an IPv6 DoH endpoint
+		// while IPv6 is up but has no route). These repeat until the route
+		// returns and are handled by bounded backoff in the recovery loop, so
+		// keep them at debug to avoid sustained error-log spam.
+		if ctrldnet.IsUnreachable(err) {
+			mainLog.Load().Debug().Err(err).Msgf("Upstream %s check failed after %v (network unreachable)", upstream, duration)
+			return err
+		}
 		mainLog.Load().Error().Err(err).Msgf("Upstream %s check failed after %v", upstream, duration)
 		return err
 	}
@@ -1951,6 +1960,7 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 			defer wg.Done()
 			mainLog.Load().Debug().Msgf("Starting recovery check loop for upstream: %s", name)
 			attempts := 0
+			unreachableStreak := 0
 			for {
 				select {
 				case <-recoveryCtx.Done():
@@ -1971,8 +1981,22 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 						}
 						return
 					}
-					mainLog.Load().Debug().Msgf("Upstream %s check failed, sleeping before retry", name)
-					if !sleepWithContext(recoveryCtx, checkUpstreamBackoffSleep) {
+					// Back off the retry cadence for an unroutable endpoint so a
+					// host with IPv6 up but no route to the IPv6 DoH endpoint does
+					// not re-bootstrap/re-check every checkUpstreamBackoffSleep and
+					// spam the log. The backoff is bounded (checkUpstreamUnreachableBackoffMax)
+					// so the endpoint is still re-probed and recovers when the route
+					// returns; any other failure resets to the base cadence.
+					sleep := checkUpstreamBackoffSleep
+					if ctrldnet.IsUnreachable(err) {
+						unreachableStreak++
+						sleep = unreachableRecoveryBackoff(unreachableStreak)
+						mainLog.Load().Debug().Msgf("Upstream %s unreachable (streak %d), backing off %s before retry", name, unreachableStreak, sleep)
+					} else {
+						unreachableStreak = 0
+						mainLog.Load().Debug().Msgf("Upstream %s check failed, sleeping before retry", name)
+					}
+					if !sleepWithContext(recoveryCtx, sleep) {
 						return
 					}
 

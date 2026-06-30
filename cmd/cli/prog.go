@@ -34,6 +34,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
@@ -1343,13 +1344,14 @@ func errAddrInUse(err error) bool {
 
 var _ = errAddrInUse
 
+// The unreachable winsock errnos (ENETUNREACH/EHOSTUNREACH) are matched via
+// ctrldnet.IsUnreachable, which owns their definitions.
+//
 // https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2
 var (
 	windowsECONNREFUSED = syscall.Errno(10061)
-	windowsENETUNREACH  = syscall.Errno(10051)
 	windowsEINVAL       = syscall.Errno(10022)
 	windowsEADDRINUSE   = syscall.Errno(10048)
-	windowsEHOSTUNREACH = syscall.Errno(10065)
 )
 
 func errUrlNetworkError(err error) bool {
@@ -1366,15 +1368,14 @@ func errNetworkError(err error) bool {
 		if opErr.Temporary() {
 			return true
 		}
+		if ctrldnet.IsUnreachable(err) {
+			return true
+		}
 		switch {
 		case errors.Is(opErr.Err, syscall.ECONNREFUSED),
 			errors.Is(opErr.Err, syscall.EINVAL),
-			errors.Is(opErr.Err, syscall.ENETUNREACH),
-			errors.Is(opErr.Err, syscall.EHOSTUNREACH),
-			errors.Is(opErr.Err, windowsENETUNREACH),
 			errors.Is(opErr.Err, windowsEINVAL),
-			errors.Is(opErr.Err, windowsECONNREFUSED),
-			errors.Is(opErr.Err, windowsEHOSTUNREACH):
+			errors.Is(opErr.Err, windowsECONNREFUSED):
 			return true
 		}
 	}
