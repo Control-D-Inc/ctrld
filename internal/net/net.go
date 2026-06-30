@@ -156,6 +156,101 @@ type parallelDialerResult struct {
 	err  error
 }
 
+const (
+	// unreachableBackoffBase is the initial suppression window applied to a
+	// dial address after it returns a network-unreachable error (e.g.
+	// "connect: no route to host"). The window grows exponentially up to
+	// unreachableBackoffMax on repeated failures, and is cleared as soon as
+	// the address dials successfully.
+	unreachableBackoffBase = 5 * time.Second
+	// unreachableBackoffMax caps the suppression window so an address is
+	// always re-probed within a bounded interval, preserving recovery when
+	// the route comes back.
+	unreachableBackoffMax = 60 * time.Second
+)
+
+// Windows winsock codes for the unreachable errnos. A failing connect on
+// Windows surfaces these raw WSA codes (WSAENETUNREACH/WSAEHOSTUNREACH), whereas
+// syscall.ENETUNREACH/EHOSTUNREACH are Go's portable "invented" values
+// (APPLICATION_ERROR + iota) that never equal them. Matching these explicitly is
+// therefore required for the classifier to detect unreachable errors on Windows;
+// errors.Is against the syscall.* constants alone would not.
+//
+// https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2
+var (
+	windowsENETUNREACH  = syscall.Errno(10051)
+	windowsEHOSTUNREACH = syscall.Errno(10065)
+)
+
+// IsUnreachable reports whether err indicates the destination network or host
+// has no route (ENETUNREACH/EHOSTUNREACH). These are the errors produced when
+// an endpoint's address family is available locally but unroutable, e.g. an
+// IPv6 DoH endpoint while the host has IPv6 but no route to it.
+func IsUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return errors.Is(opErr.Err, syscall.ENETUNREACH) ||
+			errors.Is(opErr.Err, syscall.EHOSTUNREACH) ||
+			errors.Is(opErr.Err, windowsENETUNREACH) ||
+			errors.Is(opErr.Err, windowsEHOSTUNREACH)
+	}
+	return false
+}
+
+type unreachableEntry struct {
+	until   time.Time
+	backoff time.Duration
+}
+
+// unreachableTracker records dial addresses that recently failed with a
+// network-unreachable error so ParallelDialer can temporarily stop hammering
+// them. This prevents an unroutable endpoint from generating a sustained dial
+// /health-check storm, while still re-probing each address once its bounded
+// backoff window expires so genuine recovery is never permanently blocked.
+type unreachableTracker struct {
+	mu      sync.Mutex
+	entries map[string]unreachableEntry
+}
+
+var unreachable = &unreachableTracker{entries: make(map[string]unreachableEntry)}
+
+// suppressed reports whether addr is currently within its unreachable backoff
+// window and should be skipped.
+func (t *unreachableTracker) suppressed(addr string, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.entries[addr]
+	return ok && now.Before(e.until)
+}
+
+// markUnreachable extends the suppression window for addr using a bounded
+// exponential backoff.
+func (t *unreachableTracker) markUnreachable(addr string, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e := t.entries[addr]
+	if e.backoff == 0 {
+		e.backoff = unreachableBackoffBase
+	} else {
+		e.backoff *= 2
+		if e.backoff > unreachableBackoffMax {
+			e.backoff = unreachableBackoffMax
+		}
+	}
+	e.until = now.Add(e.backoff)
+	t.entries[addr] = e
+}
+
+// markReachable clears any suppression for addr after a successful dial.
+func (t *unreachableTracker) markReachable(addr string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.entries, addr)
+}
+
 type ParallelDialer struct {
 	net.Dialer
 }
@@ -164,26 +259,63 @@ func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs 
 	if len(addrs) == 0 {
 		return nil, errors.New("empty addresses")
 	}
+
+	// Skip addresses that recently returned a network-unreachable error so an
+	// unroutable endpoint (e.g. an IPv6 DoH address while the host has IPv6
+	// but no route to it) does not generate a sustained dial storm. Suppression
+	// is bounded: once an address's backoff window expires it is re-probed, so
+	// genuine recovery is preserved.
+	now := time.Now()
+	live := make([]string, 0, len(addrs))
+	var suppressed int
+	for _, addr := range addrs {
+		if unreachable.suppressed(addr, now) {
+			suppressed++
+			continue
+		}
+		live = append(live, addr)
+	}
+	if len(live) == 0 {
+		// Every candidate is within its unreachable backoff window. Fail fast
+		// and quietly instead of re-dialing known-unroutable addresses; the
+		// windows expire and re-probe shortly, so recovery still happens.
+		logger.Debug("Skipping unreachable addresses, all in backoff", zap.Int("suppressed", suppressed))
+		// TODO: the errno here is hardcoded to EHOSTUNREACH, but the actual
+		// failure that triggered suppression may have been ENETUNREACH. This is
+		// harmless today (IsUnreachable treats both the same and nothing else
+		// inspects the errno), but if these errors are ever recorded/reported we
+		// should retain the real error in unreachableEntry and surface it here.
+		return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.EHOSTUNREACH}
+	}
+	if suppressed > 0 {
+		logger.Debug("Skipping unreachable addresses in backoff", zap.Int("suppressed", suppressed))
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	done := make(chan struct{})
 	defer close(done)
-	ch := make(chan *parallelDialerResult, len(addrs))
+	ch := make(chan *parallelDialerResult, len(live))
 	var wg sync.WaitGroup
-	wg.Add(len(addrs))
+	wg.Add(len(live))
 	go func() {
 		wg.Wait()
 		close(ch)
 	}()
 
-	for _, addr := range addrs {
+	for _, addr := range live {
 		go func(addr string) {
 			defer wg.Done()
 			logger.Debug("Dialing to", zap.String("address", addr))
 			conn, err := d.Dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				logger.Debug("Failed to dial", zap.String("address", addr), zap.Error(err))
+				if IsUnreachable(err) {
+					unreachable.markUnreachable(addr, time.Now())
+				}
+			} else {
+				unreachable.markReachable(addr)
 			}
 			select {
 			case ch <- &parallelDialerResult{conn: conn, err: err}:

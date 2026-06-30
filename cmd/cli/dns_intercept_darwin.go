@@ -1417,15 +1417,6 @@ func (p *prog) ensurePFAnchorActive() bool {
 	return true
 }
 
-func (p *prog) scheduleDNSAfterVPNSettleRefresh(reason string, delay time.Duration) {
-	time.AfterFunc(delay, func() {
-		if p.dnsInterceptState == nil {
-			return
-		}
-		p.refreshDNSAfterVPNSettle(reason)
-	})
-}
-
 func (p *prog) pfExecBackoffActive() bool {
 	until := p.pfExecBackoffUntil.Load()
 	if until == 0 {
@@ -1436,7 +1427,7 @@ func (p *prog) pfExecBackoffActive() bool {
 		p.pfExecBackoffUntil.CompareAndSwap(until, 0)
 		return false
 	}
-	mainLog.Load().Debug().Dur("remaining", remaining).Msg("DNS intercept watchdog: suppressed during pf exec backoff")
+	mainLog.Load().Debug().Msgf("DNS intercept watchdog: suppressed during pf exec backoff (remaining: %s)", remaining)
 	return true
 }
 
@@ -1446,8 +1437,7 @@ func (p *prog) pfBackoffResourceExhaustion(err error, output []byte, operation s
 	}
 	until := time.Now().Add(pfExecFailureBackoff)
 	p.pfExecBackoffUntil.Store(until.UnixMilli())
-	mainLog.Load().Warn().Err(err).Dur("backoff", pfExecFailureBackoff).Str("operation", operation).
-		Msg("DNS intercept watchdog: backing off after local exec resource exhaustion")
+	mainLog.Load().Warn().Err(err).Msgf("DNS intercept watchdog: backing off after local exec resource exhaustion (operation: %s, backoff: %s)", operation, pfExecFailureBackoff)
 	return true
 }
 

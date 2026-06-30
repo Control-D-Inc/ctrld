@@ -17,7 +17,7 @@ func withVPNDNSSettlingEnabled(t *testing.T) {
 }
 
 func TestVPNDNSRefreshSkipsConcurrentDuplicate(t *testing.T) {
-	m := newVPNDNSManager(nil)
+	m := newVPNDNSManager(&mainLog, nil)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})
@@ -33,11 +33,11 @@ func TestVPNDNSRefreshSkipsConcurrentDuplicate(t *testing.T) {
 
 	go func() {
 		defer close(done)
-		m.Refresh(true)
+		m.Refresh(context.Background(), true)
 	}()
 
 	<-started
-	m.Refresh(true)
+	m.Refresh(context.Background(), true)
 	close(release)
 	<-done
 
