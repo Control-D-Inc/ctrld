@@ -41,6 +41,11 @@ const (
 	// 2s re-check misses.
 	pfAnchorRecheckDelayLong = 4 * time.Second
 
+	// pfExecFailureBackoff suppresses repeated pfctl/scutil checks briefly after
+	// macOS reports local resource exhaustion. Without this, network-change storms
+	// can turn a pf ruleset race into a fork/file-descriptor exhaustion loop.
+	pfExecFailureBackoff = 5 * time.Second
+
 	// pfVPNInterfacePrefixes lists interface name prefixes that indicate VPN/tunnel
 	// interfaces on macOS. Used to add interface-specific DNS intercept rules so that
 	// VPN software with "pass out quick on <iface>" rules cannot bypass our intercept.
@@ -1244,6 +1249,15 @@ func (p *prog) ensurePFAnchorActive() bool {
 	if p.dnsInterceptState == nil {
 		return false
 	}
+	if !p.pfEnsureRunning.CompareAndSwap(false, true) {
+		mainLog.Load().Debug().Msg("DNS intercept watchdog: check already running, skipping duplicate")
+		return false
+	}
+	defer p.pfEnsureRunning.Store(false)
+
+	if p.pfExecBackoffActive() {
+		return false
+	}
 
 	// While stabilizing (VPN connecting), suppress all restores.
 	// The stabilization loop will restore once pf settles.
@@ -1277,6 +1291,9 @@ func (p *prog) ensurePFAnchorActive() bool {
 	// Check 1: anchor references in the main ruleset.
 	natOut, err := exec.Command("pfctl", "-sn").CombinedOutput()
 	if err != nil {
+		if p.pfBackoffResourceExhaustion(err, natOut, "dump NAT rules") {
+			return false
+		}
 		mainLog.Load().Warn().Err(err).Msg("DNS intercept watchdog: could not dump NAT rules")
 		return false
 	}
@@ -1288,6 +1305,9 @@ func (p *prog) ensurePFAnchorActive() bool {
 	if !needsRestore {
 		filterOut, err := exec.Command("pfctl", "-sr").CombinedOutput()
 		if err != nil {
+			if p.pfBackoffResourceExhaustion(err, filterOut, "dump filter rules") {
+				return false
+			}
 			mainLog.Load().Warn().Err(err).Msg("DNS intercept watchdog: could not dump filter rules")
 			return false
 		}
@@ -1305,6 +1325,9 @@ func (p *prog) ensurePFAnchorActive() bool {
 	if !needsRestore {
 		anchorFilter, err := exec.Command("pfctl", "-a", pfAnchorName, "-sr").CombinedOutput()
 		if err != nil || len(strings.TrimSpace(string(anchorFilter))) == 0 {
+			if p.pfBackoffResourceExhaustion(err, anchorFilter, "dump anchor filter rules") {
+				return false
+			}
 			mainLog.Load().Warn().Msg("DNS intercept watchdog: anchor has no filter rules — content was flushed")
 			needsRestore = true
 		}
@@ -1312,6 +1335,9 @@ func (p *prog) ensurePFAnchorActive() bool {
 	if !needsRestore {
 		anchorNat, err := exec.Command("pfctl", "-a", pfAnchorName, "-sn").CombinedOutput()
 		if err != nil || len(strings.TrimSpace(string(anchorNat))) == 0 {
+			if p.pfBackoffResourceExhaustion(err, anchorNat, "dump anchor NAT rules") {
+				return false
+			}
 			mainLog.Load().Warn().Msg("DNS intercept watchdog: anchor has no rdr rules — translation was flushed (will cause packet loop on lo0)")
 			needsRestore = true
 		}
@@ -1345,6 +1371,7 @@ func (p *prog) ensurePFAnchorActive() bool {
 	// Restore: re-inject anchor references into the main ruleset.
 	mainLog.Load().Info().Msg("DNS intercept watchdog: restoring pf anchor references")
 	if err := p.ensurePFAnchorReference(); err != nil {
+		p.pfBackoffResourceExhaustion(err, nil, "restore anchor references")
 		mainLog.Load().Error().Err(err).Msg("DNS intercept watchdog: failed to restore anchor references")
 		return true
 	}
@@ -1361,6 +1388,7 @@ func (p *prog) ensurePFAnchorActive() bool {
 	if err := os.WriteFile(pfAnchorFile, []byte(rulesStr), 0644); err != nil {
 		mainLog.Load().Error().Err(err).Msg("DNS intercept watchdog: failed to write anchor file")
 	} else if out, err := exec.Command("pfctl", "-a", pfAnchorName, "-f", pfAnchorFile).CombinedOutput(); err != nil {
+		p.pfBackoffResourceExhaustion(err, out, "load rebuilt anchor")
 		mainLog.Load().Error().Err(err).Msgf("DNS intercept watchdog: failed to load rebuilt anchor (output: %s)", strings.TrimSpace(string(out)))
 	} else {
 		flushPFStates()
@@ -1389,6 +1417,58 @@ func (p *prog) ensurePFAnchorActive() bool {
 	return true
 }
 
+func (p *prog) scheduleDNSAfterVPNSettleRefresh(reason string, delay time.Duration) {
+	time.AfterFunc(delay, func() {
+		if p.dnsInterceptState == nil {
+			return
+		}
+		p.refreshDNSAfterVPNSettle(reason)
+	})
+}
+
+func (p *prog) pfExecBackoffActive() bool {
+	until := p.pfExecBackoffUntil.Load()
+	if until == 0 {
+		return false
+	}
+	remaining := time.Until(time.UnixMilli(until))
+	if remaining <= 0 {
+		p.pfExecBackoffUntil.CompareAndSwap(until, 0)
+		return false
+	}
+	mainLog.Load().Debug().Dur("remaining", remaining).Msg("DNS intercept watchdog: suppressed during pf exec backoff")
+	return true
+}
+
+func (p *prog) pfBackoffResourceExhaustion(err error, output []byte, operation string) bool {
+	if !isResourceExhaustion(err, output) {
+		return false
+	}
+	until := time.Now().Add(pfExecFailureBackoff)
+	p.pfExecBackoffUntil.Store(until.UnixMilli())
+	mainLog.Load().Warn().Err(err).Dur("backoff", pfExecFailureBackoff).Str("operation", operation).
+		Msg("DNS intercept watchdog: backing off after local exec resource exhaustion")
+	return true
+}
+
+func isResourceExhaustion(err error, output []byte) bool {
+	if err == nil && len(output) == 0 {
+		return false
+	}
+	var msg string
+	if err != nil {
+		msg = err.Error()
+	}
+	if len(output) > 0 {
+		msg += "\n" + string(output)
+	}
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "resource temporarily unavailable") ||
+		strings.Contains(msg, "too many open files") ||
+		strings.Contains(msg, "too many processes") ||
+		strings.Contains(msg, "cannot allocate memory")
+}
+
 // pfWatchdog periodically checks that our pf anchor is still active.
 // Other programs (e.g., Windscribe desktop app, macOS configd) can replace
 // scheduleDelayedRechecks schedules delayed re-checks after a network change event.
@@ -1401,8 +1481,19 @@ func (p *prog) ensurePFAnchorActive() bool {
 //
 // Two delays (2s and 4s) cover both fast and slow VPN teardowns.
 func (p *prog) scheduleDelayedRechecks() {
+	p.pfDelayedRecheckMu.Lock()
+	defer p.pfDelayedRecheckMu.Unlock()
+
+	for _, timer := range p.pfDelayedRecheckTimers {
+		if timer != nil {
+			timer.Stop()
+		}
+	}
+	p.pfDelayedRecheckTimers = p.pfDelayedRecheckTimers[:0]
+
 	for _, delay := range []time.Duration{pfAnchorRecheckDelay, pfAnchorRecheckDelayLong} {
-		time.AfterFunc(delay, func() {
+		delay := delay
+		timer := time.AfterFunc(delay, func() {
 			if p.dnsInterceptState == nil || p.pfStabilizing.Load() {
 				return
 			}
@@ -1417,6 +1508,7 @@ func (p *prog) scheduleDelayedRechecks() {
 				p.vpnDNS.Refresh(ctx, true)
 			}
 		})
+		p.pfDelayedRecheckTimers = append(p.pfDelayedRecheckTimers, timer)
 	}
 }
 

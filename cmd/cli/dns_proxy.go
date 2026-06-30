@@ -2209,6 +2209,9 @@ func (p *prog) completeRecovery(reason RecoveryReason, recovered string) error {
 // waitForUpstreamRecovery checks the provided upstreams concurrently until one recovers.
 // It returns the name of the recovered upstream or an error if the check times out.
 func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string]*ctrld.UpstreamConfig) (string, error) {
+	recoveryCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	recoveredCh := make(chan string, 1)
 	var wg sync.WaitGroup
 
@@ -2222,7 +2225,7 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 			attempts := 0
 			for {
 				select {
-				case <-ctx.Done():
+				case <-recoveryCtx.Done():
 					p.Debug().Msgf("Context canceled for upstream %s", name)
 					return
 				default:
@@ -2234,13 +2237,16 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 						select {
 						case recoveredCh <- name:
 							p.Debug().Msgf("Sent recovery notification for upstream %s", name)
+							cancel()
 						default:
 							p.Debug().Msg("Recovery channel full, another upstream already recovered")
 						}
 						return
 					}
 					p.Debug().Msgf("Upstream %s check failed, sleeping before retry", name)
-					time.Sleep(checkUpstreamBackoffSleep)
+					if !sleepWithContext(recoveryCtx, checkUpstreamBackoffSleep) {
+						return
+					}
 
 					// if this is the upstreamOS and it's the 3rd attempt (or multiple of 3),
 					// we should try to reinit the OS resolver to ensure we can recover
@@ -2266,6 +2272,17 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 	}
 	wg.Wait()
 	return recovered, nil
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // buildRecoveryUpstreams constructs the map of upstream configurations to test.

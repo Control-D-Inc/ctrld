@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"context"
+	"net"
+	"net/url"
+	"syscall"
 	"testing"
 	"time"
 
@@ -10,6 +14,23 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 )
+
+func TestErrNetworkErrorTreatsNoRouteAsNetworkError(t *testing.T) {
+	err := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH}
+	assert.True(t, errNetworkError(err))
+	assert.True(t, errUrlNetworkError(&url.Error{Op: "Get", URL: "https://dns.controld.com", Err: err}))
+}
+
+func TestSleepWithContext(t *testing.T) {
+	assert.True(t, sleepWithContext(context.Background(), time.Millisecond))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	assert.False(t, sleepWithContext(ctx, time.Minute))
+	assert.Less(t, time.Since(start), 100*time.Millisecond)
+}
 
 func Test_prog_dnsWatchdogEnabled(t *testing.T) {
 	p := &prog{cfg: &ctrld.Config{}}

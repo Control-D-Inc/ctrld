@@ -55,6 +55,9 @@ type vpnDNSManager struct {
 	// discoverVPNDNS is injected for tests so Refresh does not depend on the
 	// runner host's real VPN/virtual adapter state.
 	discoverVPNDNS func(context.Context) []ctrld.VPNDNSConfig
+	// refreshRunning keeps noisy network-change storms from running overlapping
+	// scutil/networksetup VPN DNS discovery work.
+	refreshRunning atomic.Bool
 	// Called when VPN DNS server list changes, to update intercept exemptions.
 	onServersChanged vpnDNSExemptFunc
 }
@@ -76,6 +79,11 @@ func newVPNDNSManager(logger *atomic.Pointer[ctrld.Logger], exemptFunc vpnDNSExe
 func (m *vpnDNSManager) Refresh(ctx context.Context, guardAgainstNoNameservers ...bool) {
 	logger := ctrld.LoggerFromCtx(ctx)
 	guardedRefresh := len(guardAgainstNoNameservers) > 0 && guardAgainstNoNameservers[0]
+	if !m.refreshRunning.CompareAndSwap(false, true) {
+		ctrld.Log(ctx, logger.Debug(), "VPN DNS refresh already running, skipping duplicate")
+		return
+	}
+	defer m.refreshRunning.Store(false)
 
 	ctrld.Log(ctx, logger.Debug(), "Refreshing VPN DNS configurations")
 	discoverVPNDNS := m.discoverVPNDNS
