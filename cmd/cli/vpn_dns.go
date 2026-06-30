@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rs/zerolog"
 	"tailscale.com/net/netmon"
@@ -50,6 +51,9 @@ type vpnDNSManager struct {
 	// discoverVPNDNS is injected for tests so Refresh does not depend on the
 	// runner host's real VPN/virtual adapter state.
 	discoverVPNDNS func(context.Context) []ctrld.VPNDNSConfig
+	// refreshRunning keeps noisy network-change storms from running overlapping
+	// scutil/networksetup VPN DNS discovery work.
+	refreshRunning atomic.Bool
 	// Called when VPN DNS server list changes, to update intercept exemptions.
 	onServersChanged vpnDNSExemptFunc
 }
@@ -69,6 +73,11 @@ func newVPNDNSManager(exemptFunc vpnDNSExemptFunc) *vpnDNSManager {
 // Called on network change events.
 func (m *vpnDNSManager) Refresh(guardAgainstNoNameservers bool) {
 	logger := mainLog.Load()
+	if !m.refreshRunning.CompareAndSwap(false, true) {
+		logger.Debug().Msg("VPN DNS refresh already running, skipping duplicate")
+		return
+	}
+	defer m.refreshRunning.Store(false)
 
 	logger.Debug().Msg("Refreshing VPN DNS configurations")
 	discoverVPNDNS := m.discoverVPNDNS

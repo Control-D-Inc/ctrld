@@ -188,6 +188,21 @@ type prog struct {
 	// interception with exponential backoff and auto-heals if broken.
 	pfMonitorRunning atomic.Bool //lint:ignore U1000 used on darwin
 
+	// pfEnsureRunning ensures only one pf anchor validation/restoration runs at a time.
+	// Network-change callbacks, delayed rechecks, and the periodic watchdog can all
+	// converge during macOS interface churn; concurrent pfctl/scutil exec storms can
+	// exhaust process/file limits and make the outage worse.
+	pfEnsureRunning atomic.Bool //lint:ignore U1000 used on darwin
+
+	// pfExecBackoffUntil suppresses pf anchor validation after pfctl/scutil execs
+	// fail due host resource exhaustion (fork unavailable, too many open files).
+	pfExecBackoffUntil atomic.Int64 //lint:ignore U1000 used on darwin
+
+	// pfDelayedRecheckTimers coalesces delayed DNS-intercept rechecks after noisy
+	// network changes. Protected by pfDelayedRecheckMu.
+	pfDelayedRecheckMu     sync.Mutex    //lint:ignore U1000 used on darwin
+	pfDelayedRecheckTimers []*time.Timer //lint:ignore U1000 used on darwin
+
 	// pfProbeExpected holds the domain name of a pending pf interception probe.
 	// When non-empty, the DNS handler checks incoming queries against this value
 	// and signals pfProbeCh if matched. The probe verifies that pf's rdr rules
@@ -1355,6 +1370,7 @@ func errNetworkError(err error) bool {
 		case errors.Is(opErr.Err, syscall.ECONNREFUSED),
 			errors.Is(opErr.Err, syscall.EINVAL),
 			errors.Is(opErr.Err, syscall.ENETUNREACH),
+			errors.Is(opErr.Err, syscall.EHOSTUNREACH),
 			errors.Is(opErr.Err, windowsENETUNREACH),
 			errors.Is(opErr.Err, windowsEINVAL),
 			errors.Is(opErr.Err, windowsECONNREFUSED),

@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -139,5 +140,49 @@ func TestPFAddressFamily(t *testing.T) {
 		if got := pfAddressFamily(tt.ip); got != tt.want {
 			t.Errorf("pfAddressFamily(%q) = %q, want %q", tt.ip, got, tt.want)
 		}
+	}
+}
+
+func TestIsResourceExhaustion(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		output []byte
+		want   bool
+	}{
+		{
+			name: "exec start failure",
+			err:  errors.New("fork/exec /sbin/pfctl: resource temporarily unavailable"),
+			want: true,
+		},
+		{
+			name:   "fd exhaustion from stderr output",
+			err:    errors.New("exit status 1"),
+			output: []byte("pfctl: Pipe: Too many open files"),
+			want:   true,
+		},
+		{
+			name: "process exhaustion from wrapped restore error",
+			err:  errors.New("failed to dump running filter rules: exit status 1 (output: too many processes)"),
+			want: true,
+		},
+		{
+			name:   "ordinary pf syntax failure",
+			err:    errors.New("exit status 1"),
+			output: []byte("pfctl: syntax error"),
+			want:   false,
+		},
+		{
+			name: "nil error and empty output",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isResourceExhaustion(tt.err, tt.output); got != tt.want {
+				t.Fatalf("isResourceExhaustion() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
