@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 
 	"tailscale.com/net/netmon"
@@ -24,6 +25,11 @@ func dnsFns() []dnsFn {
 }
 
 func dns4() []string {
+	// Skip route-based DNS discovery on Android
+	if runtime.GOOS == "android" {
+		return nil
+	}
+
 	f, err := os.Open(v4RouteFile)
 	if err != nil {
 		return nil
@@ -64,6 +70,11 @@ func dns4() []string {
 }
 
 func dns6() []string {
+	// Skip route-based DNS discovery on Android
+	if runtime.GOOS == "android" {
+		return nil
+	}
+
 	f, err := os.Open(v6RouteFile)
 	if err != nil {
 		return nil
@@ -98,6 +109,11 @@ func dns6() []string {
 }
 
 func dnsFromSystemdResolver() []string {
+	// Skip systemd resolver on Android
+	if runtime.GOOS == "android" {
+		return nil
+	}
+
 	c, err := resolvconffile.ParseFile("/run/systemd/resolve/resolv.conf")
 	if err != nil {
 		return nil
