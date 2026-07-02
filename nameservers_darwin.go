@@ -25,6 +25,12 @@ func dnsFns() []dnsFn {
 func getDNSFromScutil() []string {
 	logger := *ProxyLogger.Load()
 
+	// Skip scutil on mobile platforms - not available in sandbox
+	if isMobile() {
+		Log(context.Background(), logger.Debug(), "skipping scutil DNS discovery on mobile platform")
+		return nil
+	}
+
 	const (
 		maxRetries    = 10
 		retryInterval = 100 * time.Millisecond
@@ -89,6 +95,11 @@ func getDNSFromScutil() []string {
 }
 
 func getDHCPNameservers(iface string) ([]string, error) {
+	// Skip ipconfig on mobile platforms - not available in sandbox
+	if isMobile() {
+		return nil, fmt.Errorf("ipconfig not available on mobile")
+	}
+
 	// Run the ipconfig command for the given interface.
 	cmd := exec.Command("ipconfig", "getpacket", iface)
 	output, err := cmd.Output()
@@ -201,6 +212,11 @@ func getAllDHCPNameservers() []string {
 }
 
 func patchNetIfaceName(iface *net.Interface) (bool, error) {
+	// Skip networksetup on mobile platforms - not available in sandbox
+	if isMobile() {
+		return false, nil
+	}
+
 	b, err := exec.Command("networksetup", "-listnetworkserviceorder").Output()
 	if err != nil {
 		return false, err
