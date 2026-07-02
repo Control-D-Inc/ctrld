@@ -1,6 +1,13 @@
 package ctrld
 
+import "runtime"
+
 type dnsFn func() []string
+
+// isMobile reports whether the current OS is a mobile platform.
+func isMobile() bool {
+	return runtime.GOOS == "android" || runtime.GOOS == "ios"
+}
 
 // nameservers returns DNS nameservers from system settings.
 func nameservers() []string {
