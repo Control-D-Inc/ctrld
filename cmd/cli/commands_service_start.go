@@ -124,7 +124,7 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	reportSetDnsOk := func(sockDir string) {
 		if cc := newSocketControlClient(ctx, s, sockDir); cc != nil {
 			if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
-				if iface == "auto" {
+				if iface == autoIface {
 					iface = defaultIfaceName()
 				}
 				res := &ifaceResponse{}
@@ -456,7 +456,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			return startCmd.RunE(cmd, args)
 		},
 	}
-	startCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Update DNS setting for iface, "auto" means the default interface gateway`)
+	startCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", autoIface, `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmdAlias.Flags().AddFlagSet(startCmd.Flags())
 
 	return startCmd, startCmdAlias

@@ -305,7 +305,7 @@ func onlyInterceptFlags(args []string) bool {
 			} else {
 				return false
 			}
-		case arg == "--iface=auto" || arg == "--iface" || arg == "auto":
+		case arg == "--iface="+autoIface || arg == "--iface" || arg == autoIface:
 			// Auto-added by startCmdAlias or its value; safe to ignore.
 			continue
 		default:

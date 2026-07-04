@@ -32,7 +32,7 @@ func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
 
 	p.cfg = &cfg
 	if iface == "" {
-		iface = "auto"
+		iface = autoIface
 	}
 	p.preRun()
 	if ir := runningIface(s); ir != nil {

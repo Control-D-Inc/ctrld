@@ -55,7 +55,7 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 	}
 
 	if iface == "" {
-		iface = "auto"
+		iface = autoIface
 	}
 	p.preRun()
 	if ir := runningIface(s); ir != nil {
