@@ -451,18 +451,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	p.onStopped = append(p.onStopped, func() {
 		// restore static DNS settings or DHCP
 		p.resetDNS(false, true)
-		// Iterate over all physical interfaces and restore static DNS if a saved static config exists.
-		withEachPhysicalInterfaces("", "restore static DNS", func(i *net.Interface) error {
-			file := savedStaticDnsSettingsFilePath(i)
-			if _, err := os.Stat(file); err == nil {
-				if err := restoreDNS(i); err != nil {
-					mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
-				} else {
-					mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
-				}
-			}
-			return nil
-		})
+		restoreSavedStaticDNS("", false)
 	})
 
 	close(waitCh)
@@ -826,7 +815,7 @@ func processLogAndCacheFlags(v *viper.Viper, cfg *ctrld.Config) {
 }
 
 func netInterface(ifaceName string) (*net.Interface, error) {
-	if ifaceName == "auto" {
+	if ifaceName == autoIface {
 		ifaceName = defaultIfaceName()
 	}
 	var iface *net.Interface
@@ -1112,23 +1101,7 @@ func uninstall(p *prog, s service.Service) {
 		}
 		// restore static DNS settings or DHCP
 		p.resetDNS(false, true)
-
-		// Iterate over all physical interfaces and restore DNS if a saved static config exists.
-		withEachPhysicalInterfaces(p.runningIface, "restore static DNS", func(i *net.Interface) error {
-			file := savedStaticDnsSettingsFilePath(i)
-			if _, err := os.Stat(file); err == nil {
-				if err := restoreDNS(i); err != nil {
-					mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
-				} else {
-					mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
-					err = os.Remove(file)
-					if err != nil {
-						mainLog.Load().Debug().Err(err).Msgf("Could not remove saved static DNS file for interface %s", i.Name)
-					}
-				}
-			}
-			return nil
-		})
+		restoreSavedStaticDNS(p.runningIface, true)
 
 		if router.Name() != "" {
 			mainLog.Load().Debug().Msg("Router cleanup")
@@ -1139,6 +1112,26 @@ func uninstall(p *prog, s service.Service) {
 		mainLog.Load().Notice().Msg("Service uninstalled")
 		return
 	}
+}
+
+// restoreSavedStaticDNS restores DNS from saved static config files on physical interfaces.
+func restoreSavedStaticDNS(excludeIfaceName string, removeSaved bool) {
+	withEachPhysicalInterfaces(excludeIfaceName, "restore static DNS", func(i *net.Interface) error {
+		file := savedStaticDnsSettingsFilePath(i)
+		if _, err := os.Stat(file); err == nil {
+			if err := restoreDNS(i); err != nil {
+				mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
+			} else {
+				mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)
+				if removeSaved {
+					if err := os.Remove(file); err != nil {
+						mainLog.Load().Debug().Err(err).Msgf("Could not remove saved static DNS file for interface %s", i.Name)
+					}
+				}
+			}
+		}
+		return nil
+	})
 }
 
 func validateConfig(cfg *ctrld.Config) error {
@@ -2069,6 +2062,23 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	return nil
 }
 
+// ensureRunningIfaceForInvalidUninstall populates p.runningIface before the
+// invalid-device self-uninstall resets DNS. This path can run early during
+// service startup (e.g. right after a reboot) before the running interface is
+// otherwise known. resetDNS, via resetDNSForRunningIface, silently skips DNS
+// restoration when p.runningIface is empty, which would leave the OS pointed at
+// ctrld's local listener after the service is removed. See issue-556.
+func ensureRunningIfaceForInvalidUninstall(p *prog, s service.Service) {
+	if iface == "" {
+		iface = autoIface
+	}
+	p.preRun()
+	if ir := runningIface(s); ir != nil {
+		p.runningIface = ir.Name
+		p.requiredMultiNICsConfig = ir.All
+	}
+}
+
 // uninstallInvalidCdUID performs self-uninstallation because the ControlD device does not exist.
 func uninstallInvalidCdUID(p *prog, logger zerolog.Logger, doStop bool) bool {
 	s, err := newService(p, svcConfig)
@@ -2076,8 +2086,13 @@ func uninstallInvalidCdUID(p *prog, logger zerolog.Logger, doStop bool) bool {
 		logger.Warn().Err(err).Msg("failed to create new service")
 		return false
 	}
+	ensureRunningIfaceForInvalidUninstall(p, s)
 	// restore static DNS settings or DHCP
 	p.resetDNS(false, true)
+	// The invalid-device path may run early during service startup before runningIface
+	// is known. Restore every saved static DNS file so uninstalling does not leave the
+	// OS pointed at ctrld's local listener after the service is removed.
+	restoreSavedStaticDNS("", true)
 
 	tasks := []task{{s.Uninstall, true, "Uninstall"}}
 	if doTasks(tasks) {

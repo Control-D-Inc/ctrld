@@ -394,7 +394,7 @@ func preserveBoundListeners(newListeners, curListeners map[string]*ctrld.Listene
 }
 
 func (p *prog) preRun() {
-	if iface == "auto" {
+	if iface == autoIface {
 		iface = defaultIfaceName()
 		p.requiredMultiNICsConfig = requiredMultiNICsConfig()
 	}

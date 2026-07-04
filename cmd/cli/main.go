@@ -56,6 +56,9 @@ const (
 	cdOrgFlagName          = "cd-org"
 	customHostnameFlagName = "custom-hostname"
 	nextdnsFlagName        = "nextdns"
+
+	// autoIface is the sentinel --iface value meaning "use the default gateway interface".
+	autoIface = "auto"
 )
 
 func init() {
