@@ -326,6 +326,18 @@ func (p *prog) runWait() {
 
 		p.mu.Lock()
 		*p.cfg = *newCfg
+		// In DNS-intercept mode on macOS, the DNS listener is bound once at startup and is
+		// NOT re-bound on reload (see prog.run: serveDNS is started only when !reload). When
+		// the configured/generated port (e.g. 127.0.0.1:53) is unavailable at startup because
+		// mDNSResponder owns *:53, ctrld falls back to an alternate local port (e.g. 5354).
+		// The on-disk config still declares 53, so adopting it here would revert p.cfg to a
+		// port nothing is listening on, and the pf rdr rules/probes rebuilt from p.cfg would
+		// target a dead port. Since a reload cannot move the running listener anyway, keep
+		// p.cfg pointing at the actual bound listener. The on-disk config (written above) is
+		// left unchanged. See #551.
+		if dnsIntercept && runtime.GOOS == "darwin" {
+			preserveBoundListeners(p.cfg.Listener, curListener)
+		}
 		p.mu.Unlock()
 
 		p.Notice().Msg("Reloading config successfully")
@@ -335,6 +347,39 @@ func (p *prog) runWait() {
 			p.Debug().Msg("Reload done signal sent")
 		default:
 		}
+	}
+}
+
+// preserveBoundListeners overrides the IP/Port of each listener in newListeners with the
+// actual bound address from curListeners when they differ, logging the divergence. It is used
+// on config reload in DNS-intercept mode where the running listener is never re-bound, so a
+// port change on disk (e.g. reverting a fallback 5354 back to the generated 53) must not be
+// applied to the in-memory config that drives pf rdr rules and probes.
+//
+// Preservation is limited to fallback-eligible (default/unset, i.e. 127.0.0.1:53) listeners.
+// An explicit, non-default listener in the reloaded config is an intentional change that must
+// be applied: tryUpdateListenerConfigIntercept binds explicit listeners exactly (no fallback),
+// and the control-server reload handler detects the IP/port diff to trigger a restart that
+// re-binds. Reverting an explicit change here would make that comparison return 200 instead of
+// 201, silently dropping the new listener. See #551.
+func preserveBoundListeners(newListeners, curListeners map[string]*ctrld.ListenerConfig) {
+	for n, curLc := range curListeners {
+		newLc := newListeners[n]
+		if newLc == nil || curLc == nil {
+			continue
+		}
+		if newLc.IP == curLc.IP && newLc.Port == curLc.Port {
+			continue
+		}
+		if isExplicitInterceptListener(newLc.IP, newLc.Port) {
+			continue
+		}
+		mainLog.Load().Info().
+			Str("configured", net.JoinHostPort(newLc.IP, strconv.Itoa(newLc.Port))).
+			Str("actual", net.JoinHostPort(curLc.IP, strconv.Itoa(curLc.Port))).
+			Msg("DNS intercept: preserving actual bound listener across reload; on-disk config port not applied to running listener")
+		newLc.IP = curLc.IP
+		newLc.Port = curLc.Port
 	}
 }
 
