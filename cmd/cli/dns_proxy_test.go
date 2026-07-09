@@ -405,6 +405,8 @@ func Test_isPrivatePtrLookup(t *testing.T) {
 		{"CGNAT", newDnsMsgPtr("100.66.27.28", t), true},
 		{"Loopback", newDnsMsgPtr("127.0.0.1", t), true},
 		{"Link Local Unicast", newDnsMsgPtr("fe80::69f6:e16e:8bdb:433f", t), true},
+		// RFC 7335 IPv4 Service Continuity Prefix (464XLAT/DS-Lite CLAT), see #552.
+		{"464XLAT CLAT host", newDnsMsgPtr("192.0.0.2", t), true},
 		{"Public IP", newDnsMsgPtr("8.8.8.8", t), false},
 	}
 	for _, tc := range tests {
@@ -452,6 +454,11 @@ func Test_isWanClient(t *testing.T) {
 		{"CGNAT", &net.UDPAddr{IP: net.ParseIP("100.66.27.28")}, false},
 		{"Loopback", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")}, false},
 		{"Link Local Unicast", &net.UDPAddr{IP: net.ParseIP("fe80::69f6:e16e:8bdb:433f")}, false},
+		// RFC 7335 IPv4 Service Continuity Prefix (464XLAT/DS-Lite CLAT), see #552.
+		{"464XLAT PLAT side", &net.UDPAddr{IP: net.ParseIP("192.0.0.1")}, false},
+		{"464XLAT CLAT host", &net.UDPAddr{IP: net.ParseIP("192.0.0.2")}, false},
+		// Outside the /29 but inside 192.0.0.0/24: still WAN (fix is scoped to /29).
+		{"192.0.0.0/24 outside /29", &net.UDPAddr{IP: net.ParseIP("192.0.0.100")}, true},
 		{"Public", &net.UDPAddr{IP: net.ParseIP("8.8.8.8")}, true},
 	}
 	for _, tc := range tests {

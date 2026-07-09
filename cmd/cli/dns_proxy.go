@@ -1299,7 +1299,8 @@ func isPrivatePtrLookup(m *dns.Msg) bool {
 			return addr.IsPrivate() ||
 				addr.IsLoopback() ||
 				addr.IsLinkLocalUnicast() ||
-				tsaddr.CGNATRange().Contains(addr)
+				tsaddr.CGNATRange().Contains(addr) ||
+				isServiceContinuityAddr(addr)
 		}
 	}
 	return false
@@ -1337,6 +1338,20 @@ func isLanHostname(name string) bool {
 		strings.HasSuffix(name, ".local")
 }
 
+// ipv4ServiceContinuityPrefix is the RFC 7335 IPv4 Service Continuity Prefix
+// (192.0.0.0/29), used by the CLAT in 464XLAT/DS-Lite transition setups. On such
+// networks (common on IPv6-only cellular carriers and iPhone hotspots) the local
+// machine's DNS queries reach ctrld with a source in this range (e.g. 192.0.0.2),
+// so they must be treated as local, not WAN. Go's netip.IsPrivate does not cover
+// this range — the same reason the CGNAT range is special-cased below. See #552.
+var ipv4ServiceContinuityPrefix = netip.MustParsePrefix("192.0.0.0/29")
+
+// isServiceContinuityAddr reports whether ip is in the RFC 7335 IPv4 Service
+// Continuity Prefix (464XLAT/DS-Lite CLAT).
+func isServiceContinuityAddr(ip netip.Addr) bool {
+	return ipv4ServiceContinuityPrefix.Contains(ip)
+}
+
 // isWanClient reports whether the input is a WAN address.
 func isWanClient(na net.Addr) bool {
 	var ip netip.Addr
@@ -1347,7 +1362,8 @@ func isWanClient(na net.Addr) bool {
 		!ip.IsPrivate() &&
 		!ip.IsLinkLocalUnicast() &&
 		!ip.IsLinkLocalMulticast() &&
-		!tsaddr.CGNATRange().Contains(ip)
+		!tsaddr.CGNATRange().Contains(ip) &&
+		!isServiceContinuityAddr(ip)
 }
 
 // isIPv6LoopbackListener reports whether the listener address is [::1].
