@@ -91,6 +91,20 @@ ctrld uses an adaptive strategy (matching [Tailscale's approach](https://github.
    the empty GP parent key. This ensures DNS Client stays in "local mode" where
    the local-path rule activates immediately via `paramchange`.
 
+### Reproducing the Empty GP Parent Case
+
+This is a production code reference, so the temporary repro script is not kept in
+the repository. For MR !942 review, the test script and exact before/after steps
+are posted in the MR discussion. The scenario to compare is:
+
+1. Run the same approved PowerShell repro script against a pre-fix build and this
+   branch with the same ctrld config.
+2. Create an empty GP NRPT parent key while ctrld is running in DNS intercept mode.
+3. Confirm pre-fix logs can spend policy refresh/paramchange retries while the GP
+   parent remains empty.
+4. Confirm post-fix logs clean the empty GP parent, send one NRPT-change signal,
+   and re-probe before normal retries.
+
 ### VPN Coexistence
 
 NRPT uses most-specific-match. VPN NRPT rules for specific domains (e.g.,
