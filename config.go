@@ -247,6 +247,8 @@ type ServiceConfig struct {
 	ForceRefetchWaitTime    *int           `mapstructure:"force_refetch_wait_time" toml:"force_refetch_wait_time,omitempty"`
 	LeakOnUpstreamFailure   *bool          `mapstructure:"leak_on_upstream_failure" toml:"leak_on_upstream_failure,omitempty"`
 	InterceptMode           string         `mapstructure:"intercept_mode" toml:"intercept_mode,omitempty" validate:"omitempty,oneof=off dns hard"`
+	NRPTRecoveryMaxAttempts *int           `mapstructure:"nrpt_recovery_max_attempts" toml:"nrpt_recovery_max_attempts,omitempty" validate:"omitempty,gte=0"`
+	NRPTRecoveryCooldown    *time.Duration `mapstructure:"nrpt_recovery_cooldown" toml:"nrpt_recovery_cooldown,omitempty"`
 	// FirewallMode controls the DNS-resolved IP allowlist. When "on", only IPs
 	// that were successfully resolved by ctrld are allowed for outbound connections.
 	// This closes the "DNS gap" where apps bypass DNS policy using hardcoded IPs.

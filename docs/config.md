@@ -291,6 +291,22 @@ If a remote upstream fails to resolve a query or is unreachable, `ctrld` will fo
 - Required: no
 - Default: true on Windows, MacOS and Linux.
 
+### nrpt_recovery_max_attempts
+Windows DNS intercept mode uses NRPT health probes and recovery when Windows stops routing queries to the local `ctrld` listener. This limits how many consecutive recovery flows can run before `ctrld` enters a cooldown and stops making policy/Dnscache changes.
+
+Set to `0` to disable this circuit breaker and keep retrying indefinitely.
+
+- Type: integer
+- Required: no
+- Default: 0 (unlimited, current behavior)
+
+### nrpt_recovery_cooldown
+Cooldown duration after `nrpt_recovery_max_attempts` consecutive Windows NRPT recovery flows. During cooldown, `ctrld` logs the suppressed recovery and avoids additional `RefreshPolicyEx`, Dnscache `paramchange`, and DNS cache flush calls.
+
+- Type: time duration string
+- Required: no
+- Default: 30m
+
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.
 
