@@ -748,7 +748,7 @@ func TestDoQResolve_PreservesRcode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool := newDOQConnPool(uc, []string{"127.0.0.1"})
+	pool := newDOQConnPool(ctx, uc, []string{"127.0.0.1"})
 	t.Cleanup(pool.CloseIdleConnections)
 
 	msg := new(dns.Msg)
@@ -797,7 +797,7 @@ func TestDoQResolve_PreservesWrongQuestion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool := newDOQConnPool(uc, []string{"127.0.0.1"})
+	pool := newDOQConnPool(ctx, uc, []string{"127.0.0.1"})
 	t.Cleanup(pool.CloseIdleConnections)
 
 	msg := new(dns.Msg)

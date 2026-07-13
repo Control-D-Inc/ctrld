@@ -811,6 +811,36 @@ func Test_prog_queryFromSelf(t *testing.T) {
 	})
 }
 
+func Test_sameQuestion(t *testing.T) {
+	mk := func(name string, qtype uint16) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion(name, qtype)
+		return m
+	}
+	tests := []struct {
+		name   string
+		req    *dns.Msg
+		answer *dns.Msg
+		want   bool
+	}{
+		{"identical", mk("example.com.", dns.TypeA), mk("example.com.", dns.TypeA), true},
+		{"case insensitive", mk("Example.COM.", dns.TypeA), mk("example.com.", dns.TypeA), true},
+		{"different name", mk("victim.example.", dns.TypeA), mk("attacker.example.", dns.TypeA), false},
+		{"different type", mk("example.com.", dns.TypeA), mk("example.com.", dns.TypeAAAA), false},
+		{"nil req", nil, mk("example.com.", dns.TypeA), false},
+		{"nil answer", mk("example.com.", dns.TypeA), nil, false},
+		{"empty answer question", mk("example.com.", dns.TypeA), new(dns.Msg), false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameQuestion(tc.req, tc.answer); got != tc.want {
+				t.Errorf("sameQuestion() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // newTestProg creates a properly initialized *prog for testing.
 func newTestProg(t *testing.T) *prog {
 	p := &prog{cfg: testhelper.SampleConfig(t)}
