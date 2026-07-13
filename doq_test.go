@@ -714,3 +714,105 @@ func TestDoQResolve_OversizedResponse_Rejected(t *testing.T) {
 		t.Fatalf("Resolve returned non-nil answer alongside error: %v", answer)
 	}
 }
+
+// frameDoQResponse packs msg and prepends the RFC 9250 2-octet length prefix,
+// producing the exact bytes a DoQ server writes on the wire.
+func frameDoQResponse(t *testing.T, msg *dns.Msg) []byte {
+	t.Helper()
+	b, err := msg.Pack()
+	if err != nil {
+		t.Fatalf("pack response: %v", err)
+	}
+	n := uint16(len(b))
+	return append([]byte{byte(n >> 8), byte(n & 0xFF)}, b...)
+}
+
+// TestDoQResolve_PreservesRcode locks in the fix for
+// github.com/Control-D-Inc/ctrld/issues/322: the DoQ resolver must not rewrite
+// an upstream response with SetReply, which would clobber a SERVFAIL into
+// NOERROR and hide the failure from the proxy's failover logic. The upstream
+// RCODE must survive; only the transaction ID is restored for the client.
+func TestDoQResolve_PreservesRcode(t *testing.T) {
+	t.Parallel()
+
+	// RFC 9250 puts the DNS Message ID at 0 on the wire.
+	resp := new(dns.Msg)
+	resp.SetQuestion("example.com.", dns.TypeA)
+	resp.Response = true
+	resp.Id = 0
+	resp.Rcode = dns.RcodeServerFailure
+
+	server := newMalformedDoQServer(t, frameDoQResponse(t, resp))
+	uc := newMalformedDoQUpstream(t, server.cert, server.addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool := newDOQConnPool(uc, []string{"127.0.0.1"})
+	t.Cleanup(pool.CloseIdleConnections)
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("example.com.", dns.TypeA)
+	msg.RecursionDesired = true
+
+	answer, err := pool.Resolve(ctx, msg)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if answer.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("upstream SERVFAIL was rewritten to %s; failover would be bypassed",
+			dns.RcodeToString[answer.Rcode])
+	}
+	if answer.Id != msg.Id {
+		t.Fatalf("transaction ID not restored: got %d, want %d", answer.Id, msg.Id)
+	}
+}
+
+// TestDoQResolve_PreservesWrongQuestion locks in the fix for
+// github.com/Control-D-Inc/ctrld/issues/322: when an upstream answers a
+// different name than asked, the resolver must preserve the upstream's
+// question rather than rewriting it to the request's question (as SetReply
+// did). Rewriting would hide the mismatch and let wrong-domain records poison
+// the shared cache.
+func TestDoQResolve_PreservesWrongQuestion(t *testing.T) {
+	t.Parallel()
+
+	resp := new(dns.Msg)
+	resp.SetQuestion("attacker.example.", dns.TypeA)
+	resp.Response = true
+	resp.Id = 0
+	resp.Answer = append(resp.Answer, &dns.A{
+		Hdr: dns.RR_Header{
+			Name:   "attacker.example.",
+			Rrtype: dns.TypeA,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		A: net.ParseIP("192.0.2.1"),
+	})
+
+	server := newMalformedDoQServer(t, frameDoQResponse(t, resp))
+	uc := newMalformedDoQUpstream(t, server.cert, server.addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool := newDOQConnPool(uc, []string{"127.0.0.1"})
+	t.Cleanup(pool.CloseIdleConnections)
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("victim.example.", dns.TypeA)
+	msg.RecursionDesired = true
+
+	answer, err := pool.Resolve(ctx, msg)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(answer.Question) == 0 || !strings.EqualFold(answer.Question[0].Name, "attacker.example.") {
+		t.Fatalf("upstream question was rewritten; got %v, want the upstream's attacker.example.",
+			answer.Question)
+	}
+	if answer.Id != msg.Id {
+		t.Fatalf("transaction ID not restored: got %d, want %d", answer.Id, msg.Id)
+	}
+}
