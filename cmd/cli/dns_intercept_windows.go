@@ -278,6 +278,9 @@ type wfpState struct {
 	loopbackProtectActive bool
 	// loopbackPermitIDs stores the filter IDs for the loopback protect permits.
 	loopbackPermitIDs []uint64
+	// nrptRecoveryLimiter prevents repeated Windows policy/Dnscache signaling
+	// when another agent keeps putting NRPT back into a broken state.
+	nrptRecoveryLimiter nrptRecoveryLimiter
 }
 
 // Lazy-loaded WFP DLL procedures.
@@ -343,9 +346,10 @@ const (
 //   - GP path: SOFTWARE\Policies\...\DnsPolicyConfig (Group Policy)
 //   - Local path: SYSTEM\CurrentControlSet\...\DnsPolicyConfig (service store)
 //
-// If ANY rules exist in the GP path (from IT policy, VPN, MDM, etc.), DNS Client
-// enters "GP mode" and ignores ALL local-path rules entirely. Conversely, if the
-// GP path is empty/absent, DNS Client reads from the local path only.
+// If the GP path contains real rules (from IT policy, VPN, MDM, etc.), DNS
+// Client enters "GP mode" and ignores ALL local-path rules entirely. An empty GP
+// parent key is worse: it still puts DNS Client in GP mode, but contributes no
+// usable rule, so our local catch-all is hidden until that empty parent is gone.
 //
 // Strategy (matching Tailscale's approach):
 //   - Always write to the local path (baseline for non-domain machines).
@@ -395,18 +399,20 @@ func otherGPRulesExist() bool {
 	return false
 }
 
-// cleanGPPath removes our CtrldCatchAll rule from the GP path and deletes
-// the GP DnsPolicyConfig parent key if no other rules remain. Removing the
-// empty GP key is critical: its mere existence forces DNS Client into "GP mode"
-// where local-path rules are ignored.
-func cleanGPPath() {
+// cleanGPPath removes only ctrld's GP-path rule and deletes the GP parent when
+// no rules remain. The return value tells callers whether the parent key was
+// actually deleted, which means DNS Client should be signaled once.
+//
+// Do not leave an empty GP parent behind: Windows treats the parent key itself
+// as the policy store boundary, so an empty key can still hide local-path rules.
+func cleanGPPath() bool {
 	// Delete our specific rule.
 	registry.DeleteKey(registry.LOCAL_MACHINE, nrptBaseKey+`\`+nrptRuleName)
 
 	// If the GP parent key is now empty, delete it entirely to exit "GP mode".
 	k, err := registry.OpenKey(registry.LOCAL_MACHINE, nrptBaseKey, registry.ENUMERATE_SUB_KEYS)
 	if err != nil {
-		return // Key doesn't exist — clean state.
+		return false // Key doesn't exist — clean state.
 	}
 	names, err := k.ReadSubKeyNames(-1)
 	k.Close()
@@ -414,12 +420,14 @@ func cleanGPPath() {
 		if len(names) > 0 {
 			mainLog.Load().Debug().Strs("remaining", names).Msg("DNS intercept: GP path has other rules, leaving parent key")
 		}
-		return
+		return false
 	}
 	// Empty — delete it to exit "GP mode".
 	if err := registry.DeleteKey(registry.LOCAL_MACHINE, nrptBaseKey); err == nil {
 		mainLog.Load().Info().Msg("DNS intercept: deleted empty GP DnsPolicyConfig key (exits GP mode)")
+		return true
 	}
+	return false
 }
 
 // writeNRPTRule writes a single NRPT catch-all rule at the given registry keyPath.
@@ -542,10 +550,11 @@ func refreshNRPTPolicy() {
 // Group Policy refresh so NRPT changes take effect immediately.
 // Uses DnsFlushResolverCache from dnsapi.dll + RefreshPolicyEx from userenv.dll.
 func flushDNSCache() {
-	// Step 1: Refresh GP so DNS Client loads the new NRPT rules from registry.
 	refreshNRPTPolicy()
+	flushDNSCacheOnly()
+}
 
-	// Step 2: Flush the DNS cache so stale entries from pre-NRPT resolution are cleared.
+func flushDNSCacheOnly() {
 	if err := dnsapiDLL.Load(); err == nil {
 		if err := procDnsFlushResolverCache.Find(); err == nil {
 			ret, _, _ := procDnsFlushResolverCache.Call()
@@ -555,12 +564,17 @@ func flushDNSCache() {
 			}
 		}
 	}
-	// Fallback: use ipconfig /flushdns.
 	if out, err := exec.Command("ipconfig", "/flushdns").CombinedOutput(); err != nil {
 		mainLog.Load().Debug().Msgf("DNS intercept: ipconfig /flushdns failed: %v: %s", err, string(out))
 	} else {
 		mainLog.Load().Debug().Msg("DNS intercept: flushed DNS resolver cache via ipconfig /flushdns")
 	}
+}
+
+func signalNRPTChange() {
+	refreshNRPTPolicy()
+	sendParamChange()
+	flushDNSCacheOnly()
 }
 
 // startDNSIntercept activates WFP-based DNS interception on Windows.
@@ -598,21 +612,19 @@ func (p *prog) startDNSIntercept() error {
 	mainLog.Load().Info().Msgf("DNS intercept: initializing (mode: %s)", interceptMode)
 	logNRPTParentKeyState("pre-write")
 
-	// Two-phase empty parent key recovery: if the GP DnsPolicyConfig key exists
-	// but is empty, DNS Client has cached a "no rules" state and won't accept
-	// new rules even after they're written. Delete the empty key and signal DNS
-	// Client to reset before writing our rule.
-	// Two-phase recovery handles its own 2s signaling burst internally.
-	cleanEmptyNRPTParent()
+	// Empty parent key recovery: if the GP DnsPolicyConfig key exists but is
+	// empty, DNS Client enters GP mode and hides local rules. Delete empty
+	// parents first, then send one change signal so DNS Client drops stale state.
+	if cleanEmptyNRPTParent() {
+		signalNRPTChange()
+	}
 
 	if err := addNRPTCatchAllRule(listenerIP); err != nil {
 		return fmt.Errorf("dns intercept: failed to add NRPT catch-all rule: %w", err)
 	}
 	logNRPTParentKeyState("post-write")
 	state.nrptActive = true
-	refreshNRPTPolicy()
-	sendParamChange()
-	flushDNSCache()
+	signalNRPTChange()
 	mainLog.Load().Info().Msgf("DNS intercept: NRPT catch-all rule active — all DNS queries directed to %s", listenerIP)
 
 	// Step 2: In hard mode, also set up WFP filters to block non-local DNS.
@@ -1555,7 +1567,7 @@ func (p *prog) scheduleDelayedRechecks() {
 					mainLog.Load().Error().Err(err).Msg("DNS intercept: failed to re-add NRPT catch-all rule")
 					state.nrptActive = false
 				} else {
-					flushDNSCache()
+					signalNRPTChange()
 					mainLog.Load().Info().Msg("DNS intercept: NRPT catch-all rule restored")
 				}
 			}
@@ -1593,14 +1605,22 @@ func (p *prog) nrptHealthMonitor(state *wfpState) {
 
 			// Step 1: Check registry key exists.
 			if !nrptCatchAllRuleExists() {
+				now := time.Now()
+				if ok, wait := state.nrptRecoveryLimiter.allow(now, p.cfg); !ok {
+					if state.nrptRecoveryLimiter.shouldLogSkip(now) {
+						mainLog.Load().Warn().Dur("remaining", wait).
+							Msg("DNS intercept: NRPT rule restore suppressed after repeated recovery flows")
+					}
+					continue
+				}
 				mainLog.Load().Warn().Msg("DNS intercept: NRPT health check — catch-all rule missing, restoring")
 				if err := addNRPTCatchAllRule(state.listenerIP); err != nil {
 					mainLog.Load().Error().Err(err).Msg("DNS intercept: failed to restore NRPT catch-all rule")
 					state.nrptActive = false
 					continue
 				}
-				refreshNRPTPolicy()
-				flushDNSCache()
+				signalNRPTChange()
+				state.nrptRecoveryLimiter.recordRecoveryFlow(time.Now(), p.cfg)
 				mainLog.Load().Info().Msg("DNS intercept: NRPT catch-all rule restored by health monitor")
 				// After restoring, verify it's actually working.
 				go p.nrptProbeAndHeal()
@@ -1612,6 +1632,8 @@ func (p *prog) nrptHealthMonitor(state *wfpState) {
 			if !p.probeNRPT() {
 				mainLog.Load().Warn().Msg("DNS intercept: NRPT health check — rule present but probe failed, running heal cycle")
 				go p.nrptProbeAndHeal()
+			} else {
+				state.nrptRecoveryLimiter.recordStableSuccess()
 			}
 
 			// Step 3: In hard mode, also verify WFP sublayer.
@@ -1710,43 +1732,39 @@ func sendParamChange() {
 }
 
 // cleanEmptyNRPTParent removes empty NRPT parent keys that block activation.
-// An empty DnsPolicyConfig key (exists but no subkeys) causes DNS Client to
-// cache "no rules" and ignore subsequently-added rules.
+// Empty GP and local parents have different failure shapes:
+//   - empty GP parent: DNS Client is in GP mode and ignores local-path rules;
+//   - empty local parent: DNS Client can cache an empty local policy store.
 //
-// Also cleans the GP path entirely if it has no non-ctrld rules, since the GP
-// path's existence forces DNS Client into "GP mode" where it ignores the local
-// service store path.
+// This helper only changes registry state. The caller sends the single
+// RefreshPolicyEx/paramchange/flush signal after it knows cleanup occurred.
 //
-// Returns true if cleanup was performed (caller should add a delay).
+// Returns true if cleanup was performed (caller should signal DNS Client).
 func cleanEmptyNRPTParent() bool {
-	cleaned := false
-
 	// Always clean the GP path — its existence blocks local path activation.
-	cleanGPPath()
+	cleaned := cleanGPPath()
 
 	// Clean empty local/direct path parent key.
-	k, err := registry.OpenKey(registry.LOCAL_MACHINE, nrptDirectKey, registry.ENUMERATE_SUB_KEYS)
-	if err != nil {
-		return false
-	}
-	names, err := k.ReadSubKeyNames(-1)
-	k.Close()
-	if err != nil || len(names) > 0 {
-		return false
+	if !nrptParentKeyEmpty(nrptDirectKey) {
+		return cleaned
 	}
 
 	mainLog.Load().Warn().Msg("DNS intercept: found empty NRPT local parent key (blocks activation) — removing")
 	if err := registry.DeleteKey(registry.LOCAL_MACHINE, nrptDirectKey); err != nil {
 		mainLog.Load().Warn().Err(err).Msg("DNS intercept: failed to delete empty NRPT local parent key")
+		return cleaned
+	}
+	return true
+}
+
+func nrptParentKeyEmpty(keyPath string) bool {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, keyPath, registry.ENUMERATE_SUB_KEYS)
+	if err != nil {
 		return false
 	}
-	cleaned = true
-
-	// Signal DNS Client to process the deletion and reset its internal cache.
-	mainLog.Load().Info().Msg("DNS intercept: empty NRPT parent key removed — signaling DNS Client")
-	sendParamChange()
-	flushDNSCache()
-	return cleaned
+	names, err := k.ReadSubKeyNames(-1)
+	k.Close()
+	return err == nil && len(names) == 0
 }
 
 // logNRPTParentKeyState logs the state of both NRPT registry paths for diagnostics.
@@ -1783,17 +1801,38 @@ func logNRPTParentKeyState(context string) {
 // nrptProbeAndHeal runs the NRPT probe with retries and escalating remediation.
 // Called asynchronously after startup and from the health monitor.
 //
-// Retry sequence (each attempt: GP refresh + paramchange + flush → sleep → probe):
-//  1. Immediate probe
-//  2. GP refresh + paramchange + flush → 1s → probe
-//  3. GP refresh + paramchange + flush → 2s → probe
-//  4. GP refresh + paramchange + flush → 4s → probe
+// Retry sequence:
+//  1. Immediate probe.
+//  2. If the GP parent is empty, clean it immediately, signal once, then probe.
+//     This is intentionally before the normal retry loop: policy refresh and
+//     Dnscache paramchange cannot make local rules visible while GP mode is
+//     selected by an empty GP parent.
+//  3. Otherwise, signal DNS Client with increasing backoff between probes.
 func (p *prog) nrptProbeAndHeal() {
+	state, _ := p.dnsInterceptState.(*wfpState)
+	if state != nil {
+		now := time.Now()
+		if ok, wait := state.nrptRecoveryLimiter.allow(now, p.cfg); !ok {
+			if state.nrptRecoveryLimiter.shouldLogSkip(now) {
+				mainLog.Load().Warn().Dur("remaining", wait).
+					Msg("DNS intercept: NRPT recovery suppressed after repeated failed recovery flows")
+			}
+			return
+		}
+	}
+
 	if !nrptProbeRunning.CompareAndSwap(false, true) {
 		mainLog.Load().Debug().Msg("DNS intercept: NRPT probe already running, skipping")
 		return
 	}
 	defer nrptProbeRunning.Store(false)
+
+	remediated := false
+	defer func() {
+		if remediated && state != nil {
+			state.nrptRecoveryLimiter.recordRecoveryFlow(time.Now(), p.cfg)
+		}
+	}()
 
 	mainLog.Load().Info().Msg("DNS intercept: starting NRPT verification probe sequence")
 
@@ -1805,17 +1844,37 @@ func (p *prog) nrptProbeAndHeal() {
 		mainLog.Load().Info().Msg("DNS intercept: NRPT verified working")
 		return
 	}
+	remediated = true
 
-	// Attempts 2-4: GP refresh + paramchange + flush with increasing backoff
+	// If the GP parent exists but is empty, do not burn retries on Windows
+	// signaling. Those retries create SIEM noise but cannot succeed because DNS
+	// Client is still reading the empty GP store instead of the populated local
+	// store. Delete the blocker, send one notification, then re-probe.
+	if nrptParentKeyEmpty(nrptBaseKey) {
+		mainLog.Load().Warn().Msg("DNS intercept: NRPT probe failed with empty GP parent — cleaning before retry signaling")
+		if cleanEmptyNRPTParent() {
+			signalNRPTChange()
+			time.Sleep(1 * time.Second)
+			logNRPTParentKeyState("empty-gp-after-clean")
+			if p.probeNRPT() {
+				mainLog.Load().Info().Msg("DNS intercept: NRPT verified working after empty GP parent cleanup")
+				return
+			}
+		}
+		if nrptParentKeyEmpty(nrptBaseKey) {
+			mainLog.Load().Warn().Msg("DNS intercept: empty GP NRPT parent still present after cleanup; skipping redundant policy refresh retries")
+			return
+		}
+	}
+
+	// Attempts 2-4: signal DNS Client with increasing backoff between probes.
 	delays := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
 	for i, delay := range delays {
 		attempt := i + 2
 		mainLog.Load().Info().Int("attempt", attempt).Dur("delay", delay).
-			Msg("DNS intercept: NRPT probe failed, retrying with GP refresh + paramchange")
+			Msg("DNS intercept: NRPT probe failed, retrying with policy refresh + paramchange")
 		logNRPTParentKeyState(fmt.Sprintf("probe-attempt-%d", attempt))
-		refreshNRPTPolicy()
-		sendParamChange()
-		flushDNSCache()
+		signalNRPTChange()
 		time.Sleep(delay)
 		if p.probeNRPT() {
 			mainLog.Load().Info().Int("attempt", attempt).
@@ -1829,7 +1888,7 @@ func (p *prog) nrptProbeAndHeal() {
 	// signal DNS Client to forget it, wait, then re-add and signal again.
 	mainLog.Load().Warn().Msg("DNS intercept: all probes failed — attempting two-phase NRPT recovery (delete → signal → re-add)")
 	listenerIP := "127.0.0.1"
-	if state, ok := p.dnsInterceptState.(*wfpState); ok {
+	if state != nil {
 		listenerIP = state.listenerIP
 	}
 
@@ -1837,9 +1896,7 @@ func (p *prog) nrptProbeAndHeal() {
 	_ = removeNRPTCatchAllRule()
 	// If parent key is now empty after removing our rule, delete it too.
 	cleanEmptyNRPTParent()
-	refreshNRPTPolicy()
-	sendParamChange()
-	flushDNSCache()
+	signalNRPTChange()
 	logNRPTParentKeyState("nuclear-after-delete")
 
 	// Wait for DNS Client to process the deletion.
@@ -1850,9 +1907,7 @@ func (p *prog) nrptProbeAndHeal() {
 		mainLog.Load().Error().Err(err).Msg("DNS intercept: failed to re-add NRPT after nuclear recovery")
 		return
 	}
-	refreshNRPTPolicy()
-	sendParamChange()
-	flushDNSCache()
+	signalNRPTChange()
 	logNRPTParentKeyState("nuclear-after-readd")
 
 	// Final probe after recovery.

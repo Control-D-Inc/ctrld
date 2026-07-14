@@ -1733,6 +1733,15 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 			mainLog.Load().Debug().Err(err).Msgf("Upstream %s check failed after %v (WFP loopback protect active)", upstream, duration)
 			return errOsHealthcheckSuppressed
 		}
+		// A no-route/network-unreachable failure means the endpoint's address
+		// family is available locally but unroutable (e.g. an IPv6 DoH endpoint
+		// while IPv6 is up but has no route). These repeat until the route
+		// returns and are handled by bounded backoff in the recovery loop, so
+		// keep them at debug to avoid sustained error-log spam.
+		if ctrldnet.IsUnreachable(err) {
+			mainLog.Load().Debug().Err(err).Msgf("Upstream %s check failed after %v (network unreachable)", upstream, duration)
+			return err
+		}
 		mainLog.Load().Error().Err(err).Msgf("Upstream %s check failed after %v", upstream, duration)
 		return err
 	}
@@ -1937,6 +1946,9 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 // waitForUpstreamRecovery checks the provided upstreams concurrently until one recovers.
 // It returns the name of the recovered upstream or an error if the check times out.
 func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string]*ctrld.UpstreamConfig) (string, error) {
+	recoveryCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	recoveredCh := make(chan string, 1)
 	var wg sync.WaitGroup
 
@@ -1948,9 +1960,10 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 			defer wg.Done()
 			mainLog.Load().Debug().Msgf("Starting recovery check loop for upstream: %s", name)
 			attempts := 0
+			unreachableStreak := 0
 			for {
 				select {
-				case <-ctx.Done():
+				case <-recoveryCtx.Done():
 					mainLog.Load().Debug().Msgf("Context canceled for upstream %s", name)
 					return
 				default:
@@ -1962,13 +1975,30 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 						select {
 						case recoveredCh <- name:
 							mainLog.Load().Debug().Msgf("Sent recovery notification for upstream %s", name)
+							cancel()
 						default:
 							mainLog.Load().Debug().Msg("Recovery channel full, another upstream already recovered")
 						}
 						return
 					}
-					mainLog.Load().Debug().Msgf("Upstream %s check failed, sleeping before retry", name)
-					time.Sleep(checkUpstreamBackoffSleep)
+					// Back off the retry cadence for an unroutable endpoint so a
+					// host with IPv6 up but no route to the IPv6 DoH endpoint does
+					// not re-bootstrap/re-check every checkUpstreamBackoffSleep and
+					// spam the log. The backoff is bounded (checkUpstreamUnreachableBackoffMax)
+					// so the endpoint is still re-probed and recovers when the route
+					// returns; any other failure resets to the base cadence.
+					sleep := checkUpstreamBackoffSleep
+					if ctrldnet.IsUnreachable(err) {
+						unreachableStreak++
+						sleep = unreachableRecoveryBackoff(unreachableStreak)
+						mainLog.Load().Debug().Msgf("Upstream %s unreachable (streak %d), backing off %s before retry", name, unreachableStreak, sleep)
+					} else {
+						unreachableStreak = 0
+						mainLog.Load().Debug().Msgf("Upstream %s check failed, sleeping before retry", name)
+					}
+					if !sleepWithContext(recoveryCtx, sleep) {
+						return
+					}
 
 					// if this is the upstreamOS and it's the 3rd attempt (or multiple of 3),
 					// we should try to reinit the OS resolver to ensure we can recover
@@ -1994,6 +2024,17 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 	}
 	wg.Wait()
 	return recovered, nil
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // buildRecoveryUpstreams constructs the map of upstream configurations to test.

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -12,6 +14,36 @@ func withVPNDNSSettlingEnabled(t *testing.T) {
 	old := vpnDNSSettlingEnabled
 	vpnDNSSettlingEnabled = true
 	t.Cleanup(func() { vpnDNSSettlingEnabled = old })
+}
+
+func TestVPNDNSRefreshSkipsConcurrentDuplicate(t *testing.T) {
+	m := newVPNDNSManager(nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+	var calls atomic.Int32
+
+	m.discoverVPNDNS = func(context.Context) []ctrld.VPNDNSConfig {
+		calls.Add(1)
+		once.Do(func() { close(started) })
+		<-release
+		return nil
+	}
+
+	go func() {
+		defer close(done)
+		m.Refresh(true)
+	}()
+
+	<-started
+	m.Refresh(true)
+	close(release)
+	<-done
+
+	if calls.Load() != 1 {
+		t.Fatalf("expected overlapping refresh to be skipped, got %d discovery calls", calls.Load())
+	}
 }
 
 func TestVPNDNSRefreshRetainsStateForOneGuardedEmptyDiscovery(t *testing.T) {

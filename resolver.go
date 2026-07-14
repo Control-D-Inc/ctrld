@@ -45,7 +45,11 @@ const (
 
 const controldPublicDns = "76.76.2.0"
 
+const maxConcurrentOSResolverExchanges = 128
+
 var controldPublicDnsWithPort = net.JoinHostPort(controldPublicDns, "53")
+
+var osResolverExchangeSem = make(chan struct{}, maxConcurrentOSResolverExchanges)
 
 var localResolver Resolver
 
@@ -136,14 +140,15 @@ func availableNameservers() []string {
 // It's the caller's responsibility to ensure the system DNS is in a clean state before
 // calling this function.
 func InitializeOsResolver(guardAgainstNoNameservers bool) []string {
+	resolverMutex.Lock()
+	defer resolverMutex.Unlock()
+
 	nameservers := availableNameservers()
 	// if no nameservers, return empty slice so we dont remove all nameservers
 	if len(nameservers) == 0 && guardAgainstNoNameservers {
 		return []string{}
 	}
 	ns := initializeOsResolver(nameservers)
-	resolverMutex.Lock()
-	defer resolverMutex.Unlock()
 	or = newResolverWithNameserver(ns)
 	return ns
 }
@@ -466,6 +471,13 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		for _, server := range servers {
 			go func(server string) {
 				defer wg.Done()
+				release, ok := acquireOSResolverExchangeSlot(ctx)
+				if !ok {
+					ch <- &osResolverResult{err: ctx.Err(), server: server, lan: isLan}
+					return
+				}
+				defer release()
+
 				var answer *dns.Msg
 				var err error
 				var localOSResolverIP net.IP
@@ -574,6 +586,15 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		return nonSuccessAnswer, nil
 	}
 	return nil, errors.Join(errs...)
+}
+
+func acquireOSResolverExchangeSlot(ctx context.Context) (func(), bool) {
+	select {
+	case osResolverExchangeSem <- struct{}{}:
+		return func() { <-osResolverExchangeSem }, true
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 func (o *osResolver) removeCache(key string) {

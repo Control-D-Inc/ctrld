@@ -12,7 +12,26 @@ const (
 	maxFailureRequest = 50
 	// checkUpstreamBackoffSleep is the time interval between each upstream checks.
 	checkUpstreamBackoffSleep = 2 * time.Second
+	// checkUpstreamUnreachableBackoffMax caps the recovery retry interval for an
+	// endpoint that keeps failing with a network-unreachable error. It bounds
+	// the backoff so an unroutable endpoint is still re-probed periodically and
+	// recovers once the route returns.
+	checkUpstreamUnreachableBackoffMax = 60 * time.Second
 )
+
+// unreachableRecoveryBackoff returns the retry interval for the given streak of
+// consecutive network-unreachable failures. It starts at checkUpstreamBackoffSleep
+// and doubles each attempt, capped at checkUpstreamUnreachableBackoffMax.
+func unreachableRecoveryBackoff(streak int) time.Duration {
+	d := checkUpstreamBackoffSleep
+	for i := 1; i < streak; i++ {
+		d *= 2
+		if d >= checkUpstreamUnreachableBackoffMax {
+			return checkUpstreamUnreachableBackoffMax
+		}
+	}
+	return d
+}
 
 // upstreamMonitor performs monitoring upstreams health.
 type upstreamMonitor struct {

@@ -34,6 +34,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
@@ -187,6 +188,21 @@ type prog struct {
 	// When an interface appears/disappears, we spawn a monitor that probes pf
 	// interception with exponential backoff and auto-heals if broken.
 	pfMonitorRunning atomic.Bool //lint:ignore U1000 used on darwin
+
+	// pfEnsureRunning ensures only one pf anchor validation/restoration runs at a time.
+	// Network-change callbacks, delayed rechecks, and the periodic watchdog can all
+	// converge during macOS interface churn; concurrent pfctl/scutil exec storms can
+	// exhaust process/file limits and make the outage worse.
+	pfEnsureRunning atomic.Bool //lint:ignore U1000 used on darwin
+
+	// pfExecBackoffUntil suppresses pf anchor validation after pfctl/scutil execs
+	// fail due host resource exhaustion (fork unavailable, too many open files).
+	pfExecBackoffUntil atomic.Int64 //lint:ignore U1000 used on darwin
+
+	// pfDelayedRecheckTimers coalesces delayed DNS-intercept rechecks after noisy
+	// network changes. Protected by pfDelayedRecheckMu.
+	pfDelayedRecheckMu     sync.Mutex    //lint:ignore U1000 used on darwin
+	pfDelayedRecheckTimers []*time.Timer //lint:ignore U1000 used on darwin
 
 	// pfProbeExpected holds the domain name of a pending pf interception probe.
 	// When non-empty, the DNS handler checks incoming queries against this value
@@ -1328,13 +1344,14 @@ func errAddrInUse(err error) bool {
 
 var _ = errAddrInUse
 
+// The unreachable winsock errnos (ENETUNREACH/EHOSTUNREACH) are matched via
+// ctrldnet.IsUnreachable, which owns their definitions.
+//
 // https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2
 var (
 	windowsECONNREFUSED = syscall.Errno(10061)
-	windowsENETUNREACH  = syscall.Errno(10051)
 	windowsEINVAL       = syscall.Errno(10022)
 	windowsEADDRINUSE   = syscall.Errno(10048)
-	windowsEHOSTUNREACH = syscall.Errno(10065)
 )
 
 func errUrlNetworkError(err error) bool {
@@ -1351,14 +1368,14 @@ func errNetworkError(err error) bool {
 		if opErr.Temporary() {
 			return true
 		}
+		if ctrldnet.IsUnreachable(err) {
+			return true
+		}
 		switch {
 		case errors.Is(opErr.Err, syscall.ECONNREFUSED),
 			errors.Is(opErr.Err, syscall.EINVAL),
-			errors.Is(opErr.Err, syscall.ENETUNREACH),
-			errors.Is(opErr.Err, windowsENETUNREACH),
 			errors.Is(opErr.Err, windowsEINVAL),
-			errors.Is(opErr.Err, windowsECONNREFUSED),
-			errors.Is(opErr.Err, windowsEHOSTUNREACH):
+			errors.Is(opErr.Err, windowsECONNREFUSED):
 			return true
 		}
 	}
