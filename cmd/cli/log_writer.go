@@ -318,6 +318,12 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 
 // needInternalLogging reports whether prog needs to run internal logging.
 func (p *prog) needInternalLogging() bool {
+	// Do not run in silent mode: the user explicitly asked for no logging, so
+	// ctrld must not create or write the persisted internal log file (nor reset
+	// the global level back to debug). See https://github.com/Control-D-Inc/ctrld/issues/320.
+	if silent {
+		return false
+	}
 	// Do not run in non-cd mode.
 	if cdUID == "" {
 		return false
