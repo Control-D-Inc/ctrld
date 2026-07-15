@@ -442,6 +442,11 @@ func nonSuccessHandlerWithRcode(rcode int) dns.HandlerFunc {
 
 func countHandler(call *atomic.Int64) dns.HandlerFunc {
 	return func(w dns.ResponseWriter, msg *dns.Msg) {
+		// Count the call before writing the reply. The client returns as soon
+		// as it receives the response, so a caller that reads this counter right
+		// after Resolve returns would race an increment done after WriteMsg and
+		// could observe a stale zero.
+		call.Add(1)
 		m := new(dns.Msg)
 		m.SetRcode(msg, dns.RcodeSuccess)
 		if cookie := getEdns0Cookie(msg.IsEdns0()); cookie != nil {
@@ -454,7 +459,6 @@ func countHandler(call *atomic.Int64) dns.HandlerFunc {
 			m.IsEdns0().Option = append(m.IsEdns0().Option, cookieOption)
 		}
 		w.WriteMsg(m)
-		call.Add(1)
 	}
 }
 
