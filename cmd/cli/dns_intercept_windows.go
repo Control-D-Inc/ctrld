@@ -683,8 +683,11 @@ func (p *prog) startDNSIntercept() error {
 	// server, ctrld may have fallen back to 127.0.0.x:53 instead of 127.0.0.1:53.
 	// NRPT must point to whichever address ctrld is actually listening on.
 	listenerIP := "127.0.0.1"
-	if lc := p.cfg.FirstListener(); lc != nil && lc.IP != "" {
+	if lc := p.cfg.FirstListener(); lc != nil && lc.IP != "" && lc.IP != "0.0.0.0" && lc.IP != "::" {
 		listenerIP = lc.IP
+	} else if lc != nil && (lc.IP == "0.0.0.0" || lc.IP == "::") {
+		mainLog.Load().Warn().Str("configured_ip", lc.IP).
+			Msg("DNS intercept: listener configured with wildcard IP, using 127.0.0.1 for NRPT rules")
 	}
 
 	state := &wfpState{
