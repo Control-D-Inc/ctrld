@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -269,33 +268,62 @@ func newTestHTTP3Server(t *testing.T, handler http.Handler) *testHTTP3Server {
 	return h3Server
 }
 
-// oversizedDoHHandler streams `bodyBytes` bytes of zeros with the given
-// HTTP status. The atomic counter records bytes the handler actually
-// wrote, so tests can confirm the client tore down the stream before
-// consuming the whole attacker-controlled body.
-func oversizedDoHHandler(status int, bodyBytes int64, written *atomic.Int64) http.HandlerFunc {
+// blockingBodyHandler writes exactly nbytes of body with the given status,
+// flushes them, then blocks until release is closed WITHOUT ever returning.
+// Because the handler does not return, the response stream is never terminated
+// (no EOF/FIN). A client that stops after a bounded prefix therefore completes,
+// while a client that reads to EOF blocks. Tests set nbytes to the exact read
+// cap so the client consumes the whole written body (no half-written frame is
+// left blocking on flow control) yet still never sees EOF.
+func blockingBodyHandler(status, nbytes int, release <-chan struct{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", headerApplicationDNS)
 		w.WriteHeader(status)
-		chunk := make([]byte, 64*1024)
-		var sent int64
-		for sent < bodyBytes {
-			n := int64(len(chunk))
-			if remaining := bodyBytes - sent; remaining < n {
-				n = remaining
-			}
-			m, err := w.Write(chunk[:n])
-			if err != nil {
-				return
-			}
-			sent += int64(m)
-			if written != nil {
-				written.Add(int64(m))
-			}
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
+		if _, err := w.Write(make([]byte, nbytes)); err != nil {
+			return
 		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-release
+	}
+}
+
+// requireBoundedResolve asserts that r.Resolve returns the expected size/status
+// error while the server is still withholding EOF (the handler is blocked in
+// blockingBodyHandler). Returning under those conditions proves ctrld read only
+// a bounded prefix of the body: a resolver that instead read to EOF would block
+// on the withheld stream and trip the deadline. This is the deterministic
+// regression guard for the issue-312 OOM protections, replacing the earlier
+// flaky server-side byte counter (issue-561).
+func requireBoundedResolve(t *testing.T, r Resolver, msg *dns.Msg, wantErrSubstr string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	type result struct {
+		answer *dns.Msg
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		answer, err := r.Resolve(ctx, msg)
+		done <- result{answer, err}
+	}()
+
+	select {
+	case res := <-done:
+		if res.err == nil {
+			t.Fatalf("Resolve unexpectedly succeeded; answer=%v", res.answer)
+		}
+		if !strings.Contains(res.err.Error(), wantErrSubstr) {
+			t.Fatalf("error %q does not contain %q", res.err, wantErrSubstr)
+		}
+		if res.answer != nil {
+			t.Fatalf("Resolve returned non-nil answer alongside error: %v", res.answer)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Resolve did not return while the server withheld EOF: the body is being read to EOF instead of a bounded prefix (issue-312 OOM protection missing)")
 	}
 }
 
@@ -349,9 +377,12 @@ func doh3UpstreamForAddr(t *testing.T, addr string, cert *x509.Certificate) *Ups
 // returning a body larger than the DNS protocol allows must be rejected
 // with an explicit size error rather than buffered into ctrld memory.
 func TestDoHResolve_OversizedBody_Rejected(t *testing.T) {
-	const oversized = 2 * 1024 * 1024 // far past dohMaxResponseSize (~64 KiB)
-	var written atomic.Int64
-	srv := httptest.NewUnstartedServer(oversizedDoHHandler(http.StatusOK, oversized, &written))
+	// Write exactly the LimitReader cap, then withhold EOF. ctrld's bounded
+	// read (io.LimitReader of dohMaxResponseSize+1) returns after this prefix;
+	// an unbounded read would block on the missing EOF and trip the deadline.
+	release := make(chan struct{})
+	defer close(release)
+	srv := httptest.NewUnstartedServer(blockingBodyHandler(http.StatusOK, dohMaxResponseSize+1, release))
 	testCert := generateTestCertificate(t)
 	srv.TLS = &tls.Config{
 		Certificates: []tls.Certificate{testCert.tlsCert},
@@ -371,31 +402,19 @@ func TestDoHResolve_OversizedBody_Rejected(t *testing.T) {
 	msg.SetQuestion("example.com.", dns.TypeA)
 	msg.RecursionDesired = true
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	answer, err := r.Resolve(ctx, msg)
-	if err == nil {
-		t.Fatalf("Resolve unexpectedly succeeded; answer=%v", answer)
-	}
-	if !strings.Contains(err.Error(), "maximum DNS message size") {
-		t.Fatalf("error %q does not mention the size cap", err)
-	}
-	if answer != nil {
-		t.Fatalf("Resolve returned non-nil answer alongside error: %v", answer)
-	}
-	if got := written.Load(); got >= int64(oversized) {
-		t.Fatalf("server wrote the entire %d-byte body before client tore down (wrote=%d) — cap not effective", oversized, got)
-	}
+	requireBoundedResolve(t, r, msg, "maximum DNS message size")
 }
 
 // TestDoHResolve_NonOKStatus_BoundedErrorBody locks in that a non-200
 // response with a huge body does not pull the body fully into ctrld
 // memory just to format an error string.
 func TestDoHResolve_NonOKStatus_BoundedErrorBody(t *testing.T) {
-	const huge = 8 * 1024 * 1024
-	var written atomic.Int64
-	srv := httptest.NewUnstartedServer(oversizedDoHHandler(http.StatusBadGateway, huge, &written))
+	// Same synchronization as the oversized-body test, but at the error-body
+	// cap: the non-200 path reads through an io.LimitReader of
+	// dohMaxErrorBodySize, so it must return after this prefix without EOF.
+	release := make(chan struct{})
+	defer close(release)
+	srv := httptest.NewUnstartedServer(blockingBodyHandler(http.StatusBadGateway, dohMaxErrorBodySize, release))
 	testCert := generateTestCertificate(t)
 	srv.TLS = &tls.Config{
 		Certificates: []tls.Certificate{testCert.tlsCert},
@@ -415,36 +434,22 @@ func TestDoHResolve_NonOKStatus_BoundedErrorBody(t *testing.T) {
 	msg.SetQuestion("example.com.", dns.TypeA)
 	msg.RecursionDesired = true
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	answer, err := r.Resolve(ctx, msg)
-	if err == nil {
-		t.Fatalf("Resolve unexpectedly succeeded; answer=%v", answer)
-	}
-	if !strings.Contains(err.Error(), "status: 502") {
-		t.Fatalf("error %q does not surface the upstream status", err)
-	}
-	if answer != nil {
-		t.Fatalf("Resolve returned non-nil answer alongside error: %v", answer)
-	}
-	if got := written.Load(); got > 1024*1024 {
-		t.Fatalf("server wrote %d bytes before client tore down — error path is reading too much body", got)
-	}
+	requireBoundedResolve(t, r, msg, "status: 502")
 }
 
 // TestDoHResolve_OversizedBody_DoH3 mirrors the DoH oversized-body check
 // on the HTTP/3 transport, since github-312 specifically reproduced the
 // OOM via DoH3.
 func TestDoHResolve_OversizedBody_DoH3(t *testing.T) {
-	const oversized = 2 * 1024 * 1024
+	release := make(chan struct{})
+	defer close(release)
 	testCert := generateTestCertificate(t)
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatalf("udp listen: %v", err)
 	}
 	h3 := &http3.Server{
-		Handler: oversizedDoHHandler(http.StatusOK, oversized, nil),
+		Handler: blockingBodyHandler(http.StatusOK, dohMaxResponseSize+1, release),
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{testCert.tlsCert},
 			NextProtos:   []string{"h3"},
@@ -472,17 +477,5 @@ func TestDoHResolve_OversizedBody_DoH3(t *testing.T) {
 	msg.SetQuestion("example.com.", dns.TypeA)
 	msg.RecursionDesired = true
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	answer, err := r.Resolve(ctx, msg)
-	if err == nil {
-		t.Fatalf("Resolve unexpectedly succeeded; answer=%v", answer)
-	}
-	if !strings.Contains(err.Error(), "maximum DNS message size") {
-		t.Fatalf("error %q does not mention the size cap", err)
-	}
-	if answer != nil {
-		t.Fatalf("Resolve returned non-nil answer alongside error: %v", answer)
-	}
+	requireBoundedResolve(t, r, msg, "maximum DNS message size")
 }
