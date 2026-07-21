@@ -17,6 +17,8 @@ import (
 	"golang.org/x/sync/singleflight"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
+
+	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 )
 
 const (
@@ -360,8 +362,10 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	domain := strings.TrimSuffix(msg.Question[0].Name, ".")
 	qtype := msg.Question[0].Qtype
 
-	// Unique key for the singleflight group.
-	key := fmt.Sprintf("%s:%d:", domain, qtype)
+	// Unique key for the singleflight group. The EDNS Client Subnet is part of
+	// the key so subnet-specific answers are neither coalesced nor hot-cached
+	// across different subnets (RFC 7871 §7.3).
+	key := fmt.Sprintf("%s:%d:%s", domain, qtype, dnscache.CanonicalECS(msg))
 
 	logger := LoggerFromCtx(ctx)
 	Log(ctx, logger.Debug(), "OS resolver query started: %s - %s", domain, dns.TypeToString[qtype])
