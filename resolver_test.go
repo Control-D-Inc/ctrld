@@ -282,6 +282,93 @@ func Test_Edns0_CacheReply(t *testing.T) {
 	}
 }
 
+// ecsAnswerHandler returns a distinct A record per EDNS Client Subnet, so a test can
+// prove one subnet never receives another subnet's cached record. It counts upstream
+// calls to confirm the hot cache/singleflight is partitioned by ECS rather than shared.
+func ecsAnswerHandler(call *atomic.Int64) dns.HandlerFunc {
+	return func(w dns.ResponseWriter, msg *dns.Msg) {
+		call.Add(1)
+		a := "203.0.113.1" // no/other subnet
+		if opt := msg.IsEdns0(); opt != nil {
+			for _, o := range opt.Option {
+				if e, ok := o.(*dns.EDNS0_SUBNET); ok {
+					switch {
+					case e.Address.Equal(net.ParseIP("2001:db8:1::")):
+						a = "192.0.2.1"
+					case e.Address.Equal(net.ParseIP("2001:db8:2::")):
+						a = "198.51.100.1"
+					}
+				}
+			}
+		}
+		m := new(dns.Msg)
+		m.SetReply(msg)
+		rr, _ := dns.NewRR(msg.Question[0].Name + " 300 IN A " + a)
+		m.Answer = []dns.RR{rr}
+		w.WriteMsg(m)
+	}
+}
+
+// Test_osResolver_HotCache_ECSPartition is the real cache-path regression test for #564 on
+// the osResolver hot cache / singleflight path: the upstream returns a different A record
+// per subnet, and a client in subnet B must never be served subnet A's hot-cached record.
+func Test_osResolver_HotCache_ECSPartition(t *testing.T) {
+	lanPC, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on LAN address: %v", err)
+	}
+	call := &atomic.Int64{}
+	lanServer, lanAddr, err := runLocalPacketConnTestServer(t, lanPC, ecsAnswerHandler(call))
+	if err != nil {
+		t.Fatalf("failed to run LAN test server: %v", err)
+	}
+	defer lanServer.Shutdown()
+
+	or := newResolverWithNameserver([]string{lanAddr})
+	query := func(subnet string) string {
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn("controld.com"), dns.TypeA)
+		m.RecursionDesired = true
+		m.SetEdns0(4096, true)
+		m.IsEdns0().Option = append(m.IsEdns0().Option, &dns.EDNS0_SUBNET{
+			Code:          dns.EDNS0SUBNET,
+			Family:        2,
+			SourceNetmask: 64,
+			Address:       net.ParseIP(subnet),
+		})
+		answer, err := or.Resolve(context.Background(), m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rr := range answer.Answer {
+			if a, ok := rr.(*dns.A); ok {
+				return a.A.String()
+			}
+		}
+		return ""
+	}
+
+	// Subnet A populates the hot cache; a repeat hits it (upstream called once).
+	if got := query("2001:db8:1::"); got != "192.0.2.1" {
+		t.Fatalf("subnet A: got %q, want 192.0.2.1", got)
+	}
+	if got := query("2001:db8:1::"); got != "192.0.2.1" {
+		t.Fatalf("subnet A repeat: got %q, want 192.0.2.1", got)
+	}
+	if call.Load() != 1 {
+		t.Fatalf("subnet A repeat did not hit the hot cache: %d upstream calls", call.Load())
+	}
+
+	// Subnet B must get ITS OWN record, not subnet A's hot-cached one, and this
+	// requires a fresh upstream call (the cache is partitioned, not shared).
+	if got := query("2001:db8:2::"); got != "198.51.100.1" {
+		t.Fatalf("subnet B was served the wrong record %q (want 198.51.100.1); hot cache is not ECS-partitioned", got)
+	}
+	if call.Load() != 2 {
+		t.Fatalf("subnet B unexpectedly served from subnet A's cache: %d upstream calls, want 2", call.Load())
+	}
+}
+
 // https://github.com/Control-D-Inc/ctrld/issues/255
 func Test_legacyResolverWithBigExtraSection(t *testing.T) {
 	lanPC, err := net.ListenPacket("udp", "127.0.0.1:0") // 127.0.0.1 is considered LAN (loopback)
