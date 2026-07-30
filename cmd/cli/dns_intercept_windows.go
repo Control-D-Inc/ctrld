@@ -15,6 +15,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/kardianos/service"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
@@ -129,6 +130,28 @@ const (
 	// from overriding this filter's PERMIT action ("hard permit"). Used in DNS
 	// mode to override third-party WFP blocks (e.g., OpenVPN's block-outside-dns).
 	fwpmFilterFlagClearActionRight uint32 = 0x00000008
+
+	// WFP error codes from winerror.h, needed to tell "there was nothing to clean
+	// up" apart from "there was, and we could not remove it" - which is the lockout
+	// condition itself and must not be logged as success.
+	// See: https://learn.microsoft.com/en-us/windows/win32/fwp/wfp-error-codes
+	//
+	// FWP_E_SUBLAYER_NOT_FOUND: the sub-layer does not exist.
+	fwpESubLayerNotFound uintptr = 0x80320007
+	// FWP_E_IN_USE: the object is referenced by other objects, so it cannot be
+	// deleted. Whether a sublayer's own filters count as such references is not
+	// documented - see the UNRESOLVED note on cleanupStaleDNSInterceptState. It is
+	// handled because if it does occur, deleting the sublayer alone did not clear the
+	// orphaned enforcement.
+	fwpEInUse uintptr = 0x8032000A
+	// FWP_E_DYNAMIC_SESSION_IN_PROGRESS: the call is not allowed from within a
+	// dynamic session. Returned when deleting an object that was NOT added in a
+	// dynamic session - i.e. exactly the stale objects this cleanup targets.
+	fwpEDynamicSessionInProgress uintptr = 0x8032000B
+	// FWP_E_WRONG_SESSION: the call was made from the wrong session. Returned when
+	// deleting an object added by a *different* dynamic session, i.e. one owned by
+	// another live ctrld.
+	fwpEWrongSession uintptr = 0x8032000C
 
 	// fwpmSessionFlagDynamic is FWPM_SESSION_FLAG_DYNAMIC from fwpmtypes.h.
 	//
@@ -1120,6 +1143,183 @@ func (p *prog) removeOrphanedCtrldNRPTRule(reason string) {
 	ops.signal()
 }
 
+// cleanupStaleDNSInterceptState removes ctrld-owned WFP objects left behind by a
+// previous process. It runs at startup before anything that needs network access.
+//
+// Filters installed by a ctrld that predates session-scoped ownership (or by any
+// process whose session was not dynamic) survive that process's death. In Firewall
+// Mode those include machine-wide block-all filters, so the whole host - browsers,
+// other users, and a replacement ctrld's own API bootstrap - stays denied outbound
+// traffic until a reboot. A replacement that cannot reach the API never finishes
+// preflight, so it never reaches the cleanup inside startWFPFilters and the host
+// stays locked out. Deleting the sublayer here is the attempt to break that deadlock
+// before the first API call.
+//
+// RELEASE GATE: whether deleting the sublayer is sufficient must be answered on a live
+// host that carries real pre-fix orphaned filters - run this binary there and record the
+// HRESULT. If it is FWP_E_IN_USE, the delete did not remove the child filters, the block-all
+// stays active, and this needs the enumerate-and-delete fallback described below before the
+// self-heal can be claimed to work.
+//
+// UNRESOLVED until then: whether deleting the sublayer is sufficient. It is sufficient only if
+// the delete also removes the filters inside it. FwpmSubLayerDeleteByKey0's Remarks
+// say nothing about child filters either way, while Object Management states the
+// general rule that "an object cannot be deleted until all objects that reference it
+// have first been deleted" - and FWP_E_IN_USE exists for exactly that. Whether a
+// filter's subLayerKey counts as such a reference is not documented, and this is
+// Windows-only syscall code that cannot be exercised off-Windows, so it is not
+// asserted here in either direction. What the code does is safe under both readings:
+// it attempts the delete and, on FWP_E_IN_USE, says so instead of reporting success,
+// so a support log distinguishes "cleared it" from "could not clear it". If a live
+// Windows check shows FWP_E_IN_USE against orphaned filters, this needs to enumerate
+// and delete them first - which is deliberately not written blind, because
+// FWPM_FILTER_ENUM_TEMPLATE0 has no sublayer field, so selecting ctrld's own filters
+// means reading subLayerKey at a computed offset in FWPM_FILTER0, and getting that
+// offset wrong would delete other software's filters.
+//
+// Deleting objects owned by a live session is expected to fail; those are cleaned up
+// by the OS when that session closes. Every failure is therefore debug-level: no
+// stale state is the normal case.
+//
+// Two guards decide whether this may run at all. Elevation, because opening a WFP engine
+// and deleting ctrld's sublayer must not be reachable from an unprivileged local process:
+// FwpmEngineOpen0 is expected to fail without elevation, but that is a documented
+// property of the API rather than something this code checks, and it is the only barrier.
+// And interactive invocation, because a live ctrld built before session-scoped ownership
+// holds a *non-dynamic* sublayer - exactly what this targets - so the HRESULTs cannot
+// tell that service apart from an orphan. A service start is not interactive, so the
+// deadlock case still gets cleaned; a hand-run "ctrld run" alongside a live service does
+// not strip its enforcement. That second guard requires positive evidence that nothing is
+// live: an SCM that cannot be queried is not an absent service, so an unknown answer skips
+// the cleanup exactly as a running one does.
+func cleanupStaleDNSInterceptState() {
+	if elevated, err := staleCleanupElevatedFn(); err != nil || !elevated {
+		mainLog.Load().Debug().Err(err).Msg("DNS intercept: skipping stale WFP state cleanup - not elevated")
+		return
+	}
+	interactive := staleCleanupInteractiveFn()
+	liveness := serviceLivenessStopped
+	if interactive {
+		liveness = staleCleanupLivenessFn()
+	}
+	if !staleCleanupAllowed(interactive, liveness) {
+		reason := "the ctrld service is running"
+		if liveness == serviceLivenessUnknown {
+			reason = "the ctrld service's state could not be determined"
+		}
+		mainLog.Load().Info().Msgf("DNS intercept: skipping stale WFP state cleanup - %s and a pre-session-scoped build's sublayer is indistinguishable from an orphan", reason)
+		return
+	}
+	deleteStaleWFPSublayerFn()
+}
+
+// Seams for the guard decision and the deletion it protects. The delete is a WFP syscall
+// that cannot be run in a test even on Windows - it would remove real filters - so the
+// only way to assert that the guard is consulted *before* anything is deleted is to
+// substitute both ends.
+var (
+	staleCleanupElevatedFn    = hasElevatedPrivilege
+	staleCleanupInteractiveFn = service.Interactive
+	staleCleanupLivenessFn    = ctrldServiceLiveness
+	deleteStaleWFPSublayerFn  = deleteStaleWFPSublayer
+)
+
+// deleteStaleWFPSublayer opens a WFP engine and deletes ctrld's sublayer. Callers must
+// have established that no live ctrld owns it; see cleanupStaleDNSInterceptState.
+func deleteStaleWFPSublayer() {
+	var engineHandle uintptr
+	session := fwpmSession0{}
+	sessionName, _ := windows.UTF16PtrFromString("ctrld Stale State Cleanup")
+	session.displayData.name = sessionName
+	// Deliberately NOT a dynamic session. FwpmSubLayerDeleteByKey0 is documented to
+	// fail with FWP_E_DYNAMIC_SESSION_IN_PROGRESS when called from a dynamic session
+	// for an object that was not added in one - and the only orphans that can exist
+	// are exactly those: a ctrld built before session-scoped ownership added its
+	// sublayer statically. Anything a *newer* ctrld leaves behind is removed by the OS
+	// when its session ends, so there is nothing for this to clean there. Opening this
+	// session dynamically would therefore make the whole cleanup a no-op in the one
+	// case it exists for.
+	//
+	// What protects a live ctrld is documented ownership, not the child-filter question
+	// above: a session-scoped ctrld's sublayer belongs to a different dynamic session, so
+	// the delete fails with FWP_E_WRONG_SESSION. A ctrld that predates session scoping has
+	// no such protection here - it holds a non-dynamic sublayer, indistinguishable from an
+	// orphan - which is why the caller refuses to run this from an interactive invocation
+	// unless the service is provably not live. FWP_E_IN_USE may refuse the delete as well,
+	// but whether it does is the open question, so nothing relies on it.
+	//
+	// This session adds no objects, so it needs no automatic teardown of its own.
+
+	const rpcCAuthnDefault = 0xFFFFFFFF
+	r1, _, _ := procFwpmEngineOpen0.Call(
+		0,
+		uintptr(rpcCAuthnDefault),
+		0,
+		uintptr(unsafe.Pointer(&session)),
+		uintptr(unsafe.Pointer(&engineHandle)),
+	)
+	if r1 != 0 {
+		mainLog.Load().Debug().Msgf("DNS intercept: could not open WFP engine for stale state cleanup (HRESULT 0x%x)", r1)
+		return
+	}
+	defer procFwpmEngineClose0.Call(engineHandle)
+
+	r1, _, _ = procFwpmSubLayerDeleteByKey0.Call(
+		engineHandle,
+		uintptr(unsafe.Pointer(&ctrldSubLayerGUID)),
+	)
+	switch r1 {
+	case 0:
+		// Warn, not info: this means a previous ctrld left machine-wide enforcement
+		// installed, which is worth seeing in a support log.
+		mainLog.Load().Warn().Msg("DNS intercept: removed WFP filters left by a previous ctrld process (including any Firewall Mode block-all) before startup")
+	case fwpESubLayerNotFound:
+		// The normal case: nothing was left behind.
+		mainLog.Load().Debug().Msg("DNS intercept: no stale WFP state from a previous process")
+	default:
+		// Something is installed under our GUID and we could not remove it. Never
+		// report this as "nothing to clean up": if it is orphaned enforcement, this is
+		// the lockout condition, and the operator needs the code to act on.
+		// FWP_E_WRONG_SESSION means another live ctrld owns it, which is benign.
+		// FWP_E_IN_USE is the answer the release gate above is waiting for: the delete was
+		// refused while something still references the sublayer, which would mean the
+		// enumerate-and-delete fallback is required before this self-heal works at all.
+		mainLog.Load().Warn().Msgf("DNS intercept: found WFP state under ctrld's sublayer but could not remove it (%s); if ctrld is not already running, enforcement from a previous process may still be active",
+			wfpDeleteErrString(r1))
+	}
+}
+
+// staleCleanupAllowed reports whether the stale-state cleanup may run.
+//
+// A service start (not interactive) always may: that is the deadlock this exists to break,
+// and nothing else of ctrld's is live at that point in startup.
+//
+// A hand-run "ctrld run" may only proceed on positive evidence that nothing is live. A
+// pre-session-scoped build's sublayer is indistinguishable from an orphan, so cleaning
+// while that service runs would strip its enforcement. Unknown is therefore treated like
+// running, not like stopped - an SCM that cannot be queried is not an absent service.
+func staleCleanupAllowed(interactive bool, liveness serviceLiveness) bool {
+	if !interactive {
+		return true
+	}
+	return liveness == serviceLivenessStopped
+}
+
+// wfpDeleteErrString names the delete failures that carry a specific meaning for stale
+// state, so a support log says which case was hit rather than only a raw HRESULT.
+func wfpDeleteErrString(r1 uintptr) string {
+	switch r1 {
+	case fwpEInUse:
+		return "FWP_E_IN_USE: refused while the sublayer is still referenced (see the release gate at cleanupStaleDNSInterceptState)"
+	case fwpEDynamicSessionInProgress:
+		return "FWP_E_DYNAMIC_SESSION_IN_PROGRESS: cannot delete a non-dynamic object from a dynamic session"
+	case fwpEWrongSession:
+		return "FWP_E_WRONG_SESSION: owned by another live session"
+	default:
+		return fmt.Sprintf("HRESULT 0x%x", r1)
+	}
+}
+
 // startWFPFilters opens the WFP engine and adds all block/permit filters.
 // Called only in hard intercept mode.
 func (p *prog) startWFPFilters(state *wfpState) error {
@@ -1150,9 +1350,16 @@ func (p *prog) startWFPFilters(state *wfpState) error {
 	}
 	mainLog.Load().Info().Msgf("DNS intercept: WFP engine opened (handle: 0x%x, session-scoped)", engineHandle)
 
-	// Clean up any sublayer left by an older ctrld that used a non-dynamic session
-	// (or by a build predating session-scoped ownership). Deleting the sublayer
-	// removes all its child filters.
+	// Clean up a sublayer left over from an earlier session.
+	//
+	// Note this runs on the dynamic session opened above, and
+	// FwpmSubLayerDeleteByKey0 is documented to fail with
+	// FWP_E_DYNAMIC_SESSION_IN_PROGRESS from a dynamic session when the object was not
+	// added in one. So this cannot clear state left by a build that predates
+	// session-scoped ownership - cleanupStaleDNSInterceptState(), which opens a
+	// non-dynamic session at startup, is what handles that. What remains for this call
+	// is a leftover from a previous dynamic session whose teardown had not completed
+	// when we opened ours.
 	r1, _, _ = procFwpmSubLayerDeleteByKey0.Call(
 		engineHandle,
 		uintptr(unsafe.Pointer(&ctrldSubLayerGUID)),

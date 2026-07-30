@@ -1954,6 +1954,12 @@ func buildDNSQueryPacket(domain string) []byte {
 	return append(header, question...)
 }
 
+// cleanupStaleDNSInterceptState is a startup hook for enforcement that can outlive
+// the process. macOS needs no work here: startDNSIntercept flushes the anchor and
+// removes a stale anchor file before loading rules, and the pf anchor alone does not
+// block traffic until ctrld loads rules into it.
+func cleanupStaleDNSInterceptState() {}
+
 // pfInterceptMonitor runs asynchronously after interface changes are detected.
 // It probes pf interception with exponential backoff and forces a full pf reload
 // if the probe fails. Only one instance runs at a time (singleton via atomic.Bool).

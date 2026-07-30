@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"syscall"
@@ -8,6 +9,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
@@ -31,6 +33,65 @@ func hasElevatedPrivilege() (bool, error) {
 	}
 	token := windows.Token(0)
 	return token.IsMember(sid)
+}
+
+// serviceLiveness is what could be established about the installed ctrld service. The
+// three states are distinct because a caller that must not disturb a live service has to
+// treat "could not tell" like "live", not like "stopped".
+type serviceLiveness int
+
+const (
+	// serviceLivenessUnknown means the question could not be answered: the SCM was
+	// unreachable, the caller lacked rights, or the query failed.
+	serviceLivenessUnknown serviceLiveness = iota
+	// serviceLivenessRunning means the service is running, starting, or paused - in every
+	// case a process that owns state.
+	serviceLivenessRunning
+	// serviceLivenessStopped means the service is installed and stopped, or not installed
+	// at all. Nothing of ctrld's is live.
+	serviceLivenessStopped
+)
+
+// ctrldServiceLiveness reports what can be established about the installed ctrld service.
+//
+// Only serviceLivenessStopped is positive evidence that nothing is live. Every failure
+// answers serviceLivenessUnknown rather than folding into "stopped": the SCM being
+// unreachable says nothing about whether a service is running, and a caller that acts on
+// that as absence would strip a live service's state.
+//
+// "Not installed" is deliberately stopped, not unknown: that is the answer, and it is
+// exactly the host that needs stale state cleaned - an uninstall that left filters behind
+// has no service left to protect.
+func ctrldServiceLiveness() serviceLiveness {
+	m, err := mgr.Connect()
+	if err != nil {
+		return serviceLivenessUnknown
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(ctrldServiceName)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return serviceLivenessStopped
+		}
+		return serviceLivenessUnknown
+	}
+	defer s.Close()
+
+	status, err := s.Query()
+	if err != nil {
+		return serviceLivenessUnknown
+	}
+	switch status.State {
+	case svc.Running, svc.StartPending, svc.ContinuePending, svc.PausePending, svc.Paused:
+		return serviceLivenessRunning
+	case svc.Stopped:
+		return serviceLivenessStopped
+	default:
+		// StopPending, and any state a later Windows adds: a process may still be
+		// holding its state, so this is no answer.
+		return serviceLivenessUnknown
+	}
 }
 
 // ConfigureWindowsServiceFailureActions checks if the given service

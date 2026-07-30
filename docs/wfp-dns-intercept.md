@@ -247,9 +247,20 @@ by the VPN's own WFP rules.
 ```
 
 **Crash Recovery:**
-On startup, `FwpmSubLayerDeleteByKey0` removes any stale sublayer from a previous
-unclean shutdown, including all its child filters (deterministic GUID ensures we
-only clean up our own).
+On startup, `cleanupStaleDNSInterceptState()` calls `FwpmSubLayerDeleteByKey0` to
+remove any stale sublayer from a previous unclean shutdown (the deterministic GUID
+ensures we only ever target our own). It opens a **non-dynamic** session, because a
+dynamic one cannot delete objects that were not added in a dynamic session — which is
+what a build predating session-scoped ownership leaves behind.
+
+Whether deleting the sublayer also removes the filters inside it is **not documented**
+either way, and is unresolved (see the note on `cleanupStaleDNSInterceptState`). If it
+does not, the call returns `FWP_E_IN_USE` and the orphaned filters need deleting first;
+that case is logged as a warning rather than reported as a successful cleanup, so it is
+visible in a support log instead of silently leaving enforcement active.
+
+Since every current build uses a dynamic session, the OS removes ctrld's filters when
+the process dies, so this recovery path only matters for state left by an older build.
 
 ## NRPT Probe and Auto-Heal
 

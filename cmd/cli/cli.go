@@ -298,6 +298,14 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	p.Info().Msgf("Starting ctrld %s", curVersion())
 	p.Info().Msgf("OS: %s", osVersion())
 
+	// Drop enforcement left behind by a previous ctrld process before doing anything
+	// that needs the network. A previous run that died without cleaning up can leave
+	// machine-wide block filters installed (Firewall Mode blocks all non-allowlisted
+	// outbound traffic), which would deny this process's own API bootstrap below and
+	// leave it retrying forever - never reaching the cleanup that lives inside
+	// intercept startup. No-op when no stale state exists.
+	cleanupStaleDNSInterceptState()
+
 	// Wait for network up.
 	if !ctrldnet.Up() {
 		notifyExitToLogServer()
