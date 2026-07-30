@@ -61,10 +61,33 @@ type ErrorResponse struct {
 		Message string `json:"message"`
 		Code    int    `json:"code"`
 	} `json:"error"`
+	// StatusCode is the HTTP status the API answered with. It is not part of the JSON
+	// body: this type is built for *any* non-200 whose body decodes, so the body alone
+	// cannot tell a permanent rejection of the request from a transient server-side
+	// failure, and callers that act differently on the two need the status to tell them
+	// apart. Zero means the status was not recorded.
+	StatusCode int `json:"-"`
 }
 
 func (u ErrorResponse) Error() string {
 	return u.ErrorField.Message
+}
+
+// apiErrorFromResponse builds the error for a non-200 API answer, recording the HTTP
+// status alongside the decoded body.
+//
+// The status is what tells a caller whether the answer will change on a retry: this type
+// is built for every non-200 whose body decodes, so a 502 from a load balancer and a 404
+// for a deleted device are otherwise indistinguishable. Both response paths go through
+// here so neither can decode a body and forget to record it.
+func apiErrorFromResponse(statusCode int, d *json.Decoder) (*ErrorResponse, error) {
+	errResp := &ErrorResponse{StatusCode: statusCode}
+	if err := d.Decode(errResp); err != nil {
+		return nil, err
+	}
+	// Decode fills exported fields from the body; StatusCode is json:"-", so it survives.
+	errResp.StatusCode = statusCode
+	return errResp, nil
 }
 
 type utilityRequest struct {
@@ -171,7 +194,10 @@ func postUtilityAPI(ctx context.Context, version string, cdDev, lastUpdatedFaile
 	}
 
 	ctrld.Log(ctx, logger.Debug(), "Creating HTTP request")
-	req, err := http.NewRequest("POST", apiUrl, body)
+	// Context-bound so an in-flight request is abandoned when the caller is
+	// cancelled - a service stop during API preflight must not wait out the
+	// request timeout, let alone keep retrying.
+	req, err := http.NewRequestWithContext(ctx, "POST", apiUrl, body)
 	if err != nil {
 		ctrld.Log(ctx, logger.Error(), "Failed to create HTTP request: %v", err)
 		return nil, fmt.Errorf("http.NewRequest: %w", err)
@@ -206,8 +232,8 @@ func postUtilityAPI(ctx context.Context, version string, cdDev, lastUpdatedFaile
 	ctrld.Log(ctx, logger.Debug(), "Processing API response")
 	d := json.NewDecoder(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		errResp := &ErrorResponse{}
-		if err := d.Decode(errResp); err != nil {
+		errResp, err := apiErrorFromResponse(resp.StatusCode, d)
+		if err != nil {
 			ctrld.Log(ctx, logger.Error(), "Failed to decode error response: %v", err)
 			return nil, err
 		}
@@ -237,7 +263,7 @@ func SendLogs(ctx context.Context, lr *LogsRequest, cdDev bool) error {
 	}
 
 	ctrld.Log(ctx, logger.Debug(), "Creating HTTP request for log upload")
-	req, err := http.NewRequest("POST", apiUrl, lr.Data)
+	req, err := http.NewRequestWithContext(ctx, "POST", apiUrl, lr.Data)
 	if err != nil {
 		ctrld.Log(ctx, logger.Error(), "Failed to create HTTP request: %v", err)
 		return fmt.Errorf("http.NewRequest: %w", err)
@@ -265,8 +291,8 @@ func SendLogs(ctx context.Context, lr *LogsRequest, cdDev bool) error {
 	ctrld.Log(ctx, logger.Debug(), "Processing API response")
 	d := json.NewDecoder(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		errResp := &ErrorResponse{}
-		if err := d.Decode(errResp); err != nil {
+		errResp, err := apiErrorFromResponse(resp.StatusCode, d)
+		if err != nil {
 			ctrld.Log(ctx, logger.Error(), "Failed to decode error response: %v", err)
 			return err
 		}

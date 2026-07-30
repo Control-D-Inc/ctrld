@@ -322,7 +322,7 @@ func (p *prog) runWait() {
 				continue
 			}
 			if cdUID != "" {
-				rc, err := processCDFlags(newCfg)
+				rc, err := p.fetchCDConfigBoundedByLifetime(newCfg)
 				if err != nil {
 					p.Error().Err(err).Msg("Could not fetch controld config")
 					waitOldRunDone()

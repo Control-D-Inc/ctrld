@@ -316,23 +316,57 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 	if cdUID != "" {
 		validateCdUpstreamProtocol()
-		if rc, err := processCDFlags(&cfg); err != nil {
+		// Bound API preflight by the service lifetime. Without this, a stop request
+		// arriving while the API is unreachable leaves this retry/backoff loop running
+		// after "Service stopped" was logged, so the process keeps working on behalf of
+		// a service the OS considers stopped.
+		pf := runAPIPreflight(p.stopCh, &cfg)
+		switch {
+		case pf.stopRequested:
+			// Stop requested during preflight, whether or not the fetch itself
+			// succeeded. A successful fetch does not entitle startup to continue: the
+			// operator asked for a stop, and carrying on would set up listeners and
+			// interception for a service the OS already considers stopping.
+			//
+			// Exit the way a normal stop does: no Fatal, so the OS service manager does
+			// not see a failed start and apply its restart policy to a service the
+			// operator just asked to stop.
+			p.Notice().Msg("Stop requested while fetching resolver config — shutting down")
+			notifyExitToLogServer()
+			return
+		case pf.err != nil:
 			if isMobile() {
-				appCallback.Exit(err.Error())
+				appCallback.Exit(pf.err.Error())
 				return
 			}
 
 			cdLogger := p.logger.Load().With().Str("mode", "cd")
 			// Performs self-uninstallation if the ControlD device does not exist.
 			var uer *controld.ErrorResponse
-			if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+			if errors.As(pf.err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 				_ = uninstallInvalidCdUID(p, cdLogger, false)
 			}
+			if rejection, ok := permanentAPIRejection(pf.err); ok {
+				// The API answered and rejected this request permanently. Restarting
+				// cannot change that answer, so exit cleanly rather than through Fatal:
+				// an abnormal exit spends one of the service manager's restart actions,
+				// and on Windows those are what bring enforcement back after a real
+				// crash. Burning that budget on a config problem also buries the API's
+				// reason under repeated start failures.
+				cdLogger.Error().Err(pf.err).Int("status", rejection.StatusCode).Msg("Failed to fetch resolver config; the API rejected this configuration")
+				notifyExitToLogServer()
+				return
+			}
 			notifyExitToLogServer()
-			cdLogger.Fatal().Err(err).Msg("Failed to fetch resolver config")
-		} else {
+			// Everything else - a denied socket, an unreachable API, a proxy in the way,
+			// an API that is having a bad day - is a condition a later start may not hit,
+			// so keep the abnormal exit and let the service manager's recovery policy
+			// retry. That policy backs off (see ConfigureWindowsServiceFailureActions), so
+			// a short-lived block does not exhaust it.
+			cdLogger.Fatal().Err(pf.err).Msg("Failed to fetch resolver config")
+		default:
 			p.mu.Lock()
-			p.rc = rc
+			p.rc = pf.rc
 			p.mu.Unlock()
 		}
 	}
@@ -682,28 +716,152 @@ func deactivationPinSet() bool {
 	return cdDeactivationPin.Load() != defaultDeactivationPin
 }
 
-// processCDFlags processes Control D related flags
-func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+// fetchResolverConfig is a test seam for the ControlD resolver-config API call.
+var fetchResolverConfig = controld.FetchResolverConfig
+
+// apiPreflight is the outcome of the API preflight fetch: the resolver config, the
+// error if any, and whether the service was asked to stop while it ran.
+type apiPreflight struct {
+	rc            *controld.ResolverConfig
+	err           error
+	stopRequested bool
+}
+
+// runAPIPreflight fetches the ControlD resolver config bounded by the service
+// lifetime, and reports whether a stop was requested while it ran.
+//
+// The distinction matters because the caller does very different things with it: a stop
+// exits quietly, while a failure self-uninstalls a deleted device, surfaces the error to
+// a mobile app, and reports a failed start to the service manager.
+//
+// stopRequested must not be derived from the context once it has been cancelled.
+// context.CancelFunc sets ctx.Err() unconditionally, so reading it after the cancel
+// classifies *every* failure - a deleted device, an exhausted retry, a mobile caller
+// with no stop channel - as an operator stop. Reading the stop channel directly is also
+// independent of whether the context's watcher goroutine has been scheduled yet.
+func runAPIPreflight(stopCh <-chan struct{}, cfg *ctrld.Config) apiPreflight {
+	rc, err := fetchCDConfigBoundedBy(stopCh, cfg)
+	return apiPreflight{rc: rc, err: err, stopRequested: stopRequested(stopCh)}
+}
+
+// permanentAPIRejection reports whether err is the API refusing this request in a way
+// that a restart cannot change, and returns the rejection when it is.
+//
+// The type alone does not answer this. controld builds an *ErrorResponse for *any*
+// non-200 whose body decodes, so a 502 from a load balancer and a 404 for a deleted
+// device arrive as the same Go type. Treating both as permanent would let a few minutes
+// of API trouble stop ctrld on every host with no service-manager retry behind it, which
+// is strictly worse than the abnormal exit it replaced.
+//
+// So the HTTP status decides, and only a client-error status counts:
+//
+//   - 4xx: the API examined this request and refused it - a deleted device, a revoked
+//     token, a malformed UID. The same request will be refused again.
+//   - 408 and 429 are the exceptions: they are the API asking for another attempt later.
+//   - 5xx, or no recorded status, says nothing about this configuration. Retry.
+func permanentAPIRejection(err error) (*controld.ErrorResponse, bool) {
+	var uer *controld.ErrorResponse
+	if !errors.As(err, &uer) {
+		return nil, false
+	}
+	switch uer.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return nil, false
+	}
+	if uer.StatusCode < 400 || uer.StatusCode >= 500 {
+		return nil, false
+	}
+	return uer, true
+}
+
+// processCDFlagsFn is the API fetch, indirected so the lifetime binding around it can be
+// tested without reaching the network.
+var processCDFlagsFn = processCDFlags
+
+// fetchCDConfigBoundedBy runs the API fetch bounded by stopCh, so a fetch that cannot
+// reach the API stops when the service is asked to stop instead of working on behalf of a
+// service the OS already considers stopped. The derived context is always cancelled, which
+// releases the goroutine watching stopCh.
+func fetchCDConfigBoundedBy(stopCh <-chan struct{}, cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+	ctx, cancel := contextFromStopCh(stopCh)
+	defer cancel()
+	return processCDFlagsFn(ctx, cfg)
+}
+
+// fetchCDConfigBoundedByLifetime is the reload path's fetch. Reload binds the same stop
+// primitives as startup - it used to wire them up itself, where a dropped cancel or the
+// wrong channel would have failed nothing.
+func (p *prog) fetchCDConfigBoundedByLifetime(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+	return fetchCDConfigBoundedBy(p.stopCh, cfg)
+}
+
+// stopRequested reports whether stopCh has been closed. A nil channel - mobile passes
+// none - blocks forever, so the default case is taken and it reads as "no stop".
+func stopRequested(stopCh <-chan struct{}) bool {
+	select {
+	case <-stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// contextFromStopCh returns a context that is cancelled when stopCh closes, so
+// long-running startup work stops as soon as the service is asked to stop. The
+// returned cancel func must be called to release the watcher goroutine.
+func contextFromStopCh(stopCh <-chan struct{}) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if stopCh == nil {
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+// processCDFlags fetches the ControlD configuration for cdUID and applies it to cfg.
+//
+// ctx bounds the whole operation, including the bootstrap-DNS retry loop below. That
+// loop retries indefinitely by design (a device with no network yet must eventually
+// come up), so it must be cancellable: otherwise a stop request during preflight is
+// ignored and the process keeps retrying after the service reports itself stopped.
+func processCDFlags(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	logger := mainLog.Load().With().Str("mode", "cd")
 	logger.Info().Msgf("Fetching Controld D configuration from API: %s", cdUID)
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
 	bo.LogLongerThan = 30 * time.Second
-	ctx := ctrld.LoggerCtx(context.Background(), logger)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = ctrld.LoggerCtx(ctx, logger)
 	req := &controld.ResolverConfigRequest{
 		RawUID:   cdUID,
 		Version:  appVersion,
 		Metadata: ctrld.SystemMetadata(ctx),
 	}
-	resolverConfig, err := controld.FetchResolverConfig(ctx, req, cdDev)
+	resolverConfig, err := fetchResolverConfig(ctx, req, cdDev)
 
 	// Retry logic for network errors using bootstrap DNS
 	// This is needed because the initial DNS resolution might fail due to network issues
 	// or DNS server unavailability, but bootstrap DNS can provide alternative resolution
 	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			logger.Debug().Msg("Resolver config fetch cancelled")
+			return nil, ctxErr
+		}
 		if errUrlNetworkError(err) {
 			bo.BackOff(ctx, err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				logger.Debug().Msg("Resolver config fetch cancelled during backoff")
+				return nil, ctxErr
+			}
 			logger.Warn().Msg("Could not fetch resolver using bootstrap DNS, retrying...")
-			resolverConfig, err = controld.FetchResolverConfig(ctx, req, cdDev)
+			resolverConfig, err = fetchResolverConfig(ctx, req, cdDev)
 			continue
 		}
 		break
