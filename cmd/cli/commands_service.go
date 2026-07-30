@@ -114,6 +114,7 @@ func InitServiceCmd(rootCmd *cobra.Command) *cobra.Command {
 	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show status of the ctrld service",
+		Long:  statusCmdLong,
 		Args:  cobra.NoArgs,
 		RunE:  sc.Status,
 	}
@@ -202,6 +203,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 	statusCmdAlias := &cobra.Command{
 		Use:   "status",
 		Short: "Show status of the ctrld service",
+		Long:  statusCmdLong,
 		Args:  cobra.NoArgs,
 		RunE:  statusCmd.RunE,
 	}
