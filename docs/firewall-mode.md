@@ -1,7 +1,8 @@
 # Firewall Mode
 
-Firewall mode makes DNS policy unbypassable by blocking outbound connections to any
-IP that wasn't resolved by ctrld. This closes the "DNS gap" - where apps use hardcoded
+Firewall mode makes DNS policy unbypassable *while ctrld is running* by blocking outbound
+connections to any IP that wasn't resolved by ctrld. On Windows, enforcement is tied to the
+process lifetime - see [Enforcement lifetime](#enforcement-lifetime-what-happens-when-the-process-dies). This closes the "DNS gap" - where apps use hardcoded
 IPs, direct-IP fallbacks, or alternative DNS resolvers to bypass DNS-based filtering.
 
 ## How It Works
@@ -62,6 +63,38 @@ sublayer with dynamic permit filters:
 - Static: permits for loopback, RFC1918, ctrld listener
 
 Permit filters are added/removed dynamically as the allowlist changes.
+
+#### Enforcement lifetime: what happens when the process dies
+
+ctrld opens its WFP session as a **dynamic** session, so Windows removes every filter it
+added - including firewall mode's block-all - as soon as the process exits, however it
+exits. That is a deliberate trade, recorded here because it changes what "unbypassable"
+means on Windows:
+
+- **Before**: a hard kill (`taskkill /f`, a crash) left the filters installed with no ctrld
+  to manage them. The host was unusable rather than unfiltered, and only a reboot or a
+  manual WFP cleanup recovered it. A replacement ctrld could not even reach the API to
+  start, so it never got far enough to clean up - the deadlock this session change breaks.
+- **Now**: the same kill leaves the host *unfiltered* until the service restarts.
+
+A clean stop or uninstall behaved this way already, and both need administrator rights, as
+does killing a SYSTEM service - so the newly exposed case is specifically the hard kill of
+an already-privileged process. What it costs is that an administrator can turn enforcement
+off without uninstalling and without a trace beyond the service state.
+
+Compensating controls:
+
+1. **Restart policy backs off instead of burning out.** `ConfigureWindowsServiceFailureActions`
+   uses 5s / 30s / 2m restart delays with a 10-minute reset window, so three failures cannot
+   spend the whole budget inside 15 seconds and leave the host unfiltered. Repeated kills
+   still end in a stopped service - a bounded policy has to - but it takes minutes.
+2. **Startup cleans up predecessors.** `cleanupStaleDNSInterceptState` removes filters left
+   by a build that predates session-scoped ownership, so an upgrade from such a build cannot
+   inherit the old lockout.
+
+Still open: enforcement stopping while policy should be active is visible only in the local
+log. Reporting that state centrally is follow-up work, and is the control that would make
+the hard-kill case detectable rather than merely bounded.
 
 ### Linux and Unsupported Platforms
 

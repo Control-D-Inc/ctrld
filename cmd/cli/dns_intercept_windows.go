@@ -129,6 +129,21 @@ const (
 	// from overriding this filter's PERMIT action ("hard permit"). Used in DNS
 	// mode to override third-party WFP blocks (e.g., OpenVPN's block-outside-dns).
 	fwpmFilterFlagClearActionRight uint32 = 0x00000008
+
+	// fwpmSessionFlagDynamic is FWPM_SESSION_FLAG_DYNAMIC from fwpmtypes.h.
+	//
+	// Every WFP object added through a dynamic session is owned by that session and
+	// is deleted by the OS when the engine handle closes - including when the process
+	// exits, crashes, or is killed. ctrld relies on this so its filters can never
+	// outlive the process that installed them.
+	//
+	// This matters most in Firewall Mode: its block-all filters are machine-wide, so
+	// an orphaned set silently denies outbound traffic for every process on the host
+	// (browsers, other users, even a replacement ctrld's own API bootstrap) until a
+	// reboot. Session-scoped ownership makes the OS clean that up for us instead of
+	// depending on ctrld reaching its own shutdown or startup cleanup path.
+	// See: https://learn.microsoft.com/en-us/windows/win32/api/fwpmtypes/ns-fwpmtypes-fwpm_session0
+	fwpmSessionFlagDynamic uint32 = 0x00000001
 )
 
 // WFP API structures. These mirror the C structures from fwpmtypes.h and fwptypes.h.
@@ -1114,6 +1129,10 @@ func (p *prog) startWFPFilters(state *wfpState) error {
 	session := fwpmSession0{}
 	sessionName, _ := windows.UTF16PtrFromString("ctrld DNS Intercept")
 	session.displayData.name = sessionName
+	// Session-scoped ownership: if this process dies without running its shutdown
+	// path, Windows removes our filters (including Firewall Mode's machine-wide
+	// block-all) instead of leaving the host enforced by a dead ctrld.
+	session.flags = fwpmSessionFlagDynamic
 
 	// RPC_C_AUTHN_DEFAULT (0xFFFFFFFF) lets the system pick the appropriate
 	// authentication service. RPC_C_AUTHN_NONE (0) returns ERROR_NOT_SUPPORTED
@@ -1129,11 +1148,11 @@ func (p *prog) startWFPFilters(state *wfpState) error {
 	if r1 != 0 {
 		return fmt.Errorf("FwpmEngineOpen0 failed: HRESULT 0x%x", r1)
 	}
-	mainLog.Load().Info().Msgf("DNS intercept: WFP engine opened (handle: 0x%x)", engineHandle)
+	mainLog.Load().Info().Msgf("DNS intercept: WFP engine opened (handle: 0x%x, session-scoped)", engineHandle)
 
-	// Clean up any stale sublayer from a previous unclean shutdown.
-	// If ctrld crashed or was killed, the non-dynamic WFP session may have left
-	// orphaned filters. Deleting the sublayer removes all its child filters.
+	// Clean up any sublayer left by an older ctrld that used a non-dynamic session
+	// (or by a build predating session-scoped ownership). Deleting the sublayer
+	// removes all its child filters.
 	r1, _, _ = procFwpmSubLayerDeleteByKey0.Call(
 		engineHandle,
 		uintptr(unsafe.Pointer(&ctrldSubLayerGUID)),
@@ -1141,7 +1160,12 @@ func (p *prog) startWFPFilters(state *wfpState) error {
 	if r1 == 0 {
 		mainLog.Load().Info().Msg("DNS intercept: cleaned up stale WFP sublayer from previous session")
 	}
-	// r1 != 0 means sublayer didn't exist — that's fine, nothing to clean up.
+	// A non-zero r1 is not necessarily "nothing to clean up": it is also
+	// FWP_E_SUBLAYER_NOT_FOUND (the normal case), FWP_E_WRONG_SESSION for a sublayer a
+	// live ctrld owns, or FWP_E_DYNAMIC_SESSION_IN_PROGRESS for a non-dynamic one this
+	// dynamic session may not delete. None of them need handling here: the add below
+	// fails cleanly if the sublayer really is still present, and the non-dynamic case is
+	// what cleanupStaleDNSInterceptState handles at startup.
 
 	sublayer := fwpmSublayer0{
 		subLayerKey: ctrldSubLayerGUID,
@@ -1566,6 +1590,9 @@ func (p *prog) activateLoopbackWFPProtect(state *wfpState) error {
 		session := fwpmSession0{}
 		sessionName, _ := windows.UTF16PtrFromString("ctrld DNS Loopback Protect")
 		session.displayData.name = sessionName
+		// Session-scoped, like the hard-intercept engine: no ctrld filter should
+		// outlive the process that installed it.
+		session.flags = fwpmSessionFlagDynamic
 
 		const rpcCAuthnDefault = 0xFFFFFFFF
 		r1, _, _ := procFwpmEngineOpen0.Call(

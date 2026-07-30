@@ -66,15 +66,29 @@ func ConfigureWindowsServiceFailureActions(serviceName string) error {
 		return err
 	}
 
-	// Then proceed with existing actions, e.g. setting failure actions
+	// Recovery policy for a service that carries enforcement.
+	//
+	// ctrld's WFP session is dynamic, so Windows removes its filters when the process
+	// dies - a host with no ctrld is unfiltered rather than locked out. That makes the
+	// restart budget part of the enforcement story: three restarts five seconds apart
+	// with a two-minute reset window could be spent inside fifteen seconds, after which
+	// the service stays stopped and the host stays unfiltered until an operator acts.
+	//
+	// The delays back off instead, and the reset window is long enough that a burst
+	// cannot exhaust the budget faster than the backoff allows. A genuine crash loop
+	// still ends in a stopped service - that is the point of a bounded policy - but it
+	// takes minutes rather than seconds, and the third restart survives a transient
+	// failure that repeats.
 	actions := []mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
-		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
-		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
+		{Type: mgr.ServiceRestart, Delay: time.Second * 5},
+		{Type: mgr.ServiceRestart, Delay: time.Second * 30},
+		{Type: mgr.ServiceRestart, Delay: time.Minute * 2},
 	}
 
-	// Set the recovery actions (3 restarts, reset period = 120).
-	err = s.SetRecoveryActions(actions, 120)
+	// Reset the failure count only after the service has stayed up longer than the whole
+	// backoff schedule, so repeated failures keep escalating instead of restarting the
+	// count from the first five-second delay.
+	err = s.SetRecoveryActions(actions, uint32((10 * time.Minute).Seconds()))
 	if err != nil {
 		return err
 	}
