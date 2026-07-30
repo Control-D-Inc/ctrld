@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -82,6 +83,51 @@ const (
 	// pfAnchorFile is the full path to ctrld's pf anchor configuration file.
 	pfAnchorFile = "/etc/pf.anchors/com.controld.ctrld"
 )
+
+// pfAnchorWriteMu serializes writers of the anchor file. Seven code paths rebuild it
+// (startup, tunnel change, watchdog restore, VPN DNS exemptions, forced reload,
+// forwarded-source reconcile, firewall shutdown) from timers and network-change
+// callbacks in their own goroutines, with no lock between them.
+var pfAnchorWriteMu sync.Mutex
+
+// writePFAnchorFile replaces the anchor file atomically: write a temp file in the
+// same directory, then rename over the target.
+//
+// os.WriteFile truncates and then writes, so a pfctl -f racing that window can read a
+// partial ruleset and reject the anchor - taking DNS interception down until the next
+// watchdog restore. A rename is atomic, so a concurrent reader sees either the whole
+// previous ruleset or the whole new one.
+//
+// Two writers can still be followed by two loads in either order, but every load now
+// sees a complete ruleset, and each writer's load re-applies a full anchor, so the
+// worst case is redundant work rather than a broken anchor.
+func writePFAnchorFile(rules string) error {
+	pfAnchorWriteMu.Lock()
+	defer pfAnchorWriteMu.Unlock()
+
+	tmp, err := os.CreateTemp(filepath.Dir(pfAnchorFile), ".ctrld-anchor-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		// No-op once the rename succeeded; removes the temp file on any failure path.
+		_ = os.Remove(tmpName)
+	}()
+
+	if _, err := tmp.WriteString(rules); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, pfAnchorFile)
+}
 
 // pfState holds the state of the pf DNS interception on macOS.
 type pfState struct {
@@ -240,12 +286,13 @@ func (p *prog) startDNSIntercept() error {
 		}
 	}
 
-	rules := p.buildPFAnchorRules(initialExemptions)
+	forwarded := p.currentForwardedSources()
+	rules := p.buildPFAnchorRulesWith(initialExemptions, forwarded)
 
 	if err := os.MkdirAll(pfAnchorDir, 0755); err != nil {
 		return fmt.Errorf("dns intercept: failed to create pf anchor directory %s: %w", pfAnchorDir, err)
 	}
-	if err := os.WriteFile(pfAnchorFile, []byte(rules), 0644); err != nil {
+	if err := writePFAnchorFile(rules); err != nil {
 		return fmt.Errorf("dns intercept: failed to write pf anchor file %s: %w", pfAnchorFile, err)
 	}
 	mainLog.Load().Debug().Msgf("DNS intercept: wrote pf anchor file: %s", pfAnchorFile)
@@ -255,6 +302,9 @@ func (p *prog) startDNSIntercept() error {
 		os.Remove(pfAnchorFile)
 		return fmt.Errorf("dns intercept: failed to load pf anchor: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
+	// Baseline the reconcile snapshot: the anchor just loaded already contains this
+	// set, so the first watchdog tick must not treat it as a change.
+	p.recordAppliedForwardedSources(forwarded)
 	mainLog.Load().Debug().Msgf("DNS intercept: loaded pf anchor %q from %s", pfAnchorName, pfAnchorFile)
 
 	if err := p.ensurePFAnchorReference(); err != nil {
@@ -747,7 +797,22 @@ func (p *prog) validateDNSIntercept() error {
 // from the redirect to prevent ctrld from querying itself in a loop.
 //
 // pf requires strict rule ordering: translation (rdr) BEFORE filtering (pass).
+// buildPFAnchorRules detects the current forwarded-source set itself. Callers that
+// need to know which set the anchor was built from - so they can record it as applied
+// - should use buildPFAnchorRulesWith instead.
 func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
+	return p.buildPFAnchorRulesWith(vpnExemptions, p.currentForwardedSources())
+}
+
+// buildPFAnchorRulesWith is buildPFAnchorRules over an explicit forwarded-source set.
+//
+// Every rebuild path used to re-detect internally, which meant the caller could not
+// tell what it had just installed. The reconcile snapshot therefore stayed at the
+// older set, and the next reconcile "discovered" the same change again: another
+// rebuild, another round of killed states, and a transition logged for something that
+// had already taken effect. Passing the set in lets each path record exactly what pf
+// accepted.
+func (p *prog) buildPFAnchorRulesWith(vpnExemptions []vpnDNSExemption, forwardedSources []forwardedSource) string {
 	// Read the actual listener address from config. In intercept mode, ctrld may
 	// be on a non-standard port (e.g., 127.0.0.1:5354) if mDNSResponder holds *:53.
 	// The pf rdr rules must redirect to wherever ctrld is actually listening.
@@ -969,6 +1034,9 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	// DNS intercept rules must evaluate first so that DNS queries work (they're how
 	// IPs get into the allowlist in the first place).
 	if p.firewallModeEnabled() {
+		// Make declared VM/container source subnets first-class firewall
+		// clients (DNS forced through ctrld) before the blanket allowlist block.
+		rules.WriteString(buildPFForwardedSourceRulesFor(forwardedSources, listenerIP))
 		rules.WriteString(buildPFFirewallRules())
 	}
 
@@ -1128,8 +1196,9 @@ func (p *prog) checkTunnelInterfaceChanges() bool {
 	if p.vpnDNS != nil {
 		vpnExemptions = p.vpnDNS.CurrentExemptions()
 	}
-	rulesStr := p.buildPFAnchorRules(vpnExemptions)
-	if err := os.WriteFile(pfAnchorFile, []byte(rulesStr), 0644); err != nil {
+	forwarded := p.currentForwardedSources()
+	rulesStr := p.buildPFAnchorRulesWith(vpnExemptions, forwarded)
+	if err := writePFAnchorFile(rulesStr); err != nil {
 		mainLog.Load().Error().Err(err).Msg("DNS intercept: failed to write rebuilt anchor file")
 		return true
 	}
@@ -1138,6 +1207,7 @@ func (p *prog) checkTunnelInterfaceChanges() bool {
 		mainLog.Load().Error().Err(err).Msgf("DNS intercept: failed to reload rebuilt anchor (output: %s)", strings.TrimSpace(string(out)))
 		return true
 	}
+	p.recordAppliedForwardedSources(forwarded)
 
 	flushPFStates()
 	mainLog.Load().Info().Msgf("DNS intercept: rebuilt pf anchor with %d tunnel interfaces", len(current))
@@ -1388,13 +1458,15 @@ func (p *prog) ensurePFAnchorActive() bool {
 	if p.vpnDNS != nil {
 		vpnExemptions = p.vpnDNS.CurrentExemptions()
 	}
-	rulesStr := p.buildPFAnchorRules(vpnExemptions)
-	if err := os.WriteFile(pfAnchorFile, []byte(rulesStr), 0644); err != nil {
+	forwarded := p.currentForwardedSources()
+	rulesStr := p.buildPFAnchorRulesWith(vpnExemptions, forwarded)
+	if err := writePFAnchorFile(rulesStr); err != nil {
 		mainLog.Load().Error().Err(err).Msg("DNS intercept watchdog: failed to write anchor file")
 	} else if out, err := exec.Command("pfctl", "-a", pfAnchorName, "-f", pfAnchorFile).CombinedOutput(); err != nil {
 		p.pfBackoffResourceExhaustion(err, out, "load rebuilt anchor")
 		mainLog.Load().Error().Err(err).Msgf("DNS intercept watchdog: failed to load rebuilt anchor (output: %s)", strings.TrimSpace(string(out)))
 	} else {
+		p.recordAppliedForwardedSources(forwarded)
 		flushPFStates()
 		mainLog.Load().Info().Msg("DNS intercept watchdog: rebuilt and loaded anchor rules")
 	}
@@ -1510,6 +1582,10 @@ func (p *prog) scheduleDelayedRechecks() {
 			if p.vpnDNS != nil {
 				p.vpnDNS.Refresh(ctx, true)
 			}
+			// A VM/container network often gets its address slightly after the
+			// interface appears, so the immediate handler can see it without a subnet.
+			// Re-check here (no-op when the forwarded-source set is unchanged).
+			p.reconcileForwardedSources()
 		})
 		p.pfDelayedRecheckTimers = append(p.pfDelayedRecheckTimers, timer)
 	}
@@ -1567,6 +1643,13 @@ func (p *prog) pfWatchdog() {
 					mainLog.Load().Info().Msgf("DNS intercept watchdog: pf anchor stable again after %d consecutive restores", old)
 				}
 			}
+
+			// VM/container networks appear and disappear without always
+			// producing a network-change event, and an intact anchor passes every
+			// check above. Reconciling here bounds how long a started guest can go
+			// untrusted (or a stopped one stay trusted) to one watchdog interval.
+			// No-op when the effective forwarded-source set is unchanged.
+			p.reconcileForwardedSources()
 		}
 	}
 }
@@ -1581,9 +1664,10 @@ func (p *prog) exemptVPNDNSServers(exemptions []vpnDNSExemption) error {
 		return fmt.Errorf("pf state not available")
 	}
 
-	rulesStr := p.buildPFAnchorRules(exemptions)
+	forwarded := p.currentForwardedSources()
+	rulesStr := p.buildPFAnchorRulesWith(exemptions, forwarded)
 
-	if err := os.WriteFile(pfAnchorFile, []byte(rulesStr), 0644); err != nil {
+	if err := writePFAnchorFile(rulesStr); err != nil {
 		return fmt.Errorf("dns intercept: failed to rewrite pf anchor: %w", err)
 	}
 
@@ -1591,6 +1675,7 @@ func (p *prog) exemptVPNDNSServers(exemptions []vpnDNSExemption) error {
 	if err != nil {
 		return fmt.Errorf("dns intercept: failed to reload pf anchor: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
+	p.recordAppliedForwardedSources(forwarded)
 
 	// Flush stale pf states so packets are re-evaluated against new rules.
 	flushPFStates()
@@ -1832,11 +1917,14 @@ func (p *prog) forceReloadPFMainRuleset() {
 	if p.vpnDNS != nil {
 		vpnExemptions = p.vpnDNS.CurrentExemptions()
 	}
-	rulesStr := p.buildPFAnchorRules(vpnExemptions)
-	if err := os.WriteFile(pfAnchorFile, []byte(rulesStr), 0644); err != nil {
+	forwarded := p.currentForwardedSources()
+	rulesStr := p.buildPFAnchorRulesWith(vpnExemptions, forwarded)
+	if err := writePFAnchorFile(rulesStr); err != nil {
 		mainLog.Load().Error().Err(err).Msg("DNS intercept: force reload — failed to write anchor file")
 	} else if out, err := exec.Command("pfctl", "-a", pfAnchorName, "-f", pfAnchorFile).CombinedOutput(); err != nil {
 		mainLog.Load().Error().Err(err).Msgf("DNS intercept: force reload — failed to load anchor (output: %s)", strings.TrimSpace(string(out)))
+	} else {
+		p.recordAppliedForwardedSources(forwarded)
 	}
 
 	// Flush stale rdr/reply states after the forced ruleset + anchor reload.

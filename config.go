@@ -255,8 +255,24 @@ type ServiceConfig struct {
 	// Requires intercept mode to be active for enforcement on desktop platforms.
 	// On mobile, the netstack layer uses the allowlist directly.
 	FirewallMode string `mapstructure:"firewall_mode" toml:"firewall_mode,omitempty" validate:"omitempty,oneof=off on"`
-	Daemon       bool   `mapstructure:"-" toml:"-"`
-	AllocateIP   bool   `mapstructure:"-" toml:"-"`
+	// FirewallForwardedSources lists VM/container source subnets (CIDR) whose
+	// forwarded/NATed DNS is redirected through ctrld under Firewall Mode, so
+	// guest resolutions are policy-enforced and populate the allowlist, and guest
+	// egress to allowed destinations is permitted without an interface-wide
+	// bypass. These augment auto-detection of VM networks and are the supported way
+	// to trust a stack that auto-detection cannot prove ownership of. Empty (the
+	// default) preserves prior behavior. macOS only; see
+	// buildPFForwardedSourceRules.
+	//
+	// Deliberately not validated with `cidr`: entries are checked at use time and a
+	// bad one is dropped with a warning while the rest of the set still applies
+	// (see firewallForwardedSources). A hard validator here would make one typo in
+	// an MDM-pushed subnet fatal at startup - validateConfig exits the process -
+	// taking down DNS service for the whole host over a line that only ever
+	// widened a firewall allowance.
+	FirewallForwardedSources []string `mapstructure:"firewall_forwarded_sources" toml:"firewall_forwarded_sources,omitempty"`
+	Daemon                   bool     `mapstructure:"-" toml:"-"`
+	AllocateIP               bool     `mapstructure:"-" toml:"-"`
 }
 
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.

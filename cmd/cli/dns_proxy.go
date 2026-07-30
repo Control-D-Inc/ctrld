@@ -1801,6 +1801,10 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 						p.Info().Str("interface", changedIface).
 							Msg("DNS intercept: interface appeared/disappeared — starting interception probe monitor")
 						go p.pfInterceptMonitor()
+						// A VM/container bridge appearing/disappearing changes the
+						// effective forwarded-source set; rebuild the anchor if so, since
+						// the probe monitor alone won't (an intact anchor passes its probe).
+						p.reconcileForwardedSources()
 					}
 				}
 			}
@@ -1902,6 +1906,9 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 			if p.vpnDNS != nil {
 				p.vpnDNS.Refresh(ctrld.LoggerCtx(ctx, p.logger.Load()), true)
 			}
+			// Rebuild the anchor if a VM/container bridge appeared/disappeared
+			// on this network change (no-op when the forwarded-source set is unchanged).
+			p.reconcileForwardedSources()
 			// Schedule delayed re-checks to catch async VPN teardown changes.
 			p.scheduleDelayedRechecks()
 		}

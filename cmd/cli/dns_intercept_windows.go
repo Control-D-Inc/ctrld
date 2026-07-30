@@ -1742,6 +1742,10 @@ func (p *prog) nrptHealthMonitor(state *wfpState) {
 // and don't suffer from the pf translation state corruption that macOS has.
 func (p *prog) pfInterceptMonitor() {}
 
+// reconcileForwardedSources is a no-op on Windows — forwarded-workload DNS
+// interception is macOS-pf-only; Windows Firewall Mode is tracked separately.
+func (p *prog) reconcileForwardedSources() {}
+
 const (
 	// nrptProbeDomain is the suffix used for NRPT verification probe queries.
 	// Probes use "_nrpt-probe-<hex>.<nrptProbeDomain>" — ctrld recognizes the
