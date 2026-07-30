@@ -1500,12 +1500,54 @@ var (
 	windowsEADDRINUSE   = syscall.Errno(10048)
 )
 
+// errUrlNetworkError reports whether a failed HTTP attempt is worth retrying.
+//
+// The two-attempt paths compose one *url.Error per attempt - hostname first, then the
+// direct-IP fallback - so this walks them in order rather than classifying only the first
+// one errors.As happens to find. Each attempt can say one of three things:
+//
+//   - retryable (unreachable, refused, temporary): retry, whichever attempt said it;
+//   - a name-resolution failure: no verdict. Only the hostname attempt resolves DNS, and
+//     at boot behind a captive portal or before the router's forwarder is up it fails
+//     this way while the network is merely not ready yet. Consult the next attempt;
+//   - anything else, notably a locally denied socket (WSAEACCES from a firewall blocking
+//     ctrld): definitive. Stop, because retrying cannot clear it - the Firewall Mode
+//     incident spent 256 retry cycles against filters that were never going to clear.
 func errUrlNetworkError(err error) bool {
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		return errNetworkError(urlErr.Err)
+	for _, attempt := range attemptErrors(err) {
+		var urlErr *url.Error
+		if !errors.As(attempt, &urlErr) {
+			continue
+		}
+		switch {
+		case errNetworkError(urlErr.Err):
+			return true
+		case errDNSResolutionFailure(urlErr.Err):
+			// Neutral; let a later attempt decide.
+		default:
+			return false
+		}
 	}
 	return false
+}
+
+// attemptErrors returns the per-attempt errors recorded in err, in the order they were
+// tried. A composed fallback error wraps one per attempt; anything else is a single
+// attempt.
+func attemptErrors(err error) []error {
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		return multi.Unwrap()
+	}
+	return []error{err}
+}
+
+// errDNSResolutionFailure reports whether err is a name-resolution failure. Go marks a
+// *net.DNSError as temporary only for socket failures that reached the server, so a
+// SERVFAIL or "no such host" answer is not temporary - but it is also not evidence that
+// retrying is pointless, which is why callers treat it as no verdict.
+func errDNSResolutionFailure(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr)
 }
 
 func errNetworkError(err error) bool {

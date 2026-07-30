@@ -64,8 +64,13 @@ func httpClientWithFallback(timeout time.Duration) *http.Client {
 // doWithRetry performs an HTTP request with retries
 // This improves reliability by automatically retrying failed requests with exponential backoff
 func doWithRetry(req *http.Request, maxRetries int, ip string) (*http.Response, error) {
+	return doWithRetryClient(httpClientWithFallback(defaultHTTPTimeout), req, maxRetries, ip)
+}
+
+// doWithRetryClient is doWithRetry with an injectable client, so the retry and
+// error-composition behaviour can be tested without real network access.
+func doWithRetryClient(client *http.Client, req *http.Request, maxRetries int, ip string) (*http.Response, error) {
 	var lastErr error
-	client := httpClientWithFallback(defaultHTTPTimeout)
 	var ipReq *http.Request
 	if ip != "" {
 		ipReq = req.Clone(req.Context())
@@ -82,22 +87,28 @@ func doWithRetry(req *http.Request, maxRetries int, ip string) (*http.Response, 
 		if err == nil {
 			return resp, nil
 		}
+		// Keep the hostname attempt's error: it carries the diagnosis (on Windows,
+		// a local firewall denying the socket shows up here as WSAEACCES), while the
+		// direct-ip fallback often fails for an unrelated reason such as an
+		// unreachable IPv6 route.
+		attemptErr := err
 		if ipReq != nil {
 			mainLog.Load().Warn().Err(err).Msgf("Dial to %q failed", req.Host)
 			mainLog.Load().Warn().Msgf("Fallback to direct ip to download prod version: %q", ip)
-			resp, err = client.Do(ipReq)
-			if err == nil {
+			resp, fallbackErr := client.Do(ipReq)
+			if fallbackErr == nil {
 				return resp, nil
 			}
+			attemptErr = fmt.Errorf("%w; fallback to direct ip %s failed: %w", attemptErr, ip, fallbackErr)
 		}
 
-		lastErr = err
-		mainLog.Load().Debug().Err(err).
+		lastErr = attemptErr
+		mainLog.Load().Debug().Err(attemptErr).
 			Str("method", req.Method).
 			Str("url", req.URL.String()).
 			Msgf("HTTP request attempt %d/%d failed", attempt+1, maxRetries)
 	}
-	return nil, fmt.Errorf("failed after %d attempts to %s %s: %v", maxRetries, req.Method, req.URL, lastErr)
+	return nil, fmt.Errorf("failed after %d attempts to %s %s: %w", maxRetries, req.Method, req.URL, lastErr)
 }
 
 // Helper for making GET requests with retries

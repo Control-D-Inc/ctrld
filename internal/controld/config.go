@@ -390,17 +390,31 @@ func addrsFromPort(ips []string, port string) []string {
 	return addrs
 }
 
+// doWithFallback sends req, retrying against apiIp directly if the first attempt
+// fails (typically because DNS is not usable yet).
+//
+// Both failures are reported. The first attempt carries the diagnosis - on Windows
+// a local firewall denying the socket surfaces there as WSAEACCES ("An attempt was
+// made to access a socket in a way forbidden by its access permissions"), which
+// says the host is blocking ctrld rather than that the network is down. Returning
+// only the fallback error hid that behind a bare "no route to host" from the IPv6
+// attempt and sent the Firewall Mode incident investigation after a routing
+// problem that did not exist.
 func doWithFallback(ctx context.Context, client *http.Client, req *http.Request, apiIp string) (*http.Response, error) {
 	resp, err := client.Do(req)
-	if err != nil {
-		logger := ctrld.LoggerFromCtx(ctx)
-		logger.Warn().Err(err).Msgf("Failed to send request, fallback to direct ip: %s", apiIp)
-		ipReq := req.Clone(req.Context())
-		ipReq.Host = apiIp
-		ipReq.URL.Host = apiIp
-		resp, err = client.Do(ipReq)
+	if err == nil {
+		return resp, nil
 	}
-	return resp, err
+	logger := ctrld.LoggerFromCtx(ctx)
+	logger.Warn().Err(err).Msgf("Failed to send request, fallback to direct ip: %s", apiIp)
+	ipReq := req.Clone(req.Context())
+	ipReq.Host = apiIp
+	ipReq.URL.Host = apiIp
+	resp, fallbackErr := client.Do(ipReq)
+	if fallbackErr != nil {
+		return nil, fmt.Errorf("request failed: %w; fallback to direct ip %s failed: %w", err, apiIp, fallbackErr)
+	}
+	return resp, nil
 }
 
 // apiServerIP returns the direct IP to connect to API server.
@@ -409,4 +423,11 @@ func apiServerIP(cdDev bool) string {
 		return apiDomainDevIPv4
 	}
 	return apiDomainComIPv4
+}
+
+// DoWithFallbackForTest exposes doWithFallback so tests outside this package can drive
+// the real two-attempt composition through the real retry predicate, rather than
+// asserting a copy of this error shape against another copy of it.
+func DoWithFallbackForTest(ctx context.Context, client *http.Client, req *http.Request, apiIp string) (*http.Response, error) {
+	return doWithFallback(ctx, client, req, apiIp)
 }
