@@ -14,6 +14,12 @@ func SetCacheReply(answer, msg *dns.Msg, code int) {
 		// See https://datatracker.ietf.org/doc/html/rfc7873#section-4
 		sCookie.Cookie = cCookie.Cookie[:16] + sCookie.Cookie[16:]
 	}
+	// NOTE: the answer's EDNS Client Subnet (ECS) is intentionally left as the
+	// upstream returned it. Correctness across clients is guaranteed by
+	// partitioning the cache and singleflight keys by ECS (see
+	// dnscache.CanonicalECS), so a cache hit only ever serves an answer that was
+	// resolved for the requester's own subnet. Rewriting the ECS option here
+	// without re-scoping the Answer records would violate RFC 7871 §7.3.
 }
 
 // getEdns0Cookie returns Edns0 cookie from *dns.OPT if present.

@@ -736,6 +736,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			}
 			continue
 		}
+		// Reject an answer whose question does not match the request before it
+		// can be served or cached. A mismatched question means the upstream
+		// answered a different name/type than asked; caching it would poison
+		// the shared cache with wrong-domain records for the requested name.
+		// See github.com/Control-D-Inc/ctrld/issues/322.
+		if !sameQuestion(req.msg, answer) {
+			ctrld.Log(ctx, mainLog.Load().Debug(),
+				"discarding answer from %s: question mismatch (asked %q, got %q)",
+				upstreams[n], questionString(req.msg), questionString(answer))
+			continue
+		}
 		// We are doing LAN/PTR lookup using private resolver, so always process next one.
 		// Except for the last, we want to send response instead of saying all upstream failed.
 		if answer.Rcode != dns.RcodeSuccess && isLanOrPtrQuery && n != len(upstreamConfigs)-1 {
@@ -897,6 +908,33 @@ func containRcode(rcodes []int, rcode int) bool {
 		}
 	}
 	return false
+}
+
+// sameQuestion reports whether the upstream answer echoes the request's
+// question. A well-behaved resolver always copies the question section from
+// the query (RFC 1035 section 4.1.2); names are compared case-insensitively
+// because DNS names are case-insensitive. A mismatch means the upstream
+// answered a different name/type than asked - malformed or malicious - and the
+// answer must not be served or cached, or it would poison the shared cache with
+// wrong-domain records. See github.com/Control-D-Inc/ctrld/issues/322.
+func sameQuestion(req, answer *dns.Msg) bool {
+	if req == nil || answer == nil {
+		return false
+	}
+	if len(req.Question) == 0 || len(answer.Question) == 0 {
+		return false
+	}
+	rq, aq := req.Question[0], answer.Question[0]
+	return rq.Qtype == aq.Qtype && rq.Qclass == aq.Qclass && strings.EqualFold(rq.Name, aq.Name)
+}
+
+// questionString renders a message's first question as "name/type" for logging.
+func questionString(msg *dns.Msg) string {
+	if msg == nil || len(msg.Question) == 0 {
+		return "<none>"
+	}
+	q := msg.Question[0]
+	return q.Name + "/" + dns.TypeToString[q.Qtype]
 }
 
 func setCachedAnswerTTL(answer *dns.Msg, now, expiredTime time.Time) {
@@ -1299,7 +1337,8 @@ func isPrivatePtrLookup(m *dns.Msg) bool {
 			return addr.IsPrivate() ||
 				addr.IsLoopback() ||
 				addr.IsLinkLocalUnicast() ||
-				tsaddr.CGNATRange().Contains(addr)
+				tsaddr.CGNATRange().Contains(addr) ||
+				isServiceContinuityAddr(addr)
 		}
 	}
 	return false
@@ -1337,6 +1376,20 @@ func isLanHostname(name string) bool {
 		strings.HasSuffix(name, ".local")
 }
 
+// ipv4ServiceContinuityPrefix is the RFC 7335 IPv4 Service Continuity Prefix
+// (192.0.0.0/29), used by the CLAT in 464XLAT/DS-Lite transition setups. On such
+// networks (common on IPv6-only cellular carriers and iPhone hotspots) the local
+// machine's DNS queries reach ctrld with a source in this range (e.g. 192.0.0.2),
+// so they must be treated as local, not WAN. Go's netip.IsPrivate does not cover
+// this range — the same reason the CGNAT range is special-cased below. See #552.
+var ipv4ServiceContinuityPrefix = netip.MustParsePrefix("192.0.0.0/29")
+
+// isServiceContinuityAddr reports whether ip is in the RFC 7335 IPv4 Service
+// Continuity Prefix (464XLAT/DS-Lite CLAT).
+func isServiceContinuityAddr(ip netip.Addr) bool {
+	return ipv4ServiceContinuityPrefix.Contains(ip)
+}
+
 // isWanClient reports whether the input is a WAN address.
 func isWanClient(na net.Addr) bool {
 	var ip netip.Addr
@@ -1347,7 +1400,8 @@ func isWanClient(na net.Addr) bool {
 		!ip.IsPrivate() &&
 		!ip.IsLinkLocalUnicast() &&
 		!ip.IsLinkLocalMulticast() &&
-		!tsaddr.CGNATRange().Contains(ip)
+		!tsaddr.CGNATRange().Contains(ip) &&
+		!isServiceContinuityAddr(ip)
 }
 
 // isIPv6LoopbackListener reports whether the listener address is [::1].

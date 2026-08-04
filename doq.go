@@ -242,7 +242,15 @@ func (p *doqConnPool) doResolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, er
 	if err := answer.Unpack(buf[2 : 2+respLen]); err != nil {
 		return nil, err
 	}
-	answer.SetReply(msg)
+	// RFC 9250 section 4.2.1 requires the DNS Message ID to be 0 on the wire,
+	// so restore the downstream transaction ID for the client. Do NOT use
+	// SetReply here: it rewrites the RCODE to NOERROR and overwrites the
+	// Question with the request's, which would mask upstream failures from the
+	// failover logic (a SERVFAIL would look like success) and let a
+	// wrong-question answer pass validation and poison the cache. Preserve the
+	// upstream RCODE, Question, and answer sections untouched so the proxy can
+	// evaluate them. See github.com/Control-D-Inc/ctrld/issues/322.
+	answer.Id = msg.Id
 	return answer, nil
 }
 

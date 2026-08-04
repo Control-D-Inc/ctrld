@@ -123,6 +123,35 @@ func TestPFBuildAnchorRules_Ordering(t *testing.T) {
 	}
 }
 
+// TestPFBuildAnchorRules_FallbackPort verifies that when the listener falls back
+// to an alternate local port (e.g. 5354 because mDNSResponder owns *:53), the pf
+// rdr rules redirect DNS to the ACTUAL bound port, not the configured default 53.
+// Regression test for #551: pf redirected to a dead port after listener fallback.
+func TestPFBuildAnchorRules_FallbackPort(t *testing.T) {
+	// Configured/generated listener is 127.0.0.1:53, but the runtime bound port is 5354.
+	p := &prog{cfg: &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"0": {IP: "127.0.0.1", Port: 5354}}}}
+	rules := p.buildPFAnchorRules(nil)
+
+	// rdr must redirect to the actual bound port 5354.
+	if !strings.Contains(rules, "rdr on lo0 inet proto udp from any to ! 127.0.0.1 port 53 -> 127.0.0.1 port 5354") {
+		t.Errorf("UDP rdr must redirect to bound port 5354, got:\n%s", rules)
+	}
+	if !strings.Contains(rules, "rdr on lo0 inet proto tcp from any to ! 127.0.0.1 port 53 -> 127.0.0.1 port 5354") {
+		t.Errorf("TCP rdr must redirect to bound port 5354, got:\n%s", rules)
+	}
+
+	// The rdr redirect target must NOT point at the dead default port 53.
+	// Match the exact port at line end so "port 5354" is not a false positive.
+	if strings.Contains(rules, "-> 127.0.0.1 port 53\n") {
+		t.Errorf("rdr must not redirect to dead port 53 after fallback, got:\n%s", rules)
+	}
+
+	// The inbound accept rule must also target the actual bound port.
+	if !strings.Contains(rules, "127.0.0.1 port 5354") {
+		t.Errorf("pass in rule must reference bound port 5354, got:\n%s", rules)
+	}
+}
+
 // TestPFAddressFamily tests the pfAddressFamily helper.
 func TestPFAddressFamily(t *testing.T) {
 	tests := []struct {

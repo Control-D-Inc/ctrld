@@ -399,7 +399,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			reportSetDnsOk := func(sockDir string) {
 				if cc := newSocketControlClient(ctx, s, sockDir); cc != nil {
 					if resp, _ := cc.post(ifacePath, nil); resp != nil && resp.StatusCode == http.StatusOK {
-						if iface == "auto" {
+						if iface == autoIface {
 							iface = defaultIfaceName()
 						}
 						res := &ifaceResponse{}
@@ -748,7 +748,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			startCmd.Run(cmd, args)
 		},
 	}
-	startCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Update DNS setting for iface, "auto" means the default interface gateway`)
+	startCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", autoIface, `Update DNS setting for iface, "auto" means the default interface gateway`)
 	startCmdAlias.Flags().AddFlagSet(startCmd.Flags())
 	rootCmd.AddCommand(startCmdAlias)
 
@@ -833,7 +833,7 @@ func initStopCmd() *cobra.Command {
 			stopCmd.Run(cmd, args)
 		},
 	}
-	stopCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
+	stopCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", autoIface, `Reset DNS setting for iface, "auto" means the default interface gateway`)
 	stopCmdAlias.Flags().AddFlagSet(stopCmd.Flags())
 	rootCmd.AddCommand(stopCmdAlias)
 
@@ -865,7 +865,7 @@ func initRestartCmd() *cobra.Command {
 				return
 			}
 			if iface == "" {
-				iface = "auto"
+				iface = autoIface
 			}
 			p.preRun()
 			if ir := runningIface(s); ir != nil {
@@ -1111,7 +1111,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				return
 			}
 			if iface == "" {
-				iface = "auto"
+				iface = autoIface
 			}
 			p.preRun()
 			if ir := runningIface(s); ir != nil {
@@ -1207,7 +1207,7 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 			uninstallCmd.Run(cmd, args)
 		},
 	}
-	uninstallCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", "auto", `Reset DNS setting for iface, "auto" means the default interface gateway`)
+	uninstallCmdAlias.Flags().StringVarP(&ifaceStartStop, "iface", "", autoIface, `Reset DNS setting for iface, "auto" means the default interface gateway`)
 	uninstallCmdAlias.Flags().AddFlagSet(uninstallCmd.Flags())
 	rootCmd.AddCommand(uninstallCmdAlias)
 
@@ -1400,7 +1400,7 @@ func initUpgradeCmd() *cobra.Command {
 				return
 			}
 			if iface == "" {
-				iface = "auto"
+				iface = autoIface
 			}
 			p.preRun()
 			if ir := runningIface(s); ir != nil {
@@ -1595,7 +1595,7 @@ func onlyInterceptFlags(args []string) bool {
 			} else {
 				return false
 			}
-		case arg == "--iface=auto" || arg == "--iface" || arg == "auto":
+		case arg == "--iface="+autoIface || arg == "--iface" || arg == autoIface:
 			// Auto-added by startCmdAlias or its value; safe to ignore.
 			continue
 		default:
