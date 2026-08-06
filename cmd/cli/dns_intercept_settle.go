@@ -14,21 +14,9 @@ func (p *prog) refreshDNSAfterVPNSettle(reason string) (routes, domainlessServer
 		return 0, 0, 0
 	}
 
-	beforeExemptions := p.vpnDNS.CurrentExemptions()
 	routes, domainlessServers, exemptions = p.vpnDNS.RefreshRoutesOnly()
-	afterExemptions := p.vpnDNS.CurrentExemptions()
-
-	if vpnDNSExemptionsEqual(beforeExemptions, afterExemptions) {
-		mainLog.Load().Info().Msgf("DNS intercept: post-settle VPN DNS route refresh completed — %d routes, %d domainless servers, %d exemptions (pf unchanged)",
-			routes, domainlessServers, exemptions)
-		return routes, domainlessServers, exemptions
-	}
-
-	if err := p.exemptVPNDNSServers(afterExemptions); err != nil {
-		mainLog.Load().Warn().Err(err).Msg("DNS intercept: post-settle VPN DNS exemption update failed")
-	} else {
-		mainLog.Load().Info().Msgf("DNS intercept: post-settle VPN DNS exemptions changed — updated pf/WFP with %d exemptions", len(afterExemptions))
-	}
+	mainLog.Load().Info().Msgf("DNS intercept: post-settle VPN DNS route refresh completed — %d routes, %d domainless servers, %d exemptions",
+		routes, domainlessServers, exemptions)
 	return routes, domainlessServers, exemptions
 }
 
