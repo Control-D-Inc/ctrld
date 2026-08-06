@@ -1616,13 +1616,19 @@ func parseIPv4AsUint32(ipStr string) uint32 {
 }
 
 // ensurePFAnchorActive is a no-op on Windows (WFP handles intercept differently).
-func (p *prog) ensurePFAnchorActive() bool {
-	return false
+func (p *prog) ensurePFAnchorActive() pfAnchorCheckResult {
+	return pfAnchorCheckSkipped
 }
 
 // checkTunnelInterfaceChanges is a no-op on Windows (WFP handles intercept differently).
 func (p *prog) checkTunnelInterfaceChanges() bool {
 	return false
+}
+
+// Windows preserves the existing immediate reconciliation behavior. NRPT/WFP
+// and adapter DNS settling have different lifecycle requirements from macOS pf.
+func (p *prog) dnsInterceptIgnoredChangeReconcileDue(time.Time) bool {
+	return true
 }
 
 // pfAnchorRecheckDelay is the delay for deferred pf anchor re-checks.

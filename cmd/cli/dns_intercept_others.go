@@ -4,6 +4,7 @@ package cli
 
 import (
 	"fmt"
+	"time"
 )
 
 // startDNSIntercept is not supported on this platform.
@@ -23,12 +24,16 @@ func (p *prog) exemptVPNDNSServers(exemptions []vpnDNSExemption) error {
 }
 
 // ensurePFAnchorActive is a no-op on unsupported platforms.
-func (p *prog) ensurePFAnchorActive() bool {
-	return false
+func (p *prog) ensurePFAnchorActive() pfAnchorCheckResult {
+	return pfAnchorCheckSkipped
 }
 
 // checkTunnelInterfaceChanges is a no-op on unsupported platforms.
 func (p *prog) checkTunnelInterfaceChanges() bool {
+	return false
+}
+
+func (p *prog) dnsInterceptIgnoredChangeReconcileDue(time.Time) bool {
 	return false
 }
 

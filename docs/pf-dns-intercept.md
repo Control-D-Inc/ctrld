@@ -258,11 +258,22 @@ The full pf reload is VPN-safe: it reassembles from `pfctl -sr` + `pfctl -sn`
 ### What about `set skip on lo0`?
 Some pf.conf files include `set skip on lo0` which tells pf to skip ALL processing on loopback. **This would break our approach** since both the `rdr on lo0` and `pass in on lo0` rules would be skipped.
 
-**Mitigation:** When injecting anchor references via `ensurePFAnchorReference()`,
-we strip `lo0` from any `set skip on` directives before reloading. The watchdog
-also checks for `set skip on lo0` and triggers a restore if detected. The
-interception probe provides an additional safety net — if `set skip on lo0` gets
-re-applied by another program, the probe will fail and trigger a full reload.
+**Mitigation:** the interception probe. `probePFIntercept()` sends a real query from
+outside the `_ctrld` group and confirms the listener received the redirect, which cannot
+succeed while pf is bypassing loopback — so a skip on `lo0` shows up as a probe failure
+and triggers a full reload.
+
+**Not implemented, contrary to earlier versions of this document:** ctrld does *not*
+strip `lo0` from `set skip on` directives, and the watchdog does *not* inspect skip
+state. Apple's `pfctl` offers no way to read it — `pfctl(8)` accepts `-s` nat, queue,
+rules, Anchors, states, Sources, info, References, labels, timeouts, memory, Tables,
+osfp, Interfaces, all, with no options or skip modifier — so text-based detection is not
+available on macOS.
+
+Adding an explicit check is tracked as follow-up: `pfctl(8)` documents
+`-s Interfaces -v` as additionally listing which interfaces have skip rules activated,
+which is the query to build on once its output shape is confirmed on a host that has a
+skip configured.
 
 ## Cleanup
 

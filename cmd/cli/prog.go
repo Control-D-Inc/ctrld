@@ -84,6 +84,16 @@ var noopLogf = func(format string, args ...any) {}
 
 var useSystemdResolved = false
 
+type pfAnchorCheckResult uint8
+
+const (
+	pfAnchorCheckSkipped pfAnchorCheckResult = iota
+	pfAnchorCheckIntact
+	pfAnchorCheckRestored
+	pfAnchorCheckDeferred
+	pfAnchorCheckFailed
+)
+
 type prog struct {
 	mu                   sync.Mutex
 	waitCh               chan struct{}
@@ -151,11 +161,12 @@ type prog struct {
 	// On Windows: *wfpState, on macOS: *pfState, nil on other platforms.
 	dnsInterceptState any
 
-	// lastTunnelIfaces tracks the set of active VPN/tunnel interfaces (utun*, ipsec*, etc.)
-	// discovered during the last pf anchor rule build. When the set changes (e.g., a VPN
-	// connects and creates utun420), we rebuild the pf anchor to add interface-specific
-	// intercept rules for the new interface. Protected by mu.
-	lastTunnelIfaces []string //lint:ignore U1000 used on darwin
+	// lastTunnelIfaces tracks the tunnel set included in the last successfully loaded
+	// pf anchor. Pending tunnel state is kept separately so failed PF work is retried
+	// instead of being mistaken for an applied update. Protected by mu.
+	lastTunnelIfaces       []string //lint:ignore U1000 used on darwin
+	pendingTunnelIfaces    []string //lint:ignore U1000 used on darwin
+	hasPendingTunnelIfaces bool     //lint:ignore U1000 used on darwin
 
 	// pfStabilizing is true while we're waiting for a VPN's pf ruleset to settle.
 	// While true, the watchdog and network change callbacks do NOT restore our rules.
@@ -178,10 +189,10 @@ type prog struct {
 	// interception with exponential backoff and auto-heals if broken.
 	pfMonitorRunning atomic.Bool //lint:ignore U1000 used on darwin
 
-	// pfEnsureRunning ensures only one pf anchor validation/restoration runs at a time.
-	// Network-change callbacks, delayed rechecks, and the periodic watchdog can all
-	// converge during macOS interface churn; concurrent pfctl/scutil exec storms can
-	// exhaust process/file limits and make the outage worse.
+	// pfEnsureRunning ensures only one pf validation or mutation runs at a time.
+	// Network callbacks, VPN exemption updates, delayed rechecks, probes, and the
+	// watchdog can converge during macOS churn; concurrent pfctl/scutil work can
+	// exhaust process/file limits or interleave anchor snapshots.
 	pfEnsureRunning atomic.Bool //lint:ignore U1000 used on darwin
 
 	// pfExecBackoffUntil suppresses pf anchor validation after pfctl/scutil execs
@@ -192,6 +203,11 @@ type prog struct {
 	// network changes. Protected by pfDelayedRecheckMu.
 	pfDelayedRecheckMu     sync.Mutex    //lint:ignore U1000 used on darwin
 	pfDelayedRecheckTimers []*time.Timer //lint:ignore U1000 used on darwin
+
+	// pfIgnoredChangeLastReconcile bounds immediate pf/VPN-DNS work for noisy
+	// ignored macOS network deltas. Tunnel changes bypass this limit, and the
+	// existing delayed checks provide a trailing reconciliation after churn.
+	pfIgnoredChangeLastReconcile atomic.Int64 //lint:ignore U1000 used on darwin
 
 	// pfProbeExpected holds the domain name of a pending pf interception probe.
 	pfProbeExpected atomic.Value // string
@@ -829,6 +845,39 @@ func (p *prog) deAllocateIP() error {
 	return nil
 }
 
+// Seams for the intercept-start failure lifecycle. Choosing between the interface-DNS
+// fallback and refusing it has side effects - restoring the host's DNS, then
+// terminating - which a test has to observe without reconfiguring the host or exiting
+// the test binary. The intercept start itself is indirected for the same reason: it is
+// the real platform interceptor, which on macOS mutates pf and on Windows installs an
+// NRPT rule, so a test of what happens *after* it fails must not be the thing that
+// runs it.
+var (
+	startDNSInterceptFn     = (*prog).startDNSIntercept
+	setDnsForRunningIfaceFn = (*prog).setDnsForRunningIface
+	resetDNSFn              = (*prog).resetDNS
+	refuseFallbackFatal     = func(format string, v ...any) {
+		mainLog.Load().Fatal().Msgf(format, v...)
+	}
+)
+
+// interfaceDNSFallbackViable reports whether the interface-DNS fallback can actually
+// direct queries to ctrld's listener.
+//
+// Interface DNS names a resolver by IP and has no port field - true of macOS interface
+// settings and of Windows NRPT rules - so pointing the system straight at a listener
+// that did not bind :53 sends queries to whatever owns :53 instead, and that resolver's
+// upstream is ctrld's address: a loop, not a fallback.
+//
+// A nil or portless listener is treated as viable: the port is resolved elsewhere and
+// defaults to 53, so there is nothing to refuse yet.
+//
+// master no longer supports the router-local forwarding-resolver path, so there is
+// no intermediary that can make a non-53 listener reachable from interface DNS.
+func interfaceDNSFallbackViable(lc *ctrld.ListenerConfig) bool {
+	return lc == nil || lc.Port == 0 || lc.Port == 53
+}
+
 func (p *prog) setDNS() {
 	setDnsOK := false
 	defer func() {
@@ -861,7 +910,30 @@ func (p *prog) setDNS() {
 	// modifying interface DNS settings. This eliminates race conditions with VPN
 	// software that also manages DNS. See issue #489.
 	if dnsIntercept {
-		if err := p.startDNSIntercept(); err != nil {
+		if err := startDNSInterceptFn(p); err != nil {
+			// Interface DNS cannot express a port: macOS interface settings and Windows
+			// NRPT rules both name a resolver by IP alone. So it is only a usable
+			// fallback when the listener actually bound :53. When something else owns
+			// :53 - mDNSResponder on macOS, which is the whole reason the :5354 fallback
+			// exists - pointing the system at 127.0.0.1 hands queries to that other
+			// resolver, whose own upstream is now ctrld's address. That is a resolution
+			// loop, not degraded operation: a healthy ctrld listener nothing on the host
+			// can reach, no working DNS, and no recovery short of stopping the service.
+			//
+			// Refuse instead, after putting the host's own DNS back. A visible startup
+			// failure beats DNS that is broken by design, and it stops a fallback that
+			// cannot work from quietly undoing the fail-closed verification above.
+			if lc := cfg.FirstListener(); !interfaceDNSFallbackViable(lc) {
+				mainLog.Load().Error().Err(err).Msgf("DNS intercept mode failed with the listener on port %d", lc.Port)
+				// Leave the host resolvable: restore static settings or DHCP rather than
+				// exiting with an interface still pointed at a ctrld that is not serving.
+				resetDNSFn(p, false, true)
+				refuseFallbackFatal("Refusing to fall back to interface DNS: it cannot direct queries to %s:%d, which would leave this host with no working resolver. Free port 53 for ctrld, or resolve the intercept failure, then start again.", lc.IP, lc.Port)
+				// Unreachable in production - the line above exits - but returning
+				// explicitly keeps the refusal from depending on that, so nothing can
+				// fall through to installing the fallback this just rejected.
+				return
+			}
 			p.Error().Err(err).Msg("DNS intercept mode failed — falling back to interface DNS settings")
 			// Fall through to traditional setDNS behavior.
 		} else {
@@ -913,7 +985,7 @@ func (p *prog) setDNS() {
 	slices.Sort(nameservers)
 
 	netIfaceName := ""
-	netIface := p.setDnsForRunningIface(nameservers)
+	netIface := setDnsForRunningIfaceFn(p, nameservers)
 	if netIface != nil {
 		netIfaceName = netIface.Name
 	}

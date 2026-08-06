@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -16,7 +18,7 @@ func withVPNDNSSettlingEnabled(t *testing.T) {
 	t.Cleanup(func() { vpnDNSSettlingEnabled = old })
 }
 
-func TestVPNDNSRefreshSkipsConcurrentDuplicate(t *testing.T) {
+func TestVPNDNSRefreshCoalescesConcurrentTrailingRefresh(t *testing.T) {
 	m := newVPNDNSManager(&mainLog, nil)
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -25,9 +27,16 @@ func TestVPNDNSRefreshSkipsConcurrentDuplicate(t *testing.T) {
 	var calls atomic.Int32
 
 	m.discoverVPNDNS = func(context.Context) []ctrld.VPNDNSConfig {
-		calls.Add(1)
+		call := calls.Add(1)
 		once.Do(func() { close(started) })
 		<-release
+		if call == 2 {
+			return []ctrld.VPNDNSConfig{{
+				InterfaceName: "utun-latest",
+				Servers:       []string{"10.0.0.2"},
+				Domains:       []string{"latest.internal"},
+			}}
+		}
 		return nil
 	}
 
@@ -41,8 +50,11 @@ func TestVPNDNSRefreshSkipsConcurrentDuplicate(t *testing.T) {
 	close(release)
 	<-done
 
-	if calls.Load() != 1 {
-		t.Fatalf("expected overlapping refresh to be skipped, got %d discovery calls", calls.Load())
+	if calls.Load() != 2 {
+		t.Fatalf("expected one active and one trailing discovery call, got %d", calls.Load())
+	}
+	if got := m.Routes()["latest.internal"]; len(got) != 1 || got[0] != "10.0.0.2" {
+		t.Fatalf("trailing refresh did not publish latest OS snapshot: %v", got)
 	}
 }
 
@@ -76,7 +88,9 @@ func TestVPNDNSRefreshRetainsStateForOneGuardedEmptyDiscovery(t *testing.T) {
 func TestVPNDNSRefreshClearsOnSecondGuardedEmptyDiscovery(t *testing.T) {
 	withVPNDNSSettlingEnabled(t)
 	var gotExemptions []vpnDNSExemption
+	updates := 0
 	m := newVPNDNSManager(&mainLog, func(exemptions []vpnDNSExemption) error {
+		updates++
 		gotExemptions = exemptions
 		return nil
 	})
@@ -86,6 +100,7 @@ func TestVPNDNSRefreshClearsOnSecondGuardedEmptyDiscovery(t *testing.T) {
 		Servers:       []string{"10.25.37.21"},
 	}}
 	m.domainlessServers = []string{"10.25.37.21"}
+	m.appliedExemptions = []vpnDNSExemption{{Server: "10.25.37.21", Interface: "Ethernet 6"}}
 	m.retainedAfterEmptyDiscovery = true
 
 	m.Refresh(context.Background(), true)
@@ -93,8 +108,8 @@ func TestVPNDNSRefreshClearsOnSecondGuardedEmptyDiscovery(t *testing.T) {
 	if got := m.DomainlessServers(); len(got) != 0 {
 		t.Fatalf("expected domainless servers to be cleared on second empty discovery, got %v", got)
 	}
-	if len(gotExemptions) != 0 {
-		t.Fatalf("expected empty exemptions after clearing stale state, got %v", gotExemptions)
+	if updates != 1 || len(gotExemptions) != 0 {
+		t.Fatalf("expected one empty exemption update after clearing stale state, calls=%d exemptions=%v", updates, gotExemptions)
 	}
 	if m.retainedAfterEmptyDiscovery {
 		t.Fatal("expected retained empty-discovery marker to be cleared with stale state")
@@ -126,6 +141,56 @@ func TestVPNDNSRefreshSkipsUnchangedInterceptExemptions(t *testing.T) {
 	}
 }
 
+func TestVPNDNSRefreshRetriesFailedInterceptExemptionUpdate(t *testing.T) {
+	attempts := 0
+	m := newVPNDNSManager(&mainLog, func([]vpnDNSExemption) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("pf update failed")
+		}
+		return nil
+	})
+	m.discoverVPNDNS = func(context.Context) []ctrld.VPNDNSConfig {
+		return []ctrld.VPNDNSConfig{{
+			InterfaceName: "utun-test",
+			Servers:       []string{"10.102.26.10"},
+			Domains:       []string{"internal.test"},
+		}}
+	}
+
+	m.Refresh(context.Background(), true)
+	if !m.interceptExemptionsPending() {
+		t.Fatal("failed intercept exemption update was not retained for retry")
+	}
+	m.Refresh(context.Background(), true)
+	if m.interceptExemptionsPending() {
+		t.Fatal("successful intercept exemption retry did not advance applied state")
+	}
+	m.Refresh(context.Background(), true)
+
+	if attempts != 2 {
+		t.Fatalf("intercept exemption update attempts = %d, want failed attempt plus one retry", attempts)
+	}
+	if len(m.appliedExemptions) != 1 || m.appliedExemptions[0].Server != "10.102.26.10" {
+		t.Fatalf("applied exemptions = %+v, want successful retry state", m.appliedExemptions)
+	}
+}
+
+func TestVPNDNSMarkAppliedExemptionsRejectsStaleSnapshot(t *testing.T) {
+	m := newVPNDNSManager(&mainLog, nil)
+	m.configs = []ctrld.VPNDNSConfig{{InterfaceName: "utun-new", Servers: []string{"10.0.0.2"}}}
+
+	m.markInterceptExemptionsApplied([]vpnDNSExemption{{Server: "10.0.0.1", Interface: "utun-old"}})
+	if !m.interceptExemptionsPending() {
+		t.Fatal("stale PF snapshot incorrectly advanced applied exemptions")
+	}
+
+	m.markInterceptExemptionsApplied([]vpnDNSExemption{{Server: "10.0.0.2", Interface: "utun-new"}})
+	if m.interceptExemptionsPending() {
+		t.Fatal("current PF snapshot did not advance applied exemptions")
+	}
+}
+
 func TestVPNDNSTransportFailureSuppressesFallbackOnlyWhileRetainingState(t *testing.T) {
 	withVPNDNSSettlingEnabled(t)
 	m := newVPNDNSManager(&mainLog, nil)
@@ -143,5 +208,91 @@ func TestVPNDNSTransportFailureSuppressesFallbackOnlyWhileRetainingState(t *test
 	m.VPNDNSReachable()
 	if m.retainedAfterEmptyDiscovery {
 		t.Fatal("expected reachable DNS response to clear retained empty-discovery state")
+	}
+}
+
+func TestVPNDNSFullAndRouteOnlyDiscoveryAreSerialized(t *testing.T) {
+	var updateMu sync.Mutex
+	var exemptionUpdates []string
+	m := newVPNDNSManager(&mainLog, func(exemptions []vpnDNSExemption) error {
+		updateMu.Lock()
+		defer updateMu.Unlock()
+		if len(exemptions) == 0 {
+			exemptionUpdates = append(exemptionUpdates, "")
+		} else {
+			exemptionUpdates = append(exemptionUpdates, exemptions[0].Server)
+		}
+		return nil
+	})
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	var calls atomic.Int32
+
+	m.discoverVPNDNS = func(context.Context) []ctrld.VPNDNSConfig {
+		switch calls.Add(1) {
+		case 1:
+			close(firstStarted)
+			<-releaseFirst
+			return []ctrld.VPNDNSConfig{{
+				InterfaceName: "utun-old",
+				Servers:       []string{"10.0.0.1"},
+				Domains:       []string{"old.internal"},
+			}}
+		case 2:
+			close(secondStarted)
+			return []ctrld.VPNDNSConfig{{
+				InterfaceName: "utun-new",
+				Servers:       []string{"10.0.0.2"},
+				Domains:       []string{"new.internal"},
+			}}
+		default:
+			t.Fatalf("unexpected discovery call %d", calls.Load())
+			return nil
+		}
+	}
+
+	routesDone := make(chan struct{})
+	go func() {
+		defer close(routesDone)
+		m.RefreshRoutesOnly()
+	}()
+	<-firstStarted
+
+	fullDone := make(chan struct{})
+	go func() {
+		defer close(fullDone)
+		m.Refresh(context.Background(), false)
+	}()
+
+	select {
+	case <-secondStarted:
+		t.Fatal("full and route-only VPN DNS discovery overlapped")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+
+	select {
+	case <-routesDone:
+	case <-time.After(time.Second):
+		t.Fatal("route-only refresh did not finish")
+	}
+	select {
+	case <-fullDone:
+	case <-time.After(time.Second):
+		t.Fatal("full refresh did not finish")
+	}
+
+	routes := m.Routes()
+	if _, ok := routes["old.internal"]; ok {
+		t.Fatalf("older route-only snapshot overwrote newer full refresh: %v", routes)
+	}
+	if got := routes["new.internal"]; len(got) != 1 || got[0] != "10.0.0.2" {
+		t.Fatalf("final VPN DNS routes = %v, want new.internal -> 10.0.0.2", routes)
+	}
+	updateMu.Lock()
+	defer updateMu.Unlock()
+	if len(exemptionUpdates) != 2 || exemptionUpdates[0] != "10.0.0.1" || exemptionUpdates[1] != "10.0.0.2" {
+		t.Fatalf("serialized exemption updates = %v, want old then new", exemptionUpdates)
 	}
 }

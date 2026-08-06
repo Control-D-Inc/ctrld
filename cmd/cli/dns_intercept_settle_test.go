@@ -43,7 +43,12 @@ func TestRefreshDNSAfterVPNSettleRefreshesOSResolverAndVPNRoutes(t *testing.T) {
 	if got := p.vpnDNS.UpstreamForDomain("jira.cc.bmwgroup.net."); len(got) != 1 || got[0] != "10.102.26.10" {
 		t.Fatalf("expected refreshed VPN DNS route, got %v", got)
 	}
-	if len(exemptionUpdates) != 0 {
-		t.Fatalf("expected route-only refresh to avoid pf exemption updates, got %+v", exemptionUpdates)
+	if len(exemptionUpdates) != 1 || len(exemptionUpdates[0]) != 1 || exemptionUpdates[0][0].Server != "10.102.26.10" {
+		t.Fatalf("expected one serialized pf exemption update for the late VPN DNS server, got %+v", exemptionUpdates)
+	}
+
+	p.refreshDNSAfterVPNSettle("test-repeat")
+	if len(exemptionUpdates) != 1 {
+		t.Fatalf("unchanged post-settle VPN DNS state rewrote pf: %+v", exemptionUpdates)
 	}
 }
