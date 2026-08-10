@@ -161,6 +161,22 @@ type prog struct {
 	// On Windows: *wfpState, on macOS: *pfState, nil on other platforms.
 	dnsInterceptState any
 
+	// dnsInterceptMu serializes DNS intercept lifecycle transitions - start, stop and
+	// the health monitor's rebuild - and guards every write to dnsInterceptState, so a
+	// service stop can never interleave with a monitor-driven rebuild.
+	dnsInterceptMu sync.Mutex //lint:ignore U1000 used on windows
+
+	// dnsInterceptStopRequested is set while a stop waits for dnsInterceptMu. The
+	// health and recovery flows read it as a shutdown signal and abandon their work,
+	// rather than making the stop wait out their probe backoffs.
+	dnsInterceptStopRequested atomic.Bool //lint:ignore U1000 used on windows
+
+	// nrptTransitionMu makes one NRPT ownership transition - observe, mutate, signal,
+	// record owner - atomic against shutdown and against another transition. It is
+	// deliberately finer-grained than dnsInterceptMu: it is taken for the duration of a
+	// single transition, never across the recovery flows' probe backoffs.
+	nrptTransitionMu sync.Mutex //lint:ignore U1000 used on windows
+
 	// lastTunnelIfaces tracks the tunnel set included in the last successfully loaded
 	// pf anchor. Pending tunnel state is kept separately so failed PF work is retried
 	// instead of being mistaken for an applied update. Protected by mu.
@@ -209,11 +225,22 @@ type prog struct {
 	// existing delayed checks provide a trailing reconciliation after churn.
 	pfIgnoredChangeLastReconcile atomic.Int64 //lint:ignore U1000 used on darwin
 
-	// pfProbeExpected holds the domain name of a pending pf interception probe.
-	pfProbeExpected atomic.Value // string
-
-	// pfProbeCh is signaled when the DNS handler receives the expected probe query.
-	pfProbeCh atomic.Value // *chan struct{}
+	// interceptProbes maps the domain of each pending interception probe to the channel
+	// that probe waits on. A probe verifies that interception is actually translating or
+	// redirecting packets, not merely present in rule text: the DNS handler looks up
+	// incoming queries here and signals the matching waiter.
+	//
+	// It holds one entry per in-flight probe rather than a single slot, because probes do
+	// overlap - the health monitor, a handback and a heal cycle can each have one out at
+	// the same time - and a single slot means the last registration wins and the loser
+	// waits out its timeout for a query that was answered. A false failure then triggers
+	// recovery work that was not needed.
+	//
+	// Registrations are rare and lookups happen on every query, so the map is stored as
+	// an immutable snapshot behind an atomic: readers never take a lock, writers copy
+	// under interceptProbeMu.
+	interceptProbes  atomic.Value // map[string]chan struct{}
+	interceptProbeMu sync.Mutex   //lint:ignore U1000 written only by registerInterceptProbe, used on darwin/windows
 
 	// VPN DNS manager for split DNS routing when intercept mode is active.
 	vpnDNS *vpnDNSManager
@@ -410,7 +437,12 @@ func (p *prog) preRun() {
 
 func (p *prog) postRun() {
 	if !service.Interactive() {
-		p.resetDNS(false, false)
+		// A Windows organization can install a GP-owned NRPT catch-all before
+		// starting ctrld. Detect that policy before resetDNS touches adapter DNS;
+		// startDNSIntercept will then prove the rule functionally before adopting it.
+		if !p.skipInitialDNSReset() {
+			p.resetDNS(false, false)
+		}
 		ns := ctrld.InitializeOsResolver(ctrld.LoggerCtx(context.Background(), p.logger.Load()), false)
 		p.Debug().Msgf("Initialized os resolver with nameservers: %v", ns)
 		p.setDNS()
@@ -891,7 +923,7 @@ func (p *prog) setDNS() {
 		p.Fatal().Msgf("invalid --intercept-mode value %q: must be 'off', 'dns', or 'hard'", interceptMode)
 	}
 	if interceptMode == "" || interceptMode == "off" {
-		interceptMode = cfg.Service.InterceptMode
+		interceptMode = p.configuredInterceptMode()
 		if interceptMode != "" && interceptMode != "off" {
 			p.Info().Msgf("Intercept mode enabled via config (intercept_mode = %q)", interceptMode)
 		}
@@ -911,6 +943,19 @@ func (p *prog) setDNS() {
 	// software that also manages DNS. See issue #489.
 	if dnsIntercept {
 		if err := startDNSInterceptFn(p); err != nil {
+			// An external GP catch-all still owns the namespace even when its probe
+			// fails. In either external-owner state, rewriting adapter DNS would violate
+			// the policy that startup deliberately preserved. Only the verified case has
+			// working DNS; the ineffective case remains a failed/not-ready start.
+			if interceptFailedUnderExternalDNSPolicy(err) {
+				if interceptFailedWithVerifiedExternalDNS(err) {
+					p.Error().Err(err).Msg("DNS intercept mode failed but externally managed DNS policy is verified routing to ctrld — not falling back to interface DNS settings")
+				} else {
+					p.Error().Err(err).Msg("DNS intercept mode failed and externally managed DNS policy is not routing to ctrld — leaving interface DNS settings untouched; the service is not ready")
+				}
+				return
+			}
+
 			// Interface DNS cannot express a port: macOS interface settings and Windows
 			// NRPT rules both name a resolver by IP alone. So it is only a usable
 			// fallback when the listener actually bound :53. When something else owns
@@ -1016,6 +1061,17 @@ func (p *prog) setDNS() {
 			p.dnsWatchdog(netIface, nameservers)
 		}()
 	}
+}
+
+// configuredInterceptMode resolves the service's effective intercept mode without
+// mutating package state. Platform startup preflights use the same precedence as
+// setDNS so they do not make adapter-DNS decisions from a different mode value.
+func (p *prog) configuredInterceptMode() string {
+	im := interceptMode
+	if im == "" || im == "off" {
+		im = p.cfg.Service.InterceptMode
+	}
+	return im
 }
 
 func (p *prog) setDnsForRunningIface(nameservers []string) (runningIface *net.Interface) {

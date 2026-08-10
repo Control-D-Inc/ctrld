@@ -248,13 +248,7 @@ func (p *prog) handleSpecialDomains(ctx context.Context, w dns.ResponseWriter, m
 	// signal the prober and respond NXDOMAIN. Used by both macOS pf probes
 	// (_pf-probe-*) and Windows NRPT probes (_nrpt-probe-*) to verify that
 	// DNS interception is actually routing queries to ctrld's listener.
-	if probeID, ok := p.pfProbeExpected.Load().(string); ok && probeID != "" && domain == probeID {
-		if chPtr, ok := p.pfProbeCh.Load().(*chan struct{}); ok && chPtr != nil {
-			select {
-			case *chPtr <- struct{}{}:
-			default:
-			}
-		}
+	if p.signalInterceptProbe(domain) {
 		sendDNSResponse(w, m, dns.RcodeNameError) // NXDOMAIN
 		return true
 	}
