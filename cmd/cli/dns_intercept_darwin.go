@@ -19,6 +19,10 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 )
 
+// skipInitialDNSReset is Windows-only; macOS keeps the normal adapter cleanup
+// before installing its pf redirect.
+func (p *prog) skipInitialDNSReset() bool { return false }
+
 const (
 	// pfWatchdogInterval is how often the periodic pf watchdog checks
 	// that our anchor references are still present in the running ruleset.
@@ -1855,14 +1859,9 @@ func (p *prog) probePFIntercept() bool {
 	// Generate unique probe domain
 	probeID := fmt.Sprintf("_pf-probe-%x.%s", time.Now().UnixNano()&0xFFFFFFFF, pfProbeDomain)
 
-	// Register probe so DNS handler can detect and signal it
-	probeCh := make(chan struct{}, 1)
-	p.pfProbeExpected.Store(probeID)
-	p.pfProbeCh.Store(&probeCh)
-	defer func() {
-		p.pfProbeExpected.Store("")
-		p.pfProbeCh.Store((*chan struct{})(nil))
-	}()
+	// Register this attempt's own domain: overlapping probes must not cancel each other.
+	probeCh, deregister := p.registerInterceptProbe(probeID)
+	defer deregister()
 
 	// Build a minimal DNS query packet for the probe domain.
 	// We use exec.Command to send from a subprocess with GID=0 (wheel),

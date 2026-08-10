@@ -130,13 +130,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		// signal the prober and respond NXDOMAIN. Used by both macOS pf probes
 		// (_pf-probe-*) and Windows NRPT probes (_nrpt-probe-*) to verify that
 		// DNS interception is actually routing queries to ctrld's listener.
-		if probeID, ok := p.pfProbeExpected.Load().(string); ok && probeID != "" && domain == probeID {
-			if chPtr, ok := p.pfProbeCh.Load().(*chan struct{}); ok && chPtr != nil {
-				select {
-				case *chPtr <- struct{}{}:
-				default:
-				}
-			}
+		if p.signalInterceptProbe(domain) {
 			answer := new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeNameError) // NXDOMAIN
 			_ = w.WriteMsg(answer)
