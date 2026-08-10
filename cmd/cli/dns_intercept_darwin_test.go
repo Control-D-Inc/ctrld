@@ -828,3 +828,183 @@ func TestExemptVPNDNSServersDeferredWhileStabilizing(t *testing.T) {
 		t.Error("pfEnsureRunning was left held by a deferred exemption")
 	}
 }
+
+// stubStabilizationProbe replaces the post-stabilization verification seams and returns
+// counters for probe and forced-reload calls.
+func stubStabilizationProbe(t *testing.T, probeResults []bool, reloadOK bool) (probes, reloads *int) {
+	t.Helper()
+	originalProbe, originalReload := probePFInterceptFn, forceReloadPFInterceptFn
+	t.Cleanup(func() {
+		probePFInterceptFn, forceReloadPFInterceptFn = originalProbe, originalReload
+	})
+	probeCalls, reloadCalls := 0, 0
+	probePFInterceptFn = func(*prog) bool {
+		result := false
+		if probeCalls < len(probeResults) {
+			result = probeResults[probeCalls]
+		}
+		probeCalls++
+		return result
+	}
+	forceReloadPFInterceptFn = func(*prog) bool {
+		reloadCalls++
+		return reloadOK
+	}
+	return &probeCalls, &reloadCalls
+}
+
+// TestPostStabilizationVerifiesInterceptionFunctionally is the post-wake continuity
+// boundary: the reconcile above it only proves rule text, and QA saw rules intact,
+// references intact and post-load verification passed while every query through the system
+// resolver timed out. Nothing else probes until the periodic watchdog, because the probe
+// monitor stands down while stabilization owns pf, so recovery waited for that tick.
+func TestPostStabilizationVerifiesInterceptionFunctionally(t *testing.T) {
+	// Probe fails once, then passes after the reload.
+	probes, reloads := stubStabilizationProbe(t, []bool{false, true}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.verifyInterceptAfterStabilization()
+
+	if *probes != 2 {
+		t.Errorf("probe calls = %d, want 2: one to detect and one to confirm the repair", *probes)
+	}
+	if *reloads != 1 {
+		t.Errorf("forced reloads = %d, want exactly 1 bounded repair", *reloads)
+	}
+}
+
+// TestPostStabilizationProbePassSkipsReload keeps the healthy path free of a pf reload,
+// which would flush states and kill in-flight DoH connections for nothing.
+func TestPostStabilizationProbePassSkipsReload(t *testing.T) {
+	probes, reloads := stubStabilizationProbe(t, []bool{true}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.verifyInterceptAfterStabilization()
+
+	if *probes != 1 || *reloads != 0 {
+		t.Errorf("probe calls = %d, forced reloads = %d, want 1/0", *probes, *reloads)
+	}
+}
+
+// TestPostStabilizationRepairIsBounded pins the "one bounded recovery" contract: a probe
+// that never passes must not turn into a reload loop here - the watchdog owns retries.
+func TestPostStabilizationRepairIsBounded(t *testing.T) {
+	probes, reloads := stubStabilizationProbe(t, []bool{false, false, false}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.verifyInterceptAfterStabilization()
+
+	if *reloads != 1 {
+		t.Errorf("forced reloads = %d, want 1: the repair must not loop", *reloads)
+	}
+	if *probes != 2 {
+		t.Errorf("probe calls = %d, want 2", *probes)
+	}
+}
+
+// TestPostStabilizationWaitsForAProberThatStandsDown is the interleaving that made
+// "skip when the flag is set" wrong. A probe monitor started by an ignored network change
+// claims functional-probe ownership and then aborts, because stabilization still owns pf.
+// If the verifier treats the claimed flag as "somebody is probing", neither path probes and
+// the outage lasts until the next watchdog tick - the exact window this is meant to close.
+func TestPostStabilizationWaitsForAProberThatStandsDown(t *testing.T) {
+	probes, reloads := stubStabilizationProbe(t, []bool{false, true}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	// Model the monitor's claim-then-abort: ownership is held, then released.
+	p.pfMonitorRunning.Store(true)
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		p.pfMonitorRunning.Store(false)
+		close(released)
+	}()
+
+	p.verifyInterceptAfterStabilization()
+	<-released
+
+	if *probes != 2 {
+		t.Errorf("probe calls = %d, want 2: the verifier must wait out a prober that stands down", *probes)
+	}
+	if *reloads != 1 {
+		t.Errorf("forced reloads = %d, want 1", *reloads)
+	}
+}
+
+// TestPostStabilizationYieldsToAProberThatKeepsProbing is the other half of the handoff:
+// when the holder is genuinely working through its probe sequence, the verifier must step
+// aside rather than run a second prober against the same pf state.
+func TestPostStabilizationYieldsToAProberThatKeepsProbing(t *testing.T) {
+	originalWait := pfFunctionalProbeOwnerWait
+	pfFunctionalProbeOwnerWait = 30 * time.Millisecond
+	t.Cleanup(func() { pfFunctionalProbeOwnerWait = originalWait })
+
+	probes, reloads := stubStabilizationProbe(t, []bool{false}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.pfMonitorRunning.Store(true) // held for the whole wait
+	p.verifyInterceptAfterStabilization()
+
+	if *probes != 0 || *reloads != 0 {
+		t.Errorf("probe calls = %d, forced reloads = %d, want 0/0 while another prober is working", *probes, *reloads)
+	}
+}
+
+// TestInterceptMonitorDoesNotClaimOwnershipWhileStabilizing pins the source of that race:
+// a monitor which cannot do useful work must not take functional-probe ownership on its way
+// out, or it starves the post-stabilization verifier.
+func TestInterceptMonitorDoesNotClaimOwnershipWhileStabilizing(t *testing.T) {
+	probes, reloads := stubStabilizationProbe(t, []bool{false}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.pfStabilizing.Store(true)
+	if p.interceptProbeMonitorAllowed() {
+		t.Fatal("the probe monitor considers itself eligible while stabilization owns pf")
+	}
+
+	p.pfInterceptMonitor()
+
+	if *probes != 0 || *reloads != 0 {
+		t.Errorf("probe calls = %d, forced reloads = %d, want 0/0 from a monitor that cannot run", *probes, *reloads)
+	}
+	if !p.claimFunctionalProbeOwner(0) {
+		t.Error("the aborted monitor left functional-probe ownership taken; the verifier would skip")
+	}
+	p.pfMonitorRunning.Store(false)
+}
+
+// TestFinishPFStabilizationRunsFunctionalVerification wires the fix to the production
+// completion path: deleting the verification call, or reordering it before the reconcile,
+// makes this fail.
+func TestFinishPFStabilizationRunsFunctionalVerification(t *testing.T) {
+	stubPFAnchorCheckCommand(t, map[string]string{
+		"-sn":                       `rdr-anchor "com.controld.ctrld"`,
+		"-sr":                       `anchor "com.controld.ctrld"`,
+		"-a com.controld.ctrld -sr": "pass in quick on lo0",
+		"-a com.controld.ctrld -sn": "rdr on lo0",
+	})
+	originalResolver := initializeOsResolver
+	initializeOsResolver = func(bool) []string { return nil }
+	t.Cleanup(func() { initializeOsResolver = originalResolver })
+
+	probes, reloads := stubStabilizationProbe(t, []bool{false, true}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.pfStabilizing.Store(true)
+	p.finishPFStabilization(time.Millisecond)
+
+	if *probes == 0 {
+		t.Fatal("stabilization completed without probing functional interception; recovery would wait for the watchdog")
+	}
+	if *reloads != 1 {
+		t.Errorf("forced reloads = %d, want 1", *reloads)
+	}
+
+	p.pfDelayedRecheckMu.Lock()
+	timers := append([]*time.Timer(nil), p.pfDelayedRecheckTimers...)
+	p.pfDelayedRecheckTimers = nil
+	p.pfDelayedRecheckMu.Unlock()
+	for _, timer := range timers {
+		timer.Stop()
+	}
+}

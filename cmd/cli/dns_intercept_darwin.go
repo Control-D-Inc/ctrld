@@ -1403,23 +1403,121 @@ func (p *prog) pfStabilizationLoopWithMaxWait(ctx context.Context, stableRequire
 		}
 
 		if time.Since(stableSince) >= stableRequired {
-			// The active loop retains ownership until the dedicated post-stable
-			// repair finishes. It never re-enters stabilization recursively.
-			mainLog.Load().Info().Msgf("DNS intercept: pf stable for %s — reconciling anchor rules", stableRequired)
-			result := p.reconcilePFAnchorAfterStabilization()
-			if result != pfAnchorCheckRestored && result != pfAnchorCheckIntact {
-				p.scheduleDelayedRechecks()
-			}
-			routes, domainlessServers, exemptions := p.refreshDNSAfterVPNSettle("pf_stabilized")
-			if routes == 0 && domainlessServers == 0 && exemptions == 0 {
-				p.scheduleDNSAfterVPNSettleRefresh("pf_stabilized_followup", pfAnchorRecheckDelayLong)
-			}
-			if p.hasPendingTunnelReconcile() {
-				p.scheduleDelayedRechecks()
-			}
+			p.finishPFStabilization(stableRequired)
 			return
 		}
 	}
+}
+
+// finishPFStabilization runs the work stabilization exists to do, once the ruleset has
+// held still for the required window. The active loop retains ownership throughout: it
+// never re-enters stabilization recursively.
+func (p *prog) finishPFStabilization(stableRequired time.Duration) {
+	mainLog.Load().Info().Msgf("DNS intercept: pf stable for %s — reconciling anchor rules", stableRequired)
+	result := p.reconcilePFAnchorAfterStabilization()
+	if result != pfAnchorCheckRestored && result != pfAnchorCheckIntact {
+		p.scheduleDelayedRechecks()
+	}
+	routes, domainlessServers, exemptions := p.refreshDNSAfterVPNSettle("pf_stabilized")
+	if routes == 0 && domainlessServers == 0 && exemptions == 0 {
+		p.scheduleDNSAfterVPNSettleRefresh("pf_stabilized_followup", pfAnchorRecheckDelayLong)
+	}
+	if p.hasPendingTunnelReconcile() {
+		p.scheduleDelayedRechecks()
+	}
+	p.verifyInterceptAfterStabilization()
+}
+
+// probePFInterceptFn and forceReloadPFInterceptFn are the functional verification seams
+// shared by both probers.
+var (
+	probePFInterceptFn       = (*prog).probePFIntercept
+	forceReloadPFInterceptFn = (*prog).forceReloadPFMainRuleset
+)
+
+// pfFunctionalProbeOwnerWait bounds how long the post-stabilization verifier waits for
+// another prober to release functional-probe ownership. A probe monitor that is only
+// standing down releases it at once; one that is genuinely probing holds it for its whole
+// window, and then the verifier steps aside. A var so tests can shorten the wait.
+var pfFunctionalProbeOwnerWait = 2 * time.Second
+
+// pfFunctionalProbeOwnerPoll is how often that wait re-tries the claim.
+const pfFunctionalProbeOwnerPoll = 25 * time.Millisecond
+
+// interceptProbeMonitorAllowed reports whether the probe monitor may run at all.
+//
+// The monitor must consult this before claiming ownership. Claiming first and checking
+// second means a monitor that is about to stand down still takes the flag, and the
+// post-stabilization verifier - which sees a set flag as "somebody else is probing" -
+// skips. Neither probes, and the outage lasts until the next watchdog tick.
+func (p *prog) interceptProbeMonitorAllowed() bool {
+	return p.dnsInterceptState != nil && !p.pfStabilizing.Load()
+}
+
+// claimFunctionalProbeOwner takes ownership of functional probing, waiting up to wait for
+// a current owner to release it. It reports whether ownership was acquired; the caller
+// releases with pfMonitorRunning.Store(false).
+func (p *prog) claimFunctionalProbeOwner(wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		if p.pfMonitorRunning.CompareAndSwap(false, true) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(pfFunctionalProbeOwnerPoll)
+	}
+}
+
+// verifyInterceptAfterStabilization proves pf is actually translating once stabilization
+// has finished, and repairs it once if it is not.
+//
+// The reconcile above verifies rule text. That cannot distinguish a live redirect from an
+// anchor pf has stopped evaluating, and after sleep/wake with a VPN reconnect those come
+// apart: rules present, references present, post-load verification passed, and every query
+// through the system resolver timing out. Nothing else notices until the periodic watchdog
+// runs its own probe - the interception probe monitor stands down while stabilization owns
+// pf and is not re-armed afterwards - so recovery waits up to a full watchdog interval on a
+// host whose link and default route are already back.
+//
+// One probe, then at most one forced reload and one confirming probe. Deliberately not the
+// probe monitor: that keeps probing for ~7.5s and can force a reload per failed probe,
+// where this path needs a single bounded repair and then hands back to the watchdog.
+func (p *prog) verifyInterceptAfterStabilization() {
+	if p.dnsInterceptState == nil || p.pfExecBackoffActive() {
+		return
+	}
+	// The probe monitor is the other functional prober, so only one of us may run - but
+	// "somebody holds the flag" is not the same as "somebody is probing". A monitor that
+	// started while stabilization owns pf stands down immediately, and skipping on sight
+	// left nobody probing at all. Wait briefly for the holder to release instead.
+	if !p.claimFunctionalProbeOwner(pfFunctionalProbeOwnerWait) {
+		mainLog.Load().Warn().Msgf("DNS intercept: post-stabilization probe skipped — another prober held ownership for %s; leaving recovery to the watchdog", pfFunctionalProbeOwnerWait)
+		return
+	}
+	defer p.pfMonitorRunning.Store(false)
+
+	// Ownership can take a moment to arrive; make sure there is still an intercept to check.
+	if p.dnsInterceptState == nil {
+		return
+	}
+
+	if probePFInterceptFn(p) {
+		mainLog.Load().Debug().Msg("DNS intercept: post-stabilization probe passed — interception is translating")
+		return
+	}
+
+	mainLog.Load().Warn().Msg("DNS intercept: post-stabilization rules are intact but the probe FAILED — forcing one reload")
+	if !forceReloadPFInterceptFn(p) {
+		mainLog.Load().Error().Msg("DNS intercept: post-stabilization forced reload did not run — leaving recovery to the watchdog")
+		return
+	}
+	if probePFInterceptFn(p) {
+		mainLog.Load().Info().Msg("DNS intercept: interception restored by the post-stabilization reload")
+		return
+	}
+	mainLog.Load().Error().Msg("DNS intercept: interception still not translating after the post-stabilization reload — the watchdog will retry")
 }
 
 var runPFAnchorCheckCommand = func(args ...string) ([]byte, error) {
@@ -1930,6 +2028,13 @@ func buildDNSQueryPacket(domain string) []byte {
 // The backoff schedule provides both fast detection (immediate + 500ms) and extended
 // coverage (up to ~8s) to win the race against async pf reloads by hypervisors.
 func (p *prog) pfInterceptMonitor() {
+	// Eligibility first, ownership second. A monitor that is about to stand down must not
+	// take the flag on its way out: the post-stabilization verifier reads that flag as
+	// "another prober is working" and would step aside for a prober that never probes.
+	if !p.interceptProbeMonitorAllowed() {
+		mainLog.Load().Debug().Msg("DNS intercept monitor: not starting — intercept disabled or stabilizing")
+		return
+	}
 	if !p.pfMonitorRunning.CompareAndSwap(false, true) {
 		mainLog.Load().Debug().Msg("DNS intercept monitor: already running, skipping")
 		return
@@ -1946,23 +2051,23 @@ func (p *prog) pfInterceptMonitor() {
 		if delay > 0 {
 			time.Sleep(delay)
 		}
-		if p.dnsInterceptState == nil || p.pfStabilizing.Load() {
+		if !p.interceptProbeMonitorAllowed() {
 			mainLog.Load().Debug().Msg("DNS intercept monitor: aborting — intercept disabled or stabilizing")
 			return
 		}
 
-		if p.probePFIntercept() {
+		if probePFInterceptFn(p) {
 			mainLog.Load().Debug().Msgf("DNS intercept monitor: probe %d/%d passed", i+1, len(delays))
 			continue // working now — keep monitoring in case it breaks later in the window
 		}
 
 		// Probe failed — pf translation is broken. Force full reload.
 		mainLog.Load().Warn().Msgf("DNS intercept monitor: probe %d/%d FAILED — pf translation broken, forcing full ruleset reload", i+1, len(delays))
-		p.forceReloadPFMainRuleset()
+		forceReloadPFInterceptFn(p)
 
 		// Verify the reload fixed it
 		time.Sleep(200 * time.Millisecond)
-		if p.probePFIntercept() {
+		if probePFInterceptFn(p) {
 			mainLog.Load().Info().Msg("DNS intercept monitor: probe passed after reload — interception restored")
 			// Continue monitoring in case the hypervisor reloads pf again
 		} else {
