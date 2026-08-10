@@ -19,6 +19,7 @@ import (
 	"tailscale.com/net/tsaddr"
 
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
+	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
 const (
@@ -280,6 +281,10 @@ type osResolver struct {
 	publicServers atomic.Pointer[[]string]
 	group         *singleflight.Group
 	cache         *sync.Map
+	// Per-resolver seams let tests exercise the production Resolve path without
+	// mutating process-wide resolver state.
+	exchangeDNS dnsExchangeFunc
+	localIP     func(string) net.IP
 }
 
 type osResolverResult struct {
@@ -324,19 +329,63 @@ func GetDefaultLocalIPv6() net.IP {
 	return nil
 }
 
-// customDNSExchange wraps the DNS exchange to use our debug dialer.
-// It uses dns.ExchangeWithConn so that our custom dialer is used directly.
-func customDNSExchange(ctx context.Context, msg *dns.Msg, server string, desiredLocalIP net.IP) (*dns.Msg, time.Duration, error) {
+type dnsExchangeFunc func(context.Context, *dns.Msg, string, net.IP) (*dns.Msg, time.Duration, error)
+
+func exchangeDNS(ctx context.Context, msg *dns.Msg, server string, localIP net.IP) (*dns.Msg, time.Duration, error) {
 	baseDialer := &net.Dialer{
 		Timeout:  3 * time.Second,
 		Resolver: &net.Resolver{PreferGo: true},
 	}
-	if desiredLocalIP != nil {
-		baseDialer.LocalAddr = &net.UDPAddr{IP: desiredLocalIP, Port: 0}
+	if localIP != nil {
+		baseDialer.LocalAddr = &net.UDPAddr{IP: localIP, Port: 0}
 	}
 	dnsClient := &dns.Client{Net: "udp"}
 	dnsClient.Dialer = baseDialer
 	return dnsClient.ExchangeContext(ctx, msg, server)
+}
+
+func defaultLocalIPForServer(server string) net.IP {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(server)
+	if err != nil {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.To4() == nil {
+		return GetDefaultLocalIPv6()
+	}
+	return GetDefaultLocalIPv4()
+}
+
+func preSendUnreachable(err error) bool {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) || (opErr.Op != "dial" && opErr.Op != "write") {
+		return false
+	}
+	return ctrldnet.IsUnreachable(err)
+}
+
+// customDNSExchangeWith preserves the preferred source first. A route-selected
+// retry is allowed only when the caller knows the server is an OS-selected resolver,
+// not ctrld's synthetic public fallback. This includes public DNS pushed by a VPN:
+// unbinding changes the source route, not the recipient.
+func customDNSExchangeWith(ctx context.Context, msg *dns.Msg, server string, desiredLocalIP net.IP, allowRouteSelectedRetry bool, exchange dnsExchangeFunc) (*dns.Msg, time.Duration, error) {
+	answer, rtt, err := exchange(ctx, msg, server, desiredLocalIP)
+	if answer != nil || err == nil || ctx.Err() != nil || desiredLocalIP == nil || !allowRouteSelectedRetry || !preSendUnreachable(err) {
+		return answer, rtt, err
+	}
+
+	LoggerFromCtx(ctx).Debug().Msg("OS resolver source binding is unreachable; retrying with route-selected source")
+	return exchange(ctx, msg.Copy(), server, nil)
+}
+
+// allowRouteSelectedRetryForOSServer excludes only ctrld's synthetic public
+// fallback. System-provided resolvers remain eligible even when their addresses
+// are public, as with VPNs that push public DNS servers.
+func allowRouteSelectedRetryForOSServer(server string) bool {
+	return server != controldPublicDnsWithPort
 }
 
 const hotCacheTTL = time.Second
@@ -454,6 +503,14 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 
 	ch := make(chan *osResolverResult, numServers)
 	wg := &sync.WaitGroup{}
+	exchange := o.exchangeDNS
+	if exchange == nil {
+		exchange = exchangeDNS
+	}
+	localIPForServer := o.localIP
+	if localIPForServer == nil {
+		localIPForServer = defaultLocalIPForServer
+	}
 	wg.Add(numServers)
 	go func() {
 		wg.Wait()
@@ -471,22 +528,8 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 				}
 				defer release()
 
-				var answer *dns.Msg
-				var err error
-				var localOSResolverIP net.IP
-				if runtime.GOOS == "darwin" {
-					host, _, err := net.SplitHostPort(server)
-					if err == nil {
-						ip := net.ParseIP(host)
-						if ip != nil && ip.To4() == nil {
-							// IPv6 nameserver; use default IPv6 address (if set)
-							localOSResolverIP = GetDefaultLocalIPv6()
-						} else {
-							localOSResolverIP = GetDefaultLocalIPv4()
-						}
-					}
-				}
-				answer, _, err = customDNSExchange(ctx, msg.Copy(), server, localOSResolverIP)
+				localOSResolverIP := localIPForServer(server)
+				answer, _, err := customDNSExchangeWith(ctx, msg.Copy(), server, localOSResolverIP, allowRouteSelectedRetryForOSServer(server), exchange)
 				ch <- &osResolverResult{answer: answer, err: err, server: server, lan: isLan}
 			}(server)
 		}
