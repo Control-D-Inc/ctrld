@@ -903,7 +903,10 @@ func processCDFlags(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverC
 				return resolverConfig, nil
 			}
 		}
-		mainLog.Load().Warn().Err(err).Msg("Disregarding invalid custom config")
+		// cfgErr, not err: err is the resolver-config fetch error from above, which is
+		// nil on every path that reaches here, so logging it said nothing about why the
+		// custom config was rejected.
+		mainLog.Load().Warn().Err(cfgErr).Msg("Disregarding invalid custom config")
 	}
 
 	bootstrapIP := func(endpoint string) string {
