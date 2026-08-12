@@ -792,10 +792,6 @@ func (p *prog) buildPFAnchorRulesWith(vpnExemptions []vpnDNSExemption, forwarded
 	return p.buildPFAnchorRulesForState(vpnExemptions, discoverTunnelInterfacesForReconcile(), forwardedSources)
 }
 
-func (p *prog) buildPFAnchorRulesForTunnels(vpnExemptions []vpnDNSExemption, tunnelIfaces []string) string {
-	return p.buildPFAnchorRulesForState(vpnExemptions, tunnelIfaces, p.currentForwardedSources())
-}
-
 func (p *prog) buildPFAnchorRulesForState(vpnExemptions []vpnDNSExemption, tunnelIfaces []string, forwardedSources []forwardedSource) string {
 	// Read the actual listener address from config. In intercept mode, ctrld may
 	// be on a non-standard port (e.g., 127.0.0.1:5354) if mDNSResponder holds *:53.
