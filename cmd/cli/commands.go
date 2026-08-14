@@ -1501,28 +1501,31 @@ func initUpgradeCmd() *cobra.Command {
 			if doRestart() {
 				_ = os.Remove(oldBin)
 				_ = os.Chmod(bin, 0755)
-				ver := "unknown version"
-				out, err := exec.Command(bin, "--version").CombinedOutput()
+				ver, err := binaryVersion(bin)
 				if err != nil {
 					mainLog.Load().Warn().Err(err).Msg("Failed to get new binary version")
-				}
-				if after, found := strings.CutPrefix(string(out), "ctrld version "); found {
-					ver = after
+					ver = "unknown version"
 				}
 				mainLog.Load().Notice().Msgf("Upgrade successful - %s", ver)
 				return
 			}
 
-			mainLog.Load().Warn().Msgf("Upgrade failed, restoring previous binary: %s", oldBin)
-			if err := os.Remove(bin); err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to remove new binary")
+			mainLog.Load().Warn().Msg("Upgrade failed: the new binary did not become ready")
+			stop := func() error {
+				if !svcInstalled {
+					return nil
+				}
+				if err := stopServiceAndWait(s, upgradeStopTimeout); err != nil {
+					return err
+				}
+				// Mirror the Cleanup task in doRestart: leave DNS settings as the OS
+				// had them, not as a half-started ctrld left them.
+				p.router.Cleanup()
+				p.resetDNS(false, true)
+				return nil
 			}
-			if err := os.Rename(oldBin, bin); err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to restore old binary")
-			}
-			if doRestart() {
-				mainLog.Load().Notice().Msg("Restored previous binary successfully")
-				return
+			if err := rollbackToPreviousBinary(bin, oldBin, stop, doRestart); err != nil {
+				mainLog.Load().Error().Err(err).Msg("Rollback did not complete")
 			}
 		},
 	}
