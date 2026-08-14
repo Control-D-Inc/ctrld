@@ -1047,6 +1047,7 @@ func initStatusCmd() *cobra.Command {
 	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show status of the ctrld service",
+		Long:  statusCmdLong,
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			s, err := newService(&prog{}, svcConfig)
@@ -1062,13 +1063,25 @@ func initStatusCmd() *cobra.Command {
 			switch status {
 			case service.StatusUnknown:
 				mainLog.Load().Notice().Msg("Unknown status")
-				os.Exit(2)
+				os.Exit(statusExitUnknown)
 			case service.StatusRunning:
-				mainLog.Load().Notice().Msg("Service is running")
-				os.Exit(0)
+				// The service manager only knows a process was created. It reports a
+				// service as running even when the process is still in startup, with
+				// no control socket, no DNS listener and no policy applied - so
+				// "Service is running" can describe a host with no working DNS.
+				// Probe readiness before claiming it.
+				ready, probeErr := serviceReady()
+				if probeErr != nil {
+					mainLog.Load().Debug().Err(probeErr).Msg("Readiness probe did not confirm startup")
+				}
+				r := classifyReadiness(ready, probeErr, readinessVerifiable())
+				for _, msg := range r.messages {
+					mainLog.Load().Notice().Msg(msg)
+				}
+				os.Exit(r.exitCode)
 			case service.StatusStopped:
 				mainLog.Load().Notice().Msg("Service is stopped")
-				os.Exit(1)
+				os.Exit(statusExitStopped)
 			}
 		},
 	}
@@ -1082,6 +1095,7 @@ func initStatusCmd() *cobra.Command {
 	statusCmdAlias := &cobra.Command{
 		Use:   "status",
 		Short: "Show status of the ctrld service",
+		Long:  statusCmdLong,
 		Args:  cobra.NoArgs,
 		Run:   statusCmd.Run,
 	}
