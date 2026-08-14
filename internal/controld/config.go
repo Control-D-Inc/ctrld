@@ -63,10 +63,33 @@ type ErrorResponse struct {
 		Message string `json:"message"`
 		Code    int    `json:"code"`
 	} `json:"error"`
+	// StatusCode is the HTTP status the API answered with. It is not part of the JSON
+	// body: this type is built for *any* non-200 whose body decodes, so the body alone
+	// cannot tell a permanent rejection of the request from a transient server-side
+	// failure, and callers that act differently on the two need the status to tell them
+	// apart. Zero means the status was not recorded.
+	StatusCode int `json:"-"`
 }
 
 func (u ErrorResponse) Error() string {
 	return u.ErrorField.Message
+}
+
+// apiErrorFromResponse builds the error for a non-200 API answer, recording the HTTP
+// status alongside the decoded body.
+//
+// The status is what tells a caller whether the answer will change on a retry: this type
+// is built for every non-200 whose body decodes, so a 502 from a load balancer and a 404
+// for a deleted device are otherwise indistinguishable. Both response paths go through
+// here so neither can decode a body and forget to record it.
+func apiErrorFromResponse(statusCode int, d *json.Decoder) (*ErrorResponse, error) {
+	errResp := &ErrorResponse{StatusCode: statusCode}
+	if err := d.Decode(errResp); err != nil {
+		return nil, err
+	}
+	// Decode fills exported fields from the body; StatusCode is json:"-", so it survives.
+	errResp.StatusCode = statusCode
+	return errResp, nil
 }
 
 type utilityRequest struct {
@@ -96,7 +119,7 @@ type LogsRequest struct {
 }
 
 // FetchResolverConfig fetch Control D config for given uid.
-func FetchResolverConfig(req *ResolverConfigRequest, cdDev bool) (*ResolverConfig, error) {
+func FetchResolverConfig(ctx context.Context, req *ResolverConfigRequest, cdDev bool) (*ResolverConfig, error) {
 	uid, clientID := ParseRawUID(req.RawUID)
 	uReq := utilityRequest{
 		UID:      uid,
@@ -106,11 +129,11 @@ func FetchResolverConfig(req *ResolverConfigRequest, cdDev bool) (*ResolverConfi
 		uReq.ClientID = clientID
 	}
 	body, _ := json.Marshal(uReq)
-	return postUtilityAPI(req.Version, cdDev, false, bytes.NewReader(body))
+	return postUtilityAPI(ctx, req.Version, cdDev, false, bytes.NewReader(body))
 }
 
 // FetchResolverUID fetch resolver uid from a given request.
-func FetchResolverUID(req *UtilityOrgRequest, version string, cdDev bool) (*ResolverConfig, error) {
+func FetchResolverUID(ctx context.Context, req *UtilityOrgRequest, version string, cdDev bool) (*ResolverConfig, error) {
 	if req == nil {
 		return nil, errors.New("invalid request")
 	}
@@ -131,26 +154,29 @@ func FetchResolverUID(req *UtilityOrgRequest, version string, cdDev bool) (*Reso
 	ctrld.ProxyLogger.Load().Debug().Msgf("Sending UID request to ControlD API")
 
 	body, _ := json.Marshal(req)
-	return postUtilityAPI(version, cdDev, false, bytes.NewReader(body))
+	return postUtilityAPI(ctx, version, cdDev, false, bytes.NewReader(body))
 }
 
 // UpdateCustomLastFailed calls API to mark custom config is bad.
-func UpdateCustomLastFailed(rawUID, version string, cdDev, lastUpdatedFailed bool) (*ResolverConfig, error) {
+func UpdateCustomLastFailed(ctx context.Context, rawUID, version string, cdDev, lastUpdatedFailed bool) (*ResolverConfig, error) {
 	uid, clientID := ParseRawUID(rawUID)
 	req := utilityRequest{UID: uid}
 	if clientID != "" {
 		req.ClientID = clientID
 	}
 	body, _ := json.Marshal(req)
-	return postUtilityAPI(version, cdDev, true, bytes.NewReader(body))
+	return postUtilityAPI(ctx, version, cdDev, true, bytes.NewReader(body))
 }
 
-func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reader) (*ResolverConfig, error) {
+func postUtilityAPI(ctx context.Context, version string, cdDev, lastUpdatedFailed bool, body io.Reader) (*ResolverConfig, error) {
 	apiUrl := resolverDataURLCom
 	if cdDev {
 		apiUrl = resolverDataURLDev
 	}
-	req, err := http.NewRequest("POST", apiUrl, body)
+	// Context-bound so an in-flight request is abandoned when the caller is
+	// cancelled - a service stop during API preflight must not wait out the
+	// request timeout, let alone keep retrying.
+	req, err := http.NewRequestWithContext(ctx, "POST", apiUrl, body)
 	if err != nil {
 		return nil, fmt.Errorf("http.NewRequest: %w", err)
 	}
@@ -174,8 +200,8 @@ func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reade
 	defer resp.Body.Close()
 	d := json.NewDecoder(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		errResp := &ErrorResponse{}
-		if err := d.Decode(errResp); err != nil {
+		errResp, err := apiErrorFromResponse(resp.StatusCode, d)
+		if err != nil {
 			return nil, err
 		}
 		return nil, errResp
@@ -189,13 +215,13 @@ func postUtilityAPI(version string, cdDev, lastUpdatedFailed bool, body io.Reade
 }
 
 // SendLogs sends runtime log to ControlD API.
-func SendLogs(lr *LogsRequest, cdDev bool) error {
+func SendLogs(ctx context.Context, lr *LogsRequest, cdDev bool) error {
 	defer lr.Data.Close()
 	apiUrl := logURLCom
 	if cdDev {
 		apiUrl = logURLDev
 	}
-	req, err := http.NewRequest("POST", apiUrl, lr.Data)
+	req, err := http.NewRequestWithContext(ctx, "POST", apiUrl, lr.Data)
 	if err != nil {
 		return fmt.Errorf("http.NewRequest: %w", err)
 	}
@@ -215,8 +241,8 @@ func SendLogs(lr *LogsRequest, cdDev bool) error {
 	defer resp.Body.Close()
 	d := json.NewDecoder(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		errResp := &ErrorResponse{}
-		if err := d.Decode(errResp); err != nil {
+		errResp, err := apiErrorFromResponse(resp.StatusCode, d)
+		if err != nil {
 			return err
 		}
 		return errResp

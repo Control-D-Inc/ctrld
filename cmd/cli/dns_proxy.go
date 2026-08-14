@@ -1190,7 +1190,7 @@ func (p *prog) doSelfUninstall(answer *dns.Msg) {
 			Version:  rootCmd.Version,
 			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 		}
-		_, err := controld.FetchResolverConfig(req, cdDev)
+		_, err := controld.FetchResolverConfig(context.Background(), req, cdDev)
 		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
 		selfUninstallCheck(err, p, logger)
 

@@ -324,7 +324,7 @@ func (p *prog) runWait() {
 				continue
 			}
 			if cdUID != "" {
-				rc, err := processCDFlags(newCfg)
+				rc, err := p.fetchCDConfigBoundedByLifetime(newCfg)
 				if err != nil {
 					logger.Err(err).Msg("could not fetch ControlD config")
 					waitOldRunDone()
@@ -491,7 +491,7 @@ func (p *prog) apiConfigReload() {
 			Version:  rootCmd.Version,
 			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 		}
-		resolverConfig, err := controld.FetchResolverConfig(req, cdDev)
+		resolverConfig, err := controld.FetchResolverConfig(context.Background(), req, cdDev)
 		selfUninstallCheck(err, p, logger)
 		if err != nil {
 			logger.Warn().Err(err).Msg("could not fetch resolver config")
@@ -549,7 +549,7 @@ func (p *prog) apiConfigReload() {
 			}
 			if cfgErr != nil {
 				logger.Warn().Err(err).Msg("skipping invalid custom config")
-				if _, err := controld.UpdateCustomLastFailed(cdUID, rootCmd.Version, cdDev, true); err != nil {
+				if _, err := controld.UpdateCustomLastFailed(context.Background(), cdUID, rootCmd.Version, cdDev, true); err != nil {
 					logger.Error().Err(err).Msg("could not mark custom last update failed")
 				}
 				return
