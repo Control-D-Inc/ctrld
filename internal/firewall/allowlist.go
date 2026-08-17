@@ -5,7 +5,10 @@
 //
 // The AllowList is the core data structure: a concurrent map of allowed IPs
 // populated by DNS responses, with TTL-based expiry and domain-level invalidation
-// for live profile updates.
+// for live profile updates. Alongside it are two sets that no DNS response feeds:
+// permanent entries (loopback, RFC1918, upstreams — added once, never removed) and
+// exceptions, the organization's Allowed Destination IP list, which is replaced as
+// a whole set on every configuration refresh (see exceptions.go).
 package firewall
 
 import (
@@ -39,6 +42,19 @@ type AllowList struct {
 	// These include loopback, RFC1918, link-local, ctrld listener IPs, and
 	// upstream resolver IPs.
 	permanent sync.Map // netip.Addr → struct{}
+
+	// exceptions holds the administratively allowed destinations — the
+	// organization's Allowed Destination IP list, delivered by the API on every
+	// configuration refresh. Unlike permanent entries they are replaced as a whole
+	// set (see SetExceptions), so an entry removed upstream stops being allowed.
+	// Held as an immutable index behind an atomic pointer because Contains()
+	// reads it on the hot path.
+	exceptions atomic.Pointer[exceptionIndex]
+
+	// exceptionsMu serializes SetExceptions so two concurrent refreshes cannot
+	// interleave their compare and store steps. It is separate from mu so
+	// replacing the set never blocks DNS-driven allowlist updates.
+	exceptionsMu sync.Mutex
 
 	// onChange is called (if non-nil) whenever the allowlist changes.
 	// The callback receives the IP and whether it was added (true) or removed (false).
@@ -80,6 +96,9 @@ type Stats struct {
 	AllowedIPs int `json:"allowed_ips"`
 	// PermanentIPs is the number of permanently allowed IPs.
 	PermanentIPs int `json:"permanent_ips"`
+	// ExceptionPrefixes is the number of administratively allowed destination
+	// prefixes (the organization's Allowed Destination IP list).
+	ExceptionPrefixes int `json:"exception_prefixes"`
 	// TrackedDomains is the number of domains with IP associations.
 	TrackedDomains int `json:"tracked_domains"`
 	// TotalAdds is the cumulative number of Add() calls.
@@ -186,6 +205,13 @@ func (a *AllowList) Contains(ip netip.Addr) bool {
 
 	// Check permanent list first (most common for loopback/private).
 	if a.containsPermanent(ip) {
+		a.totalHits.Add(1)
+		return true
+	}
+
+	// Administratively allowed destinations are reachable without ctrld having
+	// resolved them, so they are checked before the DNS-driven map.
+	if a.containsException(ip) {
 		a.totalHits.Add(1)
 		return true
 	}
@@ -417,6 +443,7 @@ func (a *AllowList) Stats() Stats {
 		s.TrackedDomains++
 		return true
 	})
+	s.ExceptionPrefixes = len(a.exceptionsSnapshot())
 	s.TotalAdds = a.totalAdds.Load()
 	s.TotalRemoves = a.totalRemoves.Load()
 	s.TotalHits = a.totalHits.Load()

@@ -3,6 +3,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -59,6 +61,13 @@ var forwardedSourceWarnTracker struct {
 const (
 	// pfFirewallTable is the pf table name for dynamically-allowed IPs.
 	pfFirewallTable = "ctrld_allowed"
+
+	// pfFirewallExceptionTable is the pf table name for the organization's
+	// Allowed Destination IP list. Kept separate from pfFirewallTable so the
+	// flushes that discard DNS-resolved IPs (config reload, network change)
+	// leave administratively allowed destinations in place, and so a destination
+	// removed upstream can be deleted without touching resolved entries.
+	pfFirewallExceptionTable = "ctrld_allowed_dst"
 
 	// pfFirewallBatchInterval is the accumulation window for batching pf table updates.
 	// Short enough for responsiveness, long enough to avoid per-DNS-response pfctl calls.
@@ -162,6 +171,13 @@ func (p *prog) firewallFlushPlatform() {
 // p.allowList is nil.
 func (p *prog) shutdownPlatformFirewall() {
 	p.pfFirewallFlushTable()
+	// The organization's allowed destinations live in their own persist table,
+	// which the dynamic flush does not touch. Clear it too so turning Firewall
+	// Mode off leaves no table content behind for a later run to inherit.
+	if out, err := pfExceptionTableCommand("flush", nil); err != nil {
+		p.Debug().Err(err).Str("output", strings.TrimSpace(string(out))).
+			Msgf("Firewall: failed to flush pf table %s during shutdown (may not exist)", pfFirewallExceptionTable)
+	}
 
 	if p.dnsInterceptState == nil {
 		return
@@ -242,6 +258,14 @@ func (p *prog) initPFFirewall() {
 	// were registered. Bulk-load that snapshot so pf starts with the same view
 	// as the in-memory allowlist.
 	p.pfFirewallPopulateTable()
+
+	// Likewise for the organization's allowed destinations, which are applied as
+	// soon as the allowlist exists - before pf enforcement comes up. The table is
+	// a persist table that may still hold what a previous run put in it, so mark
+	// the set for a full replace rather than a delta; the reconcile retries until
+	// pf has exactly the current set.
+	p.markDestinationsForResync()
+	p.reconcileAllowedDestinations()
 
 	// Seed the forwarded-source snapshot with what the anchor was just built with,
 	// so the first reconcile only fires on a real subsequent change.
@@ -373,6 +397,163 @@ func (p *prog) pfFirewallPopulateTable() {
 	}
 }
 
+// firewallApplyExceptionsPlatform mirrors a change to the organization's Allowed
+// Destination IP list into the pf exception table, reporting whether pf took it.
+//
+// An error - including "pf enforcement is not up yet", because the anchor that
+// declares the table has not been loaded and pfctl would fail - leaves the
+// caller's applied snapshot unadvanced, so the same delta is retried later.
+func (p *prog) firewallApplyExceptionsPlatform(added, removed []netip.Prefix) error {
+	if state, ok := p.platformFirewallState.(*pfFirewallState); !ok || state == nil {
+		return errors.New("pf firewall enforcement is not initialized")
+	}
+	return errors.Join(
+		p.pfFirewallExceptionTableOp("add", prefixStrings(added)),
+		p.pfFirewallExceptionTableOp("delete", prefixStrings(removed)),
+	)
+}
+
+const (
+	// pfExceptionTableOpTimeout bounds one pfctl call against the exception table.
+	// reconcileDestinations holds destinationsMu across the mirror, and both the
+	// configuration refresh loop and Firewall Mode teardown contend on that lock,
+	// so a pfctl that never returns would stall refresh detection of custom_config
+	// and pin changes along with the teardown itself. Generous enough that a busy
+	// pf never trips it, short enough that a wedged one is not indefinite.
+	pfExceptionTableOpTimeout = 30 * time.Second
+
+	// pfExceptionTableOpChunk caps the addresses handed to one pfctl invocation.
+	// The organization's list is API-supplied and unbounded, and every entry
+	// becomes an argv element, so a long enough list would exceed ARG_MAX and fail
+	// as a whole rather than being applied.
+	pfExceptionTableOpChunk = 500
+)
+
+// pfFirewallExceptionTableOp runs one pfctl table operation ("add", "delete" or
+// "replace") against the exception table. pf table entries are addressed exactly,
+// so deleting a network never disturbs a resolved host address inside it.
+//
+// Long lists are split across invocations. Only the first chunk carries the
+// caller's operation: a chunked "replace" would otherwise leave the table holding
+// the last chunk alone, each call having discarded what the previous one
+// installed, so the chunks after it add to what the replace established.
+func (p *prog) pfFirewallExceptionTableOp(op string, entries []string) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	for _, chunk := range pfExceptionTableChunks(op, entries) {
+		if err := p.pfFirewallExceptionTableCall(chunk.op, chunk.entries); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pfExceptionTableChunk is one pfctl invocation's share of a table operation.
+type pfExceptionTableChunk struct {
+	op      string
+	entries []string
+}
+
+// pfExceptionTableChunks splits a table operation into invocation-sized pieces.
+// Only the first piece carries the requested operation; the rest add, so that a
+// split "replace" installs the whole set instead of each piece discarding what
+// the previous one installed. "add" and "delete" are per-entry operations, so
+// splitting them changes nothing.
+func pfExceptionTableChunks(op string, entries []string) []pfExceptionTableChunk {
+	var chunks []pfExceptionTableChunk
+	for start := 0; start < len(entries); start += pfExceptionTableOpChunk {
+		end := min(start+pfExceptionTableOpChunk, len(entries))
+		chunkOp := op
+		// Only a replace changes after the first chunk. "add" and "delete" are
+		// per-entry, and rewriting a later delete chunk as an add would put back
+		// exactly the destinations the organization withdrew.
+		if op == "replace" && start > 0 {
+			chunkOp = "add"
+		}
+		chunks = append(chunks, pfExceptionTableChunk{op: chunkOp, entries: entries[start:end]})
+	}
+	return chunks
+}
+
+// pfFirewallExceptionTableCall runs a single pfctl invocation for one chunk.
+func (p *prog) pfFirewallExceptionTableCall(op string, entries []string) error {
+	out, err := pfExceptionTableCommand(op, entries)
+	if err != nil {
+		// A delete against a table that does not exist has already achieved what it
+		// asked for: with no table there is nothing permitting the entry. Treating
+		// it as a failure would keep the withdrawal pending forever, since no later
+		// retry can make an absent table deletable. This matches the WFP mirror,
+		// which tolerates FWP_E_FILTER_NOT_FOUND on delete for the same reason.
+		if op == "delete" && pfTableMissing(out) {
+			p.Debug().Int("entries", len(entries)).
+				Msgf("Firewall: pf table %s does not exist; the allowed destinations it would have held are already not permitted", pfFirewallExceptionTable)
+			return nil
+		}
+		return fmt.Errorf("pfctl -t %s -T %s (%d entries): %w (output: %s)",
+			pfFirewallExceptionTable, op, len(entries), err, strings.TrimSpace(string(out)))
+	}
+	p.Debug().Strs("entries", entries).
+		Msgf("Firewall: %s %d allowed destinations in pf table %s", pfTableOpPastTense(op), len(entries), pfFirewallExceptionTable)
+	return nil
+}
+
+// pfExceptionTableCommand runs one pfctl exception-table call under a timeout.
+func pfExceptionTableCommand(op string, entries []string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), pfExceptionTableOpTimeout)
+	defer cancel()
+	args := append([]string{"-a", pfAnchorName, "-t", pfFirewallExceptionTable, "-T", op}, entries...)
+	return exec.CommandContext(ctx, "pfctl", args...).CombinedOutput()
+}
+
+// pfTableMissing reports whether pfctl failed because the table is not loaded.
+func pfTableMissing(out []byte) bool {
+	return strings.Contains(strings.ToLower(string(out)), "table does not exist")
+}
+
+// pfTableOpPastTense renders a pfctl table operation for log messages.
+func pfTableOpPastTense(op string) string {
+	switch op {
+	case "delete":
+		return "removed"
+	case "replace":
+		return "installed"
+	default:
+		return "added"
+	}
+}
+
+// firewallReplaceExceptionsPlatform makes the pf exception table hold exactly
+// desired, whatever it held before.
+//
+// This is what runs when pf enforcement starts, and it must succeed before the
+// applied snapshot is established: the table is a persist table that outlives the
+// process, so a destination the organization withdrew while ctrld was stopped is
+// still in it. Reporting failure is the point - a discarded error here would
+// leave that entry bypassing Firewall Mode for the life of the process, with
+// nothing pending to say so.
+func (p *prog) firewallReplaceExceptionsPlatform(desired []netip.Prefix) error {
+	if state, ok := p.platformFirewallState.(*pfFirewallState); !ok || state == nil {
+		return errors.New("pf firewall enforcement is not initialized")
+	}
+	entries := prefixStrings(desired)
+	if len(entries) == 0 {
+		// pfctl -T replace needs at least one address; emptying is a flush.
+		out, err := pfExceptionTableCommand("flush", nil)
+		if err != nil {
+			if pfTableMissing(out) {
+				p.Debug().Msgf("Firewall: pf table %s does not exist; nothing is permitted through it", pfFirewallExceptionTable)
+				return nil
+			}
+			return fmt.Errorf("pfctl -t %s -T flush: %w (output: %s)",
+				pfFirewallExceptionTable, err, strings.TrimSpace(string(out)))
+		}
+		p.Debug().Msgf("Firewall: emptied pf table %s", pfFirewallExceptionTable)
+		return nil
+	}
+	return p.pfFirewallExceptionTableOp("replace", entries)
+}
+
 // buildPFFirewallRules generates the pf rules for firewall mode enforcement.
 // These rules are appended to the anchor by buildPFAnchorRules() when firewall
 // mode is active.
@@ -394,13 +575,21 @@ func buildPFFirewallRules() string {
 	rules.WriteString("# Only IPs resolved by ctrld are allowed for outbound connections.\n")
 	rules.WriteString("# Table is dynamically populated from DNS responses.\n\n")
 
-	// Declare the table. pfctl -T add/delete operates on this table dynamically.
-	fmt.Fprintf(&rules, "table <%s> persist\n\n", pfFirewallTable)
+	// Declare the tables. pfctl -T add/delete operates on these dynamically.
+	fmt.Fprintf(&rules, "table <%s> persist\n", pfFirewallTable)
+	fmt.Fprintf(&rules, "table <%s> persist\n\n", pfFirewallExceptionTable)
 
 	// Pass traffic to allowed IPs (both IPv4 and IPv6).
 	rules.WriteString("# Allow outbound to DNS-resolved IPs.\n")
 	fmt.Fprintf(&rules, "pass out quick inet proto { tcp, udp } from any to <%s>\n", pfFirewallTable)
 	fmt.Fprintf(&rules, "pass out quick inet6 proto { tcp, udp } from any to <%s>\n\n", pfFirewallTable)
+
+	// Pass traffic to the organization's allowed destinations. These are reachable
+	// by literal IP, with no DNS lookup for ctrld to observe, which is the whole
+	// point of the list; the table is populated from the API's effective set.
+	rules.WriteString("# Allow outbound to organization allowed destination IPs.\n")
+	fmt.Fprintf(&rules, "pass out quick inet proto { tcp, udp } from any to <%s>\n", pfFirewallExceptionTable)
+	fmt.Fprintf(&rules, "pass out quick inet6 proto { tcp, udp } from any to <%s>\n\n", pfFirewallExceptionTable)
 
 	// Allow ICMP/ICMPv6 - needed for path MTU discovery, ping, etc.
 	rules.WriteString("# Allow ICMP (path MTU discovery, ping, etc.)\n")
@@ -897,15 +1086,6 @@ func forwardedSubnetsNotIn(a, b []forwardedSource) []netip.Prefix {
 		}
 		seen[src.prefix] = struct{}{}
 		out = append(out, src.prefix)
-	}
-	return out
-}
-
-// prefixStrings renders prefixes for logging.
-func prefixStrings(prefixes []netip.Prefix) []string {
-	out := make([]string, 0, len(prefixes))
-	for _, pfx := range prefixes {
-		out = append(out, pfx.String())
 	}
 	return out
 }

@@ -569,3 +569,85 @@ func TestPFBuildAnchorRules_ForwardedSourcesGating(t *testing.T) {
 		t.Errorf("forwarded-source redirect (%d) must come before the blanket block (%d)", fwdIdx, blockIdx)
 	}
 }
+
+// TestBuildPFFirewallRulesDeclaresExceptionTable pins the pf side of the
+// organization's Allowed Destination IP list.
+//
+// Every cmd/cli test of the allowed-destination paths stubs the platform mirror,
+// so nothing else reaches this generator: the table the mirror populates could
+// stop being declared, or lose its pass rules, and the mirror would keep
+// reporting success while every approved destination stayed blocked. Both
+// families are asserted - a list is not usable if only one of them passes.
+func TestBuildPFFirewallRulesDeclaresExceptionTable(t *testing.T) {
+	rules := buildPFFirewallRules()
+
+	wants := []string{
+		// Declared persist, like the dynamic table: pfctl -T add/delete/replace
+		// against an undeclared table fails, and persist is what keeps the table
+		// alive while it holds no addresses.
+		"table <" + pfFirewallExceptionTable + "> persist",
+		"pass out quick inet proto { tcp, udp } from any to <" + pfFirewallExceptionTable + ">",
+		"pass out quick inet6 proto { tcp, udp } from any to <" + pfFirewallExceptionTable + ">",
+	}
+	for _, want := range wants {
+		if !strings.Contains(rules, want) {
+			t.Errorf("missing rule:\n  %s\nin:\n%s", want, rules)
+		}
+	}
+
+	// The exception table is separate from the dynamic one on purpose: the flushes
+	// that discard DNS-resolved IPs must leave administratively allowed
+	// destinations in place.
+	if pfFirewallExceptionTable == pfFirewallTable {
+		t.Fatal("the exception table and the dynamic table are the same table; a flush would drop the organization's list")
+	}
+}
+
+// TestPFExceptionTableChunks covers the argv-length split. The organization's
+// list is API-supplied and unbounded, and every entry becomes an argv element, so
+// a long enough list would blow past ARG_MAX and fail as a whole.
+func TestPFExceptionTableChunks(t *testing.T) {
+	entries := make([]string, pfExceptionTableOpChunk*2+1)
+	for i := range entries {
+		entries[i] = "203.0.113.10/32"
+	}
+
+	if got := pfExceptionTableChunks("replace", nil); len(got) != 0 {
+		t.Errorf("chunks for an empty list = %d, want 0", len(got))
+	}
+
+	short := pfExceptionTableChunks("replace", entries[:2])
+	if len(short) != 1 || short[0].op != "replace" || len(short[0].entries) != 2 {
+		t.Fatalf("a list that fits was split: %+v", short)
+	}
+
+	// A split replace must replace once and add the rest. Splitting it into three
+	// replaces would leave pf holding only the final chunk, with the organization's
+	// other destinations silently dropped while the mirror reported success.
+	split := pfExceptionTableChunks("replace", entries)
+	if len(split) != 3 {
+		t.Fatalf("chunks = %d, want 3 for %d entries at %d per call", len(split), len(entries), pfExceptionTableOpChunk)
+	}
+	if split[0].op != "replace" {
+		t.Errorf("first chunk op = %q, want replace", split[0].op)
+	}
+	for _, chunk := range split[1:] {
+		if chunk.op != "add" {
+			t.Errorf("chunk after the first has op %q, want add: a second replace discards the first", chunk.op)
+		}
+	}
+	var total int
+	for _, chunk := range split {
+		total += len(chunk.entries)
+	}
+	if total != len(entries) {
+		t.Errorf("chunked entries = %d, want %d: the split dropped entries", total, len(entries))
+	}
+
+	// delete is per-entry, so every chunk keeps the operation.
+	for _, chunk := range pfExceptionTableChunks("delete", entries) {
+		if chunk.op != "delete" {
+			t.Errorf("delete chunk op = %q, want delete", chunk.op)
+		}
+	}
+}

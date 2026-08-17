@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"runtime"
@@ -34,6 +35,21 @@ type wfpFirewallState struct {
 	// (loopback/private/link-local/listener/upstream IPs). These stay installed
 	// across dynamic allowlist flushes.
 	permanentFilterMap map[string]uint64
+
+	// exceptionFilterMap tracks permit filters for the organization's Allowed
+	// Destination IP list, keyed by prefix string. Kept apart from filterMap so
+	// the flushes that discard DNS-resolved IPs leave them installed, and apart
+	// from permanentFilterMap because entries are removed when the organization
+	// removes them. Guarded by mu.
+	//
+	// Known gap, shared with filterMap and permanentFilterMap: rebuildDNSIntercept
+	// recreates the WFP engine without re-initializing this state, so after a
+	// health-monitor repair every ID here refers to a filter in a session that is
+	// gone. Mirroring then fails for good and allowed_destinations_pending stays
+	// non-zero until the service restarts. Predates the allowed-destination work
+	// and wants its own fix - re-initializing platform firewall state as part of
+	// the rebuild - rather than a patch here.
+	exceptionFilterMap map[string]uint64
 
 	// blockFilterIDv4 and blockFilterIDv6 are the base block-all filters.
 	blockFilterIDv4 uint64
@@ -72,6 +88,15 @@ func (p *prog) shutdownPlatformFirewall() {
 func (p *prog) initPlatformFirewall() {
 	if fwState, ok := p.platformFirewallState.(*wfpFirewallState); ok && fwState != nil {
 		fwState.populatePermanentFilters(p)
+		// Both callers gate on platformFirewallState being nil, so nothing reaches
+		// this today. Should something re-initialize enforcement over existing
+		// state, the filter IDs this state holds describe whatever engine session
+		// installed them, which is not necessarily the live one - so ask for a full
+		// replace instead of a delta against a snapshot that may describe filters
+		// that no longer exist. markDestinationsForResync is idempotent and cheap,
+		// and an unnecessary replace is a no-op the mirrors already tolerate.
+		p.markDestinationsForResync()
+		p.reconcileAllowedDestinations()
 		fwState.populateFilters(p)
 		return
 	}
@@ -90,6 +115,7 @@ func (p *prog) initPlatformFirewall() {
 	fwState := &wfpFirewallState{
 		filterMap:          make(map[string]uint64),
 		permanentFilterMap: make(map[string]uint64),
+		exceptionFilterMap: make(map[string]uint64),
 		engineHandle:       state.engineHandle,
 	}
 	p.platformFirewallState = fwState
@@ -116,6 +142,13 @@ func (p *prog) initPlatformFirewall() {
 	// Without these, the block-all filters would also block ctrld upstreams,
 	// listener/loopback traffic, LAN ranges, and other permanent exceptions.
 	fwState.populatePermanentFilters(p)
+
+	// The organization's allowed destinations are applied as soon as the allowlist
+	// exists, which is before WFP enforcement comes up. This session holds no
+	// filters of its own yet, so mark the set for a full install and let the
+	// reconcile put it in - and retry it if WFP refuses.
+	p.markDestinationsForResync()
+	p.reconcileAllowedDestinations()
 
 	// Register batch callback.
 	p.allowList.SetOnBatchChange(func(added []netip.Addr, removed []netip.Addr) {
@@ -260,6 +293,12 @@ func (s *wfpFirewallState) shutdown(p *prog) {
 	}
 	s.permanentFilterMap = make(map[string]uint64)
 
+	exceptionFilters := make(map[string]uint64, len(s.exceptionFilterMap))
+	for key, filterID := range s.exceptionFilterMap {
+		exceptionFilters[key] = filterID
+	}
+	s.exceptionFilterMap = make(map[string]uint64)
+
 	blockIDs := []uint64{s.blockFilterIDv4, s.blockFilterIDv6}
 	s.blockFilterIDv4 = 0
 	s.blockFilterIDv6 = 0
@@ -268,6 +307,11 @@ func (s *wfpFirewallState) shutdown(p *prog) {
 	for key, filterID := range permanentFilters {
 		if r1, _, _ := procFwpmFilterDeleteById0.Call(s.engineHandle, uintptr(filterID)); r1 != 0 {
 			p.Debug().Msgf("Firewall: failed to remove permanent WFP filter for %s during shutdown (HRESULT 0x%x, may already be gone)", key, r1)
+		}
+	}
+	for key, filterID := range exceptionFilters {
+		if r1, _, _ := procFwpmFilterDeleteById0.Call(s.engineHandle, uintptr(filterID)); r1 != 0 {
+			p.Debug().Msgf("Firewall: failed to remove allowed destination WFP filter for %s during shutdown (HRESULT 0x%x, may already be gone)", key, r1)
 		}
 	}
 	for _, filterID := range blockIDs {
@@ -319,6 +363,109 @@ func (s *wfpFirewallState) populatePermanentFilters(p *prog) {
 		s.permanentFilterMap[key] = filterID
 		p.Debug().Msgf("Firewall: added permanent WFP permit for %s (ID: %d)", prefix, filterID)
 	}
+}
+
+// fwpErrFilterNotFound is FWP_E_FILTER_NOT_FOUND: the filter is already gone, so
+// a delete that reports it has achieved what it was asked to do.
+const fwpErrFilterNotFound = 0x80320003
+
+// firewallApplyExceptionsPlatform mirrors a change to the organization's Allowed
+// Destination IP list into WFP permit filters, reporting whether WFP took it.
+//
+// An error - including "WFP enforcement is not up yet", because there is no
+// engine handle to install filters through - leaves the caller's applied snapshot
+// unadvanced, so the same delta is retried later.
+func (p *prog) firewallApplyExceptionsPlatform(added, removed []netip.Prefix) error {
+	fwState, ok := p.platformFirewallState.(*wfpFirewallState)
+	if !ok || fwState == nil {
+		return errors.New("WFP firewall enforcement is not initialized")
+	}
+	return fwState.syncExceptionFilters(p, added, removed)
+}
+
+// firewallReplaceExceptionsPlatform makes WFP hold permit filters for exactly
+// desired, whatever it held before, and reports whether it took.
+//
+// This is what runs when WFP enforcement starts. A fresh session holds nothing,
+// but the session can also be re-initialized over state this process installed
+// earlier, so anything not in desired is removed rather than assumed absent.
+func (p *prog) firewallReplaceExceptionsPlatform(desired []netip.Prefix) error {
+	fwState, ok := p.platformFirewallState.(*wfpFirewallState)
+	if !ok || fwState == nil {
+		return errors.New("WFP firewall enforcement is not initialized")
+	}
+	return fwState.syncExceptionFilters(p, desired, fwState.exceptionsNotIn(desired))
+}
+
+// exceptionsNotIn returns the prefixes WFP currently permits that are absent from
+// keep, i.e. the filters a full resync has to remove.
+func (s *wfpFirewallState) exceptionsNotIn(keep []netip.Prefix) []netip.Prefix {
+	kept := make(map[string]struct{}, len(keep))
+	for _, prefix := range keep {
+		kept[prefix.String()] = struct{}{}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var out []netip.Prefix
+	for key := range s.exceptionFilterMap {
+		if _, ok := kept[key]; ok {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(key)
+		if err != nil {
+			continue
+		}
+		out = append(out, prefix)
+	}
+	return out
+}
+
+// syncExceptionFilters installs permit filters for added prefixes and removes the
+// filters of removed ones. Permits use the same weight as dynamically allowed
+// IPs, so they override the base block-all filter while still losing to the
+// higher-weighted DNS permits.
+//
+// A filter whose deletion failed keeps its ID in the map: dropping it would leak
+// a permit that no longer belongs to any allowed destination and that nothing
+// could ever remove, while the returned error keeps the withdrawal pending so the
+// next reconcile retries the same deletion.
+func (s *wfpFirewallState) syncExceptionFilters(p *prog, added, removed []netip.Prefix) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var errs []error
+
+	for _, prefix := range removed {
+		key := prefix.String()
+		filterID, ok := s.exceptionFilterMap[key]
+		if !ok {
+			continue
+		}
+		if r1, _, _ := procFwpmFilterDeleteById0.Call(s.engineHandle, uintptr(filterID)); r1 != 0 && r1 != fwpErrFilterNotFound {
+			errs = append(errs, fmt.Errorf("delete WFP permit filter for allowed destination %s: HRESULT 0x%x", key, r1))
+			continue
+		}
+		delete(s.exceptionFilterMap, key)
+		p.Debug().Msgf("Firewall: removed WFP permit filter for allowed destination %s", key)
+	}
+
+	for _, prefix := range added {
+		key := prefix.String()
+		if _, exists := s.exceptionFilterMap[key]; exists {
+			continue
+		}
+		filterID, err := p.addWFPFirewallPermitPrefix(s, prefix)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("add WFP permit filter for allowed destination %s: %w", key, err))
+			continue
+		}
+		s.exceptionFilterMap[key] = filterID
+		p.Debug().Msgf("Firewall: added WFP permit filter for allowed destination %s (ID: %d)", key, filterID)
+	}
+
+	return errors.Join(errs...)
 }
 
 // populateFilters installs permit filters for IPs already present in the allowlist

@@ -247,6 +247,16 @@ func (p *prog) registerControlServerHandler() {
 			} else {
 				cdDeactivationPin.Store(defaultDeactivationPin)
 			}
+			// Every resolver-config response carries the organization's allowed
+			// destinations, including this one, so apply them rather than discarding
+			// a fresher list until the next scheduled refresh converges.
+			//
+			// Only the destinations: p.rc is deliberately left alone. The scheduled
+			// refresh decides whether to reload ctrld by comparing the response
+			// against p.rc, so storing this one here would let an exclude-list change
+			// be compared away and never reloaded. The destination set needs no
+			// reload - it is enforced directly and applying it is idempotent.
+			p.applyAllowedDestinations(p.firewallAllowList(), rc.DestinationIPs)
 		} else {
 			p.Warn().Err(err).Msg("Could not re-fetch deactivation pin code")
 		}

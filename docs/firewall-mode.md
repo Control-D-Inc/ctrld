@@ -17,6 +17,10 @@ IPs, direct-IP fallbacks, or alternative DNS resolvers to bypass DNS-based filte
 3. **Permanent entries are always allowed**: Loopback, RFC1918 private ranges, link-local,
    CGNAT, multicast, ctrld's own listener, and upstream resolver IPs are always allowed.
 
+4. **The organization's allowed destinations are always allowed**: managed endpoints receive
+   an explicit list of destinations from the API that stay reachable without a DNS lookup -
+   see [Organization Allowed Destination IPs](#organization-allowed-destination-ips).
+
 ## Configuration
 
 ### TOML Config
@@ -36,7 +40,9 @@ ctrld start --firewall-mode on --intercept-mode hard
 ### Remote API
 
 Firewall mode can be toggled remotely via the ControlD API's `custom_config` field,
-which is polled by `apiConfigReload()`.
+which is polled by `apiConfigReload()`. The same response carries the organization's
+`destination_ips` list - see
+[Organization Allowed Destination IPs](#organization-allowed-destination-ips).
 
 ## Platform-Specific Enforcement
 
@@ -47,6 +53,7 @@ with a `<ctrld_allowed>` table:
 
 - Default: block all outbound traffic
 - Pass: traffic to IPs in the `<ctrld_allowed>` table
+- Pass: traffic to the organization's allowed destinations in the `<ctrld_allowed_dst>` table
 - Pass: traffic to loopback and link-local
 - Pass: existing DNS intercept rules
 
@@ -61,6 +68,7 @@ sublayer with dynamic permit filters:
 - Base: block all outbound traffic (low-weight filter)
 - Dynamic: permit filters for each IP in the allowlist
 - Static: permits for loopback, RFC1918, ctrld listener
+- Organization: permit filters for each entry in the Allowed Destination IP list
 
 Permit filters are added/removed dynamically as the allowlist changes.
 
@@ -115,6 +123,54 @@ These IPs are always allowed regardless of DNS resolution:
 | `224.0.0.0/4`, `ff00::/8` | Multicast - mDNS, SSDP |
 | ctrld listener IPs | Self - DNS proxy must be reachable |
 | Upstream resolver IPs | DoH/DoT/DoQ endpoints |
+
+## Organization Allowed Destination IPs
+
+Firewall Mode only permits what ctrld resolved, so a service addressed by literal IP - with
+no DNS lookup to observe - is unreachable. An organization can publish a list of destinations
+that stay reachable anyway, without having to turn Firewall Mode off.
+
+The API sends the *effective* list for the endpoint's organization in the `destination_ips`
+field of every resolver-config response: the organization's own entries plus any inherited
+from a parent organization that applies its settings to sub-organizations. Entries are IPv4
+or IPv6 addresses (bare, e.g. `203.0.113.10`) or CIDRs (e.g. `198.51.100.0/24`,
+`2001:db8::/48`). Nothing is configured locally - the list is not a TOML setting.
+
+How it is applied:
+
+- **As a set, not as additions.** Every refresh - the scheduled one and a forced
+  `apiConfigReload` - replaces the previous set. An entry added upstream takes effect on the
+  next refresh; an entry removed upstream stops bypassing Firewall Mode on the next refresh,
+  unless it is independently allowed by a DNS resolution or a permanent entry.
+- **Without a reload.** Applying the list does not restart listeners or reload the config,
+  and it is unaffected by the allowlist flushes that follow a profile change or a network
+  change - unlike DNS-resolved IPs, these entries carry no TTL and are never reaped.
+- **Per platform.** macOS puts them in a second pf table, `<ctrld_allowed_dst>`, passed by
+  its own rules; Windows installs a WFP permit filter per entry, at the same weight as the
+  dynamic permits. Both are kept apart from the DNS-resolved entries so a flush of those
+  leaves the organization's list installed. On Linux and other unsupported platforms the set
+  is tracked in memory and reported in stats, but nothing enforces it (see above).
+- **Retried until enforcement agrees.** ctrld tracks the set the API asked for separately
+  from the set pf/WFP has accepted. A failed `pfctl` call or WFP filter operation does not
+  advance the applied set, so the same change is retried by the next refresh and by a
+  reconcile every 5 minutes - a rejected addition does not leave an approved destination
+  blocked, and a rejected removal does not leave a withdrawn one permitted. Until the two
+  agree the difference is reported as `allowed_destinations_pending` in the stats line, and
+  the "applied" log line is not written.
+- **Enforcement startup replaces, it does not add.** When pf/WFP enforcement comes up, ctrld
+  knows nothing about what it holds - the macOS table is a `persist` table that outlives the
+  process, so it can still contain what a previous run put there, including entries the
+  organization has since withdrawn. The first reconcile therefore replaces the table's whole
+  contents (an empty list means emptying it), and that replace is retried on the same
+  schedule until it succeeds; only then does ctrld consider any part of the set applied.
+- **Bad entries are dropped individually.** An entry that is not a valid address or CIDR is
+  logged once and skipped; the rest of the list still applies.
+- **Addresses are logged at debug level.** The list is organization network topology, so
+  Info-level logging - which is persisted and travels in support bundles - carries only
+  counts.
+
+Devices with Firewall Mode off are unaffected: there is nothing to make an exception to, so
+the list is ignored until the mode is turned on.
 
 ## Live Profile Updates
 
@@ -328,8 +384,13 @@ itself, not only the dashboard.
 Allowlist stats are logged every 5 minutes:
 
 ```
-Firewall allowlist stats allowed_ips=142 permanent_ips=18 tracked_domains=89 total_hits=4521 total_misses=23
+Firewall allowlist stats allowed_ips=142 permanent_ips=18 allowed_destinations=3 allowed_destinations_pending=0 tracked_domains=89 total_hits=4521 total_misses=23
 ```
+
+`allowed_destinations` is the number of prefixes in the organization's Allowed Destination
+IP list. `allowed_destinations_pending` is how many of its changes platform enforcement has
+not accepted yet - normally 0; a non-zero value that persists across reconciles means
+`pfctl`/WFP keeps rejecting the change, and the warning that named the error is in the log.
 
 
 ## Troubleshooting
@@ -340,7 +401,17 @@ Firewall allowlist stats allowed_ips=142 permanent_ips=18 tracked_domains=89 tot
 - Check allowlist stats for hit/miss ratio
 
 ### Certain apps don't work
-- The app may be using hardcoded IPs (this is the intended behavior - those IPs aren't DNS-resolved)
+- The app may be using hardcoded IPs (this is the intended behavior - those IPs aren't DNS-resolved).
+  For an approved service, add its addresses to the organization's Allowed Destination IP list,
+  then either wait for the next scheduled refresh (`refetch_time`, hourly by default) or force
+  one by resolving `<cdUID>.verify.controld.com` through ctrld, which is the only trigger that
+  makes ctrld re-fetch its resolver config on demand. The applied set is logged as `Firewall:
+  applied organization allowed destination IPs` and counted as `allowed_destinations` in the
+  stats line. If that line does not appear, check for `could not apply all organization allowed
+  destinations` (a delta that enforcement rejected) or `could not install organization allowed
+  destinations, will retry` (the full install done when enforcement starts, or after a resync),
+  along with the `allowed_destinations_pending` count - enforcement is refusing the change and
+  the reconcile is retrying it
 - Check if the app uses a custom DNS resolver that bypasses ctrld
 - RFC1918 traffic is always allowed, so LAN-only apps should work
 

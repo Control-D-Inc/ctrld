@@ -245,6 +245,39 @@ type prog struct {
 	// VPN DNS manager for split DNS routing when intercept mode is active.
 	vpnDNS *vpnDNSManager
 
+	// rejectedDestinationsKey is the signature of the organization allowed
+	// destination entries that were last reported as unusable, so re-parsing an
+	// unchanged list on every refresh does not repeat the warning. Protected by mu.
+	rejectedDestinationsKey string
+
+	// wideDestinationsKey is the same signature for the accepted entries that were
+	// last reported as covering a very wide range. Protected by mu.
+	wideDestinationsKey string
+
+	// appliedDestinations is the organization allowed destination set that
+	// platform enforcement (pf/WFP) has actually accepted, which is not always the
+	// set the API last sent: a failed pfctl call or WFP filter operation leaves
+	// this behind the desired set, and reconcileAllowedDestinations retries the
+	// difference until they agree. Protected by destinationsMu, which is separate
+	// from mu because the mirror it guards runs subprocesses.
+	appliedDestinations []netip.Prefix
+	destinationsMu      sync.Mutex
+
+	// destinationsNeedResync marks that platform enforcement holds state ctrld
+	// cannot describe - a pf persist table inherited from a previous run, or a
+	// WFP session that holds nothing yet - so the next reconcile must replace its
+	// whole set instead of applying a delta. Cleared only once that replace has
+	// succeeded. Protected by destinationsMu.
+	destinationsNeedResync bool
+
+	// firewallGen identifies the current run's firewall enforcement. It advances
+	// on every Firewall Mode start, reload and teardown, so a maintenance worker
+	// left over from an earlier run can tell that the enforcement it was given is
+	// no longer the enforcement in place, and stop touching it. Advanced under
+	// destinationsMu, which is also held across the platform mirror, so teardown
+	// and a worker's reconcile cannot interleave.
+	firewallGen atomic.Uint64
+
 	// allowList tracks IPs resolved by ctrld for firewall mode enforcement.
 	// When firewall_mode is "on", only IPs in this list (plus permanent entries)
 	// are allowed for outbound connections. nil when firewall mode is off.
@@ -460,6 +493,12 @@ func (p *prog) postRun() {
 	}
 }
 
+// fetchResolverConfigFn fetches the resolver config for a configuration refresh.
+// Indirected so the refresh loop itself - its ticker and its forced-reload path -
+// can be driven in tests without an API server, rather than only the handler it
+// calls.
+var fetchResolverConfigFn = controld.FetchResolverConfig
+
 // apiConfigReload calls API to check for latest config update then reload ctrld if necessary.
 func (p *prog) apiConfigReload() {
 	if cdUID == "" {
@@ -490,7 +529,7 @@ func (p *prog) apiConfigReload() {
 			Version:  appVersion,
 			Metadata: ctrld.SystemMetadata(loggerCtx),
 		}
-		resolverConfig, err := controld.FetchResolverConfig(loggerCtx, req, cdDev)
+		resolverConfig, err := fetchResolverConfigFn(loggerCtx, req, cdDev)
 		selfUninstallCheck(err, p, logger)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Could not fetch resolver config")
@@ -502,66 +541,7 @@ func (p *prog) apiConfigReload() {
 			_ = selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, logger)
 		}
 
-		if resolverConfig.DeactivationPin != nil {
-			newDeactivationPin := *resolverConfig.DeactivationPin
-			curDeactivationPin := cdDeactivationPin.Load()
-			switch {
-			case curDeactivationPin != defaultDeactivationPin:
-				logger.Debug().Msg("Saving deactivation pin")
-			case curDeactivationPin != newDeactivationPin:
-				logger.Debug().Msg("Update deactivation pin")
-			}
-			cdDeactivationPin.Store(newDeactivationPin)
-		} else {
-			cdDeactivationPin.Store(defaultDeactivationPin)
-		}
-
-		p.mu.Lock()
-		rc := p.rc
-		p.rc = resolverConfig
-		p.mu.Unlock()
-		noCustomConfig := resolverConfig.Ctrld.CustomConfig == ""
-		noExcludeListChanged := true
-		if rc != nil {
-			slices.Sort(rc.Exclude)
-			slices.Sort(resolverConfig.Exclude)
-			noExcludeListChanged = slices.Equal(rc.Exclude, resolverConfig.Exclude)
-		}
-		if noCustomConfig && noExcludeListChanged {
-			return
-		}
-
-		if noCustomConfig && !noExcludeListChanged {
-			logger.Debug().Msg("Exclude list changes detected, reloading...")
-			p.firewallOnConfigReload()
-			p.apiReloadCh <- nil
-			return
-		}
-
-		if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated || forced {
-			lastUpdated = time.Now().Unix()
-			cfg := &ctrld.Config{}
-			var cfgErr error
-			if cfgErr = validateCdRemoteConfig(resolverConfig, cfg); cfgErr == nil {
-				setListenerDefaultValue(cfg)
-				setNetworkDefaultValue(cfg)
-				cfgErr = validateConfig(cfg)
-			}
-			if cfgErr != nil {
-				logger.Warn().Err(err).Msg("Skipping invalid custom config")
-				if _, err := controld.UpdateCustomLastFailed(loggerCtx, cdUID, appVersion, cdDev, true); err != nil {
-					logger.Error().Err(err).Msg("Could not mark custom last update failed")
-				}
-				return
-			}
-			logger.Debug().Msg("Custom config changes detected, reloading...")
-			// Firewall mode: flush allowlist so DNS queries against the new
-			// config repopulate it with IPs allowed under the updated policy.
-			p.firewallOnConfigReload()
-			p.apiReloadCh <- cfg
-		} else {
-			logger.Debug().Msg("Custom config does not change")
-		}
+		lastUpdated = p.applyFetchedResolverConfig(loggerCtx, logger, resolverConfig, forced, lastUpdated)
 	}
 	for {
 		select {
@@ -573,6 +553,94 @@ func (p *prog) apiConfigReload() {
 			return
 		}
 	}
+}
+
+// applyFetchedResolverConfig applies a freshly fetched resolver config, and is
+// the whole of what a configuration refresh does with one: the deactivation pin,
+// the organization's allowed destinations, and the decision whether the change
+// warrants reloading ctrld. Returns the lastUpdated watermark to carry into the
+// next refresh.
+//
+// Split out of apiConfigReload's fetch loop so both refresh paths - the scheduled
+// tick and a forced reload - can be exercised without an API server, including
+// the early return taken when neither the custom config nor the exclusion list
+// changed. That case is the one where a destination change would be easiest to
+// drop, because nothing else about the refresh has any effect.
+func (p *prog) applyFetchedResolverConfig(
+	loggerCtx context.Context,
+	logger *ctrld.Logger,
+	resolverConfig *controld.ResolverConfig,
+	forced bool,
+	lastUpdated int64,
+) int64 {
+	if resolverConfig.DeactivationPin != nil {
+		newDeactivationPin := *resolverConfig.DeactivationPin
+		curDeactivationPin := cdDeactivationPin.Load()
+		switch {
+		case curDeactivationPin != defaultDeactivationPin:
+			logger.Debug().Msg("Saving deactivation pin")
+		case curDeactivationPin != newDeactivationPin:
+			logger.Debug().Msg("Update deactivation pin")
+		}
+		cdDeactivationPin.Store(newDeactivationPin)
+	} else {
+		cdDeactivationPin.Store(defaultDeactivationPin)
+	}
+
+	p.mu.Lock()
+	rc := p.rc
+	p.rc = resolverConfig
+	p.mu.Unlock()
+
+	// Apply the organization's Allowed Destination IP list before the early
+	// returns below: adds and removals must take effect on every refresh,
+	// scheduled or forced, whether or not anything else changed. It needs no
+	// ctrld reload - the set is enforced directly.
+	p.applyAllowedDestinations(p.firewallAllowList(), resolverConfig.DestinationIPs)
+
+	noCustomConfig := resolverConfig.Ctrld.CustomConfig == ""
+	noExcludeListChanged := true
+	if rc != nil {
+		slices.Sort(rc.Exclude)
+		slices.Sort(resolverConfig.Exclude)
+		noExcludeListChanged = slices.Equal(rc.Exclude, resolverConfig.Exclude)
+	}
+	if noCustomConfig && noExcludeListChanged {
+		return lastUpdated
+	}
+
+	if noCustomConfig && !noExcludeListChanged {
+		logger.Debug().Msg("Exclude list changes detected, reloading...")
+		p.firewallOnConfigReload()
+		p.apiReloadCh <- nil
+		return lastUpdated
+	}
+
+	if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated || forced {
+		lastUpdated = time.Now().Unix()
+		cfg := &ctrld.Config{}
+		var cfgErr error
+		if cfgErr = validateCdRemoteConfig(resolverConfig, cfg); cfgErr == nil {
+			setListenerDefaultValue(cfg)
+			setNetworkDefaultValue(cfg)
+			cfgErr = validateConfig(cfg)
+		}
+		if cfgErr != nil {
+			logger.Warn().Err(cfgErr).Msg("Skipping invalid custom config")
+			if _, err := controld.UpdateCustomLastFailed(loggerCtx, cdUID, appVersion, cdDev, true); err != nil {
+				logger.Error().Err(err).Msg("Could not mark custom last update failed")
+			}
+			return lastUpdated
+		}
+		logger.Debug().Msg("Custom config changes detected, reloading...")
+		// Firewall mode: flush allowlist so DNS queries against the new
+		// config repopulate it with IPs allowed under the updated policy.
+		p.firewallOnConfigReload()
+		p.apiReloadCh <- cfg
+	} else {
+		logger.Debug().Msg("Custom config does not change")
+	}
+	return lastUpdated
 }
 
 func (p *prog) setupUpstream(cfg *ctrld.Config) {

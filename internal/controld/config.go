@@ -44,7 +44,14 @@ type ResolverConfig struct {
 		CustomLastUpdate int64  `json:"custom_last_update"`
 		VersionTarget    string `json:"version_target"`
 	} `json:"ctrld"`
-	Exclude         []string `json:"exclude"`
+	Exclude []string `json:"exclude"`
+	// DestinationIPs is the organization's effective Allowed Destination IP list:
+	// the entries configured for this endpoint's organization plus any inherited
+	// from a parent organization. Each entry is an IPv4/IPv6 address or a CIDR
+	// (the API reports single-host entries as bare addresses, not /32 or /128).
+	// Under Firewall Mode these destinations stay reachable without a prior DNS
+	// lookup; see cmd/cli/firewall.go.
+	DestinationIPs  []string `json:"destination_ips"`
 	UID             string   `json:"uid"`
 	DeactivationPin *int64   `json:"deactivation_pin,omitempty"`
 }

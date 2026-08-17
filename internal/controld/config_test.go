@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_parseUID(t *testing.T) {
@@ -95,4 +96,41 @@ func TestAPIErrorRecordsHTTPStatus(t *testing.T) {
 			t.Error("expected a decode error for a non-JSON body")
 		}
 	})
+}
+
+// TestUtilityResponseDecodesDestinationIPs pins the API field that carries the
+// organization's effective Allowed Destination IP list. The list is enforced as a
+// set of Firewall Mode exceptions, so a silent decode change - a renamed field, a
+// nesting change - would leave endpoints blocking destinations the organization
+// approved, with nothing in the logs to say why.
+func TestUtilityResponseDecodesDestinationIPs(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "addresses and CIDRs of both families",
+			body: `{"body":{"resolver":{"doh":"https://dns.controld.dev/abc","destination_ips":["203.0.113.10","198.51.100.0/24","2606:1a40::1","2001:db8::/48"]}},"success":true}`,
+			want: []string{"203.0.113.10", "198.51.100.0/24", "2606:1a40::1", "2001:db8::/48"},
+		},
+		{
+			name: "empty list - the API always sends the field",
+			body: `{"body":{"resolver":{"doh":"https://dns.controld.dev/abc","destination_ips":[]}},"success":true}`,
+			want: []string{},
+		},
+		{
+			name: "field absent",
+			body: `{"body":{"resolver":{"doh":"https://dns.controld.dev/abc"}},"success":true}`,
+			want: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ur := &utilityResponse{}
+			require.NoError(t, json.Unmarshal([]byte(tc.body), ur))
+			assert.Equal(t, tc.want, ur.Body.Resolver.DestinationIPs)
+		})
+	}
 }
