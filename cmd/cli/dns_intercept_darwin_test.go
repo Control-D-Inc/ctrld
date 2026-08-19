@@ -1000,6 +1000,16 @@ func TestFinishPFStabilizationRunsFunctionalVerification(t *testing.T) {
 		t.Errorf("forced reloads = %d, want 1", *reloads)
 	}
 
+	stopPFTestTimers(p)
+}
+
+// stopPFTestTimers cancels every timer a stabilization pass can leave pending.
+//
+// The whole test binary shares one unsynchronised log sink, so a timer that outlives its
+// test logs concurrently with whichever test is running next and trips the race detector
+// there - reported against the innocent test. The post-settle follow-up is a 4s timer, so
+// the collision lands far from its origin.
+func stopPFTestTimers(p *prog) {
 	p.pfDelayedRecheckMu.Lock()
 	timers := append([]*time.Timer(nil), p.pfDelayedRecheckTimers...)
 	p.pfDelayedRecheckTimers = nil
@@ -1007,4 +1017,416 @@ func TestFinishPFStabilizationRunsFunctionalVerification(t *testing.T) {
 	for _, timer := range timers {
 		timer.Stop()
 	}
+	p.stopPFSettleFollowup()
+}
+
+// TestScheduleDNSAfterVPNSettleRefreshIsCancellable pins the tracking itself. An
+// untracked follow-up cannot be cancelled by teardown or by this helper, which is how a
+// 4s timer escaped its test and raced the log sink of a later one.
+func TestScheduleDNSAfterVPNSettleRefreshIsCancellable(t *testing.T) {
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.scheduleDNSAfterVPNSettleRefresh("test", time.Hour)
+
+	p.pfDelayedRecheckMu.Lock()
+	tracked := p.pfSettleFollowupTimer != nil
+	p.pfDelayedRecheckMu.Unlock()
+	if !tracked {
+		t.Fatal("the follow-up refresh was scheduled without being tracked; nothing can cancel it")
+	}
+
+	p.stopPFSettleFollowup()
+	p.pfDelayedRecheckMu.Lock()
+	cleared := p.pfSettleFollowupTimer == nil
+	p.pfDelayedRecheckMu.Unlock()
+	if !cleared {
+		t.Error("stopPFSettleFollowup left the timer in place")
+	}
+}
+
+// TestScheduleDNSAfterVPNSettleRefreshReplacesPending keeps VPN churn from stacking
+// repeats of the same scutil/VPN-DNS refresh.
+func TestScheduleDNSAfterVPNSettleRefreshReplacesPending(t *testing.T) {
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.scheduleDNSAfterVPNSettleRefresh("first", time.Hour)
+	p.pfDelayedRecheckMu.Lock()
+	first := p.pfSettleFollowupTimer
+	p.pfDelayedRecheckMu.Unlock()
+
+	p.scheduleDNSAfterVPNSettleRefresh("second", time.Hour)
+	p.pfDelayedRecheckMu.Lock()
+	second := p.pfSettleFollowupTimer
+	p.pfDelayedRecheckMu.Unlock()
+	defer p.stopPFSettleFollowup()
+
+	if first == second {
+		t.Fatal("the second schedule reused the first timer")
+	}
+	if first.Stop() {
+		t.Error("the superseded timer was still armed; stabilization churn would stack refreshes")
+	}
+}
+
+// =============================================================================
+// post-wake functional verification tests
+// =============================================================================
+
+// stubWakeProbeSchedule shortens the post-resume retry schedule and neutralises the OS
+// resolver refresh, so the bounded-repair contract can be tested without real delays or
+// a real scutil call. It returns the number of resolver refreshes performed.
+func stubWakeProbeSchedule(t *testing.T, attempts int) (refreshes *int) {
+	t.Helper()
+	originalDelays, originalWait := pfWakeProbeDelays, pfWakeProbeOwnerWait
+	originalResolver := initializeOsResolver
+	t.Cleanup(func() {
+		pfWakeProbeDelays, pfWakeProbeOwnerWait = originalDelays, originalWait
+		initializeOsResolver = originalResolver
+	})
+
+	pfWakeProbeDelays = make([]time.Duration, attempts)
+	for i := range pfWakeProbeDelays {
+		pfWakeProbeDelays[i] = time.Millisecond
+	}
+	pfWakeProbeOwnerWait = 10 * time.Millisecond
+
+	calls := 0
+	initializeOsResolver = func(context.Context, bool) []string {
+		calls++
+		return []string{"10.0.0.1:53"}
+	}
+	return &calls
+}
+
+// TestWakeProbeDetectsInterceptionBrokenBySuspend is the hole this closes. Rule text
+// survives a suspend unchanged, so the watchdog reports the anchor intact, and the probe
+// monitor is only armed by interface changes with a schedule frozen through the sleep.
+// Nothing probed after the resume, and QA measured 18s of no public DNS on a host whose
+// link and default route were already back.
+func TestWakeProbeDetectsInterceptionBrokenBySuspend(t *testing.T) {
+	stubWakeProbeSchedule(t, 4)
+	probes, reloads := stubStabilizationProbe(t, []bool{false, true}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.verifyInterceptAfterWake(18 * time.Second)
+
+	if *probes != 2 {
+		t.Errorf("probe calls = %d, want 2: one to detect and one to confirm the repair", *probes)
+	}
+	if *reloads != 1 {
+		t.Errorf("forced reloads = %d, want 1", *reloads)
+	}
+}
+
+// TestWakeProbePassStopsImmediately keeps a healthy resume free of pf work: a reload
+// flushes pf state and kills in-flight DoH connections for nothing.
+func TestWakeProbePassStopsImmediately(t *testing.T) {
+	stubWakeProbeSchedule(t, 4)
+	probes, reloads := stubStabilizationProbe(t, []bool{true}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.verifyInterceptAfterWake(18 * time.Second)
+
+	if *probes != 1 {
+		t.Errorf("probe calls = %d, want 1: a passing probe must end the schedule", *probes)
+	}
+	if *reloads != 0 {
+		t.Errorf("forced reloads = %d, want 0 on a healthy resume", *reloads)
+	}
+}
+
+// TestWakeProbeRetriesAcrossTheSchedule covers the observed shape directly: the first
+// forced reload did not restore translation and a later one did, so a single attempt is
+// not enough. The second repair must still happen, and the confirming pass must end it.
+func TestWakeProbeRetriesAcrossTheSchedule(t *testing.T) {
+	stubWakeProbeSchedule(t, 4)
+	// attempt 1: probe fails, reload, confirm fails.
+	// attempt 2: probe fails, reload, confirm passes.
+	probes, reloads := stubStabilizationProbe(t, []bool{false, false, false, true}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.verifyInterceptAfterWake(18 * time.Second)
+
+	if *reloads != 2 {
+		t.Errorf("forced reloads = %d, want 2: one failed repair must not end the schedule", *reloads)
+	}
+	if *probes != 4 {
+		t.Errorf("probe calls = %d, want 4", *probes)
+	}
+}
+
+// TestWakeProbeRepairsAreBounded pins the bound. A probe that never passes must exhaust
+// the repair budget and then keep probing without reloading, so this can never become the
+// unbounded reload loop the issue rules out.
+func TestWakeProbeRepairsAreBounded(t *testing.T) {
+	stubWakeProbeSchedule(t, 6)
+	probes, reloads := stubStabilizationProbe(t, nil, true) // every probe fails
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.verifyInterceptAfterWake(18 * time.Second)
+
+	if *reloads != pfWakeMaxRepairs {
+		t.Errorf("forced reloads = %d, want the budget of %d", *reloads, pfWakeMaxRepairs)
+	}
+	// Two repaired attempts probe twice each; the remaining four probe once each.
+	if want := 2*pfWakeMaxRepairs + (6 - pfWakeMaxRepairs); *probes != want {
+		t.Errorf("probe calls = %d, want %d", *probes, want)
+	}
+	if p.pfMonitorRunning.Load() {
+		t.Error("functional-probe ownership was left held after the schedule finished")
+	}
+}
+
+// TestWakeProbeRefreshesResolverBeforeEveryProbe is why a stale list matters: the probe
+// aims at the first OS nameserver and reports success when it has none, so a list still
+// holding a pre-sleep VPN resolver turns the probe into a meaningless pass or a false
+// failure. The captured run showed the resolver set changing after the resume.
+func TestWakeProbeRefreshesResolverBeforeEveryProbe(t *testing.T) {
+	refreshes := stubWakeProbeSchedule(t, 3)
+	stubStabilizationProbe(t, nil, false) // probes fail, reload refuses to run
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.verifyInterceptAfterWake(18 * time.Second)
+
+	if *refreshes != 3 {
+		t.Errorf("OS resolver refreshes = %d, want one per attempt (3)", *refreshes)
+	}
+}
+
+// TestWakeProbeStandsDownForStabilization keeps the two repair paths from fighting over
+// pf. Stabilization owns the ruleset while a VPN settles and runs its own functional
+// verification when it finishes; reloading underneath it is the mutual overwriting
+// stabilization exists to prevent.
+func TestWakeProbeStandsDownForStabilization(t *testing.T) {
+	stubWakeProbeSchedule(t, 4)
+	probes, reloads := stubStabilizationProbe(t, []bool{false, true}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.pfStabilizing.Store(true)
+	p.verifyInterceptAfterWake(18 * time.Second)
+
+	if *probes != 0 || *reloads != 0 {
+		t.Errorf("probe calls = %d, forced reloads = %d, want 0/0 while stabilization owns pf", *probes, *reloads)
+	}
+	if !p.claimFunctionalProbeOwner(0) {
+		t.Error("standing down took functional-probe ownership; the post-stabilization verifier would skip")
+	}
+	p.pfMonitorRunning.Store(false)
+}
+
+// TestWakeProbeYieldsToAnotherProberThenRetries is the ownership handoff. A probe monitor
+// that is genuinely working owns this attempt, but the schedule must not be spent waiting
+// on it: the next attempt still has to probe once ownership is free.
+func TestWakeProbeYieldsToAnotherProberThenRetries(t *testing.T) {
+	stubWakeProbeSchedule(t, 3)
+	probes, reloads := stubStabilizationProbe(t, []bool{false, true}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.pfMonitorRunning.Store(true)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		p.pfMonitorRunning.Store(false)
+	}()
+
+	p.verifyInterceptAfterWake(18 * time.Second)
+
+	if *probes == 0 {
+		t.Fatal("the schedule gave up entirely because another prober held ownership at first")
+	}
+	if *reloads != 1 {
+		t.Errorf("forced reloads = %d, want 1", *reloads)
+	}
+}
+
+// TestWakeProbeSkippedDuringExecBackoff protects the resource-exhaustion guard: each
+// probe forks a helper, which is exactly what backoff exists to stop.
+func TestWakeProbeSkippedDuringExecBackoff(t *testing.T) {
+	stubWakeProbeSchedule(t, 3)
+	probes, reloads := stubStabilizationProbe(t, []bool{false, true}, true)
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	p.pfExecBackoffUntil.Store(time.Now().Add(time.Minute).UnixMilli())
+	p.verifyInterceptAfterWake(18 * time.Second)
+
+	if *probes != 0 || *reloads != 0 {
+		t.Errorf("probe calls = %d, forced reloads = %d, want 0/0 during pf exec backoff", *probes, *reloads)
+	}
+}
+
+// TestWakeProbeSkippedWhenInterceptDisabled keeps the watcher harmless when intercept
+// mode is off: the detector runs for the process, the repair is intercept-only.
+func TestWakeProbeSkippedWhenInterceptDisabled(t *testing.T) {
+	stubWakeProbeSchedule(t, 3)
+	probes, reloads := stubStabilizationProbe(t, []bool{false}, true)
+
+	p := &prog{}
+	p.verifyInterceptAfterWake(18 * time.Second)
+
+	if *probes != 0 || *reloads != 0 {
+		t.Errorf("probe calls = %d, forced reloads = %d, want 0/0 with intercept disabled", *probes, *reloads)
+	}
+}
+
+// TestWakeProbeStopsWhenServiceStops keeps a resume during shutdown from holding the
+// schedule open past the stop request.
+func TestWakeProbeStopsWhenServiceStops(t *testing.T) {
+	originalDelays := pfWakeProbeDelays
+	pfWakeProbeDelays = []time.Duration{0, time.Hour}
+	t.Cleanup(func() { pfWakeProbeDelays = originalDelays })
+	originalResolver := initializeOsResolver
+	initializeOsResolver = func(context.Context, bool) []string { return []string{"10.0.0.1:53"} }
+	t.Cleanup(func() { initializeOsResolver = originalResolver })
+
+	probes, _ := stubStabilizationProbe(t, nil, false) // first probe fails, reload refuses
+
+	stopCh := make(chan struct{})
+	close(stopCh)
+	p := &prog{dnsInterceptState: &pfState{}, stopCh: stopCh}
+
+	done := make(chan struct{})
+	go func() {
+		p.verifyInterceptAfterWake(18 * time.Second)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("verifyInterceptAfterWake ignored the stop request and waited out its schedule")
+	}
+	if *probes != 1 {
+		t.Errorf("probe calls = %d, want 1 before the stop was observed", *probes)
+	}
+}
+
+// =============================================================================
+// post-wake watcher registration tests
+// =============================================================================
+
+// TestStartInterceptBackgroundWorkRegistersTheWakeVerifier covers the caller wiring. The
+// detector and the wake-repair path can both be correct while nothing connects them, and
+// then a host sleep is never noticed in production.
+func TestStartInterceptBackgroundWorkRegistersTheWakeVerifier(t *testing.T) {
+	type registration struct {
+		stopCh   <-chan struct{}
+		onResume func(time.Duration)
+	}
+	registered := make(chan registration, 1)
+	watchdogStarted := make(chan struct{}, 1)
+	originalWatcher, originalWatchdog := runSuspendWatcherFn, pfWatchdogFn
+	runSuspendWatcherFn = func(stopCh <-chan struct{}, onResume func(time.Duration)) {
+		registered <- registration{stopCh: stopCh, onResume: onResume}
+	}
+	// Both loops are stubbed rather than run: each would reach pfctl, and stopping the
+	// real watchdog means closing stopCh, which the wake verifier reads as "service
+	// stopping" and would abandon its probe schedule before the first probe.
+	pfWatchdogFn = func(*prog) { watchdogStarted <- struct{}{} }
+	t.Cleanup(func() { runSuspendWatcherFn, pfWatchdogFn = originalWatcher, originalWatchdog })
+
+	stubWakeProbeSchedule(t, 4)
+	probes, _ := stubStabilizationProbe(t, []bool{false, true}, true)
+
+	// Open for the whole test: an active intercept is not stopping.
+	stopCh := make(chan struct{})
+	p := &prog{dnsInterceptState: &pfState{}, stopCh: stopCh}
+	p.startInterceptBackgroundWork()
+
+	select {
+	case <-watchdogStarted:
+	case <-time.After(2 * time.Second):
+		t.Error("no pf watchdog was started; a replaced pf ruleset would never be restored")
+	}
+
+	var reg registration
+	select {
+	case reg = <-registered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no suspend watcher was started; a host sleep would go unnoticed")
+	}
+	if reg.stopCh != stopCh {
+		t.Error("the watcher was not wired to the service stop channel; it would outlive the intercept")
+	}
+
+	// Prove the callback is the post-wake verifier and not some other function: a
+	// reported resume has to probe interception. How many probes and repairs that
+	// schedule is worth belongs to TestWakeProbeDetectsInterceptionBrokenBySuspend;
+	// pinning it again here would only couple this test to that tuning.
+	reg.onResume(18 * time.Second)
+	if *probes == 0 {
+		t.Error("the resume callback probed nothing; it is not wired to verifyInterceptAfterWake")
+	}
+}
+
+// TestStartDNSInterceptStartsBackgroundWork closes the caller-wiring gap. Everything the
+// privileged install does sits behind installPFInterceptFn, so this drives the real
+// startDNSIntercept and checks what a successful start hands off: without the handoff, an
+// active intercept runs with no pf watchdog and no post-wake verification, and every
+// detector, recovery and registration test still passes.
+func TestStartDNSInterceptStartsBackgroundWork(t *testing.T) {
+	installed := 0
+	originalInstall := installPFInterceptFn
+	installPFInterceptFn = func(*prog) error { installed++; return nil }
+	originalDiscover := discoverTunnelInterfacesForReconcile
+	discoverTunnelInterfacesForReconcile = func() []string { return nil }
+
+	watchdogStarted := make(chan struct{}, 1)
+	watcherStarted := make(chan struct{}, 1)
+	originalWatchdog, originalWatcher := pfWatchdogFn, runSuspendWatcherFn
+	pfWatchdogFn = func(*prog) { watchdogStarted <- struct{}{} }
+	runSuspendWatcherFn = func(<-chan struct{}, func(time.Duration)) { watcherStarted <- struct{}{} }
+	t.Cleanup(func() {
+		installPFInterceptFn = originalInstall
+		discoverTunnelInterfacesForReconcile = originalDiscover
+		pfWatchdogFn, runSuspendWatcherFn = originalWatchdog, originalWatcher
+	})
+
+	p := &prog{
+		cfg:    &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"0": {IP: "127.0.0.1", Port: 53}}},
+		stopCh: make(chan struct{}),
+	}
+	if err := p.startDNSIntercept(); err != nil {
+		t.Fatalf("startDNSIntercept() = %v, want nil", err)
+	}
+	if installed != 1 {
+		t.Errorf("privileged install ran %d times, want 1", installed)
+	}
+	if p.dnsInterceptState == nil {
+		t.Fatal("a successful start did not publish intercept state")
+	}
+
+	select {
+	case <-watchdogStarted:
+	case <-time.After(2 * time.Second):
+		t.Error("startDNSIntercept did not start the pf watchdog; a replaced pf ruleset would never be restored")
+	}
+	select {
+	case <-watcherStarted:
+	case <-time.After(2 * time.Second):
+		t.Error("startDNSIntercept did not start the suspend watcher; a host sleep would go unnoticed")
+	}
+}
+
+// TestStartDNSInterceptSkipsBackgroundWorkWhenInstallFails keeps the handoff conditional:
+// watchers over an intercept that was never installed would repair state nothing owns.
+func TestStartDNSInterceptSkipsBackgroundWorkWhenInstallFails(t *testing.T) {
+	originalInstall := installPFInterceptFn
+	installPFInterceptFn = func(*prog) error { return errors.New("pf unavailable") }
+	originalWatchdog, originalWatcher := pfWatchdogFn, runSuspendWatcherFn
+	pfWatchdogFn = func(*prog) { t.Error("the pf watchdog started after a failed install") }
+	runSuspendWatcherFn = func(<-chan struct{}, func(time.Duration)) {
+		t.Error("the suspend watcher started after a failed install")
+	}
+	t.Cleanup(func() {
+		installPFInterceptFn = originalInstall
+		pfWatchdogFn, runSuspendWatcherFn = originalWatchdog, originalWatcher
+	})
+
+	p := &prog{stopCh: make(chan struct{})}
+	if err := p.startDNSIntercept(); err == nil {
+		t.Fatal("startDNSIntercept() = nil after the privileged install failed")
+	}
+	if p.dnsInterceptState != nil {
+		t.Error("a failed start published intercept state; the caller would skip its DNS fallback")
+	}
+	// The goroutines above are started before this returns if at all, but give a failing
+	// wiring a moment to report rather than racing the test's end.
+	time.Sleep(50 * time.Millisecond)
 }

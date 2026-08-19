@@ -249,6 +249,12 @@ type prog struct {
 	pfDelayedRecheckMu     sync.Mutex    //lint:ignore U1000 used on darwin
 	pfDelayedRecheckTimers []*time.Timer //lint:ignore U1000 used on darwin
 
+	// pfSettleFollowupTimer is the pending post-settle VPN DNS refresh, if any.
+	// Tracked so teardown can cancel it and a later stabilization replaces it
+	// instead of stacking another copy of the same refresh. Protected by
+	// pfDelayedRecheckMu.
+	pfSettleFollowupTimer *time.Timer //lint:ignore U1000 used on darwin
+
 	// pfIgnoredChangeLastReconcile bounds immediate pf/VPN-DNS work for noisy
 	// ignored macOS network deltas. Tunnel changes bypass this limit, and the
 	// existing delayed checks provide a trailing reconciliation after churn.

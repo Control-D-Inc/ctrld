@@ -251,6 +251,44 @@ func setCtrldGroupID(gid int) error {
 func (p *prog) startDNSIntercept() error {
 	mainLog.Load().Info().Msg("DNS intercept: initializing macOS packet filter (pf) redirect")
 
+	if err := installPFInterceptFn(p); err != nil {
+		return err
+	}
+
+	p.dnsInterceptState = &pfState{
+		anchorFile: pfAnchorFile,
+		anchorName: pfAnchorName,
+	}
+
+	// Store the initial set of tunnel interfaces so we can detect changes later.
+	p.mu.Lock()
+	p.lastTunnelIfaces = discoverTunnelInterfacesForReconcile()
+	p.pendingTunnelIfaces = nil
+	p.hasPendingTunnelIfaces = false
+	p.mu.Unlock()
+
+	lc := p.cfg.FirstListener()
+	if lc != nil {
+		mainLog.Load().Info().Msgf("DNS intercept: pf redirect active - all outbound DNS (port 53) redirected to %s:%d via anchor %q", lc.IP, lc.Port, pfAnchorName)
+	} else {
+		mainLog.Load().Info().Msgf("DNS intercept: pf redirect active - all outbound DNS (port 53) redirected via anchor %q", pfAnchorName)
+	}
+
+	p.startInterceptBackgroundWork()
+
+	return nil
+}
+
+// installPFInterceptFn is the privileged-install seam. Everything behind it needs root,
+// a live pf and a writable /etc/pf.anchors - which is what kept startDNSIntercept, and
+// with it the handoff to the background watchers, out of reach of every test.
+var installPFInterceptFn = (*prog).installPFIntercept
+
+// installPFIntercept performs the privileged part of starting interception: validation,
+// _ctrld group setup, anchor file write, pfctl load, enable, and post-load verification.
+// It returns nil only once pf is authoritatively active, so the caller may publish
+// intercept mode; on failure it has already rolled back whatever it applied.
+func (p *prog) installPFIntercept() error {
 	if err := p.validateDNSIntercept(); err != nil {
 		return err
 	}
@@ -360,30 +398,31 @@ func (p *prog) startDNSIntercept() error {
 		return fmt.Errorf("dns intercept: post-load PF verification failed")
 	}
 
-	p.dnsInterceptState = &pfState{
-		anchorFile: pfAnchorFile,
-		anchorName: pfAnchorName,
-	}
-
-	// Store the initial set of tunnel interfaces so we can detect changes later.
-	p.mu.Lock()
-	p.lastTunnelIfaces = discoverTunnelInterfacesForReconcile()
-	p.pendingTunnelIfaces = nil
-	p.hasPendingTunnelIfaces = false
-	p.mu.Unlock()
-
-	lc := p.cfg.FirstListener()
-	if lc != nil {
-		mainLog.Load().Info().Msgf("DNS intercept: pf redirect active — all outbound DNS (port 53) redirected to %s:%d via anchor %q", lc.IP, lc.Port, pfAnchorName)
-	} else {
-		mainLog.Load().Info().Msgf("DNS intercept: pf redirect active — all outbound DNS (port 53) redirected via anchor %q", pfAnchorName)
-	}
-
-	// Start the pf watchdog to detect and restore rules if another program
-	// (e.g., Windscribe desktop, macOS configd) replaces the pf ruleset.
-	go p.pfWatchdog()
-
 	return nil
+}
+
+// pfWatchdogFn and runSuspendWatcherFn are the background-work seams. Tests use them to
+// observe what startInterceptBackgroundWork registers without running either loop, which
+// would otherwise reach pfctl.
+var (
+	pfWatchdogFn        = (*prog).pfWatchdog
+	runSuspendWatcherFn = runSuspendWatcher
+)
+
+// startInterceptBackgroundWork launches the goroutines that guard an active intercept.
+//
+// Split out of startDNSIntercept so the registration is reachable from a test:
+// startDNSIntercept needs root, a live pf and a writable /etc/pf.anchors, so nothing
+// covers this wiring if it lives inline there.
+func (p *prog) startInterceptBackgroundWork() {
+	// Detect and restore rules if another program (e.g., Windscribe desktop, macOS
+	// configd) replaces the pf ruleset.
+	go pfWatchdogFn(p)
+
+	// A host sleep freezes every timer above it, and rule text survives the suspend
+	// unchanged, so no existing path notices that pf stopped translating while the host
+	// was asleep. Watch for the resume itself and probe from there.
+	go runSuspendWatcherFn(p.stopCh, p.verifyInterceptAfterWake)
 }
 
 func (p *prog) rollbackDNSInterceptStart() {
@@ -562,6 +601,10 @@ func (p *prog) stopDNSIntercept() error {
 		}
 	}
 	p.pfDelayedRecheckTimers = nil
+	if p.pfSettleFollowupTimer != nil {
+		p.pfSettleFollowupTimer.Stop()
+		p.pfSettleFollowupTimer = nil
+	}
 	p.pfDelayedRecheckMu.Unlock()
 
 	for !p.pfEnsureRunning.CompareAndSwap(false, true) {
@@ -1553,6 +1596,146 @@ func (p *prog) verifyInterceptAfterStabilization() {
 	mainLog.Load().Error().Msg("DNS intercept: interception still not translating after the post-stabilization reload — the watchdog will retry")
 }
 
+// pfWakeProbeDelays is the bounded retry schedule for the post-resume functional probe.
+// Each value is the wait before its own attempt, not an offset from the resume, so the
+// attempts land at +0s, +2s, +6s and +14s after the suspend is noticed. A resumed host
+// brings its link, default route, resolver list and pf translation state back over
+// several seconds, so a single probe at +0 decides too early. A var so tests can shorten
+// it.
+var pfWakeProbeDelays = []time.Duration{0, 2 * time.Second, 4 * time.Second, 8 * time.Second}
+
+// pfWakeMaxRepairs bounds forced reloads across the whole schedule. QA on the post-wake
+// outage saw one forced reload fail to restore translation and a later one succeed, so a
+// single attempt is not enough - but this stays a bounded repair rather than a reload
+// loop, because every reload flushes pf state and kills in-flight DoH connections.
+const pfWakeMaxRepairs = 2
+
+// pfWakeProbeOwnerWait bounds how long one attempt waits for another prober to release
+// functional-probe ownership. Short on purpose: a holder that is genuinely probing is
+// doing this path's job, and there are further attempts left in the schedule.
+var pfWakeProbeOwnerWait = 250 * time.Millisecond
+
+// verifyInterceptAfterWake proves pf is actually translating after the host resumes from
+// sleep, and repairs it a bounded number of times when it is not.
+//
+// Nothing else covers this window. The periodic watchdog compares rule text, which
+// survives a suspend unchanged, so it reports the anchor intact while every query through
+// the system resolver times out. The interception probe monitor is only armed by
+// interface changes and its backoff schedule is frozen through the suspend, so whether it
+// probes after a resume depends on where its timers happened to be when the host slept.
+// QA measured 18s of no public DNS on a host whose link and default route were back
+// within the first second, recovered only because an unrelated VPN reconnect happened to
+// drive the post-stabilization verifier; without that reconnect nothing would have probed.
+//
+// The OS resolver list is refreshed before every probe. probePFIntercept aims at the
+// first OS nameserver and reports success when it has no target, so a list still holding
+// a pre-sleep VPN resolver turns this into a meaningless pass or a false failure.
+func (p *prog) verifyInterceptAfterWake(gap time.Duration) {
+	if p.dnsInterceptState == nil {
+		return
+	}
+	mainLog.Load().Info().Msgf("DNS intercept: host resumed after a %s gap - verifying interception is still translating", gap.Round(time.Second))
+
+	repairs := 0
+	probed := 0
+	for attempt, delay := range pfWakeProbeDelays {
+		if !p.waitBeforeWakeProbe(delay) {
+			return
+		}
+		if p.dnsInterceptState == nil {
+			return
+		}
+		// Stabilization owns pf while a VPN's ruleset settles, and runs its own
+		// functional verification when it finishes. Probing or reloading underneath it
+		// is the mutual overwriting stabilization exists to prevent.
+		if p.pfStabilizing.Load() {
+			mainLog.Load().Debug().Msg("DNS intercept: post-wake probe standing down - stabilization owns pf and verifies on completion")
+			return
+		}
+		if p.pfExecBackoffActive() {
+			mainLog.Load().Debug().Msg("DNS intercept: post-wake probe deferred this attempt - pf exec backoff active")
+			continue
+		}
+		// Eligibility first, ownership second, and release before the next delay: a
+		// prober that holds the flag while sleeping starves the post-stabilization
+		// verifier, which reads a held flag as "somebody is probing".
+		if !p.claimFunctionalProbeOwner(pfWakeProbeOwnerWait) {
+			mainLog.Load().Debug().Msg("DNS intercept: post-wake probe skipped this attempt - another prober holds ownership")
+			continue
+		}
+		restored, repaired := p.runWakeProbeAttempt(attempt, repairs)
+		probed++
+		p.pfMonitorRunning.Store(false)
+		if repaired {
+			repairs++
+		}
+		if restored {
+			return
+		}
+	}
+	// Report what actually ran: an attempt deferred by pf exec backoff or skipped for
+	// want of probe ownership never probes, so the schedule length would claim
+	// verification that did not happen - and with every attempt deferred, nothing was
+	// measured at all.
+	if probed == 0 {
+		mainLog.Load().Warn().Msg("DNS intercept: post-wake verification never probed - every attempt was deferred or skipped - the watchdog will retry")
+		return
+	}
+	mainLog.Load().Error().Msgf("DNS intercept: interception still not translating after resume (%d probe attempts, %d forced reloads) - the watchdog will retry",
+		probed, repairs)
+}
+
+// waitBeforeWakeProbe waits out one attempt's delay, reporting false when the service
+// stopped while waiting.
+func (p *prog) waitBeforeWakeProbe(delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-p.stopCh:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// runWakeProbeAttempt runs one probe of the post-resume schedule, forcing a reload when
+// the probe fails and repairs so far leave budget for one. It reports whether
+// interception is translating and whether this attempt spent a repair. A reload that
+// could not run does not count: nothing was changed, so the next attempt may try again.
+// The caller holds functional-probe ownership for the call.
+func (p *prog) runWakeProbeAttempt(attempt, repairs int) (restored, repaired bool) {
+	initializeOsResolver(ctrld.LoggerCtx(context.Background(), mainLog.Load()), true)
+	if probePFInterceptFn(p) {
+		if attempt > 0 || repairs > 0 {
+			mainLog.Load().Info().Msgf("DNS intercept: post-wake probe %d/%d passed - interception is translating", attempt+1, len(pfWakeProbeDelays))
+		} else {
+			mainLog.Load().Debug().Msg("DNS intercept: post-wake probe passed - interception is translating")
+		}
+		return true, false
+	}
+
+	if repairs >= pfWakeMaxRepairs {
+		mainLog.Load().Warn().Msgf("DNS intercept: post-wake probe %d/%d FAILED - repair budget of %d forced reloads is spent, not reloading again",
+			attempt+1, len(pfWakeProbeDelays), pfWakeMaxRepairs)
+		return false, false
+	}
+
+	mainLog.Load().Warn().Msgf("DNS intercept: post-wake probe %d/%d FAILED - rules survived the suspend but pf is not translating, forcing a reload",
+		attempt+1, len(pfWakeProbeDelays))
+	if !forceReloadPFInterceptFn(p) {
+		mainLog.Load().Error().Msg("DNS intercept: post-wake forced reload did not run")
+		return false, false
+	}
+	if probePFInterceptFn(p) {
+		mainLog.Load().Info().Msg("DNS intercept: interception restored by the post-wake reload")
+		return true, true
+	}
+	return false, true
+}
+
 var runPFAnchorCheckCommand = func(args ...string) ([]byte, error) {
 	return exec.Command("pfctl", args...).CombinedOutput()
 }
@@ -1714,6 +1897,36 @@ func (p *prog) dnsInterceptIgnoredChangeReconcileDue(now time.Time) bool {
 	}
 }
 
+// scheduleDNSAfterVPNSettleRefresh queues one follow-up VPN DNS refresh.
+//
+// The timer is tracked rather than fired and forgotten. Teardown has to be able to
+// cancel it, and VPN churn can finish stabilization several times in a row, where
+// untracked timers stack up into repeats of the same scutil/VPN-DNS work.
+func (p *prog) scheduleDNSAfterVPNSettleRefresh(reason string, delay time.Duration) {
+	p.pfDelayedRecheckMu.Lock()
+	defer p.pfDelayedRecheckMu.Unlock()
+	if p.pfSettleFollowupTimer != nil {
+		p.pfSettleFollowupTimer.Stop()
+	}
+	p.pfSettleFollowupTimer = time.AfterFunc(delay, func() {
+		if p.dnsInterceptState == nil {
+			return
+		}
+		p.refreshDNSAfterVPNSettle(reason)
+	})
+}
+
+// stopPFSettleFollowup cancels a pending post-settle refresh. A callback that already
+// fired still checks dnsInterceptState, so either teardown order is safe.
+func (p *prog) stopPFSettleFollowup() {
+	p.pfDelayedRecheckMu.Lock()
+	defer p.pfDelayedRecheckMu.Unlock()
+	if p.pfSettleFollowupTimer != nil {
+		p.pfSettleFollowupTimer.Stop()
+		p.pfSettleFollowupTimer = nil
+	}
+}
+
 func (p *prog) pfExecBackoffActive() bool {
 	until := p.pfExecBackoffUntil.Load()
 	if until == 0 {
@@ -1754,20 +1967,6 @@ func isResourceExhaustion(err error, output []byte) bool {
 		strings.Contains(msg, "too many open files") ||
 		strings.Contains(msg, "too many processes") ||
 		strings.Contains(msg, "cannot allocate memory")
-}
-
-func (p *prog) scheduleDNSAfterVPNSettleRefresh(reason string, delay time.Duration) {
-	timer := time.AfterFunc(delay, func() {
-		if p.dnsInterceptState == nil {
-			return
-		}
-		p.refreshDNSAfterVPNSettle(reason)
-	})
-	// Track the timer like the other delayed rechecks, so intercept teardown
-	// (and test cleanup) can stop it instead of letting it fire afterwards.
-	p.pfDelayedRecheckMu.Lock()
-	p.pfDelayedRecheckTimers = append(p.pfDelayedRecheckTimers, timer)
-	p.pfDelayedRecheckMu.Unlock()
 }
 
 // pfWatchdog periodically checks that our pf anchor is still active.
