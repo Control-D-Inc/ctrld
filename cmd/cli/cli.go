@@ -342,29 +342,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				return
 			}
 
-			cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
-			// Performs self-uninstallation if the ControlD device does not exist.
-			var uer *controld.ErrorResponse
-			if errors.As(pf.err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
-				_ = uninstallInvalidCdUID(p, cdLogger, false)
-			}
-			if rejection, ok := permanentAPIRejection(pf.err); ok {
-				// The API answered and rejected this request permanently. Restarting
-				// cannot change that answer, so exit cleanly rather than through Fatal:
-				// an abnormal exit spends one of the service manager's restart actions,
-				// and on Windows those are what bring enforcement back after a real
-				// crash. Burning that budget on a config problem also buries the API's
-				// reason under repeated start failures.
-				cdLogger.Error().Err(pf.err).Int("status", rejection.StatusCode).Msg("failed to fetch resolver config, the API rejected this configuration")
-				notifyExitToLogServer()
-				return
-			}
-			notifyExitToLogServer()
-			// Everything else - a denied socket, an unreachable API, a proxy in the way,
-			// an API that is having a bad day - is a condition a later start may not hit,
-			// so keep the abnormal exit and let the service manager's recovery policy
-			// retry.
-			cdLogger.Fatal().Err(pf.err).Msg("failed to fetch resolver config")
+			handleAPIPreflightFailure(p, pf.err, notifyExitToLogServer)
+			return
 		default:
 			p.mu.Lock()
 			p.rc = pf.rc
@@ -373,6 +352,10 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	updated := updateListenerConfig(&cfg, notifyExitToLogServer)
+
+	// Bootstrap and listener binding both succeeded, so an earlier run's
+	// recorded failure no longer describes this install.
+	clearProvisionResult()
 
 	if cdUID != "" {
 		processLogAndCacheFlags(v, &cfg)
@@ -738,6 +721,76 @@ func permanentAPIRejection(err error) (*controld.ErrorResponse, bool) {
 		return nil, false
 	}
 	return uer, true
+}
+
+// apiFailureCode maps a bootstrap preflight error to its provisioning code.
+// A deleted device gets its own code because it triggers self-uninstall;
+// other permanent rejections are generic; anything else counts as
+// reachability trouble worth retrying.
+func apiFailureCode(err error) (provisionFailureCode, bool) {
+	if err == nil {
+		return "", false
+	}
+	var uer *controld.ErrorResponse
+	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+		return provisionCodeAPIDeviceInvalid, true
+	}
+	if _, ok := permanentAPIRejection(err); ok {
+		return provisionCodeAPIRejected, true
+	}
+	return provisionCodeAPIUnreachable, true
+}
+
+// apiRejectionSummary reports the HTTP status only. The API's raw error body
+// can echo back the value the caller sent, so it stays out of the artifact.
+func apiRejectionSummary(statusCode int) string {
+	return fmt.Sprintf("ControlD API rejected this configuration (HTTP status %d)", statusCode)
+}
+
+// provisionSecrets lists every secret-bearing value to strip from provisioning
+// artifacts, including both parts of a composite "<uid>/<clientID>" --cd
+// value, which the API may echo back separately.
+func provisionSecrets() []string {
+	uid, clientID := controld.ParseRawUID(cdUID)
+	return []string{cdUID, cdOrg, uid, clientID}
+}
+
+// uninstallInvalidCdUIDFn is a var so tests can observe the self-uninstall
+// without driving the OS service manager.
+var uninstallInvalidCdUIDFn = uninstallInvalidCdUID
+
+// handleAPIPreflightFailure reports a failed resolver-config fetch. A deleted
+// device self-uninstalls; it and any other permanent rejection return cleanly
+// so a config problem cannot burn the service manager's restart budget (on
+// Windows those restarts are what bring enforcement back after a real crash).
+// Anything else exits nonzero through failProvision so the manager retries.
+func handleAPIPreflightFailure(p *prog, err error, notify func()) {
+	cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
+	code, _ := apiFailureCode(err)
+	var uer *controld.ErrorResponse
+	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+		r := newProvisionResult(code, apiRejectionSummary(uer.StatusCode), nil, provisionSecrets()...)
+		if werr := writeProvisionResult(r); werr != nil {
+			cdLogger.Warn().Err(werr).Msg("could not persist provision result")
+		}
+		_ = uninstallInvalidCdUIDFn(p, cdLogger, false)
+		cdLogger.Error().Err(err).Int("status", uer.StatusCode).Msg("failed to fetch resolver config, the device no longer exists")
+		cdLogger.Error().Msg(r.failureLine())
+		notify()
+		return
+	}
+	if rejection, ok := permanentAPIRejection(err); ok {
+		r := newProvisionResult(code, apiRejectionSummary(rejection.StatusCode), nil, provisionSecrets()...)
+		if werr := writeProvisionResult(r); werr != nil {
+			cdLogger.Warn().Err(werr).Msg("could not persist provision result")
+		}
+		cdLogger.Error().Err(err).Int("status", rejection.StatusCode).Msg("failed to fetch resolver config, the API rejected this configuration")
+		cdLogger.Error().Msg(r.failureLine())
+		notify()
+		return
+	}
+	cdLogger.Error().Err(err).Msg("failed to fetch resolver config")
+	failProvision(newProvisionResult(code, fmt.Sprintf("failed to fetch resolver config: %v", err), nil, provisionSecrets()...), notify)
 }
 
 // processCDFlagsFn is the API fetch, indirected so the lifetime binding around it can be
@@ -1424,16 +1477,27 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 		}
 	}
 
+	// bindAttempts feeds the provisioning result detail. newProvisionResult
+	// caps it, so it grows freely here.
+	var bindAttempts []provisionBindAttempt
+	recordBindAttempt := func(addr, proto string, err error) {
+		if err != nil {
+			bindAttempts = append(bindAttempts, provisionBindAttempt{Addr: addr, Proto: proto, OSError: err.Error()})
+		}
+	}
+
 	tryListen := func(ip string, port int) bool {
 		addr := net.JoinHostPort(ip, strconv.Itoa(port))
 		udpLn, udpErr := net.ListenPacket("udp", addr)
 		if udpLn != nil {
 			udpLn.Close()
 		}
+		recordBindAttempt(addr, "udp", udpErr)
 		tcpLn, tcpErr := net.Listen("tcp", addr)
 		if tcpLn != nil {
 			tcpLn.Close()
 		}
+		recordBindAttempt(addr, "tcp", tcpErr)
 		return udpErr == nil && tcpErr == nil
 	}
 
@@ -1448,8 +1512,10 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 	if hasExplicitConfig {
 		// User specified explicit address — don't guess, just fail
 		if fatal {
-			notifyFunc()
-			mainLog.Load().Fatal().Msgf("DNS intercept: cannot listen on configured address %s", addr)
+			msg := fmt.Sprintf("DNS intercept: cannot listen on configured address %s", addr)
+			mainLog.Load().Error().Msg(msg)
+			failProvision(newProvisionResult(provisionCodeListenerAddrUnavail, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+			return updated, false
 		}
 		return updated, false
 	}
@@ -1463,8 +1529,10 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 	}
 
 	if fatal {
-		notifyFunc()
-		mainLog.Load().Fatal().Msg("DNS intercept: cannot bind 127.0.0.1:53 or 127.0.0.1:5354")
+		const msg = "DNS intercept: cannot bind 127.0.0.1:53 or 127.0.0.1:5354"
+		mainLog.Load().Error().Msg(msg)
+		failProvision(newProvisionResult(provisionCodeListenerBindFailed, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+		return updated, false
 	}
 	return updated, false
 }
@@ -1566,6 +1634,15 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 			_ = closer.Close()
 		}
 	}()
+	// bindAttempts feeds the provisioning result detail. newProvisionResult
+	// caps it, so it grows freely here.
+	var bindAttempts []provisionBindAttempt
+	recordBindAttempt := func(addr, proto string, err error) {
+		if err != nil {
+			bindAttempts = append(bindAttempts, provisionBindAttempt{Addr: addr, Proto: proto, OSError: err.Error()})
+		}
+	}
+
 	// tryListen attempts to listen on given udp and tcp address.
 	// Created listeners will be kept in listeners slice above, and close
 	// before function finished.
@@ -1574,16 +1651,21 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 		if udpLn != nil {
 			closers = append(closers, udpLn)
 		}
+		recordBindAttempt(addr, "udp", udpErr)
 		tcpLn, tcpErr := net.Listen("tcp", addr)
 		if tcpLn != nil {
 			closers = append(closers, tcpLn)
 		}
+		recordBindAttempt(addr, "tcp", tcpErr)
 		return errors.Join(udpErr, tcpErr)
 	}
 
+	listenerMsg := func(listenerNum int, format string, v ...any) string {
+		return fmt.Sprintf("listener.%d %s", listenerNum, fmt.Sprintf(format, v...))
+	}
 	logMsg := func(e *zerolog.Event, listenerNum int, format string, v ...any) {
 		e.MsgFunc(func() string {
-			return fmt.Sprintf("listener.%d %s", listenerNum, fmt.Sprintf(format, v...))
+			return listenerMsg(listenerNum, format, v...)
 		})
 	}
 
@@ -1635,8 +1717,10 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 		maxAttempts := 10
 		for {
 			if attempts == maxAttempts {
-				notifyFunc()
-				logMsg(mainLog.Load().Fatal(), n, "could not find available listen ip and port")
+				logMsg(mainLog.Load().Error(), n, "could not find available listen ip and port")
+				msg := listenerMsg(n, "could not find available listen ip and port")
+				failProvision(newProvisionResult(provisionCodeListenerBindFailed, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+				return updated, false
 			}
 			addr := net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port))
 			err := tryListen(addr)
@@ -1648,8 +1732,10 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 
 			if !check.IP && !check.Port {
 				if fatal {
-					notifyFunc()
-					logMsg(mainLog.Load().Fatal(), n, "failed to listen: %v", err)
+					logMsg(mainLog.Load().Error(), n, "failed to listen: %v", err)
+					msg := listenerMsg(n, "failed to listen: %v", err)
+					failProvision(newProvisionResult(provisionCodeListenerAddrUnavail, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+					return updated, false
 				}
 				ok = false
 				break
@@ -1716,8 +1802,11 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 			}
 			if listener.IP == oldIP && listener.Port == oldPort {
 				if fatal {
-					notifyFunc()
-					logMsg(mainLog.Load().Fatal(), n, "could not listen on %s: %v", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)), err)
+					triedAddr := net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port))
+					logMsg(mainLog.Load().Error(), n, "could not listen on %s: %v", triedAddr, err)
+					msg := listenerMsg(n, "could not listen on %s: %v", triedAddr, err)
+					failProvision(newProvisionResult(provisionCodeListenerBindFailed, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+					return updated, false
 				}
 				ok = false
 				break
@@ -1755,8 +1844,10 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 					}
 				}
 				if !found {
-					notifyFunc()
-					logMsg(mainLog.Load().Fatal(), n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
+					logMsg(mainLog.Load().Error(), n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
+					msg := listenerMsg(n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
+					failProvision(newProvisionResult(provisionCodeListenerAddrUnavail, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+					return updated, false
 				}
 			}
 		}
@@ -1804,12 +1895,22 @@ func cdUIDFromProvToken() string {
 		Metadata:  ctrld.SystemMetadata(context.Background()),
 	}
 	// Process provision token if provided.
-	resolverConfig, err := controld.FetchResolverUID(context.Background(), req, rootCmd.Version, cdDev)
+	resolverConfig, err := fetchResolverUIDFn(context.Background(), req, rootCmd.Version, cdDev)
 	if err != nil {
-		mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid with provision token: %s", redactToken(cdOrg))
+		// The token exchange is the first API call of an org/MDM install, so
+		// its failure must carry a code like every other bootstrap failure.
+		code, _ := apiFailureCode(err)
+		mainLog.Load().Error().Msgf("failed to fetch resolver uid with provision token: %s: %s",
+			redactToken(cdOrg), redactSecrets(err.Error(), provisionSecrets()...))
+		failProvision(newProvisionResult(code, fmt.Sprintf("provision token exchange failed: %v", err), nil, provisionSecrets()...), nil)
+		return ""
 	}
 	return resolverConfig.UID
 }
+
+// fetchResolverUIDFn is a var so tests can drive token-exchange failures
+// without reaching the network.
+var fetchResolverUIDFn = controld.FetchResolverUID
 
 // removeOrgFlagsFromArgs removes organization flags from command line arguments.
 // The flags are:

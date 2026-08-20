@@ -283,6 +283,46 @@ func initRunCmd() *cobra.Command {
 	return runCmd
 }
 
+// serviceStageFailureCode maps an aborted service-manager task to its
+// provisioning code. Other abortOnError tasks (like config validation) keep
+// their own error paths.
+func serviceStageFailureCode(taskName string) (provisionFailureCode, bool) {
+	switch taskName {
+	case "Install":
+		return provisionCodeServiceInstall, true
+	case "Start":
+		return provisionCodeServiceStartFailed, true
+	default:
+		return "", false
+	}
+}
+
+// serviceTaskErrorSummary describes which service-manager task failed and why,
+// for use as a provisioning result message.
+func serviceTaskErrorSummary(taskName string, err error) string {
+	return fmt.Sprintf("%s failed: %v", taskName, err)
+}
+
+// resultStalenessTolerance absorbs clock granularity between "ctrld start"
+// recording its start time and the daemon writing its result file.
+const resultStalenessTolerance = 2 * time.Second
+
+// reportStartFailure reports why "ctrld start" failed after install/start
+// looked fine. A result file the daemon wrote during this attempt names the
+// failure better than a generic self-check code, so it wins.
+func reportStartFailure(startedAt time.Time, fallbackMsg string) {
+	if r, err := readProvisionResult(); err == nil && provisionResultTrusted(r) {
+		if ts, err := time.Parse(time.RFC3339, r.Timestamp); err == nil {
+			if !ts.Before(startedAt.Add(-resultStalenessTolerance)) {
+				mainLog.Load().Error().Msg(r.failureLine())
+				provisionExit(r.ExitCode)
+				return
+			}
+		}
+	}
+	failProvision(newProvisionResult(provisionCodeServiceSelfCheck, fallbackMsg, nil, provisionSecrets()...), nil)
+}
+
 func initStartCmd() *cobra.Command {
 	startCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
@@ -524,22 +564,49 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					{s.Start, true, "Start"},
 					{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 				}
+				// Any result found later must come from this attempt, not a stale run.
+				clearProvisionResult()
+				startAttemptAt := time.Now()
 				mainLog.Load().Notice().Msg("Starting existing ctrld service")
-				if doTasks(tasks) {
-					mainLog.Load().Notice().Msg("Service started")
-					sockDir, err := socketDir()
-					if err != nil {
-						mainLog.Load().Warn().Err(err).Msg("Failed to get socket directory")
-						os.Exit(1)
+				failedTask, taskErr := doTasksE(tasks)
+				if taskErr != nil {
+					if code, ok := serviceStageFailureCode(failedTask); ok {
+						failProvision(newProvisionResult(code, serviceTaskErrorSummary(failedTask, taskErr), nil, provisionSecrets()...), nil)
+						return
 					}
-					reportSetDnsOk(sockDir)
-					// Verify service registration after successful start.
-					if err := verifyServiceRegistration(); err != nil {
-						mainLog.Load().Warn().Err(err).Msg("Service registry verification failed")
-					}
-				} else {
-					mainLog.Load().Error().Err(err).Msg("Failed to start existing ctrld service")
 					os.Exit(1)
+				}
+				sockDir, err := socketDir()
+				if err != nil {
+					mainLog.Load().Warn().Err(err).Msg("Failed to get socket directory")
+					os.Exit(1)
+				}
+
+				// The daemon can start and still fail provisioning (for example a
+				// listener bind conflict). Self-check like a fresh install so this
+				// path reports the daemon's failure code instead of a false
+				// "Service started" — but never uninstall an existing service.
+				time.Sleep(1 * time.Second)
+				ok, status, err := selfCheckStatus(ctx, s, sockDir)
+				if !ok || status != service.StatusRunning {
+					fallbackMsg := "ctrld service did not pass its post-start self-check"
+					if err != nil {
+						fallbackMsg = fmt.Sprintf("An error occurred while performing test query: %s", err)
+						mainLog.Load().Error().Msg(fallbackMsg)
+					}
+					if status == service.StatusRunning && err == nil {
+						fallbackMsg = "ctrld service was running, but a DNS query could not be sent to its listener; check firewall rules blocking/intercepting/redirecting DNS queries"
+						mainLog.Load().Error().Msg(fallbackMsg)
+					}
+					reportStartFailure(startAttemptAt, fallbackMsg)
+					return
+				}
+				mainLog.Load().Notice().Msg("Service started")
+				clearProvisionResult()
+				reportSetDnsOk(sockDir)
+				// Verify service registration after successful start.
+				if err := verifyServiceRegistration(); err != nil {
+					mainLog.Load().Warn().Err(err).Msg("Service registry verification failed")
 				}
 				return
 			}
@@ -605,7 +672,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					})
 					return nil
 				}, false, "Save current DNS"},
-				{s.Install, false, "Install"},
+				{s.Install, true, "Install"},
 				{func() error {
 					return ConfigureWindowsServiceFailureActions(ctrldServiceName)
 				}, false, "Configure Windows service failure actions"},
@@ -614,59 +681,77 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				// generated after s.Start, so we notice users here for consistent with nextdns mode.
 				{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 			}
+			// Any result found later must come from this attempt, not a stale run.
+			clearProvisionResult()
+			startAttemptAt := time.Now()
 			mainLog.Load().Notice().Msg("Starting service")
-			if doTasks(tasks) {
-				if err := p.router.Install(sc); err != nil {
-					mainLog.Load().Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
+			failedTask, taskErr := doTasksE(tasks)
+			if taskErr != nil {
+				if code, ok := serviceStageFailureCode(failedTask); ok {
+					failProvision(newProvisionResult(code, serviceTaskErrorSummary(failedTask, taskErr), nil, provisionSecrets()...), nil)
 					return
 				}
+				// Not a service-stage task. doTasksE already logged the cause; exit
+				// non-zero instead of the old silent fall-through that exited 0.
+				os.Exit(1)
+				return
+			}
 
-				// add a small delay to ensure the service is started and did not crash
-				time.Sleep(1 * time.Second)
+			if err := p.router.Install(sc); err != nil {
+				mainLog.Load().Warn().Err(err).Msg("post installation failed, please check system/service log for details error")
+				return
+			}
 
-				ok, status, err := selfCheckStatus(ctx, s, sockDir)
-				switch {
-				case ok && status == service.StatusRunning:
-					mainLog.Load().Notice().Msg("Service started")
-				default:
-					marker := bytes.Repeat([]byte("="), 32)
-					// If ctrld service is not running, emitting log obtained from ctrld process.
-					if status != service.StatusRunning || ctx.Err() != nil {
-						mainLog.Load().Error().Msg("ctrld service may not have started due to an error or misconfiguration, service log:")
-						_, _ = mainLog.Load().Write(marker)
-						haveLog := false
-						for msg := range runCmdLogCh {
-							_, _ = mainLog.Load().Write([]byte(strings.ReplaceAll(msg, msgExit, "")))
-							haveLog = true
-						}
-						// If we're unable to get log from "ctrld run", notice users about it.
-						if !haveLog {
-							mainLog.Load().Write([]byte(`<no log output is obtained from ctrld process>"`))
-						}
-					}
-					// Report any error if occurred.
-					if err != nil {
-						_, _ = mainLog.Load().Write(marker)
-						msg := fmt.Sprintf("An error occurred while performing test query: %s", err)
-						mainLog.Load().Write([]byte(msg))
-					}
-					// If ctrld service is running but selfCheckStatus failed, it could be related
-					// to user's system firewall configuration, notice users about it.
-					if status == service.StatusRunning && err == nil {
-						_, _ = mainLog.Load().Write(marker)
-						mainLog.Load().Write([]byte(`ctrld service was running, but a DNS query could not be sent to its listener`))
-						mainLog.Load().Write([]byte(`Please check your system firewall if it is configured to block/intercept/redirect DNS queries`))
-					}
+			// add a small delay to ensure the service is started and did not crash
+			time.Sleep(1 * time.Second)
 
+			ok, status, err := selfCheckStatus(ctx, s, sockDir)
+			switch {
+			case ok && status == service.StatusRunning:
+				mainLog.Load().Notice().Msg("Service started")
+				clearProvisionResult()
+			default:
+				marker := bytes.Repeat([]byte("="), 32)
+				fallbackMsg := "ctrld service did not pass its post-start self-check"
+				// If ctrld service is not running, emitting log obtained from ctrld process.
+				if status != service.StatusRunning || ctx.Err() != nil {
+					mainLog.Load().Error().Msg("ctrld service may not have started due to an error or misconfiguration, service log:")
 					_, _ = mainLog.Load().Write(marker)
-					uninstall(p, s)
-					os.Exit(1)
+					haveLog := false
+					for msg := range runCmdLogCh {
+						_, _ = mainLog.Load().Write([]byte(strings.ReplaceAll(msg, msgExit, "")))
+						haveLog = true
+					}
+					// If we're unable to get log from "ctrld run", notice users about it.
+					if !haveLog {
+						mainLog.Load().Write([]byte(`<no log output is obtained from ctrld process>"`))
+					}
 				}
-				reportSetDnsOk(sockDir)
-				// Verify service registration after successful start.
-				if err := verifyServiceRegistration(); err != nil {
-					mainLog.Load().Warn().Err(err).Msg("Service registry verification failed")
+				// Report any error if occurred.
+				if err != nil {
+					_, _ = mainLog.Load().Write(marker)
+					msg := fmt.Sprintf("An error occurred while performing test query: %s", err)
+					mainLog.Load().Write([]byte(msg))
+					fallbackMsg = msg
 				}
+				// If ctrld service is running but selfCheckStatus failed, it could be related
+				// to user's system firewall configuration, notice users about it.
+				if status == service.StatusRunning && err == nil {
+					_, _ = mainLog.Load().Write(marker)
+					mainLog.Load().Write([]byte(`ctrld service was running, but a DNS query could not be sent to its listener`))
+					mainLog.Load().Write([]byte(`Please check your system firewall if it is configured to block/intercept/redirect DNS queries`))
+					fallbackMsg = "ctrld service was running, but a DNS query could not be sent to its listener; check firewall rules blocking/intercepting/redirecting DNS queries"
+				}
+
+				_, _ = mainLog.Load().Write(marker)
+				uninstall(p, s)
+				reportStartFailure(startAttemptAt, fallbackMsg)
+				return
+			}
+			reportSetDnsOk(sockDir)
+			// Verify service registration after successful start.
+			if err := verifyServiceRegistration(); err != nil {
+				mainLog.Load().Warn().Err(err).Msg("Service registry verification failed")
 			}
 		},
 	}
