@@ -1654,12 +1654,17 @@ func isResourceExhaustion(err error, output []byte) bool {
 }
 
 func (p *prog) scheduleDNSAfterVPNSettleRefresh(reason string, delay time.Duration) {
-	time.AfterFunc(delay, func() {
+	timer := time.AfterFunc(delay, func() {
 		if p.dnsInterceptState == nil {
 			return
 		}
 		p.refreshDNSAfterVPNSettle(reason)
 	})
+	// Track the timer like the other delayed rechecks, so intercept teardown
+	// (and test cleanup) can stop it instead of letting it fire afterwards.
+	p.pfDelayedRecheckMu.Lock()
+	p.pfDelayedRecheckTimers = append(p.pfDelayedRecheckTimers, timer)
+	p.pfDelayedRecheckMu.Unlock()
 }
 
 // pfWatchdog periodically checks that our pf anchor is still active.

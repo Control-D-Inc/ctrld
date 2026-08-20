@@ -179,23 +179,31 @@ type task struct {
 	Name         string
 }
 
-// doTasks executes a list of tasks and returns success status
-func doTasks(tasks []task) bool {
-	for _, task := range tasks {
-		mainLog.Load().Debug().Msgf("Running task %s", task.Name)
-		if err := task.f(); err != nil {
-			if task.abortOnError {
-				mainLog.Load().Error().Msgf("Error running task %s: %v", task.Name, err)
-				return false
+// doTasksE runs tasks in order and reports which abortOnError task, if any,
+// stopped the run. Use it over doTasks when the failure must be attributed
+// to a specific task.
+func doTasksE(tasks []task) (failedTaskName string, err error) {
+	for _, t := range tasks {
+		mainLog.Load().Debug().Msgf("Running task %s", t.Name)
+		if taskErr := t.f(); taskErr != nil {
+			if t.abortOnError {
+				mainLog.Load().Error().Msgf("Error running task %s: %v", t.Name, taskErr)
+				return t.Name, taskErr
 			}
 			// if this is darwin stop command, dont print debug
 			// since launchctl complains on every start
-			if runtime.GOOS != "darwin" || task.Name != "Stop" {
-				mainLog.Load().Debug().Msgf("Error running task %s: %v", task.Name, err)
+			if runtime.GOOS != "darwin" || t.Name != "Stop" {
+				mainLog.Load().Debug().Msgf("Error running task %s: %v", t.Name, taskErr)
 			}
 		}
 	}
-	return true
+	return "", nil
+}
+
+// doTasks executes a list of tasks and returns success status
+func doTasks(tasks []task) bool {
+	_, err := doTasksE(tasks)
+	return err == nil
 }
 
 // checkHasElevatedPrivilege checks if the process has elevated privileges and exits if not
