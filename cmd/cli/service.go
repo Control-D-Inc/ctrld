@@ -166,7 +166,6 @@ func ensureSystemdKillMode(r io.Reader) (opts []*unit.UnitOption, change bool) {
 	// channel, so it reports this comparison as always true. On success the
 	// lexer sends nothing and closes the channel, so the receive yields a nil
 	// error and this branch is not taken.
-	//lint:ignore SA4023 upstream delivers a nil error by closing the channel
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to deserialize options")
 		return
