@@ -391,7 +391,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// would silently re-enable interception from config.
 	if updateConfigInterceptMode(&cfg, interceptMode) {
 		updated = true
-		p.Info().Msgf("writing intercept_mode = %q to config", cfg.Service.InterceptMode)
+		p.Info().Msgf("writing intercept_mode = %q to config (requested %q)", cfg.Service.InterceptMode, interceptMode)
 	}
 
 	// Persist firewall_mode to config only when provided via CLI flag.

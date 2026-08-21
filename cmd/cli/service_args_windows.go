@@ -89,7 +89,7 @@ func verifyServiceRegistration() error {
 	mainLog.Load().Debug().Msgf("Service registry: BinaryPathName = %q", config.BinaryPathName)
 
 	// If intercept mode is set, verify the flag is present in BinPath.
-	if interceptMode == "dns" || interceptMode == "hard" {
+	if interceptMode == "off" || interceptMode == "dns" || interceptMode == "hard" {
 		if !strings.Contains(config.BinaryPathName, "--intercept-mode") {
 			return fmt.Errorf("service registry: --intercept-mode flag missing from BinaryPathName (expected mode %q)", interceptMode)
 		}
