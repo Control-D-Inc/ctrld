@@ -1605,6 +1605,17 @@ func isExplicitInterceptListener(ip string, port int) bool {
 	return !(ip == "127.0.0.1" && port == 53)
 }
 
+// listenerInterceptMode resolves the mode that selects the listener binding
+// strategy. An explicit "off" is final here, the same as in setDNS. A fallback
+// to the config value would select the intercept strategy from a stale
+// persisted mode on the first start after a revert to standard mode.
+func listenerInterceptMode(cfg *ctrld.Config) string {
+	if interceptMode == "" {
+		return cfg.Service.InterceptMode
+	}
+	return interceptMode
+}
+
 // tryUpdateListenerConfig tries updating listener config with a working one.
 // If fatal is true, and there's listen address conflicted, the function do
 // fatal error.
@@ -1614,13 +1625,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (
 	// 1. If config has explicit non-default IP:port, use exactly that
 	// 2. Otherwise: try 127.0.0.1:53, then 127.0.0.1:5354, then fatal
 	// This bypasses the full cd-mode listener probing loop entirely.
-	// Check interceptMode (CLI flag) first, then fall back to config value.
 	// dnsIntercept bool is derived later in prog.run(), but we need to know
 	// the intercept mode here to select the right listener probing strategy.
-	im := interceptMode
-	if im == "" || im == "off" {
-		im = cfg.Service.InterceptMode
-	}
+	im := listenerInterceptMode(cfg)
 	if (im == "dns" || im == "hard") && runtime.GOOS == "darwin" {
 		return tryUpdateListenerConfigIntercept(cfg, notifyFunc, fatal)
 	}
