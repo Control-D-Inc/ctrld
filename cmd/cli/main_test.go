@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.uber.org/zap"
@@ -13,7 +14,28 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 )
 
-var logOutput strings.Builder
+// logOutput is the log sink for the whole test binary. Tests share it with any
+// background goroutine the code under test starts (watchdogs, timers), so it
+// must tolerate concurrent writes.
+var logOutput syncBuffer
+
+// syncBuffer is a strings.Builder guarded by a mutex.
+type syncBuffer struct {
+	mu sync.Mutex
+	sb strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sb.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sb.String()
+}
 
 // envFakeVersionOutput makes this test binary impersonate a ctrld executable: when
 // set, the process writes the value to stdout and exits without running any test, so

@@ -151,6 +151,25 @@ func isMobile() bool {
 	return runtime.GOOS == "android" || runtime.GOOS == "ios"
 }
 
+func updateConfigInterceptMode(cfg *ctrld.Config, mode string) bool {
+	desired := ""
+	switch mode {
+	case "dns", "hard":
+		desired = mode
+	case "off":
+		desired = ""
+	case "":
+		return false
+	default:
+		return false
+	}
+	if cfg.Service.InterceptMode == desired {
+		return false
+	}
+	cfg.Service.InterceptMode = desired
+	return true
+}
+
 // isAndroid reports whether the current OS is Android.
 func isAndroid() bool {
 	return runtime.GOOS == "android"
@@ -367,14 +386,12 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		processLogAndCacheFlags(v, &cfg)
 	}
 
-	// Persist intercept_mode to config when provided via CLI flag on full install.
-	// This ensures the config file reflects the actual running mode for RMM/MDM visibility.
-	if interceptMode == "dns" || interceptMode == "hard" {
-		if cfg.Service.InterceptMode != interceptMode {
-			cfg.Service.InterceptMode = interceptMode
-			updated = true
-			p.Info().Msgf("writing intercept_mode = %q to config", interceptMode)
-		}
+	// Keep config and the explicit CLI/service mode in sync. In particular, "off"
+	// must clear a previously persisted dns/hard value or the next service start
+	// would silently re-enable interception from config.
+	if updateConfigInterceptMode(&cfg, interceptMode) {
+		updated = true
+		p.Info().Msgf("writing intercept_mode = %q to config", cfg.Service.InterceptMode)
 	}
 
 	// Persist firewall_mode to config only when provided via CLI flag.
