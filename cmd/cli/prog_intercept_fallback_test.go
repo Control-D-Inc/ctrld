@@ -146,6 +146,22 @@ func (h *interceptFallbackHarness) run(t *testing.T) {
 	p.setDNS()
 }
 
+func TestSetDNSExplicitOffOverridesConfig(t *testing.T) {
+	h := newInterceptFallbackHarness(t, &ctrld.ListenerConfig{IP: "127.0.0.1", Port: 53})
+	interceptMode = "off"
+	dnsIntercept = false
+	hardIntercept = false
+
+	h.run(t)
+
+	if h.interceptCalls != 0 {
+		t.Fatalf("intercept start called %d time(s), want 0: explicit off must override service.intercept_mode", h.interceptCalls)
+	}
+	if h.installCalls != 1 {
+		t.Fatalf("interface DNS installed %d time(s), want 1", h.installCalls)
+	}
+}
+
 // TestSetDNSRefusesUnreachableFallback is the behaviour test for the reported outage: it
 // drives the real setDNS() lifecycle rather than the classification helper alone.
 //

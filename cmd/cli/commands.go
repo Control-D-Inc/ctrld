@@ -394,21 +394,23 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			svcExists := serviceConfigFileExists()
 			mainLog.Load().Debug().Msgf("intercept upgrade check: args=%v interceptOnly=%v svcConfigExists=%v interceptMode=%q", osArgsEarly, interceptOnly, svcExists, interceptMode)
 			if interceptOnly && svcExists {
-				// Remove any existing intercept flags before applying the new value.
-				_ = removeServiceFlag("--intercept-mode")
+				// Replace any existing split or --intercept-mode=<value> form. Keep an
+				// explicit "off" argument so it overrides a previously persisted config
+				// value while the service clears that value on startup.
+				if err := removeServiceFlag("--intercept-mode"); err != nil {
+					mainLog.Load().Fatal().Err(err).Msg("failed to remove existing intercept mode from service arguments")
+				}
 
 				if interceptMode == "off" {
-					// "off" = remove intercept mode entirely (just the removal above).
-					mainLog.Load().Notice().Msg("Existing service detected — removing --intercept-mode from service arguments")
+					mainLog.Load().Notice().Msg("Existing service detected — disabling intercept mode")
 				} else {
-					// Add the new mode value.
 					mainLog.Load().Notice().Msgf("Existing service detected — appending --intercept-mode %s to service arguments", interceptMode)
-					if err := appendServiceFlag("--intercept-mode"); err != nil {
-						mainLog.Load().Fatal().Err(err).Msg("failed to append intercept flag to service arguments")
-					}
-					if err := appendServiceFlag(interceptMode); err != nil {
-						mainLog.Load().Fatal().Err(err).Msg("failed to append intercept mode value to service arguments")
-					}
+				}
+				if err := appendServiceFlag("--intercept-mode"); err != nil {
+					mainLog.Load().Fatal().Err(err).Msg("failed to append intercept flag to service arguments")
+				}
+				if err := appendServiceFlag(interceptMode); err != nil {
+					mainLog.Load().Fatal().Err(err).Msg("failed to append intercept mode value to service arguments")
 				}
 
 				// Stop the service if running (bypasses ctrld pin — this is an

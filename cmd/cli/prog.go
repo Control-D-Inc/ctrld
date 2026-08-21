@@ -930,11 +930,12 @@ func (p *prog) setDNS() {
 
 	// Validate and resolve intercept mode.
 	// CLI flag (--intercept-mode) takes priority over config file.
-	// Valid values: "" (off), "dns" (with VPN split routing), "hard" (all DNS through ctrld).
+	// Valid values: "" (use config), "off" (explicitly disable), "dns" (with VPN
+	// split routing), and "hard" (all DNS through ctrld).
 	if interceptMode != "" && !validInterceptMode(interceptMode) {
 		mainLog.Load().Fatal().Msgf("invalid --intercept-mode value %q: must be 'off', 'dns', or 'hard'", interceptMode)
 	}
-	if interceptMode == "" || interceptMode == "off" {
+	if interceptMode == "" {
 		interceptMode = p.configuredInterceptMode()
 		if interceptMode != "" && interceptMode != "off" {
 			mainLog.Load().Info().Msgf("Intercept mode enabled via config (intercept_mode = %q)", interceptMode)

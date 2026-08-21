@@ -24,19 +24,19 @@ func serviceConfigFileExists() bool {
 // to intercept mode without losing the existing --cd flag and other arguments.
 //
 // On macOS, this modifies the launchd plist at /Library/LaunchDaemons/ctrld.plist
-// using the "defaults" command, which is the standard way to edit plists.
+// using PlistBuddy for exact array reads and writes.
 //
 // The function is idempotent: if the flag already exists, it's a no-op.
 func appendServiceFlag(flag string) error {
 	// Read current ProgramArguments from plist.
-	out, err := exec.Command("defaults", "read", launchdPlistPath, "ProgramArguments").CombinedOutput()
+	out, err := exec.Command("/usr/libexec/PlistBuddy", "-c", "Print :ProgramArguments", launchdPlistPath).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to read plist ProgramArguments: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 
-	// Check if the flag is already present (idempotent).
-	args := string(out)
-	if strings.Contains(args, flag) {
+	// Check exact array entries. A substring match can confuse a mode such as "off"
+	// with an unrelated path or argument and leave the flag without its value.
+	if serviceArgumentPresent(out, flag) {
 		mainLog.Load().Debug().Msgf("Service flag %q already present in plist, skipping", flag)
 		return nil
 	}
@@ -61,9 +61,8 @@ func verifyServiceRegistration() error {
 	return nil
 }
 
-// removeServiceFlag removes a CLI flag (and its value, if the next argument is not
-// a flag) from the installed service's launch arguments. For example, removing
-// "--intercept-mode" also removes the following "dns" or "hard" value argument.
+// removeServiceFlag removes both "--flag value" and "--flag=value" forms from the
+// installed service's launch arguments.
 //
 // The function is idempotent: if the flag doesn't exist, it's a no-op.
 func removeServiceFlag(flag string) error {
@@ -92,22 +91,14 @@ func removeServiceFlag(flag string) error {
 		entries = append(entries, trimmed)
 	}
 
-	index := -1
-	for i, entry := range entries {
-		if entry == flag {
-			index = i
-			break
-		}
-	}
+	index, hasValue := serviceFlagPosition(entries, flag)
 
 	if index < 0 {
 		mainLog.Load().Debug().Msgf("Service flag %q not present in plist, skipping removal", flag)
 		return nil
 	}
 
-	// Check if the next entry is a value (not a flag). If so, delete it first
-	// (deleting by index shifts subsequent entries down, so delete value before flag).
-	hasValue := index+1 < len(entries) && !strings.HasPrefix(entries[index+1], "-")
+	// Delete a separate value first. An inline --flag=value entry is one array item.
 	if hasValue {
 		delVal := exec.Command(
 			"/usr/libexec/PlistBuddy",
@@ -131,4 +122,25 @@ func removeServiceFlag(flag string) error {
 
 	mainLog.Load().Info().Msgf("Removed %q from service launch arguments", flag)
 	return nil
+}
+
+func serviceArgumentPresent(out []byte, argument string) bool {
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == argument {
+			return true
+		}
+	}
+	return false
+}
+
+func serviceFlagPosition(entries []string, flag string) (index int, hasValue bool) {
+	for i, entry := range entries {
+		switch {
+		case entry == flag:
+			return i, i+1 < len(entries) && !strings.HasPrefix(entries[i+1], "-")
+		case strings.HasPrefix(entry, flag+"="):
+			return i, false
+		}
+	}
+	return -1, false
 }
