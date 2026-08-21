@@ -162,10 +162,8 @@ func (s *systemd) Start() error {
 // This is necessary for running self-upgrade flow.
 func ensureSystemdKillMode(r io.Reader) (opts []*unit.UnitOption, change bool) {
 	opts, err := unit.DeserializeOptions(r)
-	// staticcheck sees only the explicit non-nil sends on the lexer's error
-	// channel, so it reports this comparison as always true. On success the
-	// lexer sends nothing and closes the channel, so the receive yields a nil
-	// error and this branch is not taken.
+	// On success the lexer sends nothing and closes the channel, so the receive
+	// yields a nil error and this branch is not taken.
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("failed to deserialize options")
 		return

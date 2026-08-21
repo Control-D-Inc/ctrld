@@ -1091,11 +1091,11 @@ func (p *prog) setDNS() {
 }
 
 // configuredInterceptMode resolves the service's effective intercept mode without
-// mutating package state. Platform startup preflights use the same precedence as
-// setDNS so they do not make adapter-DNS decisions from a different mode value.
+// mutating package state. An explicit flag value, including "off", takes priority
+// over the persisted config value.
 func (p *prog) configuredInterceptMode() string {
 	im := interceptMode
-	if im == "" || im == "off" {
+	if im == "" {
 		im = p.cfg.Service.InterceptMode
 	}
 	return im
