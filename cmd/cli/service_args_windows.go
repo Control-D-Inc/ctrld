@@ -47,8 +47,9 @@ func appendServiceFlag(flag string) error {
 		return fmt.Errorf("failed to read service config: %w", err)
 	}
 
-	// Check if flag already present (idempotent).
-	if strings.Contains(config.BinaryPathName, flag) {
+	// Check exact arguments so a short mode such as "off" is not confused with
+	// an unrelated path or value.
+	if binaryPathArgumentPresent(config.BinaryPathName, flag) {
 		mainLog.Load().Debug().Msgf("Service flag %q already present in BinPath, skipping", flag)
 		return nil
 	}
@@ -103,9 +104,8 @@ func verifyServiceRegistration() error {
 	return nil
 }
 
-// removeServiceFlag removes a CLI flag (and its value, if present) from the installed
-// Windows service's BinPath. For example, removing "--intercept-mode" also removes
-// the following "dns" or "hard" value. The function is idempotent.
+// removeServiceFlag removes both "--flag value" and "--flag=value" forms from the
+// installed Windows service's BinPath. The function is idempotent.
 func removeServiceFlag(flag string) error {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -124,25 +124,12 @@ func removeServiceFlag(flag string) error {
 		return fmt.Errorf("failed to read service config: %w", err)
 	}
 
-	if !strings.Contains(config.BinaryPathName, flag) {
+	updatedPath, removed := removeBinaryPathFlag(config.BinaryPathName, flag)
+	if !removed {
 		mainLog.Load().Debug().Msgf("Service flag %q not present in BinPath, skipping removal", flag)
 		return nil
 	}
-
-	// Split BinPath into parts, find and remove the flag + its value (if any).
-	parts := strings.Fields(config.BinaryPathName)
-	var newParts []string
-	for i := 0; i < len(parts); i++ {
-		if parts[i] == flag {
-			// Skip the flag. Also skip the next part if it's a value (not a flag).
-			if i+1 < len(parts) && !strings.HasPrefix(parts[i+1], "-") {
-				i++ // skip value too
-			}
-			continue
-		}
-		newParts = append(newParts, parts[i])
-	}
-	config.BinaryPathName = strings.Join(newParts, " ")
+	config.BinaryPathName = updatedPath
 
 	if err := s.UpdateConfig(config); err != nil {
 		return fmt.Errorf("failed to update service config: %w", err)
@@ -150,4 +137,33 @@ func removeServiceFlag(flag string) error {
 
 	mainLog.Load().Info().Msgf("Removed %q from service BinPath", flag)
 	return nil
+}
+
+func binaryPathArgumentPresent(binaryPath, argument string) bool {
+	for _, part := range strings.Fields(binaryPath) {
+		if part == argument {
+			return true
+		}
+	}
+	return false
+}
+
+func removeBinaryPathFlag(binaryPath, flag string) (string, bool) {
+	parts := strings.Fields(binaryPath)
+	newParts := make([]string, 0, len(parts))
+	removed := false
+	for i := 0; i < len(parts); i++ {
+		switch {
+		case parts[i] == flag:
+			removed = true
+			if i+1 < len(parts) && !strings.HasPrefix(parts[i+1], "-") {
+				i++
+			}
+		case strings.HasPrefix(parts[i], flag+"="):
+			removed = true
+		default:
+			newParts = append(newParts, parts[i])
+		}
+	}
+	return strings.Join(newParts, " "), removed
 }

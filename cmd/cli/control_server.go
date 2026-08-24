@@ -237,7 +237,7 @@ func (p *prog) registerControlServerHandler() {
 			Version:  rootCmd.Version,
 			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 		}
-		if rc, err := controld.FetchResolverConfig(rcReq, cdDev); rc != nil {
+		if rc, err := controld.FetchResolverConfig(context.Background(), rcReq, cdDev); rc != nil {
 			if rc.DeactivationPin != nil {
 				cdDeactivationPin.Store(*rc.DeactivationPin)
 			} else {
@@ -351,7 +351,7 @@ func (p *prog) registerControlServerHandler() {
 		}
 		mainLog.Load().Debug().Msg("sending log file to ControlD server")
 		resp := logSentResponse{Size: r.size}
-		if err := controld.SendLogs(req, cdDev); err != nil {
+		if err := controld.SendLogs(context.Background(), req, cdDev); err != nil {
 			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
 			resp.Error = err.Error()
 			w.WriteHeader(http.StatusInternalServerError)

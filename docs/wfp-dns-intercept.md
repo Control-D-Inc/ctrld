@@ -7,9 +7,7 @@ On Windows, DNS intercept mode uses a two-layer architecture:
 - **`dns` mode (default)**: NRPT only — graceful DNS routing via the Windows DNS Client service
 - **`hard` mode**: NRPT + WFP — full enforcement with kernel-level block filters
 
-This dual-mode design ensures that `dns` mode can never break DNS (at worst, a VPN
-overwrites NRPT and queries bypass ctrld temporarily), while `hard` mode provides
-the same enforcement guarantees as macOS pf.
+`dns` mode avoids ctrld's outbound block filters and therefore degrades more gracefully when owned NRPT is removed. Resolution still depends on the active NRPT target being reachable; an administrator-owned GP catch-all intentionally remains fail-closed if its loopback listener is stopped.
 
 ## Architecture: dns vs hard Mode
 
@@ -24,9 +22,8 @@ the same enforcement guarantees as macOS pf.
 │  localhost, CLEAR_ACTION_RIGHT) prevent third-party VPN WFP     │
 │  blocks (e.g., OpenVPN block-outside-dns) from breaking NRPT.   │
 │                                                                 │
-│  If VPN clears NRPT: health monitor re-adds within 30s         │
-│  Worst case: queries go to VPN DNS until NRPT restored          │
-│  DNS never breaks — graceful degradation                        │
+│  Owned rule missing → restore; GP missing → owned fallback     │
+│  GP rule + dead listener remains intentionally fail-closed      │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -37,9 +34,8 @@ the same enforcement guarantees as macOS pf.
 │  Bypass attempt (raw 8.8.8.8:53) → WFP BLOCK filter            │
 │  VPN DNS on private IP → WFP subnet PERMIT filter → allowed    │
 │                                                                 │
-│  NRPT must be active before WFP starts (atomic guarantee)       │
-│  If NRPT fails → WFP not started (avoids DNS blackhole)         │
-│  If WFP fails → NRPT rolled back (all-or-nothing)              │
+│  NRPT route is established before WFP starts                    │
+│  WFP failure rolls back only ctrld-owned NRPT; GP is untouched  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -79,7 +75,7 @@ unreliable. If we write to the GP path, DNS Client enters GP mode but the rules
 never activate — resulting in `Get-DnsClientNrptPolicy` returning empty even though
 `Get-DnsClientNrptRule` shows the rule in registry.
 
-ctrld uses an adaptive strategy (matching [Tailscale's approach](https://github.com/tailscale/tailscale/blob/main/net/dns/nrpt_windows.go)):
+ctrld uses an adaptive strategy (matching [Tailscale's approach](https://github.com/tailscale/tailscale/blob/main/net/dns/nrpt_windows.go)) when it owns NRPT:
 
 1. **Always write to the local path** using a deterministic GUID key name
    (`{B2E9A3C1-7F4D-4A8E-9D6B-5C1E0F3A2B8D}`). This is the baseline that works
@@ -90,6 +86,23 @@ ctrld uses an adaptive strategy (matching [Tailscale's approach](https://github.
 3. **If no foreign GP rules exist**, clean any stale ctrld GP rules and delete
    the empty GP parent key. This ensures DNS Client stays in "local mode" where
    the local-path rule activates immediately via `paramchange`.
+
+### Adopting an Organization-Owned GP Catch-All
+
+Before applying that ctrld-owned strategy, service startup looks for a non-ctrld GP child with exactly `Name=["."]` and one `GenericDNSServers` value equal to the actual listener IP. The registry match is only an ownership candidate: ctrld sends its unique DNS Client probe before any NRPT write and re-reads the same child afterward.
+
+Intercept state stays unpublished while that happens. Startup publishes nothing until it has fully succeeded, which is why the probe and heal flows take the state as an argument instead of reading the published field — publishing early would expose a half-built `wfpState`, with no engine handle and filter IDs still being assigned, to callers such as the VPN DNS exemption path. The one deliberate exception is hard mode when WFP setup fails while GP-managed NRPT is verified routing: that state is published so the health monitor can keep retrying WFP, and the service start is still reported as failed.
+
+When the rule remains unchanged and the probe arrives, Group Policy owns NRPT:
+
+- the startup adapter reset is skipped;
+- no ctrld NRPT key is created;
+- `RefreshPolicyEx`, Dnscache `paramchange`, and cache flush are not used for that policy;
+- shutdown/uninstall leave the GP child untouched.
+
+A matching GP child that remains present but fails its probe is reported as ineffective and is not rewritten. If the child disappears, ctrld activates its normal owned fallback. A GP catch-all that instead changes to another resolver is reported as a conflict; ctrld does not create a second ambiguous catch-all. If the matching rule later returns, ctrld probes first, removes only its deterministic fallback keys, signals the ownership transition once, and resumes observing Group Policy.
+
+**Deployment ordering:** apply the GPO before starting ctrld to guarantee adapter DNS is never reset. Remove/unlink it before intentionally stopping or uninstalling ctrld. A GP catch-all still targeting loopback with no listener running is a deliberate fail-closed state and will break DNS.
 
 ### Reproducing the Empty GP Parent Case
 
@@ -209,28 +222,28 @@ by the VPN's own WFP rules.
 
 **Startup (hard mode):**
 ```
-1. Add NRPT catch-all rule + GP refresh + DNS flush
+1. Adopt a proven matching GP catch-all, or install ctrld-owned NRPT
 2. FwpmEngineOpen0() with RPC_C_AUTHN_DEFAULT (0xFFFFFFFF)
 3. Delete stale sublayer (crash recovery)
 4. FwpmSubLayerAdd0() — weight 0xFFFF
 5. Add 4 localhost permit filters
 6. Add 4 block filters
 7. Add RFC1918 + CGNAT subnet permits
-8. Start NRPT health monitor goroutine
+8. Start ownership-aware NRPT/WFP health monitor
 ```
 
 **Startup (dns mode):**
 ```
-1. Add NRPT catch-all rule + GP refresh + DNS flush
+1. Adopt a proven matching GP catch-all, or install ctrld-owned NRPT
 2. Activate loopback WFP protect (4 hard-permit filters for localhost DNS)
-3. Start NRPT health monitor goroutine
+3. Start ownership-aware NRPT health monitor
 ```
 
 **Shutdown:**
 ```
 1. Stop NRPT health monitor
-2. Remove NRPT catch-all rule + DNS flush
-3. (hard mode only) Clean up all WFP filters, sublayer, close engine
+2. Remove + signal only ctrld-owned NRPT; leave GP-managed policy untouched
+3. Clean up ctrld WFP filters, sublayer, and engine session
 ```
 
 **Crash Recovery:**
@@ -259,42 +272,24 @@ Windows DNS Client path to verify NRPT is actually working:
 4. ctrld's DNS handler recognizes the probe prefix and signals success
 5. If the probe times out (2s), NRPT isn't loaded yet → retry with remediation
 
-### Startup Probe (Async)
+### Startup Probes
 
-After NRPT setup, an async goroutine runs the probe-and-heal sequence without
-blocking startup:
+For a matching GP candidate, startup blocks for one 2-second probe before any NRPT mutation and then re-reads the same child. A received query plus the unchanged rule proves both routing and external ownership. If that first probe fails, ctrld installs its normal WFP protection and performs one more ownership-safe probe before advertising startup readiness.
+
+ctrld-owned NRPT retains the asynchronous sequence:
 
 ```
-Probe attempt 1 (2s timeout)
+Immediate probe
   ├─ Success → "NRPT verified working", done
-  └─ Timeout → GP refresh + DNS flush, sleep 1s
-       Probe attempt 2 (2s timeout)
-         ├─ Success → done
-         └─ Timeout → Restart DNS Client service (nuclear), sleep 2s
-              Re-add NRPT + GP refresh + DNS flush
-              Probe attempt 3 (2s timeout)
-                ├─ Success → done
-                └─ Timeout → GP refresh + DNS flush, sleep 4s
-                     Probe attempt 4 (2s timeout)
-                       ├─ Success → done
-                       └─ Timeout → log error, continue
+  └─ Timeout
+       ├─ Empty GP parent → clean once, signal once, re-probe
+       └─ Otherwise → bounded 1s/2s/4s signal + probe retries
+            └─ Still failing → two-phase remove/signal/re-add/final probe
 ```
 
-### DNS Client Restart (Nuclear Option)
+### GP-Managed Probe Failure
 
-If GP refresh alone isn't enough, ctrld restarts the Windows DNS Client service
-(`Dnscache`). This forces the DNS Client to fully re-initialize, including
-re-reading all NRPT rules from the registry. This is the equivalent of macOS
-`forceReloadPFMainRuleset()`.
-
-**Trade-offs:**
-- Briefly interrupts ALL DNS resolution (few hundred ms during restart)
-- Clears the system DNS cache (all apps need to re-resolve)
-- VPN NRPT rules survive (they're in registry, re-read on restart)
-- Enterprise security tools may log the service restart event
-
-This only fires as attempt #3 after two GP refresh attempts fail — at that point
-DNS isn't working through ctrld anyway, so a brief DNS blip is acceptable.
+A matching GP child still owns Windows' effective NRPT store even when its probe fails. Writing a local rule cannot override that precedence, and rewriting the GP child would violate administrator ownership. ctrld therefore retries only its loopback WFP permit protection, reports the ineffective external policy, and leaves NRPT registry values and policy signals untouched.
 
 ### Health Monitor Integration
 
@@ -302,19 +297,20 @@ The 30s periodic health monitor now does actual probing, not just registry check
 
 ```
 Every 30s:
-    ├─ Registry check: nrptCatchAllRuleExists()?
-    │   ├─ Missing → re-add + GP refresh + flush + probe-and-heal
-    │   └─ Present → probe to verify it's actually routing
-    │       ├─ Probe success → OK
-    │       └─ Probe failure → probe-and-heal cycle
+    ├─ GP-managed owner
+    │   ├─ Matching child + probe success → observe only
+    │   ├─ Matching child + probe failure → WFP-only retry; no NRPT mutation
+    │   └─ Matching child gone → activate ctrld-owned fallback + verify
     │
-    └─ (hard mode only) Check: wfpSublayerExists()?
-        ├─ Missing → full restart (stopDNSIntercept + startDNSIntercept)
-        └─ Present → OK
+    ├─ ctrld-owned owner
+    │   ├─ Working matching GP child returns → remove only ctrld keys; adopt GP
+    │   ├─ ctrld key missing → restore + signal + verify
+    │   └─ ctrld key present → probe; run owned heal sequence on failure
+    │
+    └─ (hard mode) Check WFP sublayer; full intercept restart if missing
 ```
 
-**Singleton guard:** Only one probe-and-heal sequence runs at a time (atomic bool).
-The startup probe and health monitor cannot overlap.
+**Singleton guard:** Only one asynchronous probe-and-heal sequence runs at a time (atomic bool). Startup's GP-candidate probe completes before the health monitor starts; direct periodic probes finish before they schedule a heal sequence.
 
 **Why periodic, not just network-event?** VPN software or Group Policy updates can
 clear NRPT at any time, not just during network changes. A 30s periodic check ensures

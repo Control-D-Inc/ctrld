@@ -4,6 +4,7 @@ package cli
 
 import (
 	"fmt"
+	"time"
 )
 
 // startDNSIntercept is not supported on this platform.
@@ -17,18 +18,25 @@ func (p *prog) stopDNSIntercept() error {
 	return nil
 }
 
+// skipInitialDNSReset is Windows-only; other platforms keep the normal reset.
+func (p *prog) skipInitialDNSReset() bool { return false }
+
 // exemptVPNDNSServers is a no-op on unsupported platforms.
 func (p *prog) exemptVPNDNSServers(exemptions []vpnDNSExemption) error {
 	return nil
 }
 
 // ensurePFAnchorActive is a no-op on unsupported platforms.
-func (p *prog) ensurePFAnchorActive() bool {
-	return false
+func (p *prog) ensurePFAnchorActive() pfAnchorCheckResult {
+	return pfAnchorCheckSkipped
 }
 
 // checkTunnelInterfaceChanges is a no-op on unsupported platforms.
 func (p *prog) checkTunnelInterfaceChanges() bool {
+	return false
+}
+
+func (p *prog) dnsInterceptIgnoredChangeReconcileDue(time.Time) bool {
 	return false
 }
 

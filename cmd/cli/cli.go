@@ -147,6 +147,25 @@ func isMobile() bool {
 	return runtime.GOOS == "android" || runtime.GOOS == "ios"
 }
 
+func updateConfigInterceptMode(cfg *ctrld.Config, mode string) bool {
+	desired := ""
+	switch mode {
+	case "dns", "hard":
+		desired = mode
+	case "off":
+		desired = ""
+	case "":
+		return false
+	default:
+		return false
+	}
+	if cfg.Service.InterceptMode == desired {
+		return false
+	}
+	cfg.Service.InterceptMode = desired
+	return true
+}
+
 // isAndroid reports whether the current OS is Android.
 func isAndroid() bool {
 	return runtime.GOOS == "android"
@@ -318,41 +337,55 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 	if cdUID != "" {
 		validateCdUpstreamProtocol()
-		if rc, err := processCDFlags(&cfg); err != nil {
+		// Bound API preflight by the service lifetime. Without this, a stop request
+		// arriving while the API is unreachable leaves this retry/backoff loop running
+		// after "service stopped" was logged, so the process keeps working on behalf of
+		// a service the OS considers stopped.
+		pf := runAPIPreflight(p.stopCh, &cfg)
+		switch {
+		case pf.stopRequested:
+			// Stop requested during preflight, whether or not the fetch itself
+			// succeeded. A successful fetch does not entitle startup to continue: the
+			// operator asked for a stop, and carrying on would set up listeners and
+			// interception for a service the OS already considers stopping.
+			//
+			// Exit the way a normal stop does: no Fatal, so the OS service manager does
+			// not see a failed start and apply its restart policy to a service the
+			// operator just asked to stop.
+			mainLog.Load().Notice().Msg("stop requested while fetching resolver config, shutting down")
+			notifyExitToLogServer()
+			return
+		case pf.err != nil:
 			if isMobile() {
-				appCallback.Exit(err.Error())
+				appCallback.Exit(pf.err.Error())
 				return
 			}
 
-			cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
-			// Performs self-uninstallation if the ControlD device does not exist.
-			var uer *controld.ErrorResponse
-			if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
-				_ = uninstallInvalidCdUID(p, cdLogger, false)
-			}
-			notifyExitToLogServer()
-			cdLogger.Fatal().Err(err).Msg("failed to fetch resolver config")
-		} else {
+			handleAPIPreflightFailure(p, pf.err, notifyExitToLogServer)
+			return
+		default:
 			p.mu.Lock()
-			p.rc = rc
+			p.rc = pf.rc
 			p.mu.Unlock()
 		}
 	}
 
 	updated := updateListenerConfig(&cfg, notifyExitToLogServer)
 
+	// Bootstrap and listener binding both succeeded, so an earlier run's
+	// recorded failure no longer describes this install.
+	clearProvisionResult()
+
 	if cdUID != "" {
 		processLogAndCacheFlags(v, &cfg)
 	}
 
-	// Persist intercept_mode to config when provided via CLI flag on full install.
-	// This ensures the config file reflects the actual running mode for RMM/MDM visibility.
-	if interceptMode == "dns" || interceptMode == "hard" {
-		if cfg.Service.InterceptMode != interceptMode {
-			cfg.Service.InterceptMode = interceptMode
-			updated = true
-			mainLog.Load().Info().Msgf("writing intercept_mode = %q to config", interceptMode)
-		}
+	// Keep config and the explicit CLI/service mode in sync. In particular, "off"
+	// must clear a previously persisted dns/hard value or the next service start
+	// would silently re-enable interception from config.
+	if updateConfigInterceptMode(&cfg, interceptMode) {
+		updated = true
+		mainLog.Load().Info().Msgf("writing intercept_mode = %q to config", cfg.Service.InterceptMode)
 	}
 
 	if updated {
@@ -649,24 +682,218 @@ func deactivationPinSet() bool {
 	return cdDeactivationPin.Load() != defaultDeactivationPin
 }
 
-func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+// fetchResolverConfig is a test seam for the ControlD resolver-config API call.
+var fetchResolverConfig = controld.FetchResolverConfig
+
+// apiPreflight is the outcome of the API preflight fetch: the resolver config, the
+// error if any, and whether the service was asked to stop while it ran.
+type apiPreflight struct {
+	rc            *controld.ResolverConfig
+	err           error
+	stopRequested bool
+}
+
+// runAPIPreflight fetches the ControlD resolver config bounded by the service
+// lifetime, and reports whether a stop was requested while it ran.
+//
+// The distinction matters because the caller does very different things with it: a stop
+// exits quietly, while a failure self-uninstalls a deleted device, surfaces the error to
+// a mobile app, and reports a failed start to the service manager.
+//
+// stopRequested must not be derived from the context once it has been cancelled.
+// context.CancelFunc sets ctx.Err() unconditionally, so reading it after the cancel
+// classifies *every* failure - a deleted device, an exhausted retry, a mobile caller
+// with no stop channel - as an operator stop. Reading the stop channel directly is also
+// independent of whether the context's watcher goroutine has been scheduled yet.
+func runAPIPreflight(stopCh <-chan struct{}, cfg *ctrld.Config) apiPreflight {
+	rc, err := fetchCDConfigBoundedBy(stopCh, cfg)
+	return apiPreflight{rc: rc, err: err, stopRequested: stopRequested(stopCh)}
+}
+
+// permanentAPIRejection reports whether err is the API refusing this request in a way
+// that a restart cannot change, and returns the rejection when it is.
+//
+// The type alone does not answer this. controld builds an *ErrorResponse for *any*
+// non-200 whose body decodes, so a 502 from a load balancer and a 404 for a deleted
+// device arrive as the same Go type. Treating both as permanent would let a few minutes
+// of API trouble stop ctrld on every host with no service-manager retry behind it, which
+// is strictly worse than the abnormal exit it replaced.
+//
+// So the HTTP status decides, and only a client-error status counts:
+//
+//   - 4xx: the API examined this request and refused it - a deleted device, a revoked
+//     token, a malformed UID. The same request will be refused again.
+//   - 408 and 429 are the exceptions: they are the API asking for another attempt later.
+//   - 5xx, or no recorded status, says nothing about this configuration. Retry.
+func permanentAPIRejection(err error) (*controld.ErrorResponse, bool) {
+	var uer *controld.ErrorResponse
+	if !errors.As(err, &uer) {
+		return nil, false
+	}
+	switch uer.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return nil, false
+	}
+	if uer.StatusCode < 400 || uer.StatusCode >= 500 {
+		return nil, false
+	}
+	return uer, true
+}
+
+// apiFailureCode maps a bootstrap preflight error to its provisioning code.
+// A deleted device gets its own code because it triggers self-uninstall;
+// other permanent rejections are generic; anything else counts as
+// reachability trouble worth retrying.
+func apiFailureCode(err error) (provisionFailureCode, bool) {
+	if err == nil {
+		return "", false
+	}
+	var uer *controld.ErrorResponse
+	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+		return provisionCodeAPIDeviceInvalid, true
+	}
+	if _, ok := permanentAPIRejection(err); ok {
+		return provisionCodeAPIRejected, true
+	}
+	return provisionCodeAPIUnreachable, true
+}
+
+// apiRejectionSummary reports the HTTP status only. The API's raw error body
+// can echo back the value the caller sent, so it stays out of the artifact.
+func apiRejectionSummary(statusCode int) string {
+	return fmt.Sprintf("ControlD API rejected this configuration (HTTP status %d)", statusCode)
+}
+
+// provisionSecrets lists every secret-bearing value to strip from provisioning
+// artifacts, including both parts of a composite "<uid>/<clientID>" --cd
+// value, which the API may echo back separately.
+func provisionSecrets() []string {
+	uid, clientID := controld.ParseRawUID(cdUID)
+	return []string{cdUID, cdOrg, uid, clientID}
+}
+
+// uninstallInvalidCdUIDFn is a var so tests can observe the self-uninstall
+// without driving the OS service manager.
+var uninstallInvalidCdUIDFn = uninstallInvalidCdUID
+
+// handleAPIPreflightFailure reports a failed resolver-config fetch. A deleted
+// device self-uninstalls; it and any other permanent rejection return cleanly
+// so a config problem cannot burn the service manager's restart budget (on
+// Windows those restarts are what bring enforcement back after a real crash).
+// Anything else exits nonzero through failProvision so the manager retries.
+func handleAPIPreflightFailure(p *prog, err error, notify func()) {
+	cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
+	code, _ := apiFailureCode(err)
+	var uer *controld.ErrorResponse
+	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+		r := newProvisionResult(code, apiRejectionSummary(uer.StatusCode), nil, provisionSecrets()...)
+		if werr := writeProvisionResult(r); werr != nil {
+			cdLogger.Warn().Err(werr).Msg("could not persist provision result")
+		}
+		_ = uninstallInvalidCdUIDFn(p, cdLogger, false)
+		cdLogger.Error().Err(err).Int("status", uer.StatusCode).Msg("failed to fetch resolver config, the device no longer exists")
+		cdLogger.Error().Msg(r.failureLine())
+		notify()
+		return
+	}
+	if rejection, ok := permanentAPIRejection(err); ok {
+		r := newProvisionResult(code, apiRejectionSummary(rejection.StatusCode), nil, provisionSecrets()...)
+		if werr := writeProvisionResult(r); werr != nil {
+			cdLogger.Warn().Err(werr).Msg("could not persist provision result")
+		}
+		cdLogger.Error().Err(err).Int("status", rejection.StatusCode).Msg("failed to fetch resolver config, the API rejected this configuration")
+		cdLogger.Error().Msg(r.failureLine())
+		notify()
+		return
+	}
+	cdLogger.Error().Err(err).Msg("failed to fetch resolver config")
+	failProvision(newProvisionResult(code, fmt.Sprintf("failed to fetch resolver config: %v", err), nil, provisionSecrets()...), notify)
+}
+
+// processCDFlagsFn is the API fetch, indirected so the lifetime binding around it can be
+// tested without reaching the network.
+var processCDFlagsFn = processCDFlags
+
+// fetchCDConfigBoundedBy runs the API fetch bounded by stopCh, so a fetch that cannot
+// reach the API stops when the service is asked to stop instead of working on behalf of a
+// service the OS already considers stopped. The derived context is always cancelled, which
+// releases the goroutine watching stopCh.
+func fetchCDConfigBoundedBy(stopCh <-chan struct{}, cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+	ctx, cancel := contextFromStopCh(stopCh)
+	defer cancel()
+	return processCDFlagsFn(ctx, cfg)
+}
+
+// fetchCDConfigBoundedByLifetime is the reload path's fetch. Reload binds the same stop
+// primitives as startup - it used to wire them up itself, where a dropped cancel or the
+// wrong channel would have failed nothing.
+func (p *prog) fetchCDConfigBoundedByLifetime(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+	return fetchCDConfigBoundedBy(p.stopCh, cfg)
+}
+
+// stopRequested reports whether stopCh has been closed. A nil channel - mobile passes
+// none - blocks forever, so the default case is taken and it reads as "no stop".
+func stopRequested(stopCh <-chan struct{}) bool {
+	select {
+	case <-stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// contextFromStopCh returns a context that is cancelled when stopCh closes, so
+// long-running startup work stops as soon as the service is asked to stop. The
+// returned cancel func must be called to release the watcher goroutine.
+func contextFromStopCh(stopCh <-chan struct{}) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if stopCh == nil {
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+// processCDFlags fetches the ControlD configuration for cdUID and applies it to cfg.
+//
+// ctx bounds the bootstrap-DNS retry loop below. That loop retries indefinitely by
+// design (a device with no network yet must eventually come up), so it must be
+// cancellable: otherwise a stop request during preflight is ignored and the process
+// keeps retrying after the service reports itself stopped.
+func processCDFlags(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 	logger := mainLog.Load().With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
 	bo.LogLongerThan = 30 * time.Second
 
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	req := &controld.ResolverConfigRequest{
 		RawUID:   cdUID,
 		Version:  rootCmd.Version,
-		Metadata: ctrld.SystemMetadataRuntime(context.Background()),
+		Metadata: ctrld.SystemMetadataRuntime(ctx),
 	}
-	resolverConfig, err := controld.FetchResolverConfig(req, cdDev)
+	resolverConfig, err := fetchResolverConfig(ctx, req, cdDev)
 	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			logger.Debug().Msg("resolver config fetch cancelled")
+			return nil, ctxErr
+		}
 		if errUrlNetworkError(err) {
 			bo.BackOff(ctx, err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				logger.Debug().Msg("resolver config fetch cancelled during backoff")
+				return nil, ctxErr
+			}
 			logger.Warn().Msg("could not fetch resolver using bootstrap DNS, retrying...")
-			resolverConfig, err = controld.FetchResolverConfig(req, cdDev)
+			resolverConfig, err = fetchResolverConfig(ctx, req, cdDev)
 			continue
 		}
 		break
@@ -698,7 +925,10 @@ func processCDFlags(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
 				return resolverConfig, nil
 			}
 		}
-		mainLog.Load().Warn().Err(err).Msg("disregarding invalid custom config")
+		// cfgErr, not err: err is the resolver-config fetch error from above, which is
+		// nil on every path that reaches here, so logging it said nothing about why the
+		// custom config was rejected.
+		mainLog.Load().Warn().Err(cfgErr).Msg("disregarding invalid custom config")
 	}
 
 	bootstrapIP := func(endpoint string) string {
@@ -1264,16 +1494,27 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 		}
 	}
 
+	// bindAttempts feeds the provisioning result detail. newProvisionResult
+	// caps it, so it grows freely here.
+	var bindAttempts []provisionBindAttempt
+	recordBindAttempt := func(addr, proto string, err error) {
+		if err != nil {
+			bindAttempts = append(bindAttempts, provisionBindAttempt{Addr: addr, Proto: proto, OSError: err.Error()})
+		}
+	}
+
 	tryListen := func(ip string, port int) bool {
 		addr := net.JoinHostPort(ip, strconv.Itoa(port))
 		udpLn, udpErr := net.ListenPacket("udp", addr)
 		if udpLn != nil {
 			udpLn.Close()
 		}
+		recordBindAttempt(addr, "udp", udpErr)
 		tcpLn, tcpErr := net.Listen("tcp", addr)
 		if tcpLn != nil {
 			tcpLn.Close()
 		}
+		recordBindAttempt(addr, "tcp", tcpErr)
 		return udpErr == nil && tcpErr == nil
 	}
 
@@ -1288,8 +1529,10 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 	if hasExplicitConfig {
 		// User specified explicit address — don't guess, just fail
 		if fatal {
-			notifyFunc()
-			mainLog.Load().Fatal().Msgf("DNS intercept: cannot listen on configured address %s", addr)
+			msg := fmt.Sprintf("DNS intercept: cannot listen on configured address %s", addr)
+			mainLog.Load().Error().Msg(msg)
+			failProvision(newProvisionResult(provisionCodeListenerAddrUnavail, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+			return updated, false
 		}
 		return updated, false
 	}
@@ -1303,8 +1546,10 @@ func tryUpdateListenerConfigIntercept(cfg *ctrld.Config, notifyFunc func(), fata
 	}
 
 	if fatal {
-		notifyFunc()
-		mainLog.Load().Fatal().Msg("DNS intercept: cannot bind 127.0.0.1:53 or 127.0.0.1:5354")
+		const msg = "DNS intercept: cannot bind 127.0.0.1:53 or 127.0.0.1:5354"
+		mainLog.Load().Error().Msg(msg)
+		failProvision(newProvisionResult(provisionCodeListenerBindFailed, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+		return updated, false
 	}
 	return updated, false
 }
@@ -1319,6 +1564,17 @@ func isExplicitInterceptListener(ip string, port int) bool {
 	return !(ip == "127.0.0.1" && port == 53)
 }
 
+// listenerInterceptMode resolves the mode that selects the listener binding
+// strategy. An explicit "off" is final here, the same as in setDNS. A fallback
+// to the config value would select the intercept strategy from a stale
+// persisted mode on the first start after a revert to standard mode.
+func listenerInterceptMode(cfg *ctrld.Config) string {
+	if interceptMode == "" {
+		return cfg.Service.InterceptMode
+	}
+	return interceptMode
+}
+
 // tryUpdateListenerConfig tries updating listener config with a working one.
 // If fatal is true, and there's listen address conflicted, the function do
 // fatal error.
@@ -1328,13 +1584,9 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 	// 1. If config has explicit non-default IP:port, use exactly that
 	// 2. Otherwise: try 127.0.0.1:53, then 127.0.0.1:5354, then fatal
 	// This bypasses the full cd-mode listener probing loop entirely.
-	// Check interceptMode (CLI flag) first, then fall back to config value.
 	// dnsIntercept bool is derived later in prog.run(), but we need to know
 	// the intercept mode here to select the right listener probing strategy.
-	im := interceptMode
-	if im == "" || im == "off" {
-		im = cfg.Service.InterceptMode
-	}
+	im := listenerInterceptMode(cfg)
 	if (im == "dns" || im == "hard") && runtime.GOOS == "darwin" {
 		return tryUpdateListenerConfigIntercept(cfg, notifyFunc, fatal)
 	}
@@ -1406,6 +1658,15 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 			_ = closer.Close()
 		}
 	}()
+	// bindAttempts feeds the provisioning result detail. newProvisionResult
+	// caps it, so it grows freely here.
+	var bindAttempts []provisionBindAttempt
+	recordBindAttempt := func(addr, proto string, err error) {
+		if err != nil {
+			bindAttempts = append(bindAttempts, provisionBindAttempt{Addr: addr, Proto: proto, OSError: err.Error()})
+		}
+	}
+
 	// tryListen attempts to listen on given udp and tcp address.
 	// Created listeners will be kept in listeners slice above, and close
 	// before function finished.
@@ -1414,16 +1675,21 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 		if udpLn != nil {
 			closers = append(closers, udpLn)
 		}
+		recordBindAttempt(addr, "udp", udpErr)
 		tcpLn, tcpErr := net.Listen("tcp", addr)
 		if tcpLn != nil {
 			closers = append(closers, tcpLn)
 		}
+		recordBindAttempt(addr, "tcp", tcpErr)
 		return errors.Join(udpErr, tcpErr)
 	}
 
+	listenerMsg := func(listenerNum int, format string, v ...any) string {
+		return fmt.Sprintf("listener.%d %s", listenerNum, fmt.Sprintf(format, v...))
+	}
 	logMsg := func(e *zerolog.Event, listenerNum int, format string, v ...any) {
 		e.MsgFunc(func() string {
-			return fmt.Sprintf("listener.%d %s", listenerNum, fmt.Sprintf(format, v...))
+			return listenerMsg(listenerNum, format, v...)
 		})
 	}
 
@@ -1475,8 +1741,10 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 		maxAttempts := 10
 		for {
 			if attempts == maxAttempts {
-				notifyFunc()
-				logMsg(mainLog.Load().Fatal(), n, "could not find available listen ip and port")
+				logMsg(mainLog.Load().Error(), n, "could not find available listen ip and port")
+				msg := listenerMsg(n, "could not find available listen ip and port")
+				failProvision(newProvisionResult(provisionCodeListenerBindFailed, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+				return updated, false
 			}
 			addr := net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port))
 			err := tryListen(addr)
@@ -1488,8 +1756,10 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 
 			if !check.IP && !check.Port {
 				if fatal {
-					notifyFunc()
-					logMsg(mainLog.Load().Fatal(), n, "failed to listen: %v", err)
+					logMsg(mainLog.Load().Error(), n, "failed to listen: %v", err)
+					msg := listenerMsg(n, "failed to listen: %v", err)
+					failProvision(newProvisionResult(provisionCodeListenerAddrUnavail, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+					return updated, false
 				}
 				ok = false
 				break
@@ -1556,8 +1826,11 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 			}
 			if listener.IP == oldIP && listener.Port == oldPort {
 				if fatal {
-					notifyFunc()
-					logMsg(mainLog.Load().Fatal(), n, "could not listen on %s: %v", net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port)), err)
+					triedAddr := net.JoinHostPort(listener.IP, strconv.Itoa(listener.Port))
+					logMsg(mainLog.Load().Error(), n, "could not listen on %s: %v", triedAddr, err)
+					msg := listenerMsg(n, "could not listen on %s: %v", triedAddr, err)
+					failProvision(newProvisionResult(provisionCodeListenerBindFailed, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+					return updated, false
 				}
 				ok = false
 				break
@@ -1595,8 +1868,10 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 					}
 				}
 				if !found {
-					notifyFunc()
-					logMsg(mainLog.Load().Fatal(), n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
+					logMsg(mainLog.Load().Error(), n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
+					msg := listenerMsg(n, "could not use %q as DNS nameserver with systemd resolved", listener.IP)
+					failProvision(newProvisionResult(provisionCodeListenerAddrUnavail, msg, bindAttempts, provisionSecrets()...), notifyFunc)
+					return updated, false
 				}
 			}
 		}
@@ -1644,12 +1919,22 @@ func cdUIDFromProvToken() string {
 		Metadata:  ctrld.SystemMetadata(context.Background()),
 	}
 	// Process provision token if provided.
-	resolverConfig, err := controld.FetchResolverUID(req, rootCmd.Version, cdDev)
+	resolverConfig, err := fetchResolverUIDFn(context.Background(), req, rootCmd.Version, cdDev)
 	if err != nil {
-		mainLog.Load().Fatal().Err(err).Msgf("failed to fetch resolver uid with provision token: %s", cdOrg)
+		// The token exchange is the first API call of an org/MDM install, so
+		// its failure must carry a code like every other bootstrap failure.
+		code, _ := apiFailureCode(err)
+		mainLog.Load().Error().Msgf("failed to fetch resolver uid with provision token: %s: %s",
+			redactToken(cdOrg), redactSecrets(err.Error(), provisionSecrets()...))
+		failProvision(newProvisionResult(code, fmt.Sprintf("provision token exchange failed: %v", err), nil, provisionSecrets()...), nil)
+		return ""
 	}
 	return resolverConfig.UID
 }
+
+// fetchResolverUIDFn is a var so tests can drive token-exchange failures
+// without reaching the network.
+var fetchResolverUIDFn = controld.FetchResolverUID
 
 // removeOrgFlagsFromArgs removes organization flags from command line arguments.
 // The flags are:
@@ -1998,7 +2283,7 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 		Version:  rootCmd.Version,
 		Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 	}
-	rc, err := controld.FetchResolverConfig(req, cdDev)
+	rc, err := controld.FetchResolverConfig(context.Background(), req, cdDev)
 	if err != nil {
 		logger := mainLog.Load().Fatal()
 		if !fatal {
@@ -2103,4 +2388,13 @@ func uninstallInvalidCdUID(p *prog, logger zerolog.Logger, doStop bool) bool {
 		return true
 	}
 	return false
+}
+
+// redactToken returns the first 4 characters of a token followed by ***,
+// or just *** if the token is 4 characters or shorter.
+func redactToken(s string) string {
+	if len(s) <= 4 {
+		return "***"
+	}
+	return s[:4] + "***"
 }

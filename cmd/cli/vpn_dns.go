@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/rs/zerolog"
 	"tailscale.com/net/netmon"
@@ -43,6 +42,9 @@ type vpnDNSManager struct {
 	// as additional nameservers for queries that match split-DNS rules
 	// (from ctrld config, AD domain, or VPN suffix config).
 	domainlessServers []string
+	// appliedExemptions advances only after the platform PF/WFP callback succeeds.
+	// Keeping it separate from discovered configs makes failed rule updates retryable.
+	appliedExemptions []vpnDNSExemption
 	// retainedAfterEmptyDiscovery means Windows reported an empty VPN DNS
 	// snapshot once while previous VPN DNS state existed. We keep that last-known
 	// state for one guarded refresh cycle because Windows can briefly report an
@@ -51,9 +53,13 @@ type vpnDNSManager struct {
 	// discoverVPNDNS is injected for tests so Refresh does not depend on the
 	// runner host's real VPN/virtual adapter state.
 	discoverVPNDNS func(context.Context) []ctrld.VPNDNSConfig
-	// refreshRunning keeps noisy network-change storms from running overlapping
-	// scutil/networksetup VPN DNS discovery work.
-	refreshRunning atomic.Bool
+	// refreshStateMu keeps noisy network-change storms from running overlapping
+	// full VPN DNS refreshes and retains one trailing refresh when an event arrives
+	// during discovery so the newest OS state is not lost.
+	refreshStateMu sync.Mutex
+	refreshRunning bool
+	refreshPending bool
+	discoveryMu    sync.Mutex
 	// Called when VPN DNS server list changes, to update intercept exemptions.
 	onServersChanged vpnDNSExemptFunc
 }
@@ -70,14 +76,39 @@ func newVPNDNSManager(exemptFunc vpnDNSExemptFunc) *vpnDNSManager {
 }
 
 // Refresh re-discovers VPN DNS configs from the OS.
-// Called on network change events.
+// Called on network change events. Overlapping calls are coalesced into one
+// trailing refresh so a newer OS snapshot is never silently discarded.
 func (m *vpnDNSManager) Refresh(guardAgainstNoNameservers bool) {
-	logger := mainLog.Load()
-	if !m.refreshRunning.CompareAndSwap(false, true) {
-		logger.Debug().Msg("VPN DNS refresh already running, skipping duplicate")
+	m.refreshStateMu.Lock()
+	if m.refreshRunning {
+		m.refreshPending = true
+		m.refreshStateMu.Unlock()
+		mainLog.Load().Debug().Msg("VPN DNS refresh already running, coalescing trailing refresh")
 		return
 	}
-	defer m.refreshRunning.Store(false)
+	m.refreshRunning = true
+	m.refreshStateMu.Unlock()
+
+	for {
+		m.refreshOnce(guardAgainstNoNameservers)
+
+		m.refreshStateMu.Lock()
+		if m.refreshPending {
+			m.refreshPending = false
+			m.refreshStateMu.Unlock()
+			guardAgainstNoNameservers = true
+			continue
+		}
+		m.refreshRunning = false
+		m.refreshStateMu.Unlock()
+		return
+	}
+}
+
+func (m *vpnDNSManager) refreshOnce(guardAgainstNoNameservers bool) {
+	logger := mainLog.Load()
+	m.discoveryMu.Lock()
+	defer m.discoveryMu.Unlock()
 
 	logger.Debug().Msg("Refreshing VPN DNS configurations")
 	discoverVPNDNS := m.discoverVPNDNS
@@ -104,8 +135,6 @@ func (m *vpnDNSManager) Refresh(guardAgainstNoNameservers bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	previousExemptions := m.currentExemptionsLocked()
-
 	if vpnDNSSettlingEnabled && len(configs) == 0 && guardAgainstNoNameservers && m.hasVPNDNSStateLocked() {
 		if !m.retainedAfterEmptyDiscovery {
 			exemptions := m.currentExemptionsLocked()
@@ -116,6 +145,8 @@ func (m *vpnDNSManager) Refresh(guardAgainstNoNameservers bool) {
 			if m.onServersChanged != nil {
 				if err := m.onServersChanged(exemptions); err != nil {
 					logger.Error().Err(err).Msg("Failed to re-apply retained VPN DNS exemptions")
+				} else {
+					m.appliedExemptions = append([]vpnDNSExemption(nil), exemptions...)
 				}
 			}
 			return
@@ -192,34 +223,36 @@ func (m *vpnDNSManager) Refresh(guardAgainstNoNameservers bool) {
 	logger.Debug().Msgf("VPN DNS refresh completed: %d configs, %d routes, %d domainless servers, %d unique exemptions",
 		len(m.configs), len(m.routes), len(m.domainlessServers), len(exemptions))
 
-	// Update intercept rules to permit VPN DNS traffic only when the exemption set
-	// actually changes. Network-change events can fire repeatedly while macOS/VPN
-	// state is otherwise identical; rewriting pf for identical exemptions can feed
-	// a self-triggering network-change loop. Empty exemptions are still applied
-	// when they differ from the previous set, so stale VPN exemptions are cleared
-	// on disconnect.
-	m.updateInterceptExemptionsIfChanged(logger, previousExemptions, exemptions, "VPN DNS")
+	// Update intercept rules only when desired exemptions differ from the last
+	// successfully applied set. Failed PF/WFP callbacks remain retryable on the
+	// next refresh even when discovery returns the same VPN DNS state.
+	m.updateInterceptExemptionsIfChanged(logger, exemptions, "VPN DNS")
 }
 
-func (m *vpnDNSManager) updateInterceptExemptionsIfChanged(logger *zerolog.Logger, before, after []vpnDNSExemption, reason string) {
+func (m *vpnDNSManager) updateInterceptExemptionsIfChanged(logger *zerolog.Logger, desired []vpnDNSExemption, reason string) {
 	if m.onServersChanged == nil {
 		return
 	}
-	if vpnDNSExemptionsEqual(before, after) {
+	if vpnDNSExemptionsEqual(m.appliedExemptions, desired) {
 		logger.Debug().Msgf("VPN DNS exemptions unchanged after %s refresh; skipping intercept rule update", reason)
 		return
 	}
-	if err := m.onServersChanged(after); err != nil {
+	if err := m.onServersChanged(desired); err != nil {
 		logger.Error().Err(err).Msg("Failed to update intercept exemptions for VPN DNS servers")
+		return
 	}
+	m.appliedExemptions = append([]vpnDNSExemption(nil), desired...)
 }
 
-// RefreshRoutesOnly re-discovers VPN DNS configs and updates only ctrld's
-// in-memory split-DNS routes. It intentionally does not call onServersChanged,
-// so it does not rewrite/reload pf/WFP rules. Use this for post-settle discovery
-// checks where we only need to learn late-published VPN search domains.
+// RefreshRoutesOnly re-discovers VPN DNS configs and updates ctrld's
+// in-memory split-DNS routes. It applies intercept exemptions only when that set
+// changes, while holding the shared discovery lane so a concurrent full refresh
+// cannot commit a newer snapshot and then be overwritten by this one.
 func (m *vpnDNSManager) RefreshRoutesOnly() (routes, domainlessServers, exemptions int) {
 	logger := mainLog.Load()
+
+	m.discoveryMu.Lock()
+	defer m.discoveryMu.Unlock()
 
 	logger.Debug().Msg("Refreshing VPN DNS route state only")
 	discoverVPNDNS := m.discoverVPNDNS
@@ -267,10 +300,26 @@ func (m *vpnDNSManager) RefreshRoutesOnly() (routes, domainlessServers, exemptio
 		}
 	}
 	m.domainlessServers = domainless
+	currentExemptions := m.currentExemptionsLocked()
 
 	logger.Debug().Msgf("VPN DNS route-only refresh completed: %d configs, %d routes, %d domainless servers, %d exemptions",
-		len(m.configs), len(m.routes), len(m.domainlessServers), len(m.currentExemptionsLocked()))
-	return len(m.routes), len(m.domainlessServers), len(m.currentExemptionsLocked())
+		len(m.configs), len(m.routes), len(m.domainlessServers), len(currentExemptions))
+	m.updateInterceptExemptionsIfChanged(logger, currentExemptions, "route-only VPN DNS")
+	return len(m.routes), len(m.domainlessServers), len(currentExemptions)
+}
+
+func (m *vpnDNSManager) markInterceptExemptionsApplied(applied []vpnDNSExemption) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if vpnDNSExemptionsEqual(m.currentExemptionsLocked(), applied) {
+		m.appliedExemptions = append([]vpnDNSExemption(nil), applied...)
+	}
+}
+
+func (m *vpnDNSManager) interceptExemptionsPending() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return !vpnDNSExemptionsEqual(m.appliedExemptions, m.currentExemptionsLocked())
 }
 
 func (m *vpnDNSManager) hasVPNDNSStateLocked() bool {

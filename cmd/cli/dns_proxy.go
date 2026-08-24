@@ -130,13 +130,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		// signal the prober and respond NXDOMAIN. Used by both macOS pf probes
 		// (_pf-probe-*) and Windows NRPT probes (_nrpt-probe-*) to verify that
 		// DNS interception is actually routing queries to ctrld's listener.
-		if probeID, ok := p.pfProbeExpected.Load().(string); ok && probeID != "" && domain == probeID {
-			if chPtr, ok := p.pfProbeCh.Load().(*chan struct{}); ok && chPtr != nil {
-				select {
-				case *chPtr <- struct{}{}:
-				default:
-				}
-			}
+		if p.signalInterceptProbe(domain) {
 			answer := new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeNameError) // NXDOMAIN
 			_ = w.WriteMsg(answer)
@@ -1196,7 +1190,7 @@ func (p *prog) doSelfUninstall(answer *dns.Msg) {
 			Version:  rootCmd.Version,
 			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 		}
-		_, err := controld.FetchResolverConfig(req, cdDev)
+		_, err := controld.FetchResolverConfig(context.Background(), req, cdDev)
 		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
 		selfUninstallCheck(err, p, logger)
 
@@ -1541,64 +1535,13 @@ func (p *prog) monitorNetworkChanges() error {
 			mainLog.Load().Debug().Msg("Ignoring interface change - no valid interfaces affected")
 			// check if the default IPs are still on an interface that is up
 			ValidateDefaultLocalIPsFromDelta(delta.New)
-			// Even minor interface changes can trigger macOS pf reloads — verify anchor.
-			// We check immediately AND schedule delayed re-checks (2s + 4s) to catch
-			// programs like Windscribe that modify pf rules and DNS settings
-			// asynchronously after the network change event fires.
+			// Minor interface changes can still accompany pf/WFP or VPN DNS changes.
+			// On macOS, bound the immediate full reconciliation so link-local-only
+			// notification storms do not run pfctl/scutil work for every event.
+			// Windows keeps the existing immediate behavior. Tunnel changes always
+			// bypass the macOS limit, and delayed checks provide a trailing refresh.
 			if dnsIntercept && p.dnsInterceptState != nil {
-				if !p.pfStabilizing.Load() {
-					p.ensurePFAnchorActive()
-				}
-				// Check tunnel interfaces unconditionally — it decides internally
-				// whether to enter stabilization or rebuild immediately.
-				p.checkTunnelInterfaceChanges()
-				// Schedule delayed re-checks to catch async VPN teardown changes.
-				// These also refresh the OS resolver and VPN DNS routes.
-				p.scheduleDelayedRechecks()
-
-				// Detect interface appearance/disappearance — hypervisors (Parallels,
-				// VMware, VirtualBox) reload pf when creating/destroying virtual network
-				// interfaces, which can corrupt pf's internal translation state. The rdr
-				// rules survive in text form (watchdog says "intact") but stop evaluating.
-				// Spawn an async monitor that probes pf interception with backoff and
-				// forces a full pf reload if broken.
-				if delta.Old != nil {
-					interfaceChanged := false
-					var changedIface string
-					for ifaceName := range delta.Old.Interface {
-						if ifaceName == "lo0" {
-							continue
-						}
-						if _, exists := delta.New.Interface[ifaceName]; !exists {
-							interfaceChanged = true
-							changedIface = ifaceName
-							break
-						}
-					}
-					if !interfaceChanged {
-						for ifaceName := range delta.New.Interface {
-							if ifaceName == "lo0" {
-								continue
-							}
-							if _, exists := delta.Old.Interface[ifaceName]; !exists {
-								interfaceChanged = true
-								changedIface = ifaceName
-								break
-							}
-						}
-					}
-					if interfaceChanged {
-						mainLog.Load().Info().Str("interface", changedIface).
-							Msg("DNS intercept: interface appeared/disappeared — starting interception probe monitor")
-						go p.pfInterceptMonitor()
-					}
-				}
-			}
-			// Refresh VPN DNS on tunnel interface changes (e.g., Tailscale connect/disconnect)
-			// even though the physical interface didn't change. Runs after tunnel checks
-			// so the pf anchor rebuild includes current VPN DNS exemptions.
-			if dnsIntercept && p.vpnDNS != nil {
-				p.vpnDNS.Refresh(true)
+				p.handleDNSInterceptIgnoredNetworkChange(delta, time.Now())
 			}
 			return
 		}
@@ -1698,6 +1641,76 @@ func (p *prog) monitorNetworkChanges() error {
 	mon.Start()
 	mainLog.Load().Debug().Msg("Network monitor started")
 	return nil
+}
+
+// handleDNSInterceptIgnoredNetworkChange runs the DNS-intercept work for a
+// network delta that did not affect a usable interface. Keeping this path in a
+// method lets tests exercise the callback wiring with synthetic deltas.
+func (p *prog) handleDNSInterceptIgnoredNetworkChange(delta *netmon.ChangeDelta, now time.Time) {
+	reconcileNow := false
+	// Stabilization owns PF repair. Do not consume the next leading-edge slot
+	// until an ignored delta can actually perform the corresponding PF check.
+	if !p.pfStabilizing.Load() {
+		reconcileNow = p.dnsInterceptIgnoredChangeReconcileDue(now)
+		if reconcileNow {
+			p.ensurePFAnchorActive()
+		}
+	}
+
+	// Check tunnel interfaces unconditionally — it decides internally whether
+	// to enter stabilization or rebuild immediately.
+	tunnelChanged := p.checkTunnelInterfaceChanges()
+	// Schedule delayed re-checks to catch async VPN teardown changes. These also
+	// refresh the OS resolver and VPN DNS routes.
+	p.scheduleDelayedRechecks()
+
+	// Detect interface appearance/disappearance — hypervisors (Parallels,
+	// VMware, VirtualBox) reload pf when creating/destroying virtual network
+	// interfaces, which can corrupt pf's internal translation state. The rdr
+	// rules survive in text form (watchdog says "intact") but stop evaluating.
+	// Spawn an async monitor that probes pf interception with backoff and forces
+	// a full pf reload if broken.
+	if delta.Old != nil {
+		interfaceChanged := false
+		var changedIface string
+		for ifaceName := range delta.Old.Interface {
+			if ifaceName == "lo0" {
+				continue
+			}
+			if _, exists := delta.New.Interface[ifaceName]; !exists {
+				interfaceChanged = true
+				changedIface = ifaceName
+				break
+			}
+		}
+		if !interfaceChanged {
+			for ifaceName := range delta.New.Interface {
+				if ifaceName == "lo0" {
+					continue
+				}
+				if _, exists := delta.Old.Interface[ifaceName]; !exists {
+					interfaceChanged = true
+					changedIface = ifaceName
+					break
+				}
+			}
+		}
+		if interfaceChanged {
+			mainLog.Load().Info().Str("interface", changedIface).
+				Msg("DNS intercept: interface appeared/disappeared — starting interception probe monitor")
+			go p.pfInterceptMonitor()
+		}
+	}
+
+	// Refresh VPN DNS immediately for real tunnel changes even when the periodic
+	// ignored-change reconciliation is currently rate-limited - but not while
+	// stabilization owns pf. A refresh rebuilds the anchor, and these deltas arrive
+	// exactly when a VPN is bringing its own ruleset up, which is the collision
+	// stabilization is there to prevent. checkTunnelInterfaceChanges keeps the
+	// observation pending, so the transition is retried rather than dropped.
+	if p.vpnDNS != nil && (reconcileNow || tunnelChanged) && !p.pfStabilizing.Load() {
+		p.vpnDNS.Refresh(true)
+	}
 }
 
 // interfaceStatesEqual compares two interface states

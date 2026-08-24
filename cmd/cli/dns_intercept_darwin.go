@@ -19,6 +19,10 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 )
 
+// skipInitialDNSReset is Windows-only; macOS keeps the normal adapter cleanup
+// before installing its pf redirect.
+func (p *prog) skipInitialDNSReset() bool { return false }
+
 const (
 	// pfWatchdogInterval is how often the periodic pf watchdog checks
 	// that our anchor references are still present in the running ruleset.
@@ -45,6 +49,15 @@ const (
 	// macOS reports local resource exhaustion. Without this, network-change storms
 	// can turn a pf ruleset race into a fork/file-descriptor exhaustion loop.
 	pfExecFailureBackoff = 5 * time.Second
+
+	// pfStabilizationMaxWait bounds the total period ordinary repair can be
+	// suppressed if PF never becomes stable or pfctl keeps failing.
+	pfStabilizationMaxWait = 90 * time.Second
+
+	// pfIgnoredChangeReconcileInterval bounds leading-edge pf/VPN-DNS work
+	// during continuous ignored network-change storms. The 2s/4s delayed checks
+	// still provide trailing reconciliation once the storm stops.
+	pfIgnoredChangeReconcileInterval = pfAnchorRecheckDelayLong
 
 	// pfVPNInterfacePrefixes lists interface name prefixes that indicate VPN/tunnel
 	// interfaces on macOS. Used to add interface-specific DNS intercept rules so that
@@ -199,6 +212,11 @@ func (p *prog) startDNSIntercept() error {
 	if err := p.validateDNSIntercept(); err != nil {
 		return err
 	}
+	p.pfStabilizing.Store(false)
+	p.pfLastRestoreTime.Store(0)
+	p.pfBackoffMultiplier.Store(0)
+	p.pfExecBackoffUntil.Store(0)
+	p.pfIgnoredChangeLastReconcile.Store(0)
 
 	// Set up _ctrld group for pf exemption scoping. This ensures that only ctrld's
 	// own DNS queries (matching "group _ctrld" in pf rules) can bypass the redirect.
@@ -258,20 +276,22 @@ func (p *prog) startDNSIntercept() error {
 
 	out, err := exec.Command("pfctl", "-a", pfAnchorName, "-f", pfAnchorFile).CombinedOutput()
 	if err != nil {
-		os.Remove(pfAnchorFile)
+		p.rollbackDNSInterceptStart()
 		return fmt.Errorf("dns intercept: failed to load pf anchor: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 	mainLog.Load().Debug().Msgf("DNS intercept: loaded pf anchor %q from %s", pfAnchorName, pfAnchorFile)
 
 	if err := p.ensurePFAnchorReference(); err != nil {
-		mainLog.Load().Warn().Err(err).Msg("DNS intercept: could not add anchor references to running pf ruleset — anchor may not be active")
+		p.rollbackDNSInterceptStart()
+		return fmt.Errorf("dns intercept: failed to activate pf anchor references: %w", err)
 	}
 
 	out, err = exec.Command("pfctl", "-e").CombinedOutput()
 	if err != nil {
 		outStr := strings.TrimSpace(string(out))
 		if !strings.Contains(outStr, "already enabled") {
-			mainLog.Load().Warn().Msgf("DNS intercept: pfctl -e returned: %s (err: %v) — pf may not be enabled", outStr, err)
+			p.rollbackDNSInterceptStart()
+			return fmt.Errorf("dns intercept: failed to enable pf: %w (output: %s)", err, outStr)
 		}
 	}
 
@@ -289,8 +309,12 @@ func (p *prog) startDNSIntercept() error {
 		mainLog.Load().Debug().Msgf("DNS intercept: active pf NAT/redirect rules:\n%s", strings.TrimSpace(string(out)))
 	}
 
-	// Post-load verification: confirm everything actually took effect.
-	p.verifyPFState()
+	// Post-load verification: do not publish intercept mode unless PF is
+	// authoritatively active; the caller can then use interface-DNS fallback.
+	if !p.verifyPFState() {
+		p.rollbackDNSInterceptStart()
+		return fmt.Errorf("dns intercept: post-load PF verification failed")
+	}
 
 	p.dnsInterceptState = &pfState{
 		anchorFile: pfAnchorFile,
@@ -299,7 +323,9 @@ func (p *prog) startDNSIntercept() error {
 
 	// Store the initial set of tunnel interfaces so we can detect changes later.
 	p.mu.Lock()
-	p.lastTunnelIfaces = discoverTunnelInterfaces()
+	p.lastTunnelIfaces = discoverTunnelInterfacesForReconcile()
+	p.pendingTunnelIfaces = nil
+	p.hasPendingTunnelIfaces = false
 	p.mu.Unlock()
 
 	lc := p.cfg.FirstListener()
@@ -314,6 +340,18 @@ func (p *prog) startDNSIntercept() error {
 	go p.pfWatchdog()
 
 	return nil
+}
+
+func (p *prog) rollbackDNSInterceptStart() {
+	if out, err := exec.Command("pfctl", "-a", pfAnchorName, "-F", "all").CombinedOutput(); err != nil {
+		mainLog.Load().Warn().Err(err).Msgf("DNS intercept: startup rollback could not flush anchor (output: %s)", strings.TrimSpace(string(out)))
+	}
+	if err := os.Remove(pfAnchorFile); err != nil && !os.IsNotExist(err) {
+		mainLog.Load().Warn().Err(err).Msg("DNS intercept: startup rollback could not remove anchor file")
+	}
+	if err := p.removePFAnchorReference(); err != nil {
+		mainLog.Load().Warn().Err(err).Msg("DNS intercept: startup rollback could not remove anchor references")
+	}
 }
 
 // ensurePFAnchorReference ensures the running pf ruleset includes our anchor
@@ -390,19 +428,19 @@ func (p *prog) ensurePFAnchorReference() error {
 		pureFilterLines = append([]string{anchorRef}, pureFilterLines...)
 	}
 
-	// Dump and clean pf options. VPN apps (e.g., Windscribe) set "set skip on { lo0 }"
-	// which disables pf processing on loopback, breaking our route-to + rdr mechanism.
-	// We strip lo0 and tunnel interfaces from the skip list before reloading.
-	cleanedOptions, hadLoopbackSkip := pfGetCleanedOptions()
-	if hadLoopbackSkip {
-		mainLog.Load().Info().Msg("DNS intercept: will reload pf options without lo0 in skip list")
-	}
-
-	// Reassemble in pf's required order: options → scrub → translation → filtering.
+	// Reassemble in pf's required order: scrub → translation → filtering.
+	//
+	// KNOWN GAP: no options section is emitted, so this reload drops the running pf
+	// options - timeouts, limits and any third-party "set skip" directives - which by
+	// pf semantics revert to defaults.
+	//
+	// They cannot simply be carried across, because Apple's pfctl offers no way to read
+	// them: pfctl(8) accepts -s nat, queue, rules, Anchors, states, Sources, info,
+	// References, labels, timeouts, memory, Tables, osfp, Interfaces and all, with no
+	// options modifier. A fix therefore likely means not rebuilding the main ruleset
+	// from scratch at all. What macOS pf does to system options on a reload like this
+	// needs confirming on a host - tracked as follow-up to #573.
 	var combined strings.Builder
-	if cleanedOptions != "" {
-		combined.WriteString(cleanedOptions)
-	}
 	for _, line := range scrubLines {
 		combined.WriteString(line + "\n")
 	}
@@ -444,139 +482,67 @@ func (p *prog) checkAnchorOrdering(filterLines []string, ourAnchorRef string) {
 	}
 }
 
-// pfGetCleanedOptions dumps the running pf options via "pfctl -sO" and returns
-// them with lo0 removed from any "set skip on" directive. VPN apps like Windscribe
-// set "set skip on { lo0 <vpn_iface> }" which tells pf to bypass ALL processing on
-// loopback — this breaks our route-to + rdr interception mechanism which depends on
-// lo0. We strip lo0 (and any known VPN tunnel interfaces) from the skip list so our
-// rdr rules on lo0 can fire. Other options (timeouts, limits, etc.) are preserved.
-//
-// Returns the cleaned options as a string suitable for prepending to a pfctl -f reload,
-// and a boolean indicating whether lo0 was found in the skip list (i.e., we needed to fix it).
-func pfGetCleanedOptions() (string, bool) {
-	out, err := exec.Command("pfctl", "-sO").CombinedOutput()
-	if err != nil {
-		mainLog.Load().Debug().Err(err).Msg("DNS intercept: could not dump pf options")
-		return "", false
-	}
-
-	var cleaned strings.Builder
-	hadLoopbackSkip := false
-
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.Contains(line, "ALTQ") {
-			continue
-		}
-
-		// Parse "set skip on { lo0 ipsec0 }" or "set skip on lo0"
-		if strings.HasPrefix(line, "set skip on") {
-			// Extract interface list from the skip directive.
-			skipPart := strings.TrimPrefix(line, "set skip on")
-			skipPart = strings.TrimSpace(skipPart)
-			skipPart = strings.Trim(skipPart, "{}")
-			skipPart = strings.TrimSpace(skipPart)
-
-			ifaces := strings.Fields(skipPart)
-			var kept []string
-			for _, iface := range ifaces {
-				if iface == "lo0" {
-					hadLoopbackSkip = true
-					continue // Remove lo0 — we need pf to process lo0 for our rdr rules.
-				}
-				// Also remove VPN tunnel interfaces — we have explicit intercept
-				// rules for them in our anchor, so skipping defeats the purpose.
-				isTunnel := false
-				for _, prefix := range strings.Split(pfVPNInterfacePrefixes, ",") {
-					if strings.HasPrefix(iface, strings.TrimSpace(prefix)) {
-						isTunnel = true
-						break
-					}
-				}
-				if isTunnel {
-					mainLog.Load().Debug().Msgf("DNS intercept: removing tunnel interface %q from pf skip list", iface)
-					continue
-				}
-				kept = append(kept, iface)
-			}
-
-			if len(kept) > 0 {
-				cleaned.WriteString(fmt.Sprintf("set skip on { %s }\n", strings.Join(kept, " ")))
-			}
-			// If no interfaces left, omit the skip directive entirely.
-			continue
-		}
-
-		// Preserve all other options (timeouts, limits, etc.).
-		cleaned.WriteString(line + "\n")
-	}
-
-	if hadLoopbackSkip {
-		mainLog.Load().Warn().Msg("DNS intercept: detected 'set skip on lo0' — another program (likely VPN software) " +
-			"disabled pf processing on loopback, which breaks our DNS interception. Removing lo0 from skip list.")
-	}
-
-	return cleaned.String(), hadLoopbackSkip
-}
-
-// pfFilterRuleLines filters pfctl output into actual pf rule lines,
-// stripping stderr warnings (e.g., "No ALTQ support in kernel") and empty lines.
-func pfFilterRuleLines(output string) []string {
-	var rules []string
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// Skip pfctl stderr warnings that appear in CombinedOutput.
-		if strings.Contains(line, "ALTQ") {
-			continue
-		}
-		rules = append(rules, line)
-	}
-	return rules
-}
-
-// pfContainsRule checks if any line in the slice contains the given rule string.
-// Uses substring matching because pfctl may append extra tokens like " all" to rules
-// (e.g., `rdr-anchor "com.controld.ctrld" all`), which would fail exact matching.
-func pfContainsRule(lines []string, rule string) bool {
-	for _, line := range lines {
-		if strings.Contains(line, rule) {
-			return true
-		}
-	}
-	return false
-}
-
 // stopDNSIntercept removes all pf rules and cleans up the DNS interception.
 func (p *prog) stopDNSIntercept() error {
-	if p.dnsInterceptState == nil {
+	state, ok := p.dnsInterceptState.(*pfState)
+	if !ok || state == nil {
 		mainLog.Load().Debug().Msg("DNS intercept: no pf state to clean up")
 		return nil
 	}
 
-	mainLog.Load().Info().Msg("DNS intercept: shutting down pf redirect")
+	// Revoke lifecycle state and cancel future owners before waiting for any
+	// in-flight PF mutation. A mutation that already owns the lane may finish,
+	// but final cleanup always runs after it and no new owner can start.
+	p.dnsInterceptState = nil
+	pfShutdownStateRevokedForTest()
+	p.mu.Lock()
+	if p.pfStabilizeCancel != nil {
+		p.pfStabilizeCancel()
+		p.pfStabilizeCancel = nil
+	}
+	p.lastTunnelIfaces = nil
+	p.pendingTunnelIfaces = nil
+	p.hasPendingTunnelIfaces = false
+	p.mu.Unlock()
+	p.pfStabilizing.Store(false)
 
-	out, err := exec.Command("pfctl", "-a", p.dnsInterceptState.(*pfState).anchorName, "-F", "all").CombinedOutput()
+	p.pfDelayedRecheckMu.Lock()
+	for _, timer := range p.pfDelayedRecheckTimers {
+		if timer != nil {
+			timer.Stop()
+		}
+	}
+	p.pfDelayedRecheckTimers = nil
+	p.pfDelayedRecheckMu.Unlock()
+
+	for !p.pfEnsureRunning.CompareAndSwap(false, true) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	defer p.pfEnsureRunning.Store(false)
+
+	mainLog.Load().Info().Msg("DNS intercept: shutting down pf redirect")
+	out, err := exec.Command("pfctl", "-a", state.anchorName, "-F", "all").CombinedOutput()
 	if err != nil {
 		mainLog.Load().Warn().Msgf("DNS intercept: failed to flush pf anchor %q: %v (output: %s)",
-			p.dnsInterceptState.(*pfState).anchorName, err, strings.TrimSpace(string(out)))
+			state.anchorName, err, strings.TrimSpace(string(out)))
 	} else {
-		mainLog.Load().Debug().Msgf("DNS intercept: flushed pf anchor %q", p.dnsInterceptState.(*pfState).anchorName)
+		mainLog.Load().Debug().Msgf("DNS intercept: flushed pf anchor %q", state.anchorName)
 	}
 
-	if err := os.Remove(p.dnsInterceptState.(*pfState).anchorFile); err != nil && !os.IsNotExist(err) {
-		mainLog.Load().Warn().Msgf("DNS intercept: failed to remove anchor file %s: %v", p.dnsInterceptState.(*pfState).anchorFile, err)
+	if err := os.Remove(state.anchorFile); err != nil && !os.IsNotExist(err) {
+		mainLog.Load().Warn().Msgf("DNS intercept: failed to remove anchor file %s: %v", state.anchorFile, err)
 	} else {
-		mainLog.Load().Debug().Msgf("DNS intercept: removed anchor file %s", p.dnsInterceptState.(*pfState).anchorFile)
+		mainLog.Load().Debug().Msgf("DNS intercept: removed anchor file %s", state.anchorFile)
 	}
 
 	if err := p.removePFAnchorReference(); err != nil {
 		mainLog.Load().Warn().Err(err).Msg("DNS intercept: failed to remove anchor references from running pf ruleset")
 	}
 
-	p.dnsInterceptState = nil
+	p.pfLastRestoreTime.Store(0)
+	p.pfBackoffMultiplier.Store(0)
+	p.pfExecBackoffUntil.Store(0)
+	p.pfIgnoredChangeLastReconcile.Store(0)
 	mainLog.Load().Info().Msg("DNS intercept: pf shutdown complete")
 	return nil
 }
@@ -596,6 +562,14 @@ func (p *prog) removePFAnchorReference() error {
 	filterOut, err := exec.Command("pfctl", "-sr").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to dump running filter rules: %w (output: %s)", err, strings.TrimSpace(string(filterOut)))
+	}
+
+	// Nothing of ours in the running ruleset means nothing to remove - and the reload
+	// below would reset system-wide pf options on the way past. Startup rollback reaches
+	// here after failures that happen before the references are ever added.
+	if !pfAnchorReferencesPresent(string(natOut), string(filterOut), pfAnchorName) {
+		mainLog.Load().Debug().Msg("DNS intercept: no anchor references in the running pf ruleset — nothing to remove")
+		return nil
 	}
 
 	// Filter and remove our lines.
@@ -705,6 +679,8 @@ func discoverTunnelInterfaces() []string {
 	return tunnels
 }
 
+var discoverTunnelInterfacesForReconcile = discoverTunnelInterfaces
+
 // dnsInterceptSupported reports whether DNS intercept mode is supported on this platform.
 func dnsInterceptSupported() bool {
 	_, err := exec.LookPath("pfctl")
@@ -761,6 +737,10 @@ func (p *prog) validateDNSIntercept() error {
 //
 // pf requires strict rule ordering: translation (rdr) BEFORE filtering (pass).
 func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
+	return p.buildPFAnchorRulesForTunnels(vpnExemptions, discoverTunnelInterfacesForReconcile())
+}
+
+func (p *prog) buildPFAnchorRulesForTunnels(vpnExemptions []vpnDNSExemption, tunnelIfaces []string) string {
 	// Read the actual listener address from config. In intercept mode, ctrld may
 	// be on a non-standard port (e.g., 127.0.0.1:5354) if mDNSResponder holds *:53.
 	// The pf rdr rules must redirect to wherever ctrld is actually listening.
@@ -950,7 +930,6 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 	// ruleset (not inside our anchor). Main ruleset rules are evaluated before ALL
 	// anchors, making them impossible for another app to override without explicitly
 	// removing them. See docs/dns-intercept-mode.md for details.
-	tunnelIfaces := discoverTunnelInterfaces()
 	if len(tunnelIfaces) > 0 {
 		rules.WriteString("# --- VPN/tunnel interface intercept rules ---\n")
 		rules.WriteString("# Explicit intercept on tunnel interfaces prevents VPN apps from capturing\n")
@@ -1030,7 +1009,7 @@ func (p *prog) buildPFAnchorRules(vpnExemptions []vpnDNSExemption) string {
 // verifyPFState checks that the pf ruleset is correctly configured after loading.
 // It verifies both the anchor references in the main ruleset and the rules within
 // our anchor. Failures are logged at ERROR level to make them impossible to miss.
-func (p *prog) verifyPFState() {
+func (p *prog) verifyPFState() bool {
 	rdrAnchorRef := fmt.Sprintf("rdr-anchor \"%s\"", pfAnchorName)
 	anchorRef := fmt.Sprintf("anchor \"%s\"", pfAnchorName)
 	verified := true
@@ -1038,6 +1017,7 @@ func (p *prog) verifyPFState() {
 	// Check main ruleset for anchor references (rdr-anchor in translation rules).
 	natOut, err := exec.Command("pfctl", "-sn").CombinedOutput()
 	if err != nil {
+		p.pfBackoffResourceExhaustion(err, natOut, "verify NAT rules")
 		mainLog.Load().Error().Err(err).Msg("DNS intercept: VERIFICATION FAILED — could not dump NAT rules")
 		verified = false
 	} else {
@@ -1050,6 +1030,7 @@ func (p *prog) verifyPFState() {
 
 	filterOut, err := exec.Command("pfctl", "-sr").CombinedOutput()
 	if err != nil {
+		p.pfBackoffResourceExhaustion(err, filterOut, "verify filter rules")
 		mainLog.Load().Error().Err(err).Msg("DNS intercept: VERIFICATION FAILED — could not dump filter rules")
 		verified = false
 	} else if !strings.Contains(string(filterOut), anchorRef) {
@@ -1060,38 +1041,44 @@ func (p *prog) verifyPFState() {
 	// Check our anchor has rules loaded.
 	anchorFilter, err := exec.Command("pfctl", "-a", pfAnchorName, "-sr").CombinedOutput()
 	if err != nil {
+		p.pfBackoffResourceExhaustion(err, anchorFilter, "verify anchor filter rules")
 		mainLog.Load().Error().Err(err).Msg("DNS intercept: VERIFICATION FAILED — could not dump anchor filter rules")
 		verified = false
-	} else if len(strings.TrimSpace(string(anchorFilter))) == 0 {
+	} else if pfRulesetEmpty(string(anchorFilter)) {
 		mainLog.Load().Error().Msg("DNS intercept: VERIFICATION FAILED — anchor has no filter rules loaded")
 		verified = false
 	}
 
 	anchorNat, err := exec.Command("pfctl", "-a", pfAnchorName, "-sn").CombinedOutput()
 	if err != nil {
+		p.pfBackoffResourceExhaustion(err, anchorNat, "verify anchor NAT rules")
 		mainLog.Load().Error().Err(err).Msg("DNS intercept: VERIFICATION FAILED — could not dump anchor NAT rules")
 		verified = false
-	} else if len(strings.TrimSpace(string(anchorNat))) == 0 {
+	} else if pfRulesetEmpty(string(anchorNat)) {
 		mainLog.Load().Error().Msg("DNS intercept: VERIFICATION FAILED — anchor has no NAT/redirect rules loaded")
 		verified = false
 	}
 
-	// Check that lo0 is not in the skip list — if it is, our rdr rules are dead.
-	optOut, err := exec.Command("pfctl", "-sO").CombinedOutput()
-	if err == nil {
-		for _, line := range strings.Split(string(optOut), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "set skip on") && strings.Contains(line, "lo0") {
-				mainLog.Load().Error().Msg("DNS intercept: VERIFICATION FAILED — 'set skip on lo0' is active, rdr rules on loopback will not fire")
-				verified = false
-				break
-			}
-		}
-	}
+	// There is deliberately no "set skip on lo0" check here, even though such a skip
+	// would make our rdr rules on loopback dead.
+	//
+	// macOS offers no way to query it as text: pfctl(8) accepts -s nat, queue, rules,
+	// Anchors, states, Sources, info, References, labels, timeouts, memory, Tables,
+	// osfp, Interfaces and all - there is no options or skip modifier. Since this
+	// verification gates whether intercept mode may publish, a check that cannot
+	// succeed here would roll back every start.
+	//
+	// probePFIntercept() detects the condition functionally instead: it sends a real
+	// query from outside the _ctrld group and confirms the listener received the
+	// redirect, which cannot succeed if pf is bypassing loopback. An explicit check is
+	// follow-up work - pfctl(8) documents "-s Interfaces -v" as listing which
+	// interfaces have skip rules activated, but its output shape needs confirming on a
+	// host that actually has a skip configured before anything parses it.
 
 	if verified {
 		mainLog.Load().Info().Msg("DNS intercept: post-load verification passed — all pf rules confirmed active")
 	}
+	return verified
 }
 
 // resetUpstreamTransports forces all DoH/DoT/DoQ upstreams to re-bootstrap their
@@ -1122,32 +1109,164 @@ func (p *prog) resetUpstreamTransports() {
 	}
 }
 
+var (
+	ensurePFAnchorReferenceForRestore = func(p *prog) error {
+		return p.ensurePFAnchorReference()
+	}
+	rebuildPFAnchorRulesForReconcile = func(p *prog, exemptions []vpnDNSExemption) ([]string, error) {
+		return p.rebuildPFAnchorRules(exemptions)
+	}
+	restorePFAnchorForReconcile = func(p *prog, reason string) pfAnchorCheckResult {
+		return p.restorePFAnchor(reason)
+	}
+	pfShutdownStateRevokedForTest = func() {}
+)
+
+func (p *prog) rebuildPFAnchorRules(vpnExemptions []vpnDNSExemption) ([]string, error) {
+	tunnelIfaces := append([]string(nil), discoverTunnelInterfacesForReconcile()...)
+	rulesStr := p.buildPFAnchorRulesForTunnels(vpnExemptions, tunnelIfaces)
+	if err := os.WriteFile(pfAnchorFile, []byte(rulesStr), 0644); err != nil {
+		return nil, fmt.Errorf("write anchor file: %w", err)
+	}
+	out, err := exec.Command("pfctl", "-a", pfAnchorName, "-f", pfAnchorFile).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("load rebuilt anchor: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+	flushPFStates()
+	return tunnelIfaces, nil
+}
+
+func (p *prog) restorePFAnchor(reason string) pfAnchorCheckResult {
+	return p.restorePFAnchorWithTransportReset(reason, true)
+}
+
+func (p *prog) restorePFAnchorWithTransportReset(reason string, resetTransports bool) pfAnchorCheckResult {
+	if p.dnsInterceptState == nil {
+		return pfAnchorCheckSkipped
+	}
+	var vpnExemptions []vpnDNSExemption
+	if p.vpnDNS != nil {
+		vpnExemptions = p.vpnDNS.CurrentExemptions()
+	}
+	mainLog.Load().Info().Str("reason", reason).Msg("DNS intercept: restoring pf anchor")
+	if err := ensurePFAnchorReferenceForRestore(p); err != nil {
+		p.pfBackoffResourceExhaustion(err, nil, "restore anchor references")
+		if resetTransports {
+			p.resetUpstreamTransports()
+		}
+		mainLog.Load().Error().Err(err).Msg("DNS intercept: failed to restore anchor references")
+		return pfAnchorCheckFailed
+	}
+
+	tunnelIfaces, err := rebuildPFAnchorRulesForReconcile(p, vpnExemptions)
+	if err != nil {
+		p.pfBackoffResourceExhaustion(err, nil, "rebuild anchor")
+		if resetTransports {
+			p.resetUpstreamTransports()
+		}
+		mainLog.Load().Error().Err(err).Msg("DNS intercept: failed to rebuild anchor")
+		return pfAnchorCheckFailed
+	}
+
+	// rebuildPFAnchorRules flushed PF states after the successful load. Reset
+	// transports even if the authoritative verification below fails, otherwise
+	// DoH can remain pinned to connections invalidated by that flush.
+	if resetTransports {
+		p.resetUpstreamTransports()
+	}
+	if !p.verifyPFState() {
+		mainLog.Load().Error().Str("reason", reason).Msg("DNS intercept: rebuilt anchor failed post-load verification")
+		return pfAnchorCheckFailed
+	}
+	if p.vpnDNS != nil {
+		p.vpnDNS.markInterceptExemptionsApplied(vpnExemptions)
+	}
+	p.commitPFReconcileState(tunnelIfaces)
+	p.pfLastRestoreTime.Store(time.Now().UnixMilli())
+	mainLog.Load().Info().Str("reason", reason).Msg("DNS intercept: pf anchor restored successfully")
+	return pfAnchorCheckRestored
+}
+
+func (p *prog) commitPFReconcileState(tunnelIfaces []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lastTunnelIfaces = append([]string(nil), tunnelIfaces...)
+	if p.hasPendingTunnelIfaces && stringSlicesEqual(p.pendingTunnelIfaces, tunnelIfaces) {
+		p.pendingTunnelIfaces = nil
+		p.hasPendingTunnelIfaces = false
+	}
+}
+
+func (p *prog) clearPendingTunnelReconcile() {
+	p.mu.Lock()
+	p.pendingTunnelIfaces = nil
+	p.hasPendingTunnelIfaces = false
+	p.mu.Unlock()
+}
+
+func (p *prog) hasPendingTunnelReconcile() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.hasPendingTunnelIfaces
+}
+
+func (p *prog) reconcilePFAnchorForTunnelChange() pfAnchorCheckResult {
+	if p.pfExecBackoffActive() {
+		return pfAnchorCheckSkipped
+	}
+	if !p.pfEnsureRunning.CompareAndSwap(false, true) {
+		return pfAnchorCheckSkipped
+	}
+	defer p.pfEnsureRunning.Store(false)
+	return restorePFAnchorForReconcile(p, "tunnel interface change")
+}
+
 // checkTunnelInterfaceChanges compares the current set of active tunnel interfaces
 // against the last known set. If they differ (e.g., a VPN connected and created utun420),
 // it rebuilds and reloads the pf anchor rules to include interface-specific intercept
 // rules for the new interface.
 //
-// Returns true if the anchor was rebuilt, false if no changes detected.
-// This is called from the network change callback even when validInterfacesMap()
-// reports no changes — because validInterfacesMap() only tracks physical hardware
-// ports (en0, bridge0, etc.) and ignores tunnel interfaces (utun*, ipsec*, etc.).
+// Returns true when a new tunnel state is observed or a pending state is
+// successfully applied. Coalesced/deferred retries return false so ignored-event
+// storms do not bypass the macOS VPN-DNS refresh limiter on every notification.
 func (p *prog) checkTunnelInterfaceChanges() bool {
 	if p.dnsInterceptState == nil {
 		return false
 	}
 
-	current := discoverTunnelInterfaces()
+	current := append([]string(nil), discoverTunnelInterfacesForReconcile()...)
 
 	p.mu.Lock()
-	prev := p.lastTunnelIfaces
-	changed := !stringSlicesEqual(prev, current)
-	if changed {
-		p.lastTunnelIfaces = current
+	prev := append([]string(nil), p.lastTunnelIfaces...)
+	stabilizing := p.pfStabilizing.Load()
+	newObservation := false
+	if p.hasPendingTunnelIfaces && stringSlicesEqual(p.pendingTunnelIfaces, current) {
+		if stabilizing {
+			p.mu.Unlock()
+			return false
+		}
+		if stringSlicesEqual(prev, current) {
+			p.pendingTunnelIfaces = nil
+			p.hasPendingTunnelIfaces = false
+			p.mu.Unlock()
+			return false
+		}
+		// The same pending state still differs from the applied baseline. Retry it
+		// after stabilization/failure instead of treating it as already applied.
+	} else {
+		if !p.hasPendingTunnelIfaces && stringSlicesEqual(prev, current) {
+			p.mu.Unlock()
+			return false
+		}
+		newObservation = true
+		p.pendingTunnelIfaces = append([]string(nil), current...)
+		p.hasPendingTunnelIfaces = true
 	}
 	p.mu.Unlock()
 
-	if !changed {
-		return false
+	if stringSlicesEqual(prev, current) {
+		p.clearPendingTunnelReconcile()
+		return true
 	}
 
 	// Detect NEW tunnel interfaces (not just any change).
@@ -1164,39 +1283,26 @@ func (p *prog) checkTunnelInterfaceChanges() bool {
 		}
 	}
 
+	if stabilizing {
+		mainLog.Load().Debug().Msgf("DNS intercept: tunnel state changed during stabilization (was %v, now %v) — deferring anchor rebuild", prev, current)
+		return newObservation
+	}
+
 	if hasNewTunnel {
-		// A new VPN tunnel appeared. Enter stabilization mode — the VPN may be
-		// about to wipe our pf rules (Windscribe does this ~500ms after tunnel creation).
-		// We can't check pfAnchorIsWiped() here because the wipe hasn't happened yet.
-		// The stabilization loop will detect whether pf actually gets wiped:
-		// - If rules change (VPN touches pf): wait for stability, then restore.
-		// - If rules stay stable for the full wait (Tailscale): exit early and rebuild immediately.
+		// A new VPN tunnel appeared. The dedicated post-stabilization repair path
+		// rebuilds the anchor if no successful exemption update applies it first.
 		p.pfStartStabilization()
-		return true
+		return newObservation
 	}
 
 	mainLog.Load().Info().Msgf("DNS intercept: tunnel interfaces changed (was %v, now %v) — rebuilding pf anchor rules", prev, current)
-
-	// Rebuild anchor rules with the updated tunnel interface list.
-	// Pass current VPN DNS servers so exemptions are preserved for still-active VPNs.
-	var vpnExemptions []vpnDNSExemption
-	if p.vpnDNS != nil {
-		vpnExemptions = p.vpnDNS.CurrentExemptions()
+	result := p.reconcilePFAnchorForTunnelChange()
+	if result != pfAnchorCheckRestored {
+		// Keep the desired tunnel set pending. The next event, delayed check, or
+		// watchdog tick retries it without confusing pending with applied state.
+		mainLog.Load().Debug().Msgf("DNS intercept: tunnel rule rebuild deferred/failed (result: %d)", result)
 	}
-	rulesStr := p.buildPFAnchorRules(vpnExemptions)
-	if err := os.WriteFile(pfAnchorFile, []byte(rulesStr), 0644); err != nil {
-		mainLog.Load().Error().Err(err).Msg("DNS intercept: failed to write rebuilt anchor file")
-		return true
-	}
-	out, err := exec.Command("pfctl", "-a", pfAnchorName, "-f", pfAnchorFile).CombinedOutput()
-	if err != nil {
-		mainLog.Load().Error().Err(err).Msgf("DNS intercept: failed to reload rebuilt anchor (output: %s)", strings.TrimSpace(string(out)))
-		return true
-	}
-
-	flushPFStates() // Clear stale states so new rules (incl. VPN DNS exemptions) take effect
-	mainLog.Load().Info().Msgf("DNS intercept: rebuilt pf anchor with %d tunnel interfaces", len(current))
-	return true
+	return newObservation || result == pfAnchorCheckRestored
 }
 
 // stringSlicesEqual reports whether two string slices have the same elements in the same order.
@@ -1216,11 +1322,9 @@ func stringSlicesEqual(a, b []string) bool {
 // until the VPN's ruleset stops changing. This prevents a death spiral where
 // ctrld and the VPN repeatedly overwrite each other's pf rules.
 func (p *prog) pfStartStabilization() {
-	if p.pfStabilizing.Load() {
-		// Already stabilizing — extending is handled by backoff.
+	if !p.pfStabilizing.CompareAndSwap(false, true) {
 		return
 	}
-	p.pfStabilizing.Store(true)
 
 	multiplier := max(int(p.pfBackoffMultiplier.Load()), 1)
 	baseStableTime := 6000 * time.Millisecond // 4 polls at 1.5s
@@ -1245,9 +1349,17 @@ func (p *prog) pfStartStabilization() {
 // pfStabilizationLoop polls pfctl -sr hash until the ruleset is stable for the
 // required duration, then restores our anchor rules.
 func (p *prog) pfStabilizationLoop(ctx context.Context, stableRequired time.Duration) {
+	p.pfStabilizationLoopWithMaxWait(ctx, stableRequired, pfStabilizationMaxWait)
+}
+
+func (p *prog) pfStabilizationLoopWithMaxWait(ctx context.Context, stableRequired, maxWaitDuration time.Duration) {
 	defer p.pfStabilizing.Store(false)
 
 	pollInterval := 1500 * time.Millisecond
+	pollTicker := time.NewTicker(pollInterval)
+	defer pollTicker.Stop()
+	maxWait := time.NewTimer(maxWaitDuration)
+	defer maxWait.Stop()
 	var lastHash string
 	stableSince := time.Time{}
 
@@ -1258,12 +1370,21 @@ func (p *prog) pfStabilizationLoop(ctx context.Context, stableRequired time.Dura
 			return
 		case <-p.stopCh:
 			return
-		case <-time.After(pollInterval):
+		case <-maxWait.C:
+			mainLog.Load().Warn().Dur("max_wait", maxWaitDuration).
+				Msg("DNS intercept: stabilization timed out — returning ownership to delayed/watchdog recovery")
+			p.scheduleDelayedRechecks()
+			return
+		case <-pollTicker.C:
 		}
 
+		if p.pfExecBackoffActive() {
+			continue
+		}
 		// Hash the current filter ruleset.
 		out, err := exec.Command("pfctl", "-sr").CombinedOutput()
 		if err != nil {
+			p.pfBackoffResourceExhaustion(err, out, "poll stabilization filter rules")
 			continue
 		}
 		hash := fmt.Sprintf("%x", sha256.Sum256(out))
@@ -1282,65 +1403,163 @@ func (p *prog) pfStabilizationLoop(ctx context.Context, stableRequired time.Dura
 		}
 
 		if time.Since(stableSince) >= stableRequired {
-			// Stable long enough — restore our rules.
-			// Clear stabilizing flag BEFORE calling ensurePFAnchorActive so
-			// the guard inside that function doesn't suppress our restore.
-			p.pfStabilizing.Store(false)
-			mainLog.Load().Info().Msgf("DNS intercept: pf stable for %s — restoring anchor rules", stableRequired)
-			p.ensurePFAnchorActive()
-			routes, domainlessServers, exemptions := p.refreshDNSAfterVPNSettle("pf_stabilized")
-			if routes == 0 && domainlessServers == 0 && exemptions == 0 {
-				p.scheduleDNSAfterVPNSettleRefresh("pf_stabilized_followup", pfAnchorRecheckDelayLong)
-			}
-			p.pfLastRestoreTime.Store(time.Now().UnixMilli())
+			p.finishPFStabilization(stableRequired)
 			return
 		}
 	}
 }
 
-// ensurePFAnchorActive checks that our pf anchor references and rules are still
-// present in the running ruleset. If anything is missing (e.g., another program
-// like Windscribe desktop or macOS itself reloaded pf.conf), it restores them.
+// finishPFStabilization runs the work stabilization exists to do, once the ruleset has
+// held still for the required window. The active loop retains ownership throughout: it
+// never re-enters stabilization recursively.
+func (p *prog) finishPFStabilization(stableRequired time.Duration) {
+	mainLog.Load().Info().Msgf("DNS intercept: pf stable for %s — reconciling anchor rules", stableRequired)
+	result := p.reconcilePFAnchorAfterStabilization()
+	if result != pfAnchorCheckRestored && result != pfAnchorCheckIntact {
+		p.scheduleDelayedRechecks()
+	}
+	routes, domainlessServers, exemptions := p.refreshDNSAfterVPNSettle("pf_stabilized")
+	if routes == 0 && domainlessServers == 0 && exemptions == 0 {
+		p.scheduleDNSAfterVPNSettleRefresh("pf_stabilized_followup", pfAnchorRecheckDelayLong)
+	}
+	if p.hasPendingTunnelReconcile() {
+		p.scheduleDelayedRechecks()
+	}
+	p.verifyInterceptAfterStabilization()
+}
+
+// probePFInterceptFn and forceReloadPFInterceptFn are the functional verification seams
+// shared by both probers.
+var (
+	probePFInterceptFn       = (*prog).probePFIntercept
+	forceReloadPFInterceptFn = (*prog).forceReloadPFMainRuleset
+)
+
+// pfFunctionalProbeOwnerWait bounds how long the post-stabilization verifier waits for
+// another prober to release functional-probe ownership. A probe monitor that is only
+// standing down releases it at once; one that is genuinely probing holds it for its whole
+// window, and then the verifier steps aside. A var so tests can shorten the wait.
+var pfFunctionalProbeOwnerWait = 2 * time.Second
+
+// pfFunctionalProbeOwnerPoll is how often that wait re-tries the claim.
+const pfFunctionalProbeOwnerPoll = 25 * time.Millisecond
+
+// interceptProbeMonitorAllowed reports whether the probe monitor may run at all.
 //
-// Returns true if restoration was needed, false if everything was already intact.
-// Called both on network changes (immediate) and by the periodic pfWatchdog.
-func (p *prog) ensurePFAnchorActive() bool {
+// The monitor must consult this before claiming ownership. Claiming first and checking
+// second means a monitor that is about to stand down still takes the flag, and the
+// post-stabilization verifier - which sees a set flag as "somebody else is probing" -
+// skips. Neither probes, and the outage lasts until the next watchdog tick.
+func (p *prog) interceptProbeMonitorAllowed() bool {
+	return p.dnsInterceptState != nil && !p.pfStabilizing.Load()
+}
+
+// claimFunctionalProbeOwner takes ownership of functional probing, waiting up to wait for
+// a current owner to release it. It reports whether ownership was acquired; the caller
+// releases with pfMonitorRunning.Store(false).
+func (p *prog) claimFunctionalProbeOwner(wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		if p.pfMonitorRunning.CompareAndSwap(false, true) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(pfFunctionalProbeOwnerPoll)
+	}
+}
+
+// verifyInterceptAfterStabilization proves pf is actually translating once stabilization
+// has finished, and repairs it once if it is not.
+//
+// The reconcile above verifies rule text. That cannot distinguish a live redirect from an
+// anchor pf has stopped evaluating, and after sleep/wake with a VPN reconnect those come
+// apart: rules present, references present, post-load verification passed, and every query
+// through the system resolver timing out. Nothing else notices until the periodic watchdog
+// runs its own probe - the interception probe monitor stands down while stabilization owns
+// pf and is not re-armed afterwards - so recovery waits up to a full watchdog interval on a
+// host whose link and default route are already back.
+//
+// One probe, then at most one forced reload and one confirming probe. Deliberately not the
+// probe monitor: that keeps probing for ~7.5s and can force a reload per failed probe,
+// where this path needs a single bounded repair and then hands back to the watchdog.
+func (p *prog) verifyInterceptAfterStabilization() {
+	if p.dnsInterceptState == nil || p.pfExecBackoffActive() {
+		return
+	}
+	// The probe monitor is the other functional prober, so only one of us may run - but
+	// "somebody holds the flag" is not the same as "somebody is probing". A monitor that
+	// started while stabilization owns pf stands down immediately, and skipping on sight
+	// left nobody probing at all. Wait briefly for the holder to release instead.
+	if !p.claimFunctionalProbeOwner(pfFunctionalProbeOwnerWait) {
+		mainLog.Load().Warn().Msgf("DNS intercept: post-stabilization probe skipped — another prober held ownership for %s; leaving recovery to the watchdog", pfFunctionalProbeOwnerWait)
+		return
+	}
+	defer p.pfMonitorRunning.Store(false)
+
+	// Ownership can take a moment to arrive; make sure there is still an intercept to check.
 	if p.dnsInterceptState == nil {
-		return false
+		return
+	}
+
+	if probePFInterceptFn(p) {
+		mainLog.Load().Debug().Msg("DNS intercept: post-stabilization probe passed — interception is translating")
+		return
+	}
+
+	mainLog.Load().Warn().Msg("DNS intercept: post-stabilization rules are intact but the probe FAILED — forcing one reload")
+	if !forceReloadPFInterceptFn(p) {
+		mainLog.Load().Error().Msg("DNS intercept: post-stabilization forced reload did not run — leaving recovery to the watchdog")
+		return
+	}
+	if probePFInterceptFn(p) {
+		mainLog.Load().Info().Msg("DNS intercept: interception restored by the post-stabilization reload")
+		return
+	}
+	mainLog.Load().Error().Msg("DNS intercept: interception still not translating after the post-stabilization reload — the watchdog will retry")
+}
+
+var runPFAnchorCheckCommand = func(args ...string) ([]byte, error) {
+	return exec.Command("pfctl", args...).CombinedOutput()
+}
+
+// ensurePFAnchorActive checks live PF state and returns an explicit outcome for
+// callers that must distinguish intact, restored, deferred, skipped, and failed.
+func (p *prog) ensurePFAnchorActive() pfAnchorCheckResult {
+	return p.ensurePFAnchorActiveWithPolicy(true, false)
+}
+
+// reconcilePFAnchorAfterStabilization is owned by the active stabilization loop.
+// It bypasses ordinary recent-wipe deferral and forces a rebuild only when tunnel
+// state is still pending. Otherwise an intact anchor is left alone, avoiding a
+// redundant global PF state flush after an earlier successful exemption update.
+func (p *prog) reconcilePFAnchorAfterStabilization() pfAnchorCheckResult {
+	return p.ensurePFAnchorActiveWithPolicy(false, p.hasPendingTunnelReconcile())
+}
+
+func (p *prog) ensurePFAnchorActiveWithPolicy(allowRecentWipeDeferral, forceRebuild bool) pfAnchorCheckResult {
+	if p.dnsInterceptState == nil {
+		return pfAnchorCheckSkipped
+	}
+	// Ordinary callers must not compete with the loop that owns stabilization.
+	// Check before acquiring the singleflight guard so the post-stable owner is
+	// not blocked by a watchdog callback that would immediately skip.
+	if allowRecentWipeDeferral && p.pfStabilizing.Load() {
+		mainLog.Load().Debug().Msg("DNS intercept watchdog: suppressed — VPN stabilization in progress")
+		return pfAnchorCheckSkipped
 	}
 	if !p.pfEnsureRunning.CompareAndSwap(false, true) {
 		mainLog.Load().Debug().Msg("DNS intercept watchdog: check already running, skipping duplicate")
-		return false
+		return pfAnchorCheckSkipped
 	}
 	defer p.pfEnsureRunning.Store(false)
 
 	if p.pfExecBackoffActive() {
-		return false
+		return pfAnchorCheckSkipped
 	}
-
-	// While stabilizing (VPN connecting), suppress all restores.
-	// The stabilization loop will restore once pf settles.
-	if p.pfStabilizing.Load() {
-		mainLog.Load().Debug().Msg("DNS intercept watchdog: suppressed — VPN stabilization in progress")
-		return false
-	}
-
-	// Check if our last restore was very recent and got wiped again.
-	// This indicates a VPN reconnect cycle — enter stabilization with backoff.
-	if lastRestore := p.pfLastRestoreTime.Load(); lastRestore > 0 {
-		elapsed := time.Since(time.UnixMilli(lastRestore))
-		if elapsed < 10*time.Second {
-			// Rules were wiped within 10s of our last restore — VPN is fighting us.
-			p.pfBackoffMultiplier.Add(1)
-			mainLog.Load().Warn().Msgf("DNS intercept: rules wiped %s after restore — entering stabilization (backoff multiplier: %d)",
-				elapsed, p.pfBackoffMultiplier.Load())
-			p.pfStartStabilization()
-			return false
-		}
-		// Rules survived >10s — reset backoff
-		if p.pfBackoffMultiplier.Load() > 0 {
-			p.pfBackoffMultiplier.Store(0)
-		}
+	if allowRecentWipeDeferral && p.pfStabilizing.Load() {
+		return pfAnchorCheckSkipped
 	}
 
 	rdrAnchorRef := fmt.Sprintf("rdr-anchor \"%s\"", pfAnchorName)
@@ -1348,13 +1567,11 @@ func (p *prog) ensurePFAnchorActive() bool {
 	needsRestore := false
 
 	// Check 1: anchor references in the main ruleset.
-	natOut, err := exec.Command("pfctl", "-sn").CombinedOutput()
+	natOut, err := runPFAnchorCheckCommand("-sn")
 	if err != nil {
-		if p.pfBackoffResourceExhaustion(err, natOut, "dump NAT rules") {
-			return false
-		}
+		p.pfBackoffResourceExhaustion(err, natOut, "dump NAT rules")
 		mainLog.Load().Warn().Err(err).Msg("DNS intercept watchdog: could not dump NAT rules")
-		return false
+		return pfAnchorCheckFailed
 	}
 	natStr := string(natOut)
 	if !strings.Contains(natStr, rdrAnchorRef) {
@@ -1363,13 +1580,11 @@ func (p *prog) ensurePFAnchorActive() bool {
 	}
 
 	if !needsRestore {
-		filterOut, err := exec.Command("pfctl", "-sr").CombinedOutput()
+		filterOut, err := runPFAnchorCheckCommand("-sr")
 		if err != nil {
-			if p.pfBackoffResourceExhaustion(err, filterOut, "dump filter rules") {
-				return false
-			}
+			p.pfBackoffResourceExhaustion(err, filterOut, "dump filter rules")
 			mainLog.Load().Warn().Err(err).Msg("DNS intercept watchdog: could not dump filter rules")
-			return false
+			return pfAnchorCheckFailed
 		}
 		if !strings.Contains(string(filterOut), anchorRef) {
 			mainLog.Load().Warn().Msg("DNS intercept watchdog: anchor reference missing from running filter rules")
@@ -1383,107 +1598,102 @@ func (p *prog) ensurePFAnchorActive() bool {
 	// Without rdr, route-to sends packets to lo0 but they never get redirected to 127.0.0.1:53,
 	// causing an infinite packet loop on lo0 and complete DNS failure.
 	if !needsRestore {
-		anchorFilter, err := exec.Command("pfctl", "-a", pfAnchorName, "-sr").CombinedOutput()
-		if err != nil || len(strings.TrimSpace(string(anchorFilter))) == 0 {
-			if p.pfBackoffResourceExhaustion(err, anchorFilter, "dump anchor filter rules") {
-				return false
-			}
+		anchorFilter, err := runPFAnchorCheckCommand("-a", pfAnchorName, "-sr")
+		if err != nil {
+			p.pfBackoffResourceExhaustion(err, anchorFilter, "dump anchor filter rules")
+			mainLog.Load().Warn().Err(err).Msg("DNS intercept watchdog: could not dump anchor filter rules")
+			return pfAnchorCheckFailed
+		}
+		if pfRulesetEmpty(string(anchorFilter)) {
 			mainLog.Load().Warn().Msg("DNS intercept watchdog: anchor has no filter rules — content was flushed")
 			needsRestore = true
 		}
 	}
 	if !needsRestore {
-		anchorNat, err := exec.Command("pfctl", "-a", pfAnchorName, "-sn").CombinedOutput()
-		if err != nil || len(strings.TrimSpace(string(anchorNat))) == 0 {
-			if p.pfBackoffResourceExhaustion(err, anchorNat, "dump anchor NAT rules") {
-				return false
-			}
+		anchorNat, err := runPFAnchorCheckCommand("-a", pfAnchorName, "-sn")
+		if err != nil {
+			p.pfBackoffResourceExhaustion(err, anchorNat, "dump anchor NAT rules")
+			mainLog.Load().Warn().Err(err).Msg("DNS intercept watchdog: could not dump anchor NAT rules")
+			return pfAnchorCheckFailed
+		}
+		if pfRulesetEmpty(string(anchorNat)) {
 			mainLog.Load().Warn().Msg("DNS intercept watchdog: anchor has no rdr rules — translation was flushed (will cause packet loop on lo0)")
 			needsRestore = true
 		}
 	}
 
-	// Check 3: "set skip on lo0" — VPN apps (e.g., Windscribe) load a complete pf.conf
-	// with "set skip on { lo0 <vpn_iface> }" which disables ALL pf processing on loopback.
-	// Our entire interception mechanism (route-to lo0 + rdr on lo0) depends on lo0 being
-	// processed by pf. This check detects the skip and triggers a restore that removes it.
-	if !needsRestore {
-		optOut, err := exec.Command("pfctl", "-sO").CombinedOutput()
-		if err == nil {
-			optStr := string(optOut)
-			// Check if lo0 appears in any "set skip on" directive.
-			for _, line := range strings.Split(optStr, "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "set skip on") && strings.Contains(line, "lo0") {
-					mainLog.Load().Warn().Msg("DNS intercept watchdog: 'set skip on lo0' detected — loopback bypass breaks our rdr rules")
-					needsRestore = true
-					break
-				}
-			}
+	// There is deliberately no "set skip on lo0" check here - see the note in
+	// verifyPFState for why macOS cannot be asked for skip state.
+	//
+	// It matters more here than a missing check might suggest: anything that cannot
+	// conclude has to return pfAnchorCheckFailed, and the caller only runs
+	// probePFIntercept() and the forced-reload recovery on an intact result. A check
+	// that can never conclude would therefore keep this function from ever reporting
+	// intact, disabling the functional probe and the self-heal it drives.
+	//
+	// So the skip case is left to probePFIntercept(). An explicit check can return via
+	// "pfctl -s Interfaces -v" once its output shape is confirmed on a host that has a
+	// skip configured.
+
+	// Only classify a recent event as a repeated wipe after the live ruleset
+	// actually proves that a reference or anchor rule is missing. Previously this
+	// timestamp check ran first, so every healthy callback for ten seconds after
+	// stabilization was mislabeled as another wipe.
+	if lastRestore := p.pfLastRestoreTime.Load(); lastRestore > 0 {
+		elapsed := time.Since(time.UnixMilli(lastRestore))
+		if needsRestore && allowRecentWipeDeferral && elapsed < 10*time.Second {
+			p.pfBackoffMultiplier.Add(1)
+			mainLog.Load().Warn().Msgf("DNS intercept: rules wiped %s after restore — entering stabilization (backoff multiplier: %d)",
+				elapsed, p.pfBackoffMultiplier.Load())
+			p.pfStartStabilization()
+			return pfAnchorCheckDeferred
+		}
+		if elapsed >= 10*time.Second && p.pfBackoffMultiplier.Load() > 0 {
+			p.pfBackoffMultiplier.Store(0)
 		}
 	}
 
-	if !needsRestore {
+	if !needsRestore && !forceRebuild {
 		mainLog.Load().Debug().Msg("DNS intercept watchdog: pf anchor intact")
-		return false
+		return pfAnchorCheckIntact
 	}
 
-	// Restore: re-inject anchor references into the main ruleset.
-	mainLog.Load().Info().Msg("DNS intercept watchdog: restoring pf anchor references")
-	if err := p.ensurePFAnchorReference(); err != nil {
-		p.pfBackoffResourceExhaustion(err, nil, "restore anchor references")
-		mainLog.Load().Error().Err(err).Msg("DNS intercept watchdog: failed to restore anchor references")
-		return true
+	reason := "missing pf anchor state"
+	if forceRebuild && !needsRestore {
+		reason = "post-stabilization rebuild"
 	}
+	return restorePFAnchorForReconcile(p, reason)
+}
 
-	// Restore: always rebuild anchor rules from scratch to ensure tunnel interface
-	// rules are up-to-date (VPN interfaces may have appeared/disappeared since the
-	// anchor file was last written).
-	mainLog.Load().Info().Msg("DNS intercept watchdog: rebuilding anchor rules with current network state")
-	var vpnExemptions []vpnDNSExemption
-	if p.vpnDNS != nil {
-		vpnExemptions = p.vpnDNS.CurrentExemptions()
+// dnsInterceptIgnoredChangeReconcileDue reports whether an ignored macOS
+// network delta should run the expensive leading-edge pf/VPN-DNS reconciliation.
+// Tunnel changes bypass this decision in the caller. The periodic watchdog and
+// coalesced delayed checks remain independent safety nets.
+func (p *prog) dnsInterceptIgnoredChangeReconcileDue(now time.Time) bool {
+	nowMillis := now.UnixMilli()
+	for {
+		last := p.pfIgnoredChangeLastReconcile.Load()
+		if last > 0 && now.Sub(time.UnixMilli(last)) < pfIgnoredChangeReconcileInterval {
+			return false
+		}
+		if p.pfIgnoredChangeLastReconcile.CompareAndSwap(last, nowMillis) {
+			return true
+		}
 	}
-	rulesStr := p.buildPFAnchorRules(vpnExemptions)
-	if err := os.WriteFile(pfAnchorFile, []byte(rulesStr), 0644); err != nil {
-		mainLog.Load().Error().Err(err).Msg("DNS intercept watchdog: failed to write anchor file")
-	} else if out, err := exec.Command("pfctl", "-a", pfAnchorName, "-f", pfAnchorFile).CombinedOutput(); err != nil {
-		p.pfBackoffResourceExhaustion(err, out, "load rebuilt anchor")
-		mainLog.Load().Error().Err(err).Msgf("DNS intercept watchdog: failed to load rebuilt anchor (output: %s)", strings.TrimSpace(string(out)))
-	} else {
-		flushPFStates()
-		mainLog.Load().Info().Msg("DNS intercept watchdog: rebuilt and loaded anchor rules")
-	}
-
-	// Update tracked tunnel interfaces after rebuild so checkTunnelInterfaceChanges()
-	// has an accurate baseline for subsequent comparisons.
-	p.mu.Lock()
-	p.lastTunnelIfaces = discoverTunnelInterfaces()
-	p.mu.Unlock()
-
-	// Verify the restoration worked.
-	p.verifyPFState()
-
-	// Proactively reset upstream transports. When another program replaces the pf
-	// ruleset with "pfctl -f", it flushes the entire state table — killing all
-	// existing TCP connections including our DoH connections to upstream DNS servers.
-	// Without this reset, Go's http.Transport keeps trying dead connections until
-	// the 5s context deadline, causing a DNS blackout. Re-bootstrapping forces fresh
-	// TLS handshakes on the next query (~200ms vs ~5s recovery).
-	p.resetUpstreamTransports()
-
-	p.pfLastRestoreTime.Store(time.Now().UnixMilli())
-	mainLog.Load().Info().Msg("DNS intercept watchdog: pf anchor restored successfully")
-	return true
 }
 
 func (p *prog) scheduleDNSAfterVPNSettleRefresh(reason string, delay time.Duration) {
-	time.AfterFunc(delay, func() {
+	timer := time.AfterFunc(delay, func() {
 		if p.dnsInterceptState == nil {
 			return
 		}
 		p.refreshDNSAfterVPNSettle(reason)
 	})
+	// Track the timer like the other delayed rechecks, so intercept teardown
+	// (and test cleanup) can stop it instead of letting it fire afterwards.
+	p.pfDelayedRecheckMu.Lock()
+	p.pfDelayedRecheckTimers = append(p.pfDelayedRecheckTimers, timer)
+	p.pfDelayedRecheckMu.Unlock()
 }
 
 func (p *prog) pfExecBackoffActive() bool {
@@ -1591,20 +1801,22 @@ func (p *prog) pfWatchdog() {
 				return
 			}
 
-			restored := p.ensurePFAnchorActive()
-			if !restored {
-				// Rules are intact in text form — also probe actual interception.
-				// This catches cases where rules survive but pf's internal translation
-				// state is corrupted (e.g., after a hypervisor reloads pf.conf).
-				if !p.pfStabilizing.Load() && !p.pfMonitorRunning.Load() {
-					if !p.probePFIntercept() {
-						mainLog.Load().Warn().Msg("DNS intercept watchdog: rules intact but probe FAILED — forcing full reload")
-						p.forceReloadPFMainRuleset()
-						restored = true // treat as a restore for logging
+			result := p.ensurePFAnchorActive()
+			if result == pfAnchorCheckIntact {
+				// Only an authoritative intact result may trigger the functional probe.
+				// Skipped/backoff/failed checks must not be treated as healthy text state.
+				if !p.pfMonitorRunning.Load() && !p.probePFIntercept() {
+					mainLog.Load().Warn().Msg("DNS intercept watchdog: rules intact but probe FAILED — forcing full reload")
+					if p.forceReloadPFMainRuleset() {
+						result = pfAnchorCheckRestored
+					} else {
+						result = pfAnchorCheckFailed
 					}
 				}
+			}
 
-				// Check if backoff should be reset.
+			if result == pfAnchorCheckIntact {
+				// Check if backoff should be reset only after an authoritative healthy check.
 				if p.pfBackoffMultiplier.Load() > 0 && p.pfLastRestoreTime.Load() > 0 {
 					elapsed := time.Since(time.UnixMilli(p.pfLastRestoreTime.Load()))
 					if elapsed > 60*time.Second {
@@ -1613,17 +1825,37 @@ func (p *prog) pfWatchdog() {
 					}
 				}
 			}
-			if restored {
+
+			switch result {
+			case pfAnchorCheckRestored:
 				misses := consecutiveMisses.Add(1)
 				if misses >= pfConsecutiveMissThreshold {
 					mainLog.Load().Error().Msgf("DNS intercept watchdog: pf anchor has been missing for %d consecutive checks — something is persistently overwriting pf rules", misses)
 				} else {
 					mainLog.Load().Warn().Msgf("DNS intercept watchdog: pf anchor was missing and restored (consecutive misses: %d)", misses)
 				}
-			} else {
+			case pfAnchorCheckIntact:
 				if old := consecutiveMisses.Swap(0); old > 0 {
 					mainLog.Load().Info().Msgf("DNS intercept watchdog: pf anchor stable again after %d consecutive restores", old)
 				}
+			case pfAnchorCheckSkipped, pfAnchorCheckDeferred, pfAnchorCheckFailed:
+				// Preserve the previous authoritative state. Do not probe, count a
+				// repair, or reset misses from an indeterminate/deferred result.
+			}
+
+			// Tunnel transitions and failed PF/WFP exemption updates are normally
+			// event-driven, but the final delayed attempt must remain retryable even
+			// if macOS emits no further event.
+			tunnelChanged := p.checkTunnelInterfaceChanges()
+			pendingExemptions := p.vpnDNS != nil && p.vpnDNS.interceptExemptionsPending()
+			// Stabilization owns pf while a VPN's ruleset is still settling, and a
+			// refresh rebuilds and reloads the anchor - exactly the mutual overwriting
+			// that stabilization exists to stop. Nothing is lost by deferring: the
+			// pending tunnel state and pending exemptions both survive, and the next
+			// tick retries once stabilization has finished.
+			if (tunnelChanged || pendingExemptions) && p.vpnDNS != nil &&
+				!p.pfExecBackoffActive() && !p.pfStabilizing.Load() {
+				p.vpnDNS.Refresh(true)
 			}
 		}
 	}
@@ -1638,8 +1870,33 @@ func (p *prog) exemptVPNDNSServers(exemptions []vpnDNSExemption) error {
 	if p.dnsInterceptState == nil {
 		return fmt.Errorf("pf state not available")
 	}
+	if p.pfExecBackoffActive() {
+		return fmt.Errorf("pf exemption update deferred during exec backoff")
+	}
+	// Defence in depth for the callers guarded at their own call sites: this function
+	// rewrites and reloads the whole anchor, which is the mutual overwriting that
+	// stabilization suppresses while a VPN's ruleset settles.
+	//
+	// This does defer handleRecovery's DHCP-nameserver exemption, which has no retry of
+	// its own - the trade is deliberate. Those exemptions are ad hoc: they are never
+	// registered with the vpnDNSManager, so the post-stabilization reconcile rebuilds
+	// the anchor from CurrentExemptions and drops them regardless. Letting them through
+	// mid-settle would buy a few seconds of captive-portal access at the cost of the
+	// collision stabilization exists to prevent. The error text surfaces in recovery's
+	// warning so the reason is visible rather than silent.
+	//
+	// Manager-driven callers lose nothing: appliedExemptions only advances on success,
+	// so interceptExemptionsPending stays true and the next tick retries.
+	if p.pfStabilizing.Load() {
+		return fmt.Errorf("pf exemption update deferred during stabilization")
+	}
+	if !p.pfEnsureRunning.CompareAndSwap(false, true) {
+		return fmt.Errorf("pf reconciliation already running")
+	}
+	defer p.pfEnsureRunning.Store(false)
 
-	rulesStr := p.buildPFAnchorRules(exemptions)
+	tunnelIfaces := append([]string(nil), discoverTunnelInterfacesForReconcile()...)
+	rulesStr := p.buildPFAnchorRulesForTunnels(exemptions, tunnelIfaces)
 
 	if err := os.WriteFile(pfAnchorFile, []byte(rulesStr), 0644); err != nil {
 		return fmt.Errorf("dns intercept: failed to rewrite pf anchor: %w", err)
@@ -1647,6 +1904,7 @@ func (p *prog) exemptVPNDNSServers(exemptions []vpnDNSExemption) error {
 
 	out, err := exec.Command("pfctl", "-a", pfAnchorName, "-f", pfAnchorFile).CombinedOutput()
 	if err != nil {
+		p.pfBackoffResourceExhaustion(err, out, "load VPN DNS anchor")
 		return fmt.Errorf("dns intercept: failed to reload pf anchor: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 
@@ -1658,8 +1916,12 @@ func (p *prog) exemptVPNDNSServers(exemptions []vpnDNSExemption) error {
 	// Ensure the anchor reference still exists in the main ruleset.
 	// Another program may have replaced the ruleset since we last checked.
 	if err := p.ensurePFAnchorReference(); err != nil {
-		mainLog.Load().Warn().Err(err).Msg("DNS intercept: failed to verify anchor reference during VPN DNS update")
+		p.pfBackoffResourceExhaustion(err, nil, "restore VPN DNS anchor reference")
+		p.resetUpstreamTransports()
+		return fmt.Errorf("dns intercept: failed to restore anchor reference during VPN DNS update: %w", err)
 	}
+	p.resetUpstreamTransports()
+	p.commitPFReconcileState(tunnelIfaces)
 
 	// Count unique excluded interfaces for logging.
 	excludedIfaces := make(map[string]bool)
@@ -1700,14 +1962,9 @@ func (p *prog) probePFIntercept() bool {
 	// Generate unique probe domain
 	probeID := fmt.Sprintf("_pf-probe-%x.%s", time.Now().UnixNano()&0xFFFFFFFF, pfProbeDomain)
 
-	// Register probe so DNS handler can detect and signal it
-	probeCh := make(chan struct{}, 1)
-	p.pfProbeExpected.Store(probeID)
-	p.pfProbeCh.Store(&probeCh)
-	defer func() {
-		p.pfProbeExpected.Store("")
-		p.pfProbeCh.Store((*chan struct{})(nil))
-	}()
+	// Register this attempt's own domain: overlapping probes must not cancel each other.
+	probeCh, deregister := p.registerInterceptProbe(probeID)
+	defer deregister()
 
 	// Build a minimal DNS query packet for the probe domain.
 	// We use exec.Command to send from a subprocess with GID=0 (wheel),
@@ -1776,6 +2033,13 @@ func buildDNSQueryPacket(domain string) []byte {
 // The backoff schedule provides both fast detection (immediate + 500ms) and extended
 // coverage (up to ~8s) to win the race against async pf reloads by hypervisors.
 func (p *prog) pfInterceptMonitor() {
+	// Eligibility first, ownership second. A monitor that is about to stand down must not
+	// take the flag on its way out: the post-stabilization verifier reads that flag as
+	// "another prober is working" and would step aside for a prober that never probes.
+	if !p.interceptProbeMonitorAllowed() {
+		mainLog.Load().Debug().Msg("DNS intercept monitor: not starting — intercept disabled or stabilizing")
+		return
+	}
 	if !p.pfMonitorRunning.CompareAndSwap(false, true) {
 		mainLog.Load().Debug().Msg("DNS intercept monitor: already running, skipping")
 		return
@@ -1792,23 +2056,23 @@ func (p *prog) pfInterceptMonitor() {
 		if delay > 0 {
 			time.Sleep(delay)
 		}
-		if p.dnsInterceptState == nil || p.pfStabilizing.Load() {
+		if !p.interceptProbeMonitorAllowed() {
 			mainLog.Load().Debug().Msg("DNS intercept monitor: aborting — intercept disabled or stabilizing")
 			return
 		}
 
-		if p.probePFIntercept() {
+		if probePFInterceptFn(p) {
 			mainLog.Load().Debug().Msgf("DNS intercept monitor: probe %d/%d passed", i+1, len(delays))
 			continue // working now — keep monitoring in case it breaks later in the window
 		}
 
 		// Probe failed — pf translation is broken. Force full reload.
 		mainLog.Load().Warn().Msgf("DNS intercept monitor: probe %d/%d FAILED — pf translation broken, forcing full ruleset reload", i+1, len(delays))
-		p.forceReloadPFMainRuleset()
+		forceReloadPFInterceptFn(p)
 
 		// Verify the reload fixed it
 		time.Sleep(200 * time.Millisecond)
-		if p.probePFIntercept() {
+		if probePFInterceptFn(p) {
 			mainLog.Load().Info().Msg("DNS intercept monitor: probe passed after reload — interception restored")
 			// Continue monitoring in case the hypervisor reloads pf again
 		} else {
@@ -1830,7 +2094,15 @@ func (p *prog) pfInterceptMonitor() {
 //
 // The reload is safe for VPN interop because it reassembles from the current running
 // ruleset (pfctl -sr/-sn), preserving all existing anchors and rules.
-func (p *prog) forceReloadPFMainRuleset() {
+func (p *prog) forceReloadPFMainRuleset() bool {
+	if p.dnsInterceptState == nil || p.pfExecBackoffActive() {
+		return false
+	}
+	if !p.pfEnsureRunning.CompareAndSwap(false, true) {
+		return false
+	}
+	defer p.pfEnsureRunning.Store(false)
+
 	rdrAnchorRef := fmt.Sprintf("rdr-anchor \"%s\"", pfAnchorName)
 	anchorRef := fmt.Sprintf("anchor \"%s\"", pfAnchorName)
 
@@ -1838,13 +2110,13 @@ func (p *prog) forceReloadPFMainRuleset() {
 	natOut, err := exec.Command("pfctl", "-sn").CombinedOutput()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("DNS intercept: force reload — failed to dump NAT rules")
-		return
+		return false
 	}
 
 	filterOut, err := exec.Command("pfctl", "-sr").CombinedOutput()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("DNS intercept: force reload — failed to dump filter rules")
-		return
+		return false
 	}
 
 	natLines := pfFilterRuleLines(string(natOut))
@@ -1868,14 +2140,10 @@ func (p *prog) forceReloadPFMainRuleset() {
 		pureFilterLines = append([]string{anchorRef}, pureFilterLines...)
 	}
 
-	// Clean pf options (remove "set skip on lo0" if present).
-	cleanedOptions, _ := pfGetCleanedOptions()
-
-	// Reassemble in pf's required order: options → scrub → translation → filtering.
+	// Reassemble in pf's required order: scrub → translation → filtering. As in
+	// ensurePFAnchorReference, no options section is emitted; see the KNOWN GAP note
+	// there.
 	var combined strings.Builder
-	if cleanedOptions != "" {
-		combined.WriteString(cleanedOptions)
-	}
 	for _, line := range scrubLines {
 		combined.WriteString(line + "\n")
 	}
@@ -1891,32 +2159,19 @@ func (p *prog) forceReloadPFMainRuleset() {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msgf("DNS intercept: force reload — pfctl -f - failed (output: %s)", strings.TrimSpace(string(out)))
-		return
+		return false
 	}
-
-	// Also reload the anchor rules to ensure they're fresh.
-	var vpnExemptions []vpnDNSExemption
-	if p.vpnDNS != nil {
-		vpnExemptions = p.vpnDNS.CurrentExemptions()
-	}
-	rulesStr := p.buildPFAnchorRules(vpnExemptions)
-	if err := os.WriteFile(pfAnchorFile, []byte(rulesStr), 0644); err != nil {
-		mainLog.Load().Error().Err(err).Msg("DNS intercept: force reload — failed to write anchor file")
-	} else if out, err := exec.Command("pfctl", "-a", pfAnchorName, "-f", pfAnchorFile).CombinedOutput(); err != nil {
-		mainLog.Load().Error().Err(err).Msgf("DNS intercept: force reload — failed to load anchor (output: %s)", strings.TrimSpace(string(out)))
-	}
-
-	// Flush stale rdr/reply states after the forced ruleset + anchor reload.
-	// Without this, macOS can keep using pre-reload state and try to send
-	// redirected DNS replies directly from loopback to tunnel client addresses
-	// (for example, 127.0.0.1:<listener> -> 100.64.0.0/10), which fails with
-	// "sendmsg: can't assign requested address".
-	flushPFStates()
-
-	// Reset upstream transports — pf reload/state flush kills existing DoH connections.
+	// A successful main ruleset reload invalidates PF state even if the
+	// subsequent anchor rebuild fails, so retire stale DoH transports now.
 	p.resetUpstreamTransports()
 
+	if result := p.restorePFAnchorWithTransportReset("forced main ruleset reload", false); result != pfAnchorCheckRestored {
+		mainLog.Load().Error().Msg("DNS intercept: force reload — anchor rebuild failed")
+		return false
+	}
+
 	mainLog.Load().Info().Msg("DNS intercept: force reload — pf ruleset and anchor reloaded successfully")
+	return true
 }
 
 // osHealthcheckSuppressed always returns false on darwin — WFP loopback
