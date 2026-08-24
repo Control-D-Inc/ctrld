@@ -87,14 +87,18 @@ func (p *prog) shutdownPlatformFirewall() {
 // initPlatformFirewall initializes Windows-specific firewall enforcement (WFP filters).
 func (p *prog) initPlatformFirewall() {
 	if fwState, ok := p.platformFirewallState.(*wfpFirewallState); ok && fwState != nil {
+		// A reload re-enters here with enforcement already up, to install permits
+		// for permanent entries added since - a newly resolved API address, say -
+		// which AddPermanent records in memory without any callback that would
+		// reach WFP. Both populate calls skip what they already hold, so this is a
+		// refresh rather than a reinstall.
 		fwState.populatePermanentFilters(p)
-		// Both callers gate on platformFirewallState being nil, so nothing reaches
-		// this today. Should something re-initialize enforcement over existing
-		// state, the filter IDs this state holds describe whatever engine session
-		// installed them, which is not necessarily the live one - so ask for a full
-		// replace instead of a delta against a snapshot that may describe filters
-		// that no longer exist. markDestinationsForResync is idempotent and cheap,
-		// and an unnecessary replace is a no-op the mirrors already tolerate.
+		// The filter IDs this state holds describe whatever engine session
+		// installed them, which after a rebuildDNSIntercept is not the live one -
+		// so ask for a full replace instead of a delta against a snapshot that may
+		// describe filters that no longer exist. markDestinationsForResync is
+		// idempotent and cheap, and an unnecessary replace is a no-op the mirrors
+		// already tolerate.
 		p.markDestinationsForResync()
 		p.reconcileAllowedDestinations()
 		fwState.populateFilters(p)

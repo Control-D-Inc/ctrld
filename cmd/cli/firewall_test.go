@@ -619,3 +619,50 @@ func TestAllowedDestinationLogsKeepAddressesOutOfWarnings(t *testing.T) {
 		t.Errorf("the wide entry %q appears in no Debug line", wide)
 	}
 }
+
+// TestFirewallPermanentAllowListPermitsControlDEndpoints is the regression guard
+// for the Windows lockout described on controld.APIEndpointIPs.
+//
+// Firewall Mode learns destinations from queries ctrld's own listener answered.
+// The addresses asserted here are the ones each endpoint falls back to when DNS
+// does not work at all - which is the state a ctrld blocked by its own filters is
+// in - so they are exactly the ones no lookup can ever teach it.
+func TestFirewallPermanentAllowListPermitsControlDEndpoints(t *testing.T) {
+	for _, dev := range []bool{false, true} {
+		t.Run(map[bool]string{false: "prod", true: "dev"}[dev], func(t *testing.T) {
+			origDev := cdDev
+			cdDev = dev
+			t.Cleanup(func() { cdDev = origDev })
+
+			al := firewall.New()
+			p := &prog{cfg: &ctrld.Config{}}
+			p.logger.Store(mainLog.Load())
+			p.initFirewallAllowList(context.Background(), al)
+
+			apiIPs := controld.APIEndpointIPs(dev)
+			if len(apiIPs) == 0 {
+				t.Fatal("no ControlD API addresses to permit")
+			}
+
+			endpoints := map[string][]string{
+				// The API transport's direct addresses.
+				"API": apiIPs,
+				// The upgrade download server's fallback. performUpgrade runs the
+				// download in a detached child process, and WFP's block-all filters
+				// carry no process condition, so the service blocks its own upgrade.
+				"download server": {downloadServerIp},
+			}
+			for what, ips := range endpoints {
+				for _, ipStr := range ips {
+					ip, err := netip.ParseAddr(ipStr)
+					if err != nil {
+						t.Fatalf("the %s address %q does not parse: %v", what, ipStr, err)
+					}
+					if !al.Contains(ip) {
+						t.Errorf("the ControlD %s address %s is not permitted; Firewall Mode would block ctrld's own socket to it", what, ip)
+					}
+				}
+			}
+		})
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -322,38 +323,55 @@ func ParseRawUID(rawUID string) (string, string) {
 	return uid, clientID
 }
 
+// APIDomain returns the ControlD API hostname for the environment.
+func APIDomain(cdDev bool) string {
+	if cdDev {
+		return apiDomainDev
+	}
+	return apiDomainCom
+}
+
+// APIEndpointIPs returns the addresses the API transport dials directly when the
+// hostname cannot be resolved.
+//
+// Exported because Firewall Mode has to permit them: it blocks every destination
+// ctrld did not resolve through its own listener, and the API is resolved through
+// the OS resolver by LookupIP instead, so nothing ever teaches the allowlist about
+// it. Left unpermitted, ctrld's own block-all filters deny its API socket - which
+// is what stranded the 2026-08-16 Windows run with 920 WSAEACCES denials and not
+// one successful configuration refresh in 38 hours.
+func APIEndpointIPs(cdDev bool) []string {
+	if cdDev {
+		return []string{apiDomainDevIPv4}
+	}
+	return []string{apiDomainComIPv4, apiDomainComIPv6}
+}
+
+// apiDirectIPs splits APIEndpointIPs into its IPv4 and IPv6 halves.
+func apiDirectIPs(cdDev bool) (v4, v6 []string) {
+	for _, ip := range APIEndpointIPs(cdDev) {
+		if strings.Contains(ip, ":") {
+			v6 = append(v6, ip)
+		} else {
+			v4 = append(v4, ip)
+		}
+	}
+	return v4, v6
+}
+
 // apiTransport returns an HTTP transport for connecting to ControlD API endpoint.
 func apiTransport(loggerCtx context.Context, cdDev bool) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		apiDomain := apiDomainCom
-		apiIpsV4 := []string{apiDomainComIPv4}
-		apiIpsV6 := []string{apiDomainComIPv6}
-		apiIPs := []string{apiDomainComIPv4, apiDomainComIPv6}
-		if cdDev {
-			apiDomain = apiDomainDev
-			apiIpsV4 = []string{apiDomainDevIPv4}
-			apiIpsV6 = []string{}
-			apiIPs = []string{apiDomainDevIPv4}
-		}
+		apiDomain := APIDomain(cdDev)
+		apiIpsV4, apiIpsV6 := apiDirectIPs(cdDev)
+		apiIPs := APIEndpointIPs(cdDev)
 
 		ips := ctrld.LookupIP(loggerCtx, apiDomain)
 		if len(ips) == 0 {
 			logger := ctrld.LoggerFromCtx(loggerCtx)
 			logger.Warn().Msgf("No ips found for %s, use direct ips: %v", apiDomain, apiIPs)
 			ips = apiIPs
-		}
-
-		// Separate IPv4 and IPv6 addresses
-		// This separation is needed because different network stacks may have different
-		// connectivity to IPv4 vs IPv6, so we try them separately for better reliability
-		var ipv4s, ipv6s []string
-		for _, ip := range ips {
-			if strings.Contains(ip, ":") {
-				ipv6s = append(ipv6s, ip)
-			} else {
-				ipv4s = append(ipv4s, ip)
-			}
 		}
 
 		dial := func(ctx context.Context, network string, addrs []string) (net.Conn, error) {
@@ -363,31 +381,126 @@ func apiTransport(loggerCtx context.Context, cdDev bool) *http.Transport {
 		}
 		_, port, _ := net.SplitHostPort(addr)
 
-		// Try IPv4 first
-		if len(ipv4s) > 0 {
-			if conn, err := dial(ctx, "tcp4", addrsFromPort(ipv4s, port)); err == nil {
+		var attempts []error
+		for _, stage := range apiDialStages(ips, apiIpsV4, apiIpsV6) {
+			conn, err := dial(ctx, stage.network, addrsFromPort(stage.ips, port))
+			if err == nil {
 				return conn, nil
 			}
+			attempts = append(attempts, wrapAttempt(stage.what, err))
 		}
-		// Fallback to direct IPv4
-		if conn, err := dial(ctx, "tcp4", addrsFromPort(apiIpsV4, port)); err == nil {
-			return conn, nil
-		}
-
-		// Fallback to IPv6 if available
-		if len(ipv6s) > 0 {
-			if conn, err := dial(ctx, "tcp6", addrsFromPort(ipv6s, port)); err == nil {
-				return conn, nil
-			}
-		}
-		// Fallback to direct IPv6
-		return dial(ctx, "tcp6", addrsFromPort(apiIpsV6, port))
+		// Every attempt is reported, not just the last one. The stage that
+		// diagnoses a local block is the IPv4 one - on Windows a firewall denying
+		// ctrld's own socket surfaces there as WSAEACCES - while the last stage is
+		// an IPv6 address that is commonly unroutable and fails with a bare "no
+		// route to host". Returning only that turned a self-inflicted block into a
+		// phantom routing problem and sent an incident investigation the wrong way.
+		return nil, joinAttemptErrors(attempts)
 	}
 	if runtime.GOOS == "android" {
 		transport.TLSClientConfig = &tls.Config{RootCAs: certs.CACertPool(), MinVersion: tls.VersionTLS12}
 	}
 	return transport
 }
+
+// apiDialStage is one attempt in the API transport's fallback order.
+type apiDialStage struct {
+	what    string
+	network string
+	ips     []string
+}
+
+// apiDialStages plans the dial order for one API connection: resolved IPv4, the
+// direct IPv4, then the same for IPv6. The families are attempted separately
+// because a host can have working connectivity to one and not the other.
+//
+// Every direct address is always dialed. It is the address that has to work when
+// DNS does not, so it is dropped from its own stage only when it is already in
+// the resolved list and the earlier stage therefore dials it anyway - dialing it
+// twice doubles the failures without adding a chance of success. If resolution
+// returns nothing, or returns addresses that are stale or wrong, the direct
+// stages still carry the full direct list.
+func apiDialStages(resolved, directV4, directV6 []string) []apiDialStage {
+	// Different network stacks may have different connectivity to IPv4 vs IPv6.
+	var ipv4s, ipv6s []string
+	for _, ip := range resolved {
+		if strings.Contains(ip, ":") {
+			ipv6s = append(ipv6s, ip)
+		} else {
+			ipv4s = append(ipv4s, ip)
+		}
+	}
+	stages := []apiDialStage{
+		{"resolved ipv4", "tcp4", ipv4s},
+		{"direct ipv4", "tcp4", notIn(directV4, ipv4s)},
+		{"resolved ipv6", "tcp6", ipv6s},
+		{"direct ipv6", "tcp6", notIn(directV6, ipv6s)},
+	}
+	out := make([]apiDialStage, 0, len(stages))
+	for _, stage := range stages {
+		if len(stage.ips) > 0 {
+			out = append(out, stage)
+		}
+	}
+	return out
+}
+
+// notIn returns the members of ips that are absent from seen.
+//
+// The direct-IP stages exist for when the hostname does not resolve, and LookupIP
+// usually answers with those very addresses, so dialing both lists doubles the
+// failures for no added chance of success.
+func notIn(ips, seen []string) []string {
+	if len(seen) == 0 {
+		return ips
+	}
+	var out []string
+	for _, ip := range ips {
+		if !slices.Contains(seen, ip) {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// wrapAttempt labels one dial attempt's failure with the stage that produced it,
+// so a joined error says which family and which address list failed how.
+func wrapAttempt(what string, err error) error {
+	return fmt.Errorf("%s: %w", what, err)
+}
+
+// joinAttemptErrors combines the dial attempts into one error.
+func joinAttemptErrors(attempts []error) error {
+	switch len(attempts) {
+	case 0:
+		return errors.New("no api address to dial")
+	case 1:
+		return attempts[0]
+	}
+	return &dialAttemptsError{attempts: attempts}
+}
+
+// dialAttemptsError carries every attempt the API dialer made.
+//
+// errors.Join would do the same for errors.Is, but renders one attempt per line,
+// and these end up in a single log record; this keeps them on one line. Unwrap
+// returns all of them, so a caller testing for a specific errno - a local socket
+// denial rather than an unroutable address - finds it wherever in the sequence it
+// happened, not only if it happened last.
+type dialAttemptsError struct {
+	attempts []error
+}
+
+func (e *dialAttemptsError) Error() string {
+	msgs := make([]string, 0, len(e.attempts))
+	for _, err := range e.attempts {
+		msgs = append(msgs, err.Error())
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// Unwrap exposes every attempt to errors.Is and errors.As.
+func (e *dialAttemptsError) Unwrap() []error { return e.attempts }
 
 func addrsFromPort(ips []string, port string) []string {
 	addrs := make([]string, len(ips))

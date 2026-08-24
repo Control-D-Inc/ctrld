@@ -11,6 +11,7 @@ import (
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
 
+	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/firewall"
 )
 
@@ -52,7 +53,7 @@ func (p *prog) setFirewallAllowList(al *firewall.AllowList) {
 //   - CGNAT range (100.64.0.0/10) — used by Tailscale, carrier NAT
 //   - ctrld listener IPs
 //   - DoH/DoT/DoQ upstream resolver IPs
-//   - ControlD API endpoint IPs
+//   - ControlD API and upgrade download server IPs
 func (p *prog) initFirewallAllowList(ctx context.Context, al *firewall.AllowList) {
 	// Loopback.
 	al.AddPermanentPrefix(netip.MustParsePrefix("127.0.0.0/8"))
@@ -83,6 +84,9 @@ func (p *prog) initFirewallAllowList(ctx context.Context, al *firewall.AllowList
 
 	// Upstream resolver IPs — ctrld needs to reach its upstreams.
 	p.addUpstreamIPsToPermanent(al)
+
+	// ControlD API and download IPs — ctrld needs to reach its own control plane.
+	p.addControlDEndpointIPsToPermanent(al)
 
 	// Platform-specific enforcement (pf on macOS, WFP on Windows) is initialized
 	// from postRun() after startDNSIntercept() has prepared dnsInterceptState.
@@ -130,6 +134,7 @@ func (p *prog) syncFirewallMode(ctx context.Context) {
 		}
 	} else {
 		p.addUpstreamIPsToPermanent(al)
+		p.addControlDEndpointIPsToPermanent(al)
 	}
 
 	// Open this run's firewall generation before any work is scheduled against it,
@@ -150,7 +155,14 @@ func (p *prog) syncFirewallMode(ctx context.Context) {
 	// On reload, postRun() is not called, so initialize platform enforcement here
 	// if intercept state already exists. Initial startup still defers to postRun()
 	// because DNS intercept state is prepared there.
-	if p.dnsInterceptState != nil && p.platformFirewallState == nil {
+	//
+	// Called whether or not enforcement is already up, because the permanent adds
+	// above reach memory only: AddPermanent fires no change callback, so a reload
+	// that resolves a new API address would log it as permitted while the platform
+	// never hears about it. Each platform's re-entry is a refresh - Windows
+	// reinstalls the permanent filters it is missing, macOS returns early - so
+	// calling it when enforcement is already up costs nothing and closes that gap.
+	if p.dnsInterceptState != nil {
 		p.initPlatformFirewall()
 	}
 }
@@ -553,6 +565,57 @@ func prefixStrings(prefixes []netip.Prefix) []string {
 		out = append(out, prefix.String())
 	}
 	return out
+}
+
+// addControlDEndpointIPsToPermanent permits the ControlD endpoints ctrld dials on
+// its own behalf. Called at startup and on config reload, like the upstream IPs.
+//
+// Firewall Mode permits what ctrld's listener resolved, and each of these has a
+// hardcoded address it dials when DNS is unusable - which is exactly the state a
+// ctrld blocked by its own filters is in. Nothing teaches the allowlist about
+// those addresses, so the block-all filters deny ctrld's own sockets. See
+// controld.APIEndpointIPs for the incident this comes from.
+func (p *prog) addControlDEndpointIPsToPermanent(al *firewall.AllowList) {
+	// The API. Its transport resolves with ctrld.LookupIP, which queries the OS
+	// nameservers directly rather than through the listener, so neither what it
+	// resolves nor what it falls back to is ever learned - both are permitted here.
+	p.addPermanentIPs(al, "ControlD API", controld.APIEndpointIPs(cdDev))
+	p.addPermanentResolvedIPs(al, "ControlD API", controld.APIDomain(cdDev))
+
+	// The upgrade download server. performUpgrade spawns a detached child process,
+	// which WFP's block-all filters deny exactly like this one: they carry no
+	// process condition. Its hostname lookup does go through the listener and is
+	// learned, so only the direct IP it falls back to needs permitting - and that
+	// fallback is the one an upgrade on a blocked host depends on.
+	p.addPermanentIPs(al, "ControlD download server", []string{downloadServerIp})
+}
+
+// addPermanentIPs permits literal addresses, ignoring any that do not parse.
+func (p *prog) addPermanentIPs(al *firewall.AllowList, what string, ips []string) {
+	for _, ipStr := range ips {
+		if ip, err := netip.ParseAddr(ipStr); err == nil {
+			al.AddPermanent(ip)
+			p.Debug().Msgf("Firewall: added %s IP %s to permanent allowlist", what, ip)
+		}
+	}
+}
+
+// addPermanentResolvedIPs permits whatever domain resolves to right now.
+func (p *prog) addPermanentResolvedIPs(al *firewall.AllowList, what, domain string) {
+	ips, err := net.LookupHost(domain)
+	if err != nil {
+		// Neither fatal nor surprising during early startup, and not a Warn: the
+		// direct addresses are permitted regardless, and they are what the
+		// transport itself falls back to in this same situation.
+		p.Debug().Err(err).Msgf("Firewall: could not resolve %s for the permanent allowlist; its direct IPs are permitted", domain)
+		return
+	}
+	for _, ipStr := range ips {
+		if ip, err := netip.ParseAddr(ipStr); err == nil {
+			al.AddPermanent(ip)
+			p.Debug().Msgf("Firewall: added %s IP %s (%s) to permanent allowlist", what, ip, domain)
+		}
+	}
 }
 
 // extractHostFromEndpoint extracts the hostname or IP from a DoH/DoT/DoQ endpoint URL.
