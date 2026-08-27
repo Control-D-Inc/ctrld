@@ -77,6 +77,16 @@ func isNoConfigStart(cmd *cobra.Command) bool {
 	return false
 }
 
+// cliName is this client's identity: the command name Cobra prints in help and
+// in "--version" output, the file the release pipeline publishes
+// (scripts/build.sh executable_name), and therefore the file the self-upgrader
+// downloads.
+//
+// Referenced rather than repeated because "--version" output is parsed as well as
+// printed: binaryVersion builds its expected prefix from this, and a literal on
+// either side would let a rename break rollback silently.
+const cliName = "ctrld-client"
+
 const rootShortDesc = `
         __         .__       .___
   _____/  |________|  |    __| _/
@@ -96,7 +106,7 @@ func curVersion() string {
 	// Return version directly if it's not empty and not a dev build
 	// This avoids unnecessary commit hash concatenation for release versions
 	if version != "" && version != "dev" {
-		return version
+		return displayVersion(version)
 	}
 	// Truncate commit hash to 7 characters for readability
 	// Git commit hashes are typically 40 characters, but 7 is sufficient for identification
@@ -106,6 +116,28 @@ func curVersion() string {
 	return fmt.Sprintf("%s-%s", version, commit)
 }
 
+// displayVersion converts the build tag into the version the client reports.
+//
+// master carries v2.x.x tags so its releases can be tracked alongside the v1.x.x
+// line still cut from the v1.0 branch, but the client presents itself as v1.x.x:
+// a v2.0.0 tag reads as v1.0.0, v2.3.1 as v1.3.1. Only master ever carries a
+// major >= 2, so the split tag spaces scope this to master by themselves and the
+// binary needs no build-time signal for which branch produced it - the v1.0
+// branch's tags have major 1 and pass through untouched, as does anything that is
+// not a semantic version ("dev", commit-suffixed builds).
+//
+// Minor, patch, prerelease and build metadata are preserved, so a v2.1.0-rc1 tag
+// stays a release candidate at v1.1.0-rc1 and isStableVersion still classifies it
+// the same way.
+func displayVersion(v string) string {
+	sv, err := semver.NewVersion(v)
+	if err != nil || sv.Major() < 2 {
+		return v
+	}
+	shifted := semver.New(sv.Major()-1, sv.Minor(), sv.Patch(), sv.Prerelease(), sv.Metadata())
+	return "v" + shifted.String()
+}
+
 func initCLI() *cobra.Command {
 	// Enable opening via explorer.exe on Windows.
 	// See: https://github.com/spf13/cobra/issues/844.
@@ -113,7 +145,7 @@ func initCLI() *cobra.Command {
 	cobra.EnableCommandSorting = false
 
 	rootCmd := &cobra.Command{
-		Use:     "ctrld",
+		Use:     cliName,
 		Short:   strings.TrimLeft(rootShortDesc, "\n"),
 		Version: appVersion,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -2233,16 +2265,20 @@ func goArm() string {
 	return "5"
 }
 
-// upgradeUrl returns the url for downloading new ctrld binary.
+// upgradeUrl builds the download URL for this platform's binary.
+//
+// The path carries no version segment: the v1 line publishes as "ctrld" and this
+// one as "ctrld-client", so the file name distinguishes them and they can share
+// one path.
 func upgradeUrl(baseUrl string) string {
-	dlPath := fmt.Sprintf("v2/%s-%s/ctrld", runtime.GOOS, runtime.GOARCH)
+	dlPath := fmt.Sprintf("%s-%s/%s", runtime.GOOS, runtime.GOARCH, cliName)
 	// Use arm version set during build time, v5 binary can be run on higher arm version system.
 	if armVersion := goArm(); armVersion != "" {
-		dlPath = fmt.Sprintf("%s-%sv%s/ctrld", runtime.GOOS, runtime.GOARCH, armVersion)
+		dlPath = fmt.Sprintf("%s-%sv%s/%s", runtime.GOOS, runtime.GOARCH, armVersion, cliName)
 	}
 	// linux/amd64 has nocgo version, to support systems that missing some libc (like openwrt).
 	if !cgoEnabled && runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
-		dlPath = fmt.Sprintf("%s-%s-nocgo/ctrld", runtime.GOOS, runtime.GOARCH)
+		dlPath = fmt.Sprintf("%s-%s-nocgo/%s", runtime.GOOS, runtime.GOARCH, cliName)
 	}
 	dlUrl := fmt.Sprintf("%s/%s", baseUrl, dlPath)
 	if runtime.GOOS == "windows" {

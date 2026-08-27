@@ -26,17 +26,17 @@ DNS intercept mode works at a lower level than interface settings:
 
 ```bash
 # Start ctrld with DNS intercept mode (auto-detects VPN search domains)
-ctrld start --intercept-mode dns --cd <resolver-uid>
+ctrld-client start --intercept-mode dns --cd <resolver-uid>
 
 # Hard intercept: all DNS through ctrld, no VPN split routing
-ctrld start --intercept-mode hard --cd <resolver-uid>
+ctrld-client start --intercept-mode hard --cd <resolver-uid>
 
 # Or with a config file
-ctrld start --intercept-mode dns -c /path/to/ctrld.toml
+ctrld-client start --intercept-mode dns -c /path/to/ctrld.toml
 
 # Run in foreground (debug)
-ctrld run --intercept-mode dns --cd <resolver-uid>
-ctrld run --intercept-mode hard --cd <resolver-uid>
+ctrld-client run --intercept-mode dns --cd <resolver-uid>
+ctrld-client run --intercept-mode hard --cd <resolver-uid>
 ```
 
 ### Intercept Modes

@@ -15,7 +15,7 @@ func TestBasicCommandStructure(t *testing.T) {
 	rootCmd := initCLI()
 
 	// Test that root command has basic properties
-	assert.Equal(t, "ctrld", rootCmd.Use)
+	assert.Equal(t, "ctrld-client", rootCmd.Use)
 	assert.NotEmpty(t, rootCmd.Short, "Root command should have a short description")
 
 	// Test that root command has subcommands
@@ -46,14 +46,19 @@ func TestServiceCommandCreation(t *testing.T) {
 	config := sc.createServiceConfig()
 	require.NotNil(t, config, "Service config should be created")
 	assert.Equal(t, ctrldServiceName, config.Name)
-	assert.Equal(t, "Control-D Helper Service", config.DisplayName)
+	assert.Equal(t, ctrldServiceDisplayName, config.DisplayName)
+	// Windows requires service display names to be unique and rejects a second
+	// registration with ERROR_DUPLICATE_SERVICE_NAME. Reusing the v1 service's
+	// display name would make "ctrld-client start" unable to install on hosts
+	// that still have v1 installed, so pin that they stay distinct (#565).
+	assert.NotEqual(t, "Control-D Helper Service", config.DisplayName)
 	assert.Equal(t, "A highly configurable, multi-protocol DNS forwarding proxy", config.Description)
 }
 
 // TestServiceCommandSubCommands tests service command sub commands
 func TestServiceCommandSubCommands(t *testing.T) {
 	rootCmd := &cobra.Command{
-		Use:   "ctrld",
+		Use:   "ctrld-client",
 		Short: "DNS forwarding proxy",
 	}
 

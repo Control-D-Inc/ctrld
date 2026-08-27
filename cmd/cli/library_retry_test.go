@@ -37,7 +37,7 @@ func (rt *denyingRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 
 func TestDoWithRetryPreservesHostnameError(t *testing.T) {
 	const hostname = "dl.controld.dev"
-	req, err := http.NewRequest(http.MethodGet, "https://"+hostname+"/v2/windows-amd64/ctrld.exe", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://"+hostname+"/windows-amd64/ctrld-client.exe", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestDoWithFallbackClassificationEndToEnd(t *testing.T) {
 // and not only in the hand-built shape.
 func TestDoWithRetryComposesHostnameAttemptFirst(t *testing.T) {
 	const hostname = "dl.controld.dev"
-	req, err := http.NewRequest(http.MethodGet, "https://"+hostname+"/v2/windows-amd64/ctrld.exe", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://"+hostname+"/windows-amd64/ctrld-client.exe", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

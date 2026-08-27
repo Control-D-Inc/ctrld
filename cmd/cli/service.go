@@ -41,7 +41,7 @@ type sysV struct {
 }
 
 func (s *sysV) installed() bool {
-	fi, err := os.Stat("/etc/init.d/ctrld")
+	fi, err := os.Stat(sysVInitScript)
 	if err != nil {
 		return false
 	}
@@ -53,7 +53,7 @@ func (s *sysV) Start() error {
 	if !s.installed() {
 		return service.ErrNotInstalled
 	}
-	_, err := exec.Command("/etc/init.d/ctrld", "start").CombinedOutput()
+	_, err := exec.Command(sysVInitScript, "start").CombinedOutput()
 	return err
 }
 
@@ -61,7 +61,7 @@ func (s *sysV) Stop() error {
 	if !s.installed() {
 		return service.ErrNotInstalled
 	}
-	_, err := exec.Command("/etc/init.d/ctrld", "stop").CombinedOutput()
+	_, err := exec.Command(sysVInitScript, "stop").CombinedOutput()
 	return err
 }
 
@@ -89,7 +89,7 @@ type systemd struct {
 }
 
 func (s *systemd) Status() (service.Status, error) {
-	out, _ := exec.Command("systemctl", "status", "ctrld").CombinedOutput()
+	out, _ := exec.Command("systemctl", "status", ctrldServiceName).CombinedOutput()
 	if bytes.Contains(out, []byte("/FAILURE)")) {
 		return service.StatusStopped, nil
 	}
@@ -97,7 +97,6 @@ func (s *systemd) Status() (service.Status, error) {
 }
 
 func (s *systemd) Start() error {
-	const systemdUnitFile = "/etc/systemd/system/ctrld.service"
 	f, err := os.Open(systemdUnitFile)
 	if err != nil {
 		return err
@@ -223,7 +222,7 @@ func checkHasElevatedPrivilege() {
 
 // unixSystemVServiceStatus checks the status of a Unix System V service
 func unixSystemVServiceStatus() (service.Status, error) {
-	out, err := exec.Command("/etc/init.d/ctrld", "status").CombinedOutput()
+	out, err := exec.Command(sysVInitScript, "status").CombinedOutput()
 	if err != nil {
 		return service.StatusUnknown, nil
 	}

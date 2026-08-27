@@ -48,7 +48,23 @@ const (
 	upstreamOS                 = upstreamPrefix + "os"
 	upstreamOSLocal            = upstreamOS + ".local"
 	dnsWatchdogDefaultInterval = 20 * time.Second
-	ctrldServiceName           = "ctrld"
+	ctrldServiceName           = "ctrld-client"
+	// ctrldServiceDisplayName must differ from the v1 service's display name
+	// ("Control-D Helper Service"). Windows requires display names to be unique
+	// across all installed services and fails registration with
+	// ERROR_DUPLICATE_SERVICE_NAME otherwise, so reusing v1's name would make
+	// "ctrld-client start" unable to install on any host that still has the v1
+	// service. It moves with ctrldServiceName: both identify this service.
+	ctrldServiceDisplayName = "Control-D Client Service"
+)
+
+// Service-manager paths derived from ctrldServiceName. Every init system names
+// its unit after the service identifier, so these must move with it: a rename
+// that missed one would leave ctrld managing a unit it no longer installs.
+const (
+	systemdUnitFile  = "/etc/systemd/system/" + ctrldServiceName + ".service"
+	sysVInitScript   = "/etc/init.d/" + ctrldServiceName
+	launchdPlistFile = "/Library/LaunchDaemons/" + ctrldServiceName + ".plist"
 )
 
 // RecoveryReason provides context for why we are waiting for recovery.

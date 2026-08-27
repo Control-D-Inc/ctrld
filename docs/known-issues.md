@@ -14,7 +14,7 @@ This document outlines known issues with ctrld and their current status, workaro
 
 **Workarounds**:
 1. **Recommended**: Upgrade your macOS system to Darwin 15.6 or later, which has been tested and verified to work correctly with ctrld self-upgrade functionality.
-2. **Alternative**: Run `ctrld upgrade prod` directly to manually upgrade ctrld to the latest version on Darwin 15.5.
+2. **Alternative**: Run `ctrld-client upgrade prod` directly to manually upgrade ctrld to the latest version on Darwin 15.5.
 
 **Affected Versions**: ctrld v1.4.2 and later on macOS Darwin 15.5
 

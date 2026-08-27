@@ -217,7 +217,7 @@ Both anchors appended. This is a degenerate case that shouldn't occur in practic
 ### What happens if ctrld crashes (SIGKILL)?
 - pf anchor rules persist in kernel memory
 - DNS is redirected to 127.0.0.1:53 but nothing is listening → DNS breaks
-- On next `ctrld start`, we detect the stale anchor file, flush the anchor, and start fresh
+- On next `ctrld-client start`, we detect the stale anchor file, flush the anchor, and start fresh
 - Without ctrld restart: `sudo pfctl -a com.controld.ctrld -F all` manually clears it
 
 ### What if another program flushes all pf rules?

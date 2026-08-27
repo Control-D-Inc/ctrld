@@ -23,7 +23,7 @@ func NewServiceManager() (*ServiceManager, error) {
 	// Create a proper service configuration
 	svcConfig := &service.Config{
 		Name:        ctrldServiceName,
-		DisplayName: "Control-D Helper Service",
+		DisplayName: ctrldServiceDisplayName,
 		Description: "A highly configurable, multi-protocol DNS forwarding proxy",
 		Option:      service.KeyValue{},
 	}

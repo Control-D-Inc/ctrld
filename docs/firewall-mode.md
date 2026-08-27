@@ -34,7 +34,7 @@ IPs, direct-IP fallbacks, or alternative DNS resolvers to bypass DNS-based filte
 ### CLI Flag
 
 ```bash
-ctrld start --firewall-mode on --intercept-mode hard
+ctrld-client start --firewall-mode on --intercept-mode hard
 ```
 
 ### Remote API

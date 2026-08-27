@@ -97,8 +97,8 @@ System metadata (OS, chassis, username, domain) is sent to the Control D API via
 
 | Scenario | Metadata sent? | Username included? |
 |---|---|---|
-| `ctrld start` with `--cd-org` (provisioning via `cdUIDFromProvToken`) | ✅ Full | ✅ Yes |
-| `ctrld run` startup (config validation / processCDFlags) | ✅ Lightweight | ❌ No |
+| `ctrld-client start` with `--cd-org` (provisioning via `cdUIDFromProvToken`) | ✅ Full | ✅ Yes |
+| `ctrld-client run` startup (config validation / processCDFlags) | ✅ Lightweight | ❌ No |
 | Runtime config reload (`doReloadApiConfig`) | ✅ Lightweight | ❌ No |
 | Runtime self-uninstall check | ✅ Lightweight | ❌ No |
 | Runtime deactivation pin refresh | ✅ Lightweight | ❌ No |

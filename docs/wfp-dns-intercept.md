@@ -452,7 +452,7 @@ nslookup example.com 127.0.0.1
 gpupdate /target:computer /force
 
 # Verify service registration
-sc qc ctrld
+sc qc ctrld-client
 ```
 
 ### Service Verification
@@ -461,10 +461,10 @@ After install, verify the Windows service is correctly registered:
 
 ```powershell
 # Check binary path and start type
-sc qc ctrld
+sc qc ctrld-client
 
 # Should show:
-#   BINARY_PATH_NAME: "C:\...\ctrld.exe" run --cd xxxxx --intercept-mode dns
+#   BINARY_PATH_NAME: "C:\...\ctrld-client.exe" run --cd xxxxx --intercept-mode dns
 #   START_TYPE: AUTO_START
 ```
 

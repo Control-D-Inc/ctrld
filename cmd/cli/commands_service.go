@@ -70,7 +70,7 @@ func NewServiceCommand() *ServiceCommand {
 func (sc *ServiceCommand) createServiceConfig() *service.Config {
 	return &service.Config{
 		Name:        ctrldServiceName,
-		DisplayName: "Control-D Helper Service",
+		DisplayName: ctrldServiceDisplayName,
 		Description: "A highly configurable, multi-protocol DNS forwarding proxy",
 		Option:      service.KeyValue{},
 	}

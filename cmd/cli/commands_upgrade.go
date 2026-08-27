@@ -329,11 +329,11 @@ var binaryVersionFn = binaryVersion
 // answers "can this binary actually run on this host", which is what rollback needs
 // to know before making a file the installed ctrld.
 //
-// On Windows path is ctrld.exe_previous, whose extension is not in PATHEXT. That
+// On Windows path is ctrld-client.exe_previous, whose extension is not in PATHEXT. That
 // resolves because os/exec only falls back to appending PATHEXT entries when the path
 // has no extension at all (lp_windows.go findExecutable): with one present and the
 // file on disk, it is used as-is. A suffix that left no extension - renaming
-// oldBinSuffix such that the result is "ctrld_previous" - would break this probe with
+// oldBinSuffix such that the result is "ctrld-client_previous" - would break this probe with
 // "executable file not found in %PATH%", and rollback would then refuse to restore a
 // perfectly good binary.
 func binaryVersion(path string) (string, error) {
@@ -343,11 +343,30 @@ func binaryVersion(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("running %s --version: %w", path, err)
 	}
-	ver, found := strings.CutPrefix(strings.TrimSpace(string(out)), "ctrld version ")
-	if !found {
+	ver, ok := parseVersionOutput(string(out))
+	if !ok {
 		return "", fmt.Errorf("unexpected --version output from %s: %q", path, strings.TrimSpace(string(out)))
 	}
 	return ver, nil
+}
+
+// parseVersionOutput extracts the version from a binary's "--version" output.
+//
+// The expected prefix is built from cliName, which is also what the root command
+// is named, because Cobra renders "--version" as "<name> version <version>" from
+// that same name. Spelling the prefix out here instead would make a rename of the
+// client silently break this parser - and with it rollback, which refuses to
+// restore a previous binary whose version it cannot read. That failure mode is
+// the worst one this code has: the service is already stopped, so a wrongly
+// rejected previous binary leaves the host with no ctrld enforcement at all.
+func parseVersionOutput(out string) (string, bool) {
+	// Not CutPrefix's own return: on a miss it hands back the whole input, which a
+	// caller that forgot to check the bool would store as if it were a version.
+	ver, ok := strings.CutPrefix(strings.TrimSpace(out), cliName+" version ")
+	if !ok {
+		return "", false
+	}
+	return ver, true
 }
 
 // InitUpgradeCmd creates the upgrade command with proper logic

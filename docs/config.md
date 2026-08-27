@@ -23,7 +23,7 @@ The config file allows for advanced configuration of the `ctrld` utility to cove
 The user can choose to override default value using command line `--config` or `-c`:
 
 ```shell
-ctrld run --config /path/to/myconfig.toml
+ctrld-client run --config /path/to/myconfig.toml
 ```
 
 If no configuration files found, a default `ctrld.toml` file will be created in the current directory.

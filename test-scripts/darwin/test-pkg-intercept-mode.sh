@@ -36,9 +36,9 @@ printf 'launchctl %s\n' "$*" >>"$CALLS"
 exit 0
 EOF
 
-cat >"$bin/ctrld" <<'EOF'
+cat >"$bin/ctrld-client" <<'EOF'
 #!/bin/sh
-printf 'ctrld %s\n' "$*" >>"$CALLS"
+printf 'ctrld-client %s\n' "$*" >>"$CALLS"
 if [ "${FAKE_CTRLD_EXIT:-0}" = "0" ]; then
     case " $* " in
         *" --cd-org="*) : >"$FAKE_PLIST" ;;
@@ -47,7 +47,7 @@ fi
 exit "${FAKE_CTRLD_EXIT:-0}"
 EOF
 
-chmod +x "$bin/defaults" "$bin/launchctl" "$bin/ctrld"
+chmod +x "$bin/defaults" "$bin/launchctl" "$bin/ctrld-client"
 
 assert_contains() {
     expected=$1
@@ -78,7 +78,7 @@ run_case() {
     expected_status=${6:-0}
     case_dir="$fixture/$name"
     mkdir -p "$case_dir"
-    plist="$case_dir/ctrld.plist"
+    plist="$case_dir/ctrld-client.plist"
     prefs="$case_dir/preferences"
     calls="$case_dir/calls"
     output="$case_dir/output"
@@ -89,11 +89,29 @@ run_case() {
     fi
 
     sed \
-        -e "s|^PLIST=\"/Library/LaunchDaemons/ctrld.plist\"$|PLIST=\"$plist\"|" \
-        -e "s|^CTRLD=\"/usr/local/bin/ctrld\"$|CTRLD=\"$bin/ctrld\"|" \
+        -e "s|^PLIST=\"/Library/LaunchDaemons/ctrld-client.plist\"$|PLIST=\"$plist\"|" \
+        -e "s|^CTRLD=\"/usr/local/bin/ctrld-client\"$|CTRLD=\"$bin/ctrld-client\"|" \
         -e "s|^PREFS=\"/Library/Managed Preferences/com.controld.ctrld\"$|PREFS=\"$prefs\"|" \
         "$postinstall_source" >"$postinstall"
     chmod +x "$postinstall"
+
+    # A substitution that stops matching is the dangerous failure here, not a
+    # noisy one: the generated script would keep the real /usr/local/bin and
+    # /Library paths and the case would exercise the installed system instead of
+    # this fixture. Renaming the client once already did exactly that, so check
+    # that every redirection actually landed.
+    for expected in "PLIST=\"$plist\"" "CTRLD=\"$bin/ctrld-client\"" "PREFS=\"$prefs\""; do
+        if ! grep -Fq -- "$expected" "$postinstall"; then
+            printf 'FAIL: %s: fixture substitution did not apply (%s); postinstall paths changed?\n' \
+                "$name" "$expected" >&2
+            exit 1
+        fi
+    done
+    if grep -Eq '^(PLIST|CTRLD|PREFS)="(/Library|/usr/local)' "$postinstall"; then
+        printf 'FAIL: %s: a real system path survived substitution\n' "$name" >&2
+        grep -E '^(PLIST|CTRLD|PREFS)=' "$postinstall" >&2
+        exit 1
+    fi
 
     status=0
     PATH="$bin:$PATH" \
@@ -118,26 +136,26 @@ run_case() {
 assert_not_contains 'CTRLD_POSTINSTALL_' "$postinstall_source"
 
 case_dir=$(run_case fresh-legacy 0 0 '')
-assert_contains 'ctrld start --cd-org=test-token' "$case_dir/calls"
+assert_contains 'ctrld-client start --cd-org=test-token' "$case_dir/calls"
 assert_not_contains '--intercept-mode' "$case_dir/calls"
 
 case_dir=$(run_case fresh-standard 0 1 standard)
-assert_contains 'ctrld start --cd-org=test-token' "$case_dir/calls"
+assert_contains 'ctrld-client start --cd-org=test-token' "$case_dir/calls"
 assert_not_contains '--intercept-mode' "$case_dir/calls"
 
 case_dir=$(run_case fresh-intercept 0 1 intercept-dns)
-assert_contains 'ctrld start --cd-org=test-token --intercept-mode dns' "$case_dir/calls"
+assert_contains 'ctrld-client start --cd-org=test-token --intercept-mode dns' "$case_dir/calls"
 
 case_dir=$(run_case upgrade-legacy 1 0 '')
 assert_contains 'launchctl load' "$case_dir/calls"
-assert_not_contains 'ctrld start' "$case_dir/calls"
+assert_not_contains 'ctrld-client start' "$case_dir/calls"
 
 case_dir=$(run_case upgrade-standard 1 1 standard)
-assert_contains 'ctrld start --intercept-mode off' "$case_dir/calls"
+assert_contains 'ctrld-client start --intercept-mode off' "$case_dir/calls"
 assert_not_contains 'launchctl load' "$case_dir/calls"
 
 case_dir=$(run_case upgrade-intercept 1 1 intercept-dns)
-assert_contains 'ctrld start --intercept-mode dns' "$case_dir/calls"
+assert_contains 'ctrld-client start --intercept-mode dns' "$case_dir/calls"
 assert_not_contains 'launchctl load' "$case_dir/calls"
 
 case_dir=$(run_case fresh-invalid 0 1 invalid)
@@ -147,10 +165,10 @@ assert_not_contains '--intercept-mode' "$case_dir/calls"
 case_dir=$(run_case upgrade-invalid 1 1 invalid)
 assert_contains 'WARNING: unsupported InterceptMode in managed preferences; preserving existing service mode' "$case_dir/output"
 assert_contains 'launchctl load' "$case_dir/calls"
-assert_not_contains 'ctrld start' "$case_dir/calls"
+assert_not_contains 'ctrld-client start' "$case_dir/calls"
 
 case_dir=$(run_case upgrade-standard-failure 1 1 standard 1 1)
-assert_contains 'ctrld start --intercept-mode off' "$case_dir/calls"
+assert_contains 'ctrld-client start --intercept-mode off' "$case_dir/calls"
 assert_contains 'ERROR: upgrade installed but managed InterceptMode could not be applied' "$case_dir/output"
 assert_not_contains 'launchctl load' "$case_dir/calls"
 

@@ -14,11 +14,11 @@ var errServiceFlagsUnsupported = errors.New("modifying service flags is not supp
 // serviceConfigFileExists checks common service config file locations on Linux.
 func serviceConfigFileExists() bool {
 	// systemd unit file
-	if _, err := os.Stat("/etc/systemd/system/ctrld.service"); err == nil {
+	if _, err := os.Stat(systemdUnitFile); err == nil {
 		return true
 	}
 	// SysV init script
-	if _, err := os.Stat("/etc/init.d/ctrld"); err == nil {
+	if _, err := os.Stat(sysVInitScript); err == nil {
 		return true
 	}
 	return false

@@ -6,7 +6,7 @@ import "strings"
 // ImagePath value, which carries the command line rather than a bare path: it may be
 // quoted and is usually followed by arguments, e.g.
 //
-//	"C:\Program Files\Control D\ctrld.exe" run --config C:\...\ctrld.toml
+//	"C:\Program Files\Control D\ctrld-client.exe" run --config C:\...\ctrld.toml
 //
 // It returns "" when no path can be read, which callers must treat as "cannot tell"
 // rather than "does not match".

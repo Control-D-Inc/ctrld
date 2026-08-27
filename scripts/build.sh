@@ -1,7 +1,7 @@
 #!/bin/bash
 
 go=${GOBIN:-go}
-executable_name="ctrld"
+executable_name="ctrld-client"
 os_archs=(
     darwin/arm64
     darwin/amd64

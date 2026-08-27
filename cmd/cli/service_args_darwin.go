@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const launchdPlistPath = "/Library/LaunchDaemons/ctrld.plist"
+const launchdPlistPath = launchdPlistFile
 
 // serviceConfigFileExists returns true if the launchd plist for ctrld exists on disk.
 // This is more reliable than checking launchctl status, which may report "not found"
@@ -23,7 +23,7 @@ func serviceConfigFileExists() bool {
 // service's launch arguments. This is used when upgrading an existing installation
 // to intercept mode without losing the existing --cd flag and other arguments.
 //
-// On macOS, this modifies the launchd plist at /Library/LaunchDaemons/ctrld.plist
+// On macOS, this modifies the launchd plist named after ctrldServiceName
 // using PlistBuddy for exact array reads and writes.
 //
 // The function is idempotent: if the flag already exists, it's a no-op.

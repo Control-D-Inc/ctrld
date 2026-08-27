@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,7 +139,7 @@ func TestRemoveBinaryWithRetry(t *testing.T) {
 
 func TestBinaryVersion(t *testing.T) {
 	t.Run("reports the version", func(t *testing.T) {
-		t.Setenv(envFakeVersionOutput, "ctrld version dev-94fbd3f")
+		t.Setenv(envFakeVersionOutput, cliName+" version dev-94fbd3f")
 		got, err := binaryVersion(os.Args[0])
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -285,5 +287,79 @@ func TestRollbackToPreviousBinaryAbortsWhenStopFails(t *testing.T) {
 	// The executable of a process that may still be running must be left alone.
 	if _, err := os.Stat(bin); err != nil {
 		t.Errorf("binary was modified even though the stop failed: %v", err)
+	}
+}
+
+// TestVersionOutputParsesThroughRollbackProbe ties the "--version" output the root
+// command actually produces to the parser rollback reads it with.
+//
+// These are two halves of one contract that live in different files: Cobra renders
+// "<Use> version <Version>", and binaryVersion cuts a prefix off it. Renaming the
+// client moved the first half; if the second half had kept its literal, every
+// upgrade would have logged "unknown version" and - the part that matters -
+// rollbackToPreviousBinary would have judged a perfectly good previous binary
+// "not usable" and left the host stopped with the broken one installed.
+//
+// The version output is taken from the real root command rather than assembled
+// here, so a future change to the name, the template, or the parser has to keep
+// them agreeing.
+func TestVersionOutputParsesThroughRollbackProbe(t *testing.T) {
+	rootCmd := initCLI()
+	rootCmd.SetVersionTemplate(rootCmd.VersionTemplate())
+
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetArgs([]string{"--version"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("running --version: %v", err)
+	}
+
+	got := out.String()
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("--version produced no output")
+	}
+	ver, ok := parseVersionOutput(got)
+	if !ok {
+		t.Fatalf("the version probe cannot parse the root command's own --version output %q; "+
+			"rollback would reject a working previous binary as unusable", strings.TrimSpace(got))
+	}
+	if ver != appVersion {
+		t.Errorf("parsed version = %q, want %q", ver, appVersion)
+	}
+}
+
+// TestParseVersionOutput covers the shapes the probe must accept and reject. The
+// rejected ones are what a genuinely broken previous binary produces - the
+// incident's ctrld.exe_previous printed nothing at all - and rollback depends on
+// telling those apart from a healthy binary under a new name.
+func TestParseVersionOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want string
+		ok   bool
+	}{
+		{"current identity", cliName + " version v1.0.0", "v1.0.0", true},
+		{"trailing newline", cliName + " version v1.0.0\n", "v1.0.0", true},
+		{"dev build", cliName + " version dev-94fbd3f", "dev-94fbd3f", true},
+		// The pre-rename identity: a v1-line binary is not a valid rollback target
+		// for this client, and must not be read as one.
+		{"previous identity", "ctrld version v1.3.5", "", false},
+		{"no output", "", "", false},
+		{"unrelated output", "some other program", "", false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := parseVersionOutput(tc.out)
+			if ok != tc.ok {
+				t.Fatalf("parseVersionOutput(%q) ok = %v, want %v", tc.out, ok, tc.ok)
+			}
+			if got != tc.want {
+				t.Errorf("parseVersionOutput(%q) = %q, want %q", tc.out, got, tc.want)
+			}
+		})
 	}
 }

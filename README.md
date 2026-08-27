@@ -44,12 +44,12 @@ There are several ways to download and install `ctrld`.
 The simplest way to download and install `ctrld` is to use the following installer command on any UNIX-like platform:
 
 ```shell
-sh -c 'sh -c "$(curl -sL https://api.controld.com/dl?version=2)"'
+sh -c 'sh -c "$(curl -sL https://api.controld.com/dl?version=client)"'
 ```
 
 Windows user and prefer Powershell (who doesn't)? No problem, execute this command instead in administrative PowerShell:
 ```shell
-(Invoke-WebRequest -Uri 'https://api.controld.com/dl/ps1?version=2' -UseBasicParsing).Content | Set-Content "$env:TEMP\ctrld_install.ps1"; Invoke-Expression "& '$env:TEMP\ctrld_install.ps1'"
+(Invoke-WebRequest -Uri 'https://api.controld.com/dl/ps1?version=client' -UseBasicParsing).Content | Set-Content "$env:TEMP\ctrld_install.ps1"; Invoke-Expression "& '$env:TEMP\ctrld_install.ps1'"
 ```
 
 Or you can pull and run a Docker container from [Docker Hub](https://hub.docker.com/r/controldns/ctrld)
@@ -93,7 +93,7 @@ _/ ___\   __\_  __ \  |   / __ |
      \/ dns forwarding proxy  \/
 
 Usage:
-  ctrld [command]
+  ctrld-client [command]
 
 Available Commands:
   run         Run the DNS proxy server
@@ -109,12 +109,12 @@ Available Commands:
   log         Manage runtime debug logs
 
 Flags:
-  -h, --help            help for ctrld
+  -h, --help            help for ctrld-client
   -s, --silent          do not write any log output
   -v, --verbose count   verbose log output, "-v" basic logging, "-vv" debug logging
-      --version         version for ctrld
+      --version         version for ctrld-client
 
-Use "ctrld [command] --help" for more information about a command.
+Use "ctrld-client [command] --help" for more information about a command.
 ```
 
 ## Basic Run Mode
@@ -124,12 +124,12 @@ This is the most basic way to run `ctrld`, in foreground mode. Unless you alread
 
 Windows (Admin Shell)
   ```shell
-  ctrld.exe run
+  ctrld-client.exe run
   ```
 
 Linux or Macos
   ```shell
-  sudo ctrld run
+  sudo ctrld-client run
   ```
 
 You can then run a test query using a DNS client, for example, `dig`:
@@ -148,17 +148,17 @@ This mode will run the application as a background system service on any Windows
 
 Windows (Admin Shell)
   ```shell
-  ctrld.exe start
+  ctrld-client.exe start
   ```
 
 Linux or Macos
   ```
-  sudo ctrld start
+  sudo ctrld-client start
   ```
 
-If `ctrld` is not in your system path (you installed it manually), you will need to run the above commands from the directory where you installed `ctrld`. 
+If `ctrld-client` is not in your system path (you installed it manually), you will need to run the above commands from the directory where you installed it. 
 
-In order to stop the service, and restore your DNS to original state, simply run `ctrld stop`. If you wish to stop and uninstall the service permanently, run `ctrld uninstall`. 
+In order to stop the service, and restore your DNS to original state, simply run `ctrld-client stop`. If you wish to stop and uninstall the service permanently, run `ctrld-client uninstall`. 
 
 ## Unmanaged Service Mode
 This mode functions similarly to the "Service Mode" above except it will simply start a system service and the config defined listeners, but **will not make any changes to any network interfaces**. You can then set the `ctrld` listener(s) IP on the desired network interfaces manually. 
@@ -167,12 +167,12 @@ This mode functions similarly to the "Service Mode" above except it will simply 
 
 Windows (Admin Shell)
   ```shell
-  ctrld.exe service start
+  ctrld-client.exe service start
   ```
 
 Linux or Macos
   ```shell
-  sudo ctrld service start
+  sudo ctrld-client service start
   ```
 
 ## Configuration
@@ -185,12 +185,12 @@ The following command will use your own personal Control D Device resolver, and 
 
 Windows (Admin Shell)
 ```shell
-ctrld.exe start --cd abcd1234
+ctrld-client.exe start --cd abcd1234
 ```
 
 Linux or Macos
 ```shell
-sudo ctrld start --cd abcd1234
+sudo ctrld-client start --cd abcd1234
 ```
 
 Once you run the above command, the following things will happen:
@@ -236,7 +236,7 @@ If you're unable to use a config file, `ctrld` can be be supplied with basic con
 
 ### Example
 ```
-ctrld run --listen=127.0.0.1:53 --primary_upstream=https://freedns.controld.com/p2 --secondary_upstream=10.0.10.1:53 --domains=*.company.int,very-secure.local --log /path/to/log.log
+ctrld-client run --listen=127.0.0.1:53 --primary_upstream=https://freedns.controld.com/p2 --secondary_upstream=10.0.10.1:53 --domains=*.company.int,very-secure.local --log /path/to/log.log
 ```
 
 The above will start a foreground process and:
@@ -260,12 +260,12 @@ Enable DNS Intercept Mode if you:
 
 Windows (Admin Shell)
 ```shell
-ctrld.exe start --intercept-mode dns --cd RESOLVER_ID_HERE
+ctrld-client.exe start --intercept-mode dns --cd RESOLVER_ID_HERE
 ```
 
 macOS
 ```shell
-sudo ctrld start --intercept-mode dns --cd RESOLVER_ID_HERE
+sudo ctrld-client start --intercept-mode dns --cd RESOLVER_ID_HERE
 ```
 
 `--intercept-mode dns` automatically detects VPN internal domains and routes them to the VPN's DNS server, while Control D handles everything else.
@@ -274,12 +274,12 @@ To disable intercept mode on a service that already has it enabled:
 
 Windows (Admin Shell)
 ```shell
-ctrld.exe start --intercept-mode off
+ctrld-client.exe start --intercept-mode off
 ```
 
 macOS
 ```shell
-sudo ctrld start --intercept-mode off
+sudo ctrld-client start --intercept-mode off
 ```
 
 This removes the intercept rules and reverts to standard interface-based DNS configuration.
