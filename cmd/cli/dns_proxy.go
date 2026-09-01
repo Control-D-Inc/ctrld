@@ -2074,8 +2074,9 @@ func (p *prog) debounceRecovery() {
 func (p *prog) handleRecovery(reason RecoveryReason) {
 	p.Debug().Msg("Starting recovery process: removing DNS settings")
 
-	// Handle recovery cancellation based on reason
-	if !p.shouldStartRecovery(reason) {
+	recoveryCtx, gen, interceptRecovery, ok := p.beginRecovery(reason)
+	if !ok {
+		p.Debug().Msg("Upstream recovery already in progress; skipping duplicate trigger")
 		return
 	}
 
@@ -2096,87 +2097,44 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 		p.Info().Msg("Force-reset upstream transports for network change recovery")
 	}
 
-	// Create recovery context and cleanup function
-	recoveryCtx, cleanup := p.createRecoveryContext()
-	defer cleanup()
-
-	// Remove DNS settings and prepare for recovery
-	if err := p.prepareForRecovery(reason); err != nil {
+	if err := p.prepareForRecovery(reason, interceptRecovery); err != nil {
 		p.Error().Err(err).Msg("Failed to prepare for recovery")
+		p.recoveryCanceledCleanup(gen)
 		return
 	}
 
-	// Build upstream map based on the recovery reason
 	upstreams := p.buildRecoveryUpstreams(reason)
-
-	// Wait for upstream recovery
 	recovered, err := p.waitForUpstreamRecovery(recoveryCtx, upstreams)
 	if err != nil {
 		p.Error().Err(err).Msg("Recovery failed; DNS settings remain removed")
+		p.recoveryCanceledCleanup(gen)
+		return
+	}
+	if !p.recoveryOwnsState(gen) {
+		p.Debug().Msgf("Recovery generation %d was superseded after upstream success; skipping stale completion", gen)
 		return
 	}
 
-	// Complete recovery process
-	if err := p.completeRecovery(reason, recovered); err != nil {
+	if err := p.completeRecoveryWork(reason, recovered, interceptRecovery); err != nil {
 		p.Error().Err(err).Msg("Failed to complete recovery")
+		p.recoveryCanceledCleanup(gen)
+		return
+	}
+	if !p.completeRecoveryState(gen) {
+		p.Debug().Msgf("Recovery generation %d was superseded during completion; preserving successor state", gen)
 		return
 	}
 
 	p.Info().Msgf("Recovery completed successfully for upstream %q", recovered)
 }
 
-// shouldStartRecovery determines if recovery should start based on the reason and current state.
-// Returns true if recovery should proceed, false otherwise.
-func (p *prog) shouldStartRecovery(reason RecoveryReason) bool {
-	p.recoveryCancelMu.Lock()
-	defer p.recoveryCancelMu.Unlock()
-
-	if reason == RecoveryReasonNetworkChange {
-		// For network changes, cancel any existing recovery check because the network state has changed.
-		if p.recoveryCancel != nil {
-			p.Debug().Msg("Cancelling existing recovery check (network change)")
-			p.recoveryCancel()
-			p.recoveryCancel = nil
-		}
-		return true
-	}
-
-	// For upstream failures, if a recovery is already in progress, do nothing new.
-	if p.recoveryCancel != nil {
-		p.Debug().Msg("Upstream recovery already in progress; skipping duplicate trigger")
-		return false
-	}
-
-	return true
-}
-
-// createRecoveryContext creates a new recovery context and returns it along with a cleanup function.
-func (p *prog) createRecoveryContext() (context.Context, func()) {
-	p.recoveryCancelMu.Lock()
-	recoveryCtx, cancel := context.WithCancel(context.Background())
-	p.recoveryCancel = cancel
-	p.recoveryCancelMu.Unlock()
-
-	cleanup := func() {
-		p.recoveryCancelMu.Lock()
-		p.recoveryCancel = nil
-		p.recoveryCancelMu.Unlock()
-	}
-
-	return recoveryCtx, cleanup
-}
-
 // prepareForRecovery removes DNS settings and initializes OS resolver if needed.
-func (p *prog) prepareForRecovery(reason RecoveryReason) error {
-	// Set recoveryRunning to true to prevent watchdogs from putting the listener back on the interface
-	p.recoveryRunning.Store(true)
-
+func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool) error {
 	// In DNS intercept mode, don't tear down WFP/pf filters.
 	// Instead, enable recovery bypass so proxy() forwards queries to
 	// the OS/DHCP resolver. This handles captive portal authentication
 	// without the overhead of filter teardown/rebuild.
-	if dnsIntercept && p.dnsInterceptState != nil {
-		p.recoveryBypass.Store(true)
+	if interceptRecovery {
 		p.Info().Msg("DNS intercept recovery: enabling DHCP bypass (filters stay active)")
 
 		// Reinitialize OS resolver to discover DHCP servers on the new network.
@@ -2184,12 +2142,14 @@ func (p *prog) prepareForRecovery(reason RecoveryReason) error {
 		// to resolve the auth page.
 		p.Debug().Msg("DNS intercept recovery: discovering DHCP nameservers")
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-		dhcpServers := ctrld.InitializeOsResolver(loggerCtx, true)
+		dhcpServers, systemNameservers := initializeOsResolverWithSystemNameserversFn(loggerCtx, true)
 		if len(dhcpServers) == 0 {
 			p.Warn().Msg("DNS intercept recovery: no DHCP nameservers found")
 		} else {
 			p.Info().Msgf("DNS intercept recovery: found DHCP nameservers: %v", dhcpServers)
 		}
+
+		ensureInterceptDNSTargetFn(p, systemNameservers)
 
 		// Exempt DHCP nameservers from intercept filters so the OS resolver
 		// can actually reach them on port 53. Without this, the WFP block
@@ -2242,52 +2202,37 @@ func (p *prog) reinitializeOSResolver(message string) error {
 	return nil
 }
 
-// completeRecovery completes the recovery process by resetting upstream state and reapplying DNS settings.
-func (p *prog) completeRecovery(reason RecoveryReason, recovered string) error {
-	// Reset the upstream failure count and down state
+// completeRecoveryWork performs owner-specific recovery work. Shared recovery
+// flags are released separately by completeRecoveryState under the ownership lock.
+func (p *prog) completeRecoveryWork(reason RecoveryReason, recovered string, interceptRecovery bool) error {
 	p.um.reset(recovered)
 
-	// In DNS intercept mode, just disable the bypass — filters are still active.
-	if dnsIntercept && p.dnsInterceptState != nil {
-		// Always reset recoveryRunning, even on error paths below.
-		defer p.recoveryRunning.Store(false)
-
-		p.recoveryBypass.Store(false)
-		p.Info().Msg("DNS intercept recovery complete: disabling DHCP bypass, resuming normal flow")
-
+	if interceptRecovery {
 		// Refresh VPN DNS routes in case VPN state changed during recovery.
-		// This also re-exempts VPN DNS servers (which may have changed) and
-		// removes any DHCP exemptions that were added during recovery.
 		if p.vpnDNS != nil {
 			p.vpnDNS.Refresh(ctrld.LoggerCtx(context.Background(), p.logger.Load()), true)
 		}
-
-		// Reinitialize OS resolver for the recovered state.
 		if reason == RecoveryReasonNetworkChange {
 			if err := p.reinitializeOSResolver("Network change detected during recovery"); err != nil {
 				return fmt.Errorf("failed to reinitialize OS resolver during network change: %w", err)
 			}
 		}
-
 		return nil
 	}
 
-	// Traditional flow: reapply DNS settings.
-
-	// For network changes we also reinitialize the OS resolver.
-	if reason == RecoveryReasonNetworkChange {
+	var systemNameservers []string
+	if dnsIntercept {
+		// Intercept was requested but was not active when recovery began. A
+		// retry must use a completed raw discovery result, never nil.
+		systemNameservers = p.systemNameserversForInterceptRetry()
+	} else if reason == RecoveryReasonNetworkChange {
 		if err := p.reinitializeOSResolver("Network change detected during recovery"); err != nil {
 			return fmt.Errorf("failed to reinitialize OS resolver during network change: %w", err)
 		}
 	}
 
-	// Apply our DNS settings back and log the interface state.
-	p.setDNS()
+	p.setDNS(systemNameservers)
 	p.logInterfacesState()
-
-	// Allow watchdogs to put the listener back on the interface if it's changed for any reason
-	p.recoveryRunning.Store(false)
-
 	return nil
 }
 
@@ -2366,7 +2311,15 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 
 	var recovered string
 	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+	}
+	select {
 	case recovered = <-recoveredCh:
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}

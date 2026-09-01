@@ -145,6 +145,7 @@ type prog struct {
 	recoveryCancelMu sync.Mutex
 	recoveryCancel   context.CancelFunc
 	recoveryRunning  atomic.Bool
+	recoveryGen      atomic.Uint64
 
 	// recoveryDebounceTimer coalesces rapid NetworkChange recovery triggers
 	// into a single handleRecovery call. Only handleRecovery is debounced —
@@ -156,6 +157,14 @@ type prog struct {
 	// instead of the configured upstreams. This allows captive portal
 	// authentication without tearing down WFP/pf filters.
 	recoveryBypass atomic.Bool
+
+	// interceptDNSTargetService names the macOS network service on which
+	// ctrld set a temporary DNS target; interceptDNSTargetSetValue records the
+	// exact value. Both are guarded by interceptDNSTargetMu.
+	interceptDNSTargetMu       sync.Mutex //lint:ignore U1000 used on darwin
+	interceptDNSTargetService  string     //lint:ignore U1000 used on darwin
+	interceptDNSTargetSetValue string     //lint:ignore U1000 used on darwin
+	interceptDNSTargetLoaded   bool       //lint:ignore U1000 used on darwin
 
 	// DNS intercept mode state (platform-specific).
 	// On Windows: *wfpState, on macOS: *pfState, nil on other platforms.
@@ -481,9 +490,10 @@ func (p *prog) postRun() {
 		if !p.skipInitialDNSReset() {
 			p.resetDNS(false, false)
 		}
-		ns := ctrld.InitializeOsResolver(ctrld.LoggerCtx(context.Background(), p.logger.Load()), false)
+		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
+		ns, systemNameservers := initializeOsResolverWithSystemNameserversFn(loggerCtx, false)
 		p.Debug().Msgf("Initialized os resolver with nameservers: %v", ns)
-		p.setDNS()
+		p.setDNS(systemNameservers)
 		if p.allowList != nil {
 			p.initPlatformFirewall()
 		}
@@ -958,10 +968,13 @@ func (p *prog) deAllocateIP() error {
 // NRPT rule, so a test of what happens *after* it fails must not be the thing that
 // runs it.
 var (
-	startDNSInterceptFn     = (*prog).startDNSIntercept
-	setDnsForRunningIfaceFn = (*prog).setDnsForRunningIface
-	resetDNSFn              = (*prog).resetDNS
-	refuseFallbackFatal     = func(format string, v ...any) {
+	startDNSInterceptFn                         = (*prog).startDNSIntercept
+	ensureInterceptDNSTargetFn                  = (*prog).ensureInterceptDNSTarget
+	removeInterceptDNSTargetFn                  = (*prog).removeInterceptDNSTarget
+	initializeOsResolverWithSystemNameserversFn = ctrld.InitializeOsResolverWithSystemNameservers
+	setDnsForRunningIfaceFn                     = (*prog).setDnsForRunningIface
+	resetDNSFn                                  = (*prog).resetDNS
+	refuseFallbackFatal                         = func(format string, v ...any) {
 		mainLog.Load().Fatal().Msgf(format, v...)
 	}
 )
@@ -983,7 +996,7 @@ func interfaceDNSFallbackViable(lc *ctrld.ListenerConfig) bool {
 	return lc == nil || lc.Port == 0 || lc.Port == 53
 }
 
-func (p *prog) setDNS() {
+func (p *prog) setDNS(systemNameservers []string) {
 	setDnsOK := false
 	defer func() {
 		p.csSetDnsOk = setDnsOK
@@ -1017,6 +1030,7 @@ func (p *prog) setDNS() {
 	// software that also manages DNS. See issue #489.
 	if dnsIntercept {
 		if err := startDNSInterceptFn(p); err != nil {
+			removeInterceptDNSTargetFn(p, "DNS intercept unavailable")
 			// An external GP catch-all still owns the namespace even when its probe
 			// fails. In either external-owner state, rewriting adapter DNS would violate
 			// the policy that startup deliberately preserved. Only the verified case has
@@ -1056,6 +1070,7 @@ func (p *prog) setDNS() {
 			p.Error().Err(err).Msg("DNS intercept mode failed — falling back to interface DNS settings")
 			// Fall through to traditional setDNS behavior.
 		} else {
+			ensureInterceptDNSTargetFn(p, systemNameservers)
 			if hardIntercept {
 				p.Info().Msg("Hard intercept mode active — all DNS through ctrld, no VPN split routing")
 			} else {
@@ -1072,6 +1087,9 @@ func (p *prog) setDNS() {
 			setDnsOK = true
 			return
 		}
+	}
+	if !dnsIntercept {
+		removeInterceptDNSTargetFn(p, "intercept mode inactive")
 	}
 
 	if cfg.Listener == nil {
@@ -1305,6 +1323,7 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 // resetDNS performs a DNS reset for all interfaces.
 // In DNS intercept mode, this tears down the WFP/pf filters instead.
 func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
+	removeInterceptDNSTargetFn(p, "DNS reset")
 	if dnsIntercept && p.dnsInterceptState != nil {
 		if err := p.stopDNSIntercept(); err != nil {
 			p.Error().Err(err).Msg("Failed to stop DNS intercept mode during reset")

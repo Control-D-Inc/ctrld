@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"os/exec"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -89,24 +88,29 @@ func getDNSFromScutil(ctx context.Context) []string {
 }
 
 func getDHCPNameservers(iface string) ([]string, error) {
-	// Run the ipconfig command for the given interface.
-	cmd := exec.Command("ipconfig", "getpacket", iface)
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("error running ipconfig: %v", err)
+	// getoption returns the selected interface's DHCP option directly and does
+	// not expose unrelated packet addresses to the parser.
+	output, err := exec.Command("ipconfig", "getoption", iface, "domain_name_server").Output()
+	if err == nil {
+		return parseDHCPOptionNameservers(output), nil
 	}
 
-	// Look for a line like:
-	//     domain_name_servers = 192.168.1.1 8.8.8.8;
-	re := regexp.MustCompile(`domain_name_servers\s*=\s*(.*);`)
-	matches := re.FindStringSubmatch(string(output))
-	if len(matches) < 2 {
-		return nil, fmt.Errorf("no DHCP nameservers found")
+	// Older macOS releases can fail getoption while still exposing the packet.
+	// Parse the real macOS field shape, for example:
+	//     domain_name_server (ip_mult): {192.168.1.1, 8.8.8.8}
+	output, packetErr := exec.Command("ipconfig", "getpacket", iface).Output()
+	if packetErr != nil {
+		if err != nil {
+			return nil, fmt.Errorf("error reading DHCP DNS option: getoption: %v; getpacket: %v", err, packetErr)
+		}
+		return nil, fmt.Errorf("error reading DHCP packet: %v", packetErr)
 	}
+	return parseDHCPPacketNameservers(output), nil
+}
 
-	// Split the nameservers by whitespace.
-	nameservers := strings.Fields(matches[1])
-	return nameservers, nil
+// DHCPNameserversForInterface returns DHCP option 6 for exactly iface.
+func DHCPNameserversForInterface(iface string) ([]string, error) {
+	return getDHCPNameservers(iface)
 }
 
 func getAllDHCPNameservers(ctx context.Context) []string {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 
@@ -81,9 +82,12 @@ func TestInterfaceDNSFallbackViable(t *testing.T) {
 // than depending on the runner denying a privileged operation.
 type interceptFallbackHarness struct {
 	interceptCalls       int
+	ensureTargetCalls    int
+	ensuredNameservers   []string
 	installedNameservers []string
 	installCalls         int
 	resetCalls           int
+	removeTargetCalls    int
 	refusals             []string
 }
 
@@ -91,11 +95,11 @@ func newInterceptFallbackHarness(t *testing.T, lc *ctrld.ListenerConfig) *interc
 	t.Helper()
 	h := &interceptFallbackHarness{}
 
-	origStart, origInstall := startDNSInterceptFn, setDnsForRunningIfaceFn
+	origStart, origEnsure, origRemove, origInstall := startDNSInterceptFn, ensureInterceptDNSTargetFn, removeInterceptDNSTargetFn, setDnsForRunningIfaceFn
 	origReset, origFatal := resetDNSFn, refuseFallbackFatal
 	origCfg, origMode, origIntercept, origHard := cfg, interceptMode, dnsIntercept, hardIntercept
 	t.Cleanup(func() {
-		startDNSInterceptFn, setDnsForRunningIfaceFn = origStart, origInstall
+		startDNSInterceptFn, ensureInterceptDNSTargetFn, removeInterceptDNSTargetFn, setDnsForRunningIfaceFn = origStart, origEnsure, origRemove, origInstall
 		resetDNSFn, refuseFallbackFatal = origReset, origFatal
 		cfg, interceptMode, dnsIntercept, hardIntercept = origCfg, origMode, origIntercept, origHard
 	})
@@ -106,6 +110,11 @@ func newInterceptFallbackHarness(t *testing.T, lc *ctrld.ListenerConfig) *interc
 		h.interceptCalls++
 		return errors.New("dns intercept: injected start failure")
 	}
+	ensureInterceptDNSTargetFn = func(_ *prog, nameservers []string) {
+		h.ensureTargetCalls++
+		h.ensuredNameservers = slices.Clone(nameservers)
+	}
+	removeInterceptDNSTargetFn = func(_ *prog, _ string) { h.removeTargetCalls++ }
 	setDnsForRunningIfaceFn = func(_ *prog, nameservers []string) *net.Interface {
 		h.installCalls++
 		h.installedNameservers = nameservers
@@ -129,7 +138,29 @@ func (h *interceptFallbackHarness) run(t *testing.T) {
 	t.Helper()
 	p := &prog{cfg: &cfg}
 	p.logger.Store(mainLog.Load())
-	p.setDNS()
+	p.setDNS(nil)
+}
+
+func TestSetDNSEnsuresInterceptTargetAfterSuccessfulStart(t *testing.T) {
+	h := newInterceptFallbackHarness(t, &ctrld.ListenerConfig{IP: "127.0.0.1", Port: 5354})
+	startDNSInterceptFn = func(_ *prog) error {
+		h.interceptCalls++
+		return nil
+	}
+	want := []string{"fe80::1"}
+	p := &prog{cfg: &cfg}
+	p.logger.Store(mainLog.Load())
+	p.setDNS(want)
+
+	if h.interceptCalls != 1 || h.ensureTargetCalls != 1 {
+		t.Fatalf("intercept calls=%d ensure calls=%d, want 1 each", h.interceptCalls, h.ensureTargetCalls)
+	}
+	if !slices.Equal(h.ensuredNameservers, want) {
+		t.Fatalf("system nameservers = %v, want %v", h.ensuredNameservers, want)
+	}
+	if h.installCalls != 0 {
+		t.Fatalf("interface-DNS fallback installed %d time(s) after successful intercept start", h.installCalls)
+	}
 }
 
 func TestSetDNSExplicitOffOverridesConfig(t *testing.T) {
@@ -145,6 +176,9 @@ func TestSetDNSExplicitOffOverridesConfig(t *testing.T) {
 	}
 	if h.installCalls != 1 {
 		t.Fatalf("interface DNS installed %d time(s), want 1", h.installCalls)
+	}
+	if h.removeTargetCalls != 1 {
+		t.Fatalf("stale intercept DNS target cleanup called %d time(s), want 1", h.removeTargetCalls)
 	}
 }
 
@@ -167,6 +201,9 @@ func TestSetDNSRefusesUnreachableFallback(t *testing.T) {
 		}
 		if h.resetCalls == 0 {
 			t.Error("host DNS was not restored before refusing, leaving the interface pointed at a ctrld that is not serving")
+		}
+		if h.removeTargetCalls != 1 {
+			t.Errorf("stale intercept DNS target cleanup called %d time(s), want 1 after intercept failure", h.removeTargetCalls)
 		}
 		if len(h.refusals) == 0 {
 			t.Fatal("refusal was not surfaced: startup must fail loudly rather than silently skip the fallback")

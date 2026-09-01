@@ -528,6 +528,11 @@ func (p *prog) checkAnchorOrdering(filterLines []string, ourAnchorRef string) {
 
 // stopDNSIntercept removes all pf rules and cleans up the DNS interception.
 func (p *prog) stopDNSIntercept() error {
+	// Remove a loopback DNS target set for a DNS-less network (issue #533)
+	// before tearing down pf, so the service is returned to its saved or
+	// empty DNS state.
+	p.removeInterceptDNSTarget("intercept shutdown")
+
 	state, ok := p.dnsInterceptState.(*pfState)
 	if !ok || state == nil {
 		mainLog.Load().Debug().Msg("DNS intercept: no pf state to clean up")
@@ -1733,6 +1738,11 @@ func (p *prog) pfWatchdog() {
 				mainLog.Load().Debug().Msg("DNS intercept: pf watchdog exiting — intercept state is nil")
 				return
 			}
+
+			// Reconcile the temporary service DNS target even when macOS emits no
+			// major network delta. This converges both DHCP-return cleanup and a
+			// later return to a DNS-less network.
+			ensureInterceptDNSTargetFn(p, []string{})
 
 			result := p.ensurePFAnchorActive()
 			if result == pfAnchorCheckIntact {

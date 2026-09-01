@@ -392,6 +392,31 @@ func Test_osResolver_ResolveWithNonSuccessAnswer(t *testing.T) {
 	}
 }
 
+func TestOSResolverNameserverSetsKeepsSyntheticFallbackOutOfSystemDiscovery(t *testing.T) {
+	system := []string{"fe80::1"}
+	effective, discovered, skip := osResolverNameserverSets(system, false)
+	if skip {
+		t.Fatal("non-empty discovery unexpectedly skipped resolver replacement")
+	}
+
+	if len(discovered) != 1 || discovered[0] != system[0] {
+		t.Fatalf("discovered nameservers = %v, want raw system list %v", discovered, system)
+	}
+	if len(effective) != 2 || effective[0] != "[fe80::1]:53" || effective[1] != controldPublicDnsWithPort {
+		t.Fatalf("effective nameservers = %v, want IPv6 system resolver plus synthetic fallback", effective)
+	}
+}
+
+func TestOSResolverNameserverSetsHonorsEmptyGuard(t *testing.T) {
+	effective, discovered, skip := osResolverNameserverSets(nil, true)
+	if len(effective) != 0 || len(discovered) != 0 {
+		t.Fatalf("guarded empty discovery returned effective=%v discovered=%v", effective, discovered)
+	}
+	if !skip {
+		t.Fatal("guarded empty discovery did not return the skip decision")
+	}
+}
+
 func Test_osResolver_InitializationRace(t *testing.T) {
 	var wg sync.WaitGroup
 	n := 10

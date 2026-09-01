@@ -115,17 +115,37 @@ func availableNameservers(ctx context.Context) []string {
 // It's the caller's responsibility to ensure the system DNS is in a clean state before
 // calling this function.
 func InitializeOsResolver(ctx context.Context, guardAgainstNoNameservers bool) []string {
+	ns, _ := InitializeOsResolverWithSystemNameservers(ctx, guardAgainstNoNameservers)
+	return ns
+}
+
+// InitializeOsResolverWithSystemNameservers initializes the OS resolver and
+// returns both the effective resolver list and the unmodified nameservers
+// discovered from the system. The latter deliberately excludes synthetic
+// fallbacks added by initializeOsResolver.
+func InitializeOsResolverWithSystemNameservers(ctx context.Context, guardAgainstNoNameservers bool) (effective, system []string) {
 	resolverMutex.Lock()
 	defer resolverMutex.Unlock()
 
-	nameservers := availableNameservers(ctx)
-	// if no nameservers, return empty slice so we dont remove all nameservers
-	if len(nameservers) == 0 && guardAgainstNoNameservers {
-		return []string{}
+	system = availableNameservers(ctx)
+	if system == nil {
+		// A non-nil empty slice means discovery completed and found no DNS.
+		// Callers use nil to mean that discovery was not attempted.
+		system = []string{}
 	}
-	ns := initializeOsResolver(nameservers)
-	or = newResolverWithNameserver(ns)
-	return ns
+	effective, system, skip := osResolverNameserverSets(system, guardAgainstNoNameservers)
+	if skip {
+		return effective, system
+	}
+	or = newResolverWithNameserver(effective)
+	return effective, system
+}
+
+func osResolverNameserverSets(system []string, guardAgainstNoNameservers bool) (effective, discovered []string, skip bool) {
+	if len(system) == 0 && guardAgainstNoNameservers {
+		return []string{}, system, true
+	}
+	return initializeOsResolver(system), system, false
 }
 
 // OsResolverNameservers returns the current OS resolver nameservers (host:port format).
