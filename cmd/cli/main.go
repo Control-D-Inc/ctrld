@@ -42,7 +42,7 @@ var (
 	cleanup           bool
 	startOnly         bool
 	rfc1918           bool
-	interceptMode     string // "", "dns", or "hard" — set via --intercept-mode flag or config
+	interceptMode     string // "", "off", "dns", or "hard" — set via --intercept-mode flag or config
 	dnsIntercept      bool   // derived: interceptMode == "dns" || interceptMode == "hard"
 	hardIntercept     bool   // derived: interceptMode == "hard"
 

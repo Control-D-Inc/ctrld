@@ -15,6 +15,11 @@ func TestServiceArgumentPresent(t *testing.T) {
 	if serviceArgumentPresent(out, "off") {
 		t.Fatal("substring in an unrelated path was mistaken for the off argument")
 	}
+
+	splitOut := []byte("Array {\n    /usr/local/bin/ctrld\n    run\n    --intercept-mode\n    dns\n}\n")
+	if !serviceArgumentPresent(splitOut, "--intercept-mode") {
+		t.Fatal("standalone flag argument was not found")
+	}
 }
 
 func TestServiceFlagPosition(t *testing.T) {

@@ -275,7 +275,7 @@ func initRunCmd() *cobra.Command {
 	_ = runCmd.Flags().MarkHidden("iface")
 	runCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 	runCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
-	runCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'dns' (with VPN split routing) or 'hard' (all DNS through ctrld, no VPN split routing)")
+	runCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'off' (disable interception and clear a persisted intercept_mode), 'dns' (with VPN split routing), or 'hard' (all DNS through ctrld, no VPN split routing)")
 
 	runCmd.FParseErrWhitelist = cobra.FParseErrWhitelist{UnknownFlags: true}
 	rootCmd.AddCommand(runCmd)
@@ -394,8 +394,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			svcExists := serviceConfigFileExists()
 			mainLog.Load().Debug().Msgf("intercept upgrade check: args=%v interceptOnly=%v svcConfigExists=%v interceptMode=%q", osArgsEarly, interceptOnly, svcExists, interceptMode)
 			if interceptOnly && svcExists {
-				// Replace any existing split or --intercept-mode=<value> form. Keep an
-				// explicit "off" argument so it overrides a previously persisted config
+				// An explicit "off" argument must override a previously persisted config
 				// value while the service clears that value on startup.
 				if err := removeServiceFlag("--intercept-mode"); err != nil {
 					mainLog.Load().Fatal().Err(err).Msg("failed to remove existing intercept mode from service arguments")
@@ -778,7 +777,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmd.Flags().BoolVarP(&startOnly, "start_only", "", false, "Do not install new service")
 	_ = startCmd.Flags().MarkHidden("start_only")
 	startCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
-	startCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'dns' (with VPN split routing) or 'hard' (all DNS through ctrld, no VPN split routing)")
+	startCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'off' (disable interception and clear a persisted intercept_mode), 'dns' (with VPN split routing), or 'hard' (all DNS through ctrld, no VPN split routing)")
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
