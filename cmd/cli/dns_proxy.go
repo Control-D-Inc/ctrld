@@ -1852,24 +1852,13 @@ func (p *prog) debounceRecovery() {
 func (p *prog) handleRecovery(reason RecoveryReason) {
 	mainLog.Load().Debug().Msg("Starting recovery process: removing DNS settings")
 
-	// For network changes, cancel any existing recovery check because the network state has changed.
+	recoveryCtx, gen, interceptRecovery, ok := p.beginRecovery(reason)
+	if !ok {
+		mainLog.Load().Debug().Msg("Upstream recovery already in progress; skipping duplicate trigger")
+		return
+	}
 	if reason == RecoveryReasonNetworkChange {
-		p.recoveryCancelMu.Lock()
-		if p.recoveryCancel != nil {
-			mainLog.Load().Debug().Msg("Cancelling existing recovery check (network change)")
-			p.recoveryCancel()
-			p.recoveryCancel = nil
-		}
-		p.recoveryCancelMu.Unlock()
-	} else {
-		// For upstream failures, if a recovery is already in progress, do nothing new.
-		p.recoveryCancelMu.Lock()
-		if p.recoveryCancel != nil {
-			mainLog.Load().Debug().Msg("Upstream recovery already in progress; skipping duplicate trigger")
-			p.recoveryCancelMu.Unlock()
-			return
-		}
-		p.recoveryCancelMu.Unlock()
+		mainLog.Load().Debug().Msg("Network change recovery now owns shared recovery state")
 	}
 
 	// For network changes, force-reset all upstream transports synchronously.
@@ -1887,31 +1876,27 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 		mainLog.Load().Info().Msg("Force-reset upstream transports for network change recovery")
 	}
 
-	// Create a new recovery context without a fixed timeout.
-	p.recoveryCancelMu.Lock()
-	recoveryCtx, cancel := context.WithCancel(context.Background())
-	p.recoveryCancel = cancel
-	p.recoveryCancelMu.Unlock()
-
-	// set recoveryRunning to true to prevent watchdogs from putting the listener back on the interface
-	p.recoveryRunning.Store(true)
-
 	// In DNS intercept mode, don't tear down WFP/pf filters.
 	// Instead, enable recovery bypass so proxy() forwards queries to
 	// the OS/DHCP resolver. This handles captive portal authentication
 	// without the overhead of filter teardown/rebuild.
-	if dnsIntercept && p.dnsInterceptState != nil {
-		p.recoveryBypass.Store(true)
+	if interceptRecovery {
 		mainLog.Load().Info().Msg("DNS intercept recovery: enabling DHCP bypass (filters stay active)")
 
 		// Reinitialize OS resolver to discover DHCP servers on the new network.
 		mainLog.Load().Debug().Msg("DNS intercept recovery: discovering DHCP nameservers")
-		dhcpServers := ctrld.InitializeOsResolver(true)
+		dhcpServers, systemNameservers := ctrld.InitializeOsResolverWithSystemNameservers(true)
 		if len(dhcpServers) == 0 {
 			mainLog.Load().Warn().Msg("DNS intercept recovery: no DHCP nameservers found")
 		} else {
 			mainLog.Load().Info().Msgf("DNS intercept recovery: found DHCP nameservers: %v", dhcpServers)
 		}
+
+		// If the new network provides no usable IPv4 DNS (e.g. IPv6-only
+		// tethering with 464XLAT), macOS cannot emit DNS queries at all and
+		// pf has nothing to intercept. Ensure a loopback DNS target exists
+		// so the OS keeps sending queries to ctrld's listener (issue #533).
+		ensureInterceptDNSTargetFn(p, systemNameservers)
 
 		// Exempt DHCP nameservers from intercept filters so the OS resolver
 		// can actually reach them on port 53.
@@ -1954,21 +1939,20 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 	recovered, err := p.waitForUpstreamRecovery(recoveryCtx, upstreams)
 	if err != nil {
 		mainLog.Load().Error().Err(err).Msg("Recovery canceled; DNS settings remain removed")
-		p.recoveryCancelMu.Lock()
-		p.recoveryCancel = nil
-		p.recoveryCancelMu.Unlock()
+		p.recoveryCanceledCleanup(gen)
+		return
+	}
+	if !p.recoveryOwnsState(gen) {
+		mainLog.Load().Debug().Msgf("Recovery generation %d was superseded after upstream success; skipping stale completion", gen)
 		return
 	}
 	mainLog.Load().Info().Msgf("Upstream %q recovered; re-applying DNS settings", recovered)
 
-	// reset the upstream failure count and down state
+	// Reset the upstream failure count and down state while this generation
+	// still owns recovery completion.
 	p.um.reset(recovered)
 
-	// In DNS intercept mode, just disable the bypass — filters are still active.
-	if dnsIntercept && p.dnsInterceptState != nil {
-		p.recoveryBypass.Store(false)
-		mainLog.Load().Info().Msg("DNS intercept recovery complete: disabling DHCP bypass, resuming normal flow")
-
+	if interceptRecovery {
 		// Refresh VPN DNS routes in case VPN state changed during recovery.
 		if p.vpnDNS != nil {
 			p.vpnDNS.Refresh(true)
@@ -1983,11 +1967,15 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 				mainLog.Load().Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
 			}
 		}
-
-		p.recoveryRunning.Store(false)
 	} else {
-		// For network changes we also reinitialize the OS resolver.
-		if reason == RecoveryReasonNetworkChange {
+		var systemNameservers []string
+		if dnsIntercept {
+			// Intercept was requested but no interceptor was active when recovery
+			// began. Rediscover on every recovery reason before retrying setDNS;
+			// passing nil could make a successful retry install a loopback target
+			// on a healthy DHCP network.
+			systemNameservers = systemNameserversForInterceptRetry()
+		} else if reason == RecoveryReasonNetworkChange {
 			ns := ctrld.InitializeOsResolver(true)
 			if len(ns) == 0 {
 				mainLog.Load().Warn().Msg("No nameservers found for OS resolver during network-change recovery; using existing values")
@@ -1997,17 +1985,17 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 		}
 
 		// Apply our DNS settings back and log the interface state.
-		p.setDNS()
+		p.setDNS(systemNameservers)
 		p.logInterfacesState()
-
-		// allow watchdogs to put the listener back on the interface if its changed for any reason
-		p.recoveryRunning.Store(false)
 	}
 
-	// Clear the recovery cancellation for a clean slate.
-	p.recoveryCancelMu.Lock()
-	p.recoveryCancel = nil
-	p.recoveryCancelMu.Unlock()
+	if !p.completeRecovery(gen) {
+		mainLog.Load().Debug().Msgf("Recovery generation %d was superseded during completion; preserving successor state", gen)
+		return
+	}
+	if interceptRecovery {
+		mainLog.Load().Info().Msg("DNS intercept recovery complete: disabling DHCP bypass, resuming normal flow")
+	}
 }
 
 // waitForUpstreamRecovery checks the provided upstreams concurrently until one recovers.
@@ -2085,7 +2073,15 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 
 	var recovered string
 	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+	}
+	select {
 	case recovered = <-recoveredCh:
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
