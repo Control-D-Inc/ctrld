@@ -29,6 +29,7 @@ type Key struct {
 	Name     string
 	Upstream string
 	ECS      string
+	Variant  string
 }
 
 type Value struct {
@@ -69,6 +70,14 @@ func NewLRUCache(size int) (*LRUCache, error) {
 func NewKey(msg *dns.Msg, upstream string) Key {
 	q := msg.Question[0]
 	return Key{Qtype: q.Qtype, Qclass: q.Qclass, Name: normalizeQname(q.Name), Upstream: upstream, ECS: CanonicalECS(msg)}
+}
+
+// NewVariantKey creates a cache key in a named result variant. Variants keep
+// derived answers separate from the upstream's answer to the same question.
+func NewVariantKey(msg *dns.Msg, upstream, variant string) Key {
+	key := NewKey(msg, upstream)
+	key.Variant = variant
+	return key
 }
 
 // CanonicalECS returns a canonical string form of the EDNS Client Subnet (ECS,

@@ -84,6 +84,52 @@ type upstreamForResult struct {
 	srcAddr        string
 }
 
+func (p *prog) addCachedResponse(key dnscache.Key, answer *dns.Msg) {
+	ttl := ttlFromMsg(answer)
+	now := time.Now()
+	expired := now.Add(time.Duration(ttl) * time.Second)
+	if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
+		expired = now.Add(time.Duration(cachedTTL) * time.Second)
+	}
+	setCachedAnswerTTL(answer, now, expired)
+	p.cache.Add(key, dnscache.NewValue(answer, expired))
+}
+
+func (p *prog) cachedResponse(req *dns.Msg, upstream string, dns64Prefix netip.Prefix, dns64Active bool, now time.Time) (answer, stale *dns.Msg, hit, dns64Hit, dns64Bypass bool) {
+	if dns64Active {
+		if cachedValue := p.cache.Get(dns64CacheKey(req, upstream, dns64Prefix)); cachedValue != nil {
+			answer = cachedValue.Msg.Copy()
+			ctrld.SetCacheReply(answer, req, answer.Rcode)
+			if cachedValue.Expire.After(now) {
+				setCachedAnswerTTL(answer, now, cachedValue.Expire)
+				return answer, nil, true, true, false
+			}
+			stale = answer
+		}
+	}
+
+	cachedValue := p.cache.Get(dnscache.NewKey(req, upstream))
+	if cachedValue == nil {
+		return nil, stale, false, false, false
+	}
+	answer = cachedValue.Msg.Copy()
+	ctrld.SetCacheReply(answer, req, answer.Rcode)
+	if cachedValue.Expire.After(now) {
+		if dns64Eligible(req, answer) && dns64Active {
+			if stale == nil {
+				stale = answer
+			}
+			return nil, stale, false, false, true
+		}
+		setCachedAnswerTTL(answer, now, cachedValue.Expire)
+		return answer, stale, true, false, false
+	}
+	if stale == nil {
+		stale = answer
+	}
+	return nil, stale, false, false, false
+}
+
 func (p *prog) serveDNS(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
 	// make sure ip is allocated
@@ -517,22 +563,29 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 
 	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
 	if p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR {
+		dns64Prefix, dns64Active := netip.Prefix{}, false
+		if req.msg.Question[0].Qtype == dns.TypeAAAA {
+			dns64Prefix, dns64Active = p.activeDNS64Prefix()
+		}
 		for _, upstream := range upstreams {
-			cachedValue := p.cache.Get(dnscache.NewKey(req.msg, upstream))
-			if cachedValue == nil {
+			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, time.Now())
+			if stale != nil {
+				staleAnswer = stale
+			}
+			if dns64Bypass {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: bypassing cached empty-AAAA answer for synthesis")
+			}
+			if !hit {
 				continue
 			}
-			answer := cachedValue.Msg.Copy()
-			ctrld.SetCacheReply(answer, req.msg, answer.Rcode)
-			now := time.Now()
-			if cachedValue.Expire.After(now) {
+			if dns64Hit {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: hit cached response variant")
+			} else {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "hit cached response")
-				setCachedAnswerTTL(answer, now, cachedValue.Expire)
-				res.answer = answer
-				res.cached = true
-				return res
 			}
-			staleAnswer = answer
+			res.answer = answer
+			res.cached = true
+			return res
 		}
 	}
 
@@ -756,19 +809,39 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		answer.Compress = true
 
 		if p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR {
-			ttl := ttlFromMsg(answer)
-			now := time.Now()
-			expired := now.Add(time.Duration(ttl) * time.Second)
-			if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
-				expired = now.Add(time.Duration(cachedTTL) * time.Second)
-			}
-			setCachedAnswerTTL(answer, now, expired)
-			p.cache.Add(dnscache.NewKey(req.msg, upstreams[n]), dnscache.NewValue(answer, expired))
+			p.addCachedResponse(dnscache.NewKey(req.msg, upstreams[n]), answer)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
 		}
 		hostname := ""
 		if req.ci != nil {
 			hostname = req.ci.Hostname
+		}
+		// DNS64 synthesis for IPv6-only networks without CLAT: applied to the
+		// policy-approved answer only, using the same upstream for the companion
+		// A resolution. No-op unless the network state requires it.
+		var synthesizedPrefix netip.Prefix
+		answer, synthesizedPrefix = p.maybeDNS64(ctx, req.msg, answer, func(aReq *dns.Msg) *dns.Msg {
+			key := dnscache.NewKey(aReq, upstreams[n])
+			if p.cache != nil {
+				if cachedValue := p.cache.Get(key); cachedValue != nil {
+					now := time.Now()
+					if cachedValue.Expire.After(now) {
+						cached := cachedValue.Msg.Copy()
+						ctrld.SetCacheReply(cached, aReq, cached.Rcode)
+						setCachedAnswerTTL(cached, now, cachedValue.Expire)
+						return cached
+					}
+				}
+			}
+			resolved := resolve(upstreams[n], upstreamConfig, aReq)
+			if p.cache != nil && resolved != nil && sameQuestion(aReq, resolved) {
+				p.addCachedResponse(key, resolved)
+			}
+			return resolved
+		})
+		if p.cache != nil && synthesizedPrefix.IsValid() {
+			p.addCachedResponse(dns64CacheKey(req.msg, upstreams[n], synthesizedPrefix), answer)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: add cached response variant")
 		}
 		ctrld.Log(ctx, mainLog.Load().Info(), "REPLY: %s -> %s (%s): %s", upstreams[n], req.ufr.srcAddr, hostname, dns.RcodeToString[answer.Rcode])
 		res.answer = answer
@@ -1460,10 +1533,11 @@ func (p *prog) monitorNetworkChanges() error {
 	}
 
 	mon.RegisterChangeCallback(func(delta *netmon.ChangeDelta) {
+		isMajorChange := mon.IsMajorChangeFrom(delta.Old, delta.New)
+		p.handleDNS64NetworkChange(delta, isMajorChange)
+
 		// Get map of valid interfaces
 		validIfaces := validInterfacesMap()
-
-		isMajorChange := mon.IsMajorChangeFrom(delta.Old, delta.New)
 
 		mainLog.Load().Debug().
 			Interface("old_state", delta.Old).

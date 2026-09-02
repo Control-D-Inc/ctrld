@@ -172,6 +172,10 @@ type prog struct {
 	// instead of using the normal upstream flow.
 	recoveryBypass atomic.Bool
 
+	// dns64 tracks DNS64/NAT64 synthesis state for IPv6-only networks
+	// without client-side 464XLAT. See cmd/cli/dns64.go.
+	dns64 dns64State
+
 	// interceptDNSTargetService names the macOS network service on which
 	// ctrld set a loopback DNS value because the service provided no usable
 	// IPv4 DNS while DNS intercept mode was active (issue #533);
