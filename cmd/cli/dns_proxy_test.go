@@ -286,6 +286,52 @@ func TestCache(t *testing.T) {
 	assert.Equal(t, answer2.Rcode, got2.answer.Rcode)
 }
 
+func TestDNS64CacheLookup(t *testing.T) {
+	cfg := testhelper.SampleConfig(t)
+	p := &prog{cfg: cfg}
+	cache, err := dnscache.NewLRUCache(16)
+	require.NoError(t, err)
+	p.cache = cache
+
+	now := time.Now()
+	prefix := dns64WellKnownPrefix
+	req := mkAAAAReq("legacy.example")
+	upstream := "upstream.0"
+	empty := new(dns.Msg)
+	empty.SetReply(req)
+	synthesized := new(dns.Msg)
+	synthesized.SetReply(req)
+	synthesized.Answer = []dns.RR{&dns.AAAA{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 60}, AAAA: net.ParseIP("64:ff9b::c000:201")}}
+
+	t.Run("fresh variant hit", func(t *testing.T) {
+		p.cache.Purge()
+		p.cache.Add(dns64CacheKey(req, upstream, prefix), dnscache.NewValue(synthesized, now.Add(time.Minute)))
+		answer, stale, hit, dns64Hit, bypass := p.cachedResponse(req, upstream, prefix, true, now)
+		if answer == nil || !answerHasAAAA(answer) || stale != nil || !hit || !dns64Hit || bypass {
+			t.Fatalf("unexpected lookup result: answer=%v stale=%v hit=%v dns64Hit=%v bypass=%v", answer, stale, hit, dns64Hit, bypass)
+		}
+	})
+
+	t.Run("fresh empty normal answer is retained as stale while bypassed", func(t *testing.T) {
+		p.cache.Purge()
+		p.cache.Add(dnscache.NewKey(req, upstream), dnscache.NewValue(empty, now.Add(time.Minute)))
+		answer, stale, hit, dns64Hit, bypass := p.cachedResponse(req, upstream, prefix, true, now)
+		if answer != nil || stale == nil || hit || dns64Hit || !bypass {
+			t.Fatalf("unexpected lookup result: answer=%v stale=%v hit=%v dns64Hit=%v bypass=%v", answer, stale, hit, dns64Hit, bypass)
+		}
+	})
+
+	t.Run("expired variant is preferred as stale", func(t *testing.T) {
+		p.cache.Purge()
+		p.cache.Add(dns64CacheKey(req, upstream, prefix), dnscache.NewValue(synthesized, now.Add(-time.Minute)))
+		p.cache.Add(dnscache.NewKey(req, upstream), dnscache.NewValue(empty, now.Add(-time.Minute)))
+		answer, stale, hit, dns64Hit, bypass := p.cachedResponse(req, upstream, prefix, true, now)
+		if answer != nil || stale == nil || !answerHasAAAA(stale) || hit || dns64Hit || bypass {
+			t.Fatalf("unexpected lookup result: answer=%v stale=%v hit=%v dns64Hit=%v bypass=%v", answer, stale, hit, dns64Hit, bypass)
+		}
+	})
+}
+
 func Test_ipAndMacFromMsg(t *testing.T) {
 	tests := []struct {
 		name    string

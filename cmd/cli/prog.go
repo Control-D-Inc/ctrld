@@ -174,6 +174,10 @@ type prog struct {
 	// authentication without tearing down WFP/pf filters.
 	recoveryBypass atomic.Bool
 
+	// dns64 tracks DNS64/NAT64 synthesis state for IPv6-only networks
+	// without client-side 464XLAT. See cmd/cli/dns64.go.
+	dns64 dns64State
+
 	// interceptDNSTargetService names the macOS network service on which
 	// ctrld set a temporary DNS target; interceptDNSTargetSetValue records the
 	// exact value. Both are guarded by interceptDNSTargetMu.

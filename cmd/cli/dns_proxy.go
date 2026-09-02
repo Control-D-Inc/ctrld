@@ -98,6 +98,52 @@ type upstreamForResult struct {
 	srcAddr        string
 }
 
+func (p *prog) addCachedResponse(key dnscache.Key, answer *dns.Msg) {
+	ttl := ttlFromMsg(answer)
+	now := time.Now()
+	expired := now.Add(time.Duration(ttl) * time.Second)
+	if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
+		expired = now.Add(time.Duration(cachedTTL) * time.Second)
+	}
+	setCachedAnswerTTL(answer, now, expired)
+	p.cache.Add(key, dnscache.NewValue(answer, expired))
+}
+
+func (p *prog) cachedResponse(req *dns.Msg, upstream string, dns64Prefix netip.Prefix, dns64Active bool, now time.Time) (answer, stale *dns.Msg, hit, dns64Hit, dns64Bypass bool) {
+	if dns64Active {
+		if cachedValue := p.cache.Get(dns64CacheKey(req, upstream, dns64Prefix)); cachedValue != nil {
+			answer = cachedValue.Msg.Copy()
+			ctrld.SetCacheReply(answer, req, answer.Rcode)
+			if cachedValue.Expire.After(now) {
+				setCachedAnswerTTL(answer, now, cachedValue.Expire)
+				return answer, nil, true, true, false
+			}
+			stale = answer
+		}
+	}
+
+	cachedValue := p.cache.Get(dnscache.NewKey(req, upstream))
+	if cachedValue == nil {
+		return nil, stale, false, false, false
+	}
+	answer = cachedValue.Msg.Copy()
+	ctrld.SetCacheReply(answer, req, answer.Rcode)
+	if cachedValue.Expire.After(now) {
+		if dns64Eligible(req, answer) && dns64Active {
+			if stale == nil {
+				stale = answer
+			}
+			return nil, stale, false, false, true
+		}
+		setCachedAnswerTTL(answer, now, cachedValue.Expire)
+		return answer, stale, true, false, false
+	}
+	if stale == nil {
+		stale = answer
+	}
+	return nil, stale, false, false, false
+}
+
 // serveDNS sets up and starts a DNS server on the specified listener, handling DNS queries and network monitoring.
 // This is the main entry point for DNS server functionality
 func (p *prog) serveDNS(ctx context.Context, listenerNum string) error {
@@ -785,48 +831,45 @@ func (p *prog) tryCache(ctx context.Context, req *proxyRequest, upstreams []stri
 // checkCache checks if a cached DNS response exists for the given request and upstream.
 // Returns a proxyResponse with the cached response if found and valid, or nil otherwise.
 func (p *prog) checkCache(ctx context.Context, req *proxyRequest, upstream string) *proxyResponse {
-	cachedValue := p.cache.Get(dnscache.NewKey(req.msg, upstream))
-	if cachedValue == nil {
-		ctrld.Log(ctx, p.Debug(), "No cached value found for upstream: %s", upstream)
+	dns64Prefix, dns64Active := netip.Prefix{}, false
+	if req.msg.Question[0].Qtype == dns.TypeAAAA {
+		dns64Prefix, dns64Active = p.activeDNS64Prefix()
+	}
+
+	answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, time.Now())
+	if stale != nil {
+		req.staleAnswer = stale
+	}
+	if dns64Bypass {
+		ctrld.Log(ctx, p.Debug(), "DNS64: bypassing cached empty-AAAA answer for synthesis")
+	}
+	if !hit {
+		ctrld.Log(ctx, p.Debug(), "No usable cached value found for upstream: %s", upstream)
 		return nil
 	}
 
-	answer := cachedValue.Msg.Copy()
-	ctrld.SetCacheReply(answer, req.msg, answer.Rcode)
-	now := time.Now()
-
-	if cachedValue.Expire.After(now) {
+	if dns64Hit {
+		ctrld.Log(ctx, p.Debug(), "DNS64: hit cached response variant")
+	} else {
 		ctrld.Log(ctx, p.Debug(), "Hit cached response")
-		setCachedAnswerTTL(answer, now, cachedValue.Expire)
-
-		// Firewall mode: refresh allowlist entries from cached responses.
-		// Even though these IPs were already added when the response was first
-		// resolved, the allowlist entries may have expired (TTL-based reaper)
-		// while the DNS cache entry is still valid. Refreshing here ensures
-		// the allowlist stays populated for as long as the cached DNS entry is served.
-		if p.firewallModeEnabled() {
-			domain := canonicalName(req.msg.Question[0].Name)
-			p.firewallRecordResolvedIPs(answer, domain)
-		}
-
-		return &proxyResponse{answer: answer, cached: true}
 	}
 
-	ctrld.Log(ctx, p.Debug(), "Cached response expired, storing as stale")
-	req.staleAnswer = answer
-	return nil
+	// Firewall mode: refresh allowlist entries from cached responses.
+	// Even though these IPs were already added when the response was first
+	// resolved, the allowlist entries may have expired (TTL-based reaper)
+	// while the DNS cache entry is still valid. Refreshing here ensures
+	// the allowlist stays populated for as long as the cached DNS entry is served.
+	if p.firewallModeEnabled() {
+		domain := canonicalName(req.msg.Question[0].Name)
+		p.firewallRecordResolvedIPs(answer, domain)
+	}
+
+	return &proxyResponse{answer: answer, cached: true}
 }
 
 // updateCache updates the DNS response cache with the given request, response, TTL, and upstream information.
 func (p *prog) updateCache(ctx context.Context, req *proxyRequest, answer *dns.Msg, upstream string) {
-	ttl := ttlFromMsg(answer)
-	now := time.Now()
-	expired := now.Add(time.Duration(ttl) * time.Second)
-	if cachedTTL := p.cfg.Service.CacheTTLOverride; cachedTTL > 0 {
-		expired = now.Add(time.Duration(cachedTTL) * time.Second)
-	}
-	setCachedAnswerTTL(answer, now, expired)
-	p.cache.Add(dnscache.NewKey(req.msg, upstream), dnscache.NewValue(answer, expired))
+	p.addCachedResponse(dnscache.NewKey(req.msg, upstream), answer)
 	ctrld.Log(ctx, p.Debug(), "Added cached response")
 }
 
@@ -898,6 +941,36 @@ func (p *prog) prepareSuccessResponse(ctx context.Context, req *proxyRequest, an
 	if p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR {
 		ctrld.Log(ctx, p.Debug(), "Updating cache with successful response")
 		p.updateCache(ctx, req, answer, upstream)
+	}
+
+	// Apply DNS64 only after policy processing, and resolve the companion A
+	// question through the same upstream that produced the approved answer.
+	var synthesizedPrefix netip.Prefix
+	answer, synthesizedPrefix = p.maybeDNS64(ctx, req.msg, answer, func(aReq *dns.Msg) *dns.Msg {
+		key := dnscache.NewKey(aReq, upstream)
+		if p.cache != nil {
+			if cachedValue := p.cache.Get(key); cachedValue != nil {
+				now := time.Now()
+				if cachedValue.Expire.After(now) {
+					cached := cachedValue.Msg.Copy()
+					ctrld.SetCacheReply(cached, aReq, cached.Rcode)
+					setCachedAnswerTTL(cached, now, cachedValue.Expire)
+					return cached
+				}
+			}
+		}
+
+		aProxyReq := *req
+		aProxyReq.msg = aReq
+		resolved := p.queryUpstream(ctx, &aProxyReq, upstream, upstreamConfig)
+		if p.cache != nil && resolved != nil && sameQuestion(aReq, resolved) {
+			p.addCachedResponse(key, resolved)
+		}
+		return resolved
+	})
+	if p.cache != nil && synthesizedPrefix.IsValid() {
+		p.addCachedResponse(dns64CacheKey(req.msg, upstream, synthesizedPrefix), answer)
+		ctrld.Log(ctx, p.Debug(), "DNS64: added cached response variant")
 	}
 
 	hostname := ""
@@ -1673,10 +1746,11 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 	}
 
 	mon.RegisterChangeCallback(func(delta *netmon.ChangeDelta) {
+		isMajorChange := mon.IsMajorChangeFrom(delta.Old, delta.New)
+		p.handleDNS64NetworkChange(delta, isMajorChange)
+
 		// Get map of valid interfaces
 		validIfaces := ctrld.ValidInterfaces(ctrld.LoggerCtx(ctx, p.logger.Load()))
-
-		isMajorChange := mon.IsMajorChangeFrom(delta.Old, delta.New)
 
 		p.Debug().
 			Interface("old_state", delta.Old).
