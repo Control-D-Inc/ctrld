@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/cuonglm/osinfo"
@@ -220,8 +221,12 @@ func isStableVersion(vs string) bool {
 func RunCobraCommand(cmd *cobra.Command) {
 	noConfigStart = isNoConfigStart(cmd)
 	firewallModeFlagChanged = cmd.Flags().Changed("firewall-mode")
-	checkStrFlagEmpty(cmd, cdUidFlagName)
-	checkStrFlagEmpty(cmd, cdOrgFlagName)
+	if !checkStrFlagEmpty(cmd, cdUidFlagName) {
+		return
+	}
+	if !checkStrFlagEmpty(cmd, cdOrgFlagName) {
+		return
+	}
 	run(nil, make(chan struct{}))
 }
 
@@ -260,7 +265,8 @@ func CheckDeactivationPin(pin int64, stopCh chan struct{}) int {
 // run runs ctrld cli with given app callback and stop channel.
 func run(appCallback *AppCallback, stopCh chan struct{}) {
 	if stopCh == nil {
-		mainLog.Load().Fatal().Msg("stopCh is nil")
+		failRunUnclassified(mainLog.Load().Error(), "run() called with a nil stop channel", nil)
+		return
 	}
 	waitCh := make(chan struct{})
 	p := &prog{
@@ -298,14 +304,10 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		consoleWriter = newHumanReadableZapCore(io.MultiWriter(os.Stdout, hlc), consoleWriterLevel)
 		p.logConn = hlc
 	}
-	notifyExitToLogServer := func() {
-		if p.logConn != nil {
-			_ = p.logConn.Close()
-		}
-	}
 
 	if daemon && runtime.GOOS == "windows" {
-		p.Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
+		failRunUnclassified(p.Error(), "cannot run in daemon mode; please install a Windows service", p.notifyExitToLogServer)
+		return
 	}
 
 	if !daemon {
@@ -316,7 +318,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			svcConfig := svcCmd.createServiceConfig()
 			s, err := svcCmd.newService(p, svcConfig)
 			if err != nil {
-				p.Fatal().Err(err).Msg("Failed to create new service")
+				failRunUnclassified(p.Error().Err(err), fmt.Sprintf("failed to create new service: %v", err), p.notifyExitToLogServer)
+				return
 			}
 			if err := s.Run(); err != nil {
 				p.Error().Err(err).Msg("Failed to start service")
@@ -327,18 +330,20 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	tryReadingConfig(writeDefaultConfig)
 
 	if err := readBase64Config(configBase64); err != nil {
-		p.Fatal().Err(err).Msg("Failed to read base64 config")
+		failRunUnclassified(p.Error().Err(err), fmt.Sprintf("failed to read base64 config: %v", err), p.notifyExitToLogServer)
+		return
 	}
 	processNoConfigFlags(noConfigStart)
 
 	// After s.Run() was called, if ctrld is going to be terminated for any reason,
 	// write msgExit to p.logConn so others (like "ctrld start") won't have to wait for timeout.
 	p.mu.Lock()
-	if err := v.Unmarshal(&cfg); err != nil {
-		notifyExitToLogServer()
-		p.Fatal().Msgf("Failed to unmarshal config: %v", err)
-	}
+	unmarshalErr := v.Unmarshal(&cfg)
 	p.mu.Unlock()
+	if unmarshalErr != nil {
+		failRunUnclassified(p.Error(), fmt.Sprintf("failed to unmarshal config: %v", unmarshalErr), p.notifyExitToLogServer)
+		return
+	}
 
 	processLogAndCacheFlags(v, &cfg)
 
@@ -359,8 +364,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	// Wait for network up.
 	if !ctrldnet.Up() {
-		notifyExitToLogServer()
-		p.Fatal().Msg("Network is not up yet")
+		failRunUnclassified(p.Error(), "network is not up yet", p.notifyExitToLogServer)
+		return
 	}
 
 	cs, err := newControlServer(filepath.Join(sockDir, ControlSocketName()))
@@ -374,7 +379,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		cdUID = uid
 	}
 	if cdUID != "" {
-		validateCdUpstreamProtocol()
+		if !validateCdUpstreamProtocol(p.notifyExitToLogServer) {
+			return
+		}
 		// Bound API preflight by the service lifetime. Without this, a stop request
 		// arriving while the API is unreachable leaves this retry/backoff loop running
 		// after "Service stopped" was logged, so the process keeps working on behalf of
@@ -391,7 +398,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			// not see a failed start and apply its restart policy to a service the
 			// operator just asked to stop.
 			p.Notice().Msg("Stop requested while fetching resolver config — shutting down")
-			notifyExitToLogServer()
+			p.notifyExitToLogServer()
 			return
 		case pf.err != nil:
 			if isMobile() {
@@ -399,7 +406,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				return
 			}
 
-			handleAPIPreflightFailure(p, pf.err, notifyExitToLogServer)
+			handleAPIPreflightFailure(p, pf.err, p.notifyExitToLogServer)
 			return
 		default:
 			p.mu.Lock()
@@ -408,7 +415,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		}
 	}
 
-	updated := updateListenerConfig(&cfg, notifyExitToLogServer)
+	updated := updateListenerConfig(&cfg, p.notifyExitToLogServer)
 
 	// Bootstrap and listener binding both succeeded, so an earlier run's
 	// recorded failure no longer describes this install.
@@ -430,9 +437,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// The flag defaults to "off" for help output, so use Changed() to avoid
 	// clobbering a config-file value of firewall_mode = "on" on normal starts.
 	if firewallModeFlagChanged {
-		if !validFirewallMode(firewallMode) {
-			notifyExitToLogServer()
-			p.Fatal().Msgf("invalid --firewall-mode value %q: must be 'off' or 'on'", firewallMode)
+		if !validateFirewallModeFlag(true, firewallMode, p.notifyExitToLogServer) {
+			return
 		}
 		if cfg.Service.FirewallMode != firewallMode {
 			cfg.Service.FirewallMode = firewallMode
@@ -448,11 +454,10 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	if updated {
 		if err := writeConfigFile(&cfg); err != nil {
-			notifyExitToLogServer()
-			p.Fatal().Err(err).Msg("Failed to write config file")
-		} else {
-			p.Info().Msg("Writing config file to: " + defaultConfigFile)
+			failRunUnclassified(p.Error().Err(err), fmt.Sprintf("failed to write config file: %v", err), p.notifyExitToLogServer)
+			return
 		}
+		p.Info().Msg("Writing config file to: " + defaultConfigFile)
 	}
 
 	if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
@@ -471,31 +476,28 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	if err := validateConfig(&cfg); err != nil {
-		notifyExitToLogServer()
-		os.Exit(1)
+		failRunUnclassified(p.Error().Err(err), fmt.Sprintf("invalid config: %v", err), p.notifyExitToLogServer)
+		return
 	}
 	initCache()
 
 	if daemon {
 		exe, err := os.Executable()
 		if err != nil {
-			p.Error().Err(err).Msg("Failed to find the binary")
-			notifyExitToLogServer()
-			os.Exit(1)
+			failRunUnclassified(p.Error().Err(err), "failed to find the binary", p.notifyExitToLogServer)
+			return
 		}
 		curDir, err := os.Getwd()
 		if err != nil {
-			p.Error().Err(err).Msg("Failed to get current working directory")
-			notifyExitToLogServer()
-			os.Exit(1)
+			failRunUnclassified(p.Error().Err(err), "failed to get current working directory", p.notifyExitToLogServer)
+			return
 		}
 		// If running as daemon, re-run the command in background, with daemon off.
 		cmd := exec.Command(exe, append(os.Args[1:], "-d=false")...)
 		cmd.Dir = curDir
 		if err := cmd.Start(); err != nil {
-			p.Error().Err(err).Msg("Failed to start process as daemon")
-			notifyExitToLogServer()
-			os.Exit(1)
+			failRunUnclassified(p.Error().Err(err), "failed to start process as daemon", p.notifyExitToLogServer)
+			return
 		}
 		p.Info().Int("pid", cmd.Process.Pid).Msg("DNS proxy started")
 		os.Exit(0)
@@ -814,9 +816,10 @@ func permanentAPIRejection(err error) (*controld.ErrorResponse, bool) {
 }
 
 // apiFailureCode maps a bootstrap preflight error to its provisioning code.
-// A deleted device gets its own code because it triggers self-uninstall;
-// other permanent rejections are generic; anything else counts as
-// reachability trouble worth retrying.
+// A deleted device gets its own code because it triggers self-uninstall; a
+// permanent rejection with a known token reason gets its own code; other
+// permanent rejections are generic; anything else counts as reachability
+// trouble worth retrying.
 func apiFailureCode(err error) (provisionFailureCode, bool) {
 	if err == nil {
 		return "", false
@@ -825,10 +828,60 @@ func apiFailureCode(err error) (provisionFailureCode, bool) {
 	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		return provisionCodeAPIDeviceInvalid, true
 	}
-	if _, ok := permanentAPIRejection(err); ok {
+	if rejection, ok := permanentAPIRejection(err); ok {
+		if code, ok := tokenFailureCodeForReason(rejection.ErrorField.Metadata.Reason); ok {
+			return code, true
+		}
 		return provisionCodeAPIRejected, true
 	}
 	return provisionCodeAPIUnreachable, true
+}
+
+// tokenFailureCodeForReason maps error.metadata.reason on a provisioning-token
+// rejection to its failure code. An empty or unrecognized reason is not
+// classified here; the caller falls back to the generic rejection code.
+func tokenFailureCodeForReason(reason string) (provisionFailureCode, bool) {
+	switch reason {
+	case controld.ReasonTokenInvalid:
+		return provisionCodeTokenInvalid, true
+	case controld.ReasonTokenExpired:
+		return provisionCodeTokenExpired, true
+	case controld.ReasonTokenLimitReached:
+		return provisionCodeTokenLimitReached, true
+	case controld.ReasonTokenDisabled:
+		return provisionCodeTokenDisabled, true
+	default:
+		return "", false
+	}
+}
+
+// tokenRejectionMessage returns the human message for a TOKEN_* code: what is
+// wrong with the provisioning code and one concrete next action. Empty for
+// any other code, so callers know to fall back to a generic message. Never
+// includes the token itself.
+func tokenRejectionMessage(code provisionFailureCode) string {
+	switch code {
+	case provisionCodeTokenInvalid:
+		return "the provisioning code is not valid; check the code and re-enter it exactly as given"
+	case provisionCodeTokenExpired:
+		return "the provisioning code has expired; get a new provisioning code from your administrator"
+	case provisionCodeTokenLimitReached:
+		return "the provisioning code reached its device limit; free up a device slot or use a different code"
+	case provisionCodeTokenDisabled:
+		return "the provisioning code was invalidated; download a profile from an active provisioning code"
+	default:
+		return ""
+	}
+}
+
+// provisionTokenFailureMessage returns the result-file message for a failed
+// provision-token exchange: a token-specific message when the API gave a
+// known reason, the generic exchange-failure summary otherwise.
+func provisionTokenFailureMessage(code provisionFailureCode, err error) string {
+	if msg := tokenRejectionMessage(code); msg != "" {
+		return msg
+	}
+	return fmt.Sprintf("provision token exchange failed: %v", err)
 }
 
 // apiRejectionSummary reports the HTTP status only. The API's raw error body
@@ -1328,7 +1381,21 @@ func userHomeDir() (string, error) {
 	return ctrld.UserHomeDir()
 }
 
-// socketDir returns directory that ctrld will create socket file for running controlServer.
+// absHomeDir returns the absolute path of filename in the ctrld home
+// directory. A custom homedir wins, so a file lands next to the log and
+// the config that obey the same override.
+func absHomeDir(filename string) string {
+	if homedir != "" {
+		return filepath.Join(homedir, filename)
+	}
+	dir, err := userHomeDir()
+	if err != nil {
+		return filename
+	}
+	return filepath.Join(dir, filename)
+}
+
+// socketDir returns directory to use for the controlServer socket.
 func socketDir() (string, error) {
 	switch {
 	case runtime.GOOS == "windows", isMobile():
@@ -1939,6 +2006,99 @@ func osVersion() string {
 	return oi.String()
 }
 
+// provisionTokenMinLen, provisionTokenMaxLen, and provisionTokenExpectedPrefix
+// describe the shape of a --cd-org value the input stage checks before any
+// network call.
+const (
+	provisionTokenMinLen         = 6
+	provisionTokenMaxLen         = 64
+	provisionTokenExpectedPrefix = "org-v1-"
+)
+
+// provisionTokenShapeValid reports whether token looks like something the API
+// could parse: a length between provisionTokenMinLen and provisionTokenMaxLen,
+// with no whitespace or control characters. It does not require the
+// "org-v1-" prefix - legacy provisioning codes predate that convention and
+// are handled with a warning, not a failure.
+func provisionTokenShapeValid(token string) bool {
+	if len(token) < provisionTokenMinLen || len(token) > provisionTokenMaxLen {
+		return false
+	}
+	for _, r := range token {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// validateProvisionTokenShape classifies an obviously malformed --cd-org
+// value (PROVISION_TOKEN_MALFORMED) before any network call, so a typo or a
+// pasted URL fails fast instead of going through a doomed API round trip. A
+// token missing the "org-v1-" prefix only gets a logged warning: legacy
+// provisioning codes may lack it and still work.
+func validateProvisionTokenShape() bool {
+	if !provisionTokenShapeValid(cdOrg) {
+		msg := fmt.Sprintf("--cd-org provisioning code is malformed: must be %d-%d characters with no whitespace or control characters", provisionTokenMinLen, provisionTokenMaxLen)
+		failProvision(newProvisionResult(provisionCodeProvisionTokenMalformed, msg, nil, provisionSecrets()...), nil)
+		return false
+	}
+	if !strings.HasPrefix(cdOrg, provisionTokenExpectedPrefix) {
+		mainLog.Load().Warn().Msg("--cd-org provisioning code does not have the expected org-v1- prefix; continuing, since legacy codes may lack it")
+	}
+	return true
+}
+
+// validateCustomHostnameFlag classifies an invalid --custom-hostname value
+// (CUSTOM_HOSTNAME_INVALID) before any network call. ctrld's accept/reject
+// rule (validHostname) is unchanged - this only names the field, the
+// offending character(s), and the allowed format instead of a bare fatal
+// exit. ControlD's device-name formatting folds or strips some characters
+// ctrld still accepts (dot, space, plus), so a hostname using one of those
+// gets a one-line notice instead: the registered device name may differ from
+// what was requested.
+func validateCustomHostnameFlag() bool {
+	if customHostname == "" {
+		return true
+	}
+	if !validHostname(customHostname) {
+		failProvision(newProvisionResult(provisionCodeCustomHostnameInvalid, customHostnameFailureMessage(customHostname), nil, provisionSecrets()...), nil)
+		return false
+	}
+	if hostnameMayBeFoldedByServer(customHostname) {
+		mainLog.Load().Notice().Msgf("device name %q contains characters ControlD may fold or strip when it registers the device; the registered name may differ", customHostname)
+	}
+	return true
+}
+
+// validateInterceptModeFlag classifies an invalid --intercept-mode value
+// (INTERCEPT_MODE_INVALID) on the provisioning boundary, so a typo fails with
+// a stable code instead of a bare fatal exit an installer wrapper cannot tell
+// apart from any other crash. An empty mode means the flag was not set.
+func validateInterceptModeFlag(mode string) bool {
+	if mode == "" || validInterceptMode(mode) {
+		return true
+	}
+	msg := fmt.Sprintf("--intercept-mode %q is not valid: must be 'off', 'dns', or 'hard'", mode)
+	failProvision(newProvisionResult(provisionCodeInterceptModeInvalid, msg, nil, provisionSecrets()...), nil)
+	return false
+}
+
+// validateFirewallModeFlag classifies an invalid --firewall-mode value on the
+// provisioning boundary. Unlike --intercept-mode, no dedicated code exists
+// for this flag, so a bad value falls back to UNCLASSIFIED rather than a bare
+// fatal exit. changed must be the flag's Cobra Changed() state: the default
+// value ("off") is not itself invalid, so an unset flag always proceeds.
+// notify unblocks a waiting "ctrld start"; pass nil when there is none.
+func validateFirewallModeFlag(changed bool, mode string, notify func()) bool {
+	if !changed || validFirewallMode(mode) {
+		return true
+	}
+	msg := fmt.Sprintf("--firewall-mode %q is not valid: must be 'off' or 'on'", mode)
+	failProvisionUnclassified(msg, notify)
+	return false
+}
+
 // cdUIDFromProvToken fetch UID from ControlD API using provision token.
 func cdUIDFromProvToken() string {
 	// --cd flag supersedes --cd-org, ignore it if both are supplied.
@@ -1949,9 +2109,11 @@ func cdUIDFromProvToken() string {
 	if cdOrg == "" {
 		return ""
 	}
-	// Validate custom hostname if provided.
-	if customHostname != "" && !validHostname(customHostname) {
-		mainLog.Load().Fatal().Msgf("Invalid custom hostname: %q", customHostname)
+	if !validateProvisionTokenShape() {
+		return ""
+	}
+	if !validateCustomHostnameFlag() {
+		return ""
 	}
 	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
 	req := &controld.UtilityOrgRequest{
@@ -1967,7 +2129,7 @@ func cdUIDFromProvToken() string {
 		code, _ := apiFailureCode(err)
 		mainLog.Load().Error().Msgf("Failed to fetch resolver uid with provision token: %s: %s",
 			redactToken(cdOrg), redactSecrets(err.Error(), provisionSecrets()...))
-		failProvision(newProvisionResult(code, fmt.Sprintf("provision token exchange failed: %v", err), nil, provisionSecrets()...), nil)
+		failProvision(newProvisionResult(code, provisionTokenFailureMessage(code, err), nil, provisionSecrets()...), nil)
 		return ""
 	}
 	return resolverConfig.UID
@@ -2073,34 +2235,55 @@ func newSocketControlClientMobile(dir string, stopCh chan struct{}) *controlClie
 }
 
 // checkStrFlagEmpty validates if a string flag was set to an empty string.
-// If yes, emitting a fatal error message.
-func checkStrFlagEmpty(cmd *cobra.Command, flagName string) {
+// An explicit empty --cd-org is a malformed provisioning token, classified on
+// the provisioning boundary; every other flag keeps the bare fatal, since
+// this helper is shared with flags outside that boundary. Returns false when
+// the caller must stop: provisionExit is stubbed out under test, so nothing
+// else stops execution from falling through.
+func checkStrFlagEmpty(cmd *cobra.Command, flagName string) bool {
 	fl := cmd.Flags().Lookup(flagName)
-	if !fl.Changed || fl.Value.Type() != "string" {
-		return
+	if !fl.Changed || fl.Value.Type() != "string" || fl.Value.String() != "" {
+		return true
 	}
-	if fl.Value.String() == "" {
-		mainLog.Load().Fatal().Msgf(`flag "--%s" value must be non-empty`, fl.Name)
+	if flagName == cdOrgFlagName {
+		msg := fmt.Sprintf("--%s provisioning code is malformed: value must be non-empty", cdOrgFlagName)
+		failProvision(newProvisionResult(provisionCodeProvisionTokenMalformed, msg, nil, provisionSecrets()...), nil)
+		return false
 	}
+	mainLog.Load().Fatal().Msgf(`flag "--%s" value must be non-empty`, fl.Name)
+	return false
 }
 
-// validateCdUpstreamProtocol validates the Control D upstream protocol
-func validateCdUpstreamProtocol() {
+// validateCdUpstreamProtocol validates the Control D upstream protocol,
+// classified on the provisioning boundary since it only runs once --cd is
+// set. notify unblocks a waiting "ctrld start" on the daemon side; the parent
+// process, which has no one waiting, passes nil. Returns false when the
+// caller must stop.
+func validateCdUpstreamProtocol(notify func()) bool {
 	if cdUID == "" {
-		return
+		return true
 	}
 	switch cdUpstreamProto {
 	case ctrld.ResolverTypeDOH, ctrld.ResolverTypeDOH3:
+		return true
 	default:
-		mainLog.Load().Fatal().Msg(`Flag "--protocol" must be "doh" or "doh3"`)
+		msg := fmt.Sprintf("--proto %q is not valid: must be 'doh' or 'doh3'", cdUpstreamProto)
+		failProvision(newProvisionResult(provisionCodeInvalidFlagCombination, msg, nil, provisionSecrets()...), notify)
+		return false
 	}
 }
 
-// validateCdAndNextDNSFlags validates that Control D and NextDNS flags are not used together
-func validateCdAndNextDNSFlags() {
+// validateCdAndNextDNSFlags validates that Control D and NextDNS flags are
+// not used together, classified on the provisioning boundary since it only
+// fires once --cd or --cd-org is set. Returns false when the caller must
+// stop.
+func validateCdAndNextDNSFlags() bool {
 	if (cdUID != "" || cdOrg != "") && nextdns != "" {
-		mainLog.Load().Fatal().Msgf("--%s/--%s could not be used with --%s", cdUidFlagName, cdOrgFlagName, nextdnsFlagName)
+		msg := fmt.Sprintf("--%s/--%s cannot be used together with --%s", cdUidFlagName, cdOrgFlagName, nextdnsFlagName)
+		failProvision(newProvisionResult(provisionCodeInvalidFlagCombination, msg, nil, provisionSecrets()...), nil)
+		return false
 	}
+	return true
 }
 
 // removeNextDNSFromArgs removes the --nextdns from command line arguments.
@@ -2306,7 +2489,25 @@ func runningIface(s service.Service) *ifaceResponse {
 	return nil
 }
 
+// apiRejectionMessage returns the result-file message for a permanent API
+// rejection: the HTTP status for a device-invalid or generic rejection, or
+// the raw error for anything else (network trouble, an unreachable API).
+func apiRejectionMessage(err error) string {
+	var uer *controld.ErrorResponse
+	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
+		return apiRejectionSummary(uer.StatusCode)
+	}
+	if rejection, ok := permanentAPIRejection(err); ok {
+		return apiRejectionSummary(rejection.StatusCode)
+	}
+	return fmt.Sprintf("failed to fetch resolver config: %v", err)
+}
+
 // doValidateCdRemoteConfig fetches and validates custom config for cdUID.
+// fatal distinguishes the two callers: the direct "--cd <uid>" install path
+// passes true and classifies a fetch failure on the provisioning boundary;
+// the restart path passes false and gets the error back to decide for
+// itself, with no process exit.
 func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
 	req := &controld.ResolverConfigRequest{
@@ -2314,16 +2515,16 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 		Version:  appVersion,
 		Metadata: ctrld.SystemMetadata(loggerCtx),
 	}
-	rc, err := controld.FetchResolverConfig(loggerCtx, req, cdDev)
+	rc, err := fetchResolverConfig(loggerCtx, req, cdDev)
 	if err != nil {
-		logger := mainLog.Load().Fatal()
 		if !fatal {
-			logger = mainLog.Load().Warn()
-		}
-		logger.Err(err).Err(err).Msgf("Failed to fetch resolver uid: %s", cdUID)
-		if !fatal {
+			mainLog.Load().Warn().Err(err).Msgf("Failed to fetch resolver config for %s", redactToken(cdUID))
 			return err
 		}
+		code, _ := apiFailureCode(err)
+		mainLog.Load().Error().Err(err).Msgf("Failed to fetch resolver config for %s", redactToken(cdUID))
+		failProvision(newProvisionResult(code, apiRejectionMessage(err), nil, provisionSecrets()...), nil)
+		return err
 	}
 
 	// return earlier if there's no custom config.

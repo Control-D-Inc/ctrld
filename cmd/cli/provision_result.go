@@ -22,6 +22,7 @@ import (
 type provisionStage string
 
 const (
+	provisionStageInput     provisionStage = "input"
 	provisionStageBootstrap provisionStage = "bootstrap"
 	provisionStageListener  provisionStage = "listener"
 	provisionStageService   provisionStage = "service"
@@ -30,50 +31,87 @@ const (
 type provisionFailureCode string
 
 const (
-	provisionCodeAPIUnreachable      provisionFailureCode = "API_UNREACHABLE"
-	provisionCodeAPIRejected         provisionFailureCode = "API_REJECTED"
-	provisionCodeAPIDeviceInvalid    provisionFailureCode = "API_DEVICE_INVALID"
-	provisionCodeListenerBindFailed  provisionFailureCode = "LISTENER_BIND_FAILED"
-	provisionCodeListenerAddrUnavail provisionFailureCode = "LISTENER_CONFIGURED_ADDR_UNAVAILABLE"
-	provisionCodeServiceInstall      provisionFailureCode = "SERVICE_INSTALL_FAILED"
-	provisionCodeServiceStartFailed  provisionFailureCode = "SERVICE_START_FAILED"
-	provisionCodeServiceSelfCheck    provisionFailureCode = "SERVICE_SELFCHECK_FAILED"
+	provisionCodeProvisionTokenMalformed provisionFailureCode = "PROVISION_TOKEN_MALFORMED"
+	provisionCodeCustomHostnameInvalid   provisionFailureCode = "CUSTOM_HOSTNAME_INVALID"
+	provisionCodeInterceptModeInvalid    provisionFailureCode = "INTERCEPT_MODE_INVALID"
+	provisionCodeInvalidFlagCombination  provisionFailureCode = "INVALID_FLAG_COMBINATION"
+	provisionCodeAPIUnreachable          provisionFailureCode = "API_UNREACHABLE"
+	provisionCodeAPIRejected             provisionFailureCode = "API_REJECTED"
+	provisionCodeAPIDeviceInvalid        provisionFailureCode = "API_DEVICE_INVALID"
+	provisionCodeTokenInvalid            provisionFailureCode = "TOKEN_INVALID"
+	provisionCodeTokenExpired            provisionFailureCode = "TOKEN_EXPIRED"
+	provisionCodeTokenLimitReached       provisionFailureCode = "TOKEN_LIMIT_REACHED"
+	provisionCodeTokenDisabled           provisionFailureCode = "TOKEN_DISABLED"
+	provisionCodeListenerBindFailed      provisionFailureCode = "LISTENER_BIND_FAILED"
+	provisionCodeListenerAddrUnavail     provisionFailureCode = "LISTENER_CONFIGURED_ADDR_UNAVAILABLE"
+	provisionCodeServiceInstall          provisionFailureCode = "SERVICE_INSTALL_FAILED"
+	provisionCodeServiceStartFailed      provisionFailureCode = "SERVICE_START_FAILED"
+	provisionCodeServiceSelfCheck        provisionFailureCode = "SERVICE_SELFCHECK_FAILED"
+	provisionCodeUnclassified            provisionFailureCode = "UNCLASSIFIED"
 )
 
 var allProvisionFailureCodes = []provisionFailureCode{
+	provisionCodeProvisionTokenMalformed,
+	provisionCodeCustomHostnameInvalid,
+	provisionCodeInterceptModeInvalid,
+	provisionCodeInvalidFlagCombination,
 	provisionCodeAPIUnreachable,
 	provisionCodeAPIRejected,
 	provisionCodeAPIDeviceInvalid,
+	provisionCodeTokenInvalid,
+	provisionCodeTokenExpired,
+	provisionCodeTokenLimitReached,
+	provisionCodeTokenDisabled,
 	provisionCodeListenerBindFailed,
 	provisionCodeListenerAddrUnavail,
 	provisionCodeServiceInstall,
 	provisionCodeServiceStartFailed,
 	provisionCodeServiceSelfCheck,
+	provisionCodeUnclassified,
 }
 
 var provisionStageForCode = map[provisionFailureCode]provisionStage{
-	provisionCodeAPIUnreachable:      provisionStageBootstrap,
-	provisionCodeAPIRejected:         provisionStageBootstrap,
-	provisionCodeAPIDeviceInvalid:    provisionStageBootstrap,
-	provisionCodeListenerBindFailed:  provisionStageListener,
-	provisionCodeListenerAddrUnavail: provisionStageListener,
-	provisionCodeServiceInstall:      provisionStageService,
-	provisionCodeServiceStartFailed:  provisionStageService,
-	provisionCodeServiceSelfCheck:    provisionStageService,
+	provisionCodeProvisionTokenMalformed: provisionStageInput,
+	provisionCodeCustomHostnameInvalid:   provisionStageInput,
+	provisionCodeInterceptModeInvalid:    provisionStageInput,
+	provisionCodeInvalidFlagCombination:  provisionStageInput,
+	provisionCodeAPIUnreachable:          provisionStageBootstrap,
+	provisionCodeAPIRejected:             provisionStageBootstrap,
+	provisionCodeAPIDeviceInvalid:        provisionStageBootstrap,
+	provisionCodeTokenInvalid:            provisionStageBootstrap,
+	provisionCodeTokenExpired:            provisionStageBootstrap,
+	provisionCodeTokenLimitReached:       provisionStageBootstrap,
+	provisionCodeTokenDisabled:           provisionStageBootstrap,
+	provisionCodeListenerBindFailed:      provisionStageListener,
+	provisionCodeListenerAddrUnavail:     provisionStageListener,
+	provisionCodeServiceInstall:          provisionStageService,
+	provisionCodeServiceStartFailed:      provisionStageService,
+	provisionCodeServiceSelfCheck:        provisionStageService,
+	provisionCodeUnclassified:            provisionStageService,
 }
 
-// Exit codes are grouped by stage (bootstrap 30-39, listener 40-49, service
-// 50-59) so the exit code alone names the failed stage. 0-3 belong to
-// "ctrld status" and 126 to the deactivation pin check; never reuse those.
+// Exit codes are grouped by stage (input 20-29, bootstrap 30-39, listener
+// 40-49, service 50-59) so the exit code alone names the failed stage. 0-3
+// belong to "ctrld status" and 126 to the deactivation pin check; never
+// reuse those.
 var provisionExitCodeForCode = map[provisionFailureCode]int{
-	provisionCodeAPIUnreachable:      30,
-	provisionCodeAPIRejected:         31,
-	provisionCodeAPIDeviceInvalid:    32,
-	provisionCodeListenerBindFailed:  41,
-	provisionCodeListenerAddrUnavail: 42,
-	provisionCodeServiceInstall:      51,
-	provisionCodeServiceStartFailed:  52,
-	provisionCodeServiceSelfCheck:    53,
+	provisionCodeProvisionTokenMalformed: 21,
+	provisionCodeCustomHostnameInvalid:   22,
+	provisionCodeInterceptModeInvalid:    23,
+	provisionCodeInvalidFlagCombination:  24,
+	provisionCodeAPIUnreachable:          30,
+	provisionCodeAPIRejected:             31,
+	provisionCodeAPIDeviceInvalid:        32,
+	provisionCodeTokenInvalid:            33,
+	provisionCodeTokenExpired:            34,
+	provisionCodeTokenLimitReached:       35,
+	provisionCodeTokenDisabled:           36,
+	provisionCodeListenerBindFailed:      41,
+	provisionCodeListenerAddrUnavail:     42,
+	provisionCodeServiceInstall:          51,
+	provisionCodeServiceStartFailed:      52,
+	provisionCodeServiceSelfCheck:        53,
+	provisionCodeUnclassified:            59,
 }
 
 const (
@@ -106,7 +144,7 @@ type provisionResult struct {
 
 // provisionResultPath is a var so tests can point it at a temp dir.
 var provisionResultPath = func() string {
-	return ctrld.AbsHomeDir(provisionResultFileName)
+	return absHomeDir(provisionResultFileName)
 }
 
 // provisionExit is a var so tests can observe the exit code instead of dying.
@@ -246,4 +284,25 @@ func failProvision(r *provisionResult, notify func()) {
 		notify()
 	}
 	provisionExit(r.ExitCode)
+}
+
+// failProvisionUnclassified persists an UNCLASSIFIED result (service stage,
+// exit 59) and exits. It is the fallback for a terminal path that predates a
+// stable code - a config unmarshal, a file-system or environment failure -
+// so support still gets a result file and a stage-scoped exit code instead
+// of a bare crash with nothing to read. No terminal path on the
+// provisioning boundary may bypass this or an existing classified code.
+func failProvisionUnclassified(message string, notify func()) {
+	failProvision(newProvisionResult(provisionCodeUnclassified, message, nil, provisionSecrets()...), notify)
+}
+
+// failRunUnclassified logs msg on ev, then fails provisioning as UNCLASSIFIED
+// and unblocks a waiting "ctrld start" via notify (nil if none). Callers
+// return immediately after this call: provisionExit is stubbed out under
+// test, so nothing stops execution from falling through otherwise. ev
+// carries whatever the caller already chained onto it (for example .Err()),
+// so each call site keeps its own log fields.
+func failRunUnclassified(ev *ctrld.LogEvent, msg string, notify func()) {
+	ev.Msg(msg)
+	failProvisionUnclassified(msg, notify)
 }

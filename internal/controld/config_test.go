@@ -98,6 +98,116 @@ func TestAPIErrorRecordsHTTPStatus(t *testing.T) {
 	})
 }
 
+// TestAPIErrorDecodesRejectionReason pins the additive metadata.reason field the
+// API sends on provisioning-token rejections. cmd/cli maps known reasons to their
+// own failure codes, and must fall back cleanly when the field is absent or holds
+// a value this build does not recognize yet.
+func TestAPIErrorDecodesRejectionReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantReason string
+	}{
+		{
+			name:       "known reason",
+			body:       `{"error":{"message":"invalid token","code":40003,"metadata":{"reason":"token_disabled"}}}`,
+			wantReason: "token_disabled",
+		},
+		{
+			name:       "reason absent",
+			body:       `{"error":{"message":"invalid token","code":40003}}`,
+			wantReason: "",
+		},
+		{
+			name:       "unknown reason value",
+			body:       `{"error":{"message":"invalid token","code":40003,"metadata":{"reason":"something_new"}}}`,
+			wantReason: "something_new",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := json.NewDecoder(strings.NewReader(tc.body))
+			errResp, err := apiErrorFromResponse(http.StatusBadRequest, d)
+			if err != nil {
+				t.Fatalf("unexpected decode error: %v", err)
+			}
+			if errResp.ErrorField.Metadata.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", errResp.ErrorField.Metadata.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestAPIErrorToleratesMalformedRejectionReason pins the fix for a decode error
+// confined to metadata.reason: a reason sent as the wrong JSON type must not
+// discard the rest of the response. Before this fix, apiErrorFromResponse
+// returned the raw decode error and nothing else, which cmd/cli's
+// apiFailureCode cannot recognize as an *ErrorResponse - it falls back to
+// API_UNREACHABLE (a retryable bootstrap failure) instead of the permanent
+// rejection the HTTP status and code actually describe.
+func TestAPIErrorToleratesMalformedRejectionReason(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "reason as a number", body: `{"error":{"message":"invalid token","code":40003,"metadata":{"reason":12345}}}`},
+		{name: "reason as an object", body: `{"error":{"message":"invalid token","code":40003,"metadata":{"reason":{"inner":"value"}}}}`},
+		{name: "reason as null", body: `{"error":{"message":"invalid token","code":40003,"metadata":{"reason":null}}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := json.NewDecoder(strings.NewReader(tc.body))
+			errResp, err := apiErrorFromResponse(http.StatusBadRequest, d)
+			if err != nil {
+				t.Fatalf("a malformed reason must not fail the whole decode: %v", err)
+			}
+			if errResp.ErrorField.Message != "invalid token" {
+				t.Errorf("message = %q, want it to survive the malformed reason", errResp.ErrorField.Message)
+			}
+			if errResp.ErrorField.Code != 40003 {
+				t.Errorf("code = %d, want it to survive the malformed reason", errResp.ErrorField.Code)
+			}
+			if errResp.ErrorField.Metadata.Reason != "" {
+				t.Errorf("reason = %q, want empty for a malformed value", errResp.ErrorField.Metadata.Reason)
+			}
+		})
+	}
+}
+
+// TestAPIErrorToleratesMalformedMetadata pins the same tolerance one level
+// up: a metadata field that is not a JSON object must not discard the rest
+// of the response. Code and Message still classify the failure, and Reason
+// stays empty.
+func TestAPIErrorToleratesMalformedMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "metadata as a string", body: `{"error":{"message":"invalid token","code":40003,"metadata":"foo"}}`},
+		{name: "metadata as a number", body: `{"error":{"message":"invalid token","code":40003,"metadata":7}}`},
+		{name: "metadata as an array", body: `{"error":{"message":"invalid token","code":40003,"metadata":["reason"]}}`},
+		{name: "metadata as a boolean", body: `{"error":{"message":"invalid token","code":40003,"metadata":true}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := json.NewDecoder(strings.NewReader(tc.body))
+			errResp, err := apiErrorFromResponse(http.StatusBadRequest, d)
+			if err != nil {
+				t.Fatalf("unexpected decode error: %v", err)
+			}
+			if errResp.ErrorField.Code != 40003 {
+				t.Errorf("code = %d, want 40003", errResp.ErrorField.Code)
+			}
+			if errResp.ErrorField.Message != "invalid token" {
+				t.Errorf("message = %q, want %q", errResp.ErrorField.Message, "invalid token")
+			}
+			if errResp.ErrorField.Metadata.Reason != "" {
+				t.Errorf("reason = %q, want empty for a malformed metadata", errResp.ErrorField.Metadata.Reason)
+			}
+		})
+	}
+}
+
 // TestUtilityResponseDecodesDestinationIPs pins the API field that carries the
 // organization's effective Allowed Destination IP list. The list is enforced as a
 // set of Firewall Mode exceptions, so a silent decode change - a renamed field, a

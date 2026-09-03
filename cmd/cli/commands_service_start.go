@@ -63,10 +63,21 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	logger := mainLog.Load()
 	logger.Debug().Msg("Service start command started")
 
+	// Clear before any check runs, not just before doTasksE: a result from a
+	// previous attempt must never survive to mislead diag/postinstall on this
+	// one, even if this attempt fails before reaching doTasksE.
+	clearProvisionResult()
+
 	firewallModeFlagChanged = cmd.Flags().Changed("firewall-mode")
-	checkStrFlagEmpty(cmd, cdUidFlagName)
-	checkStrFlagEmpty(cmd, cdOrgFlagName)
-	validateCdAndNextDNSFlags()
+	if !checkStrFlagEmpty(cmd, cdUidFlagName) {
+		return nil
+	}
+	if !checkStrFlagEmpty(cmd, cdOrgFlagName) {
+		return nil
+	}
+	if !validateCdAndNextDNSFlags() {
+		return nil
+	}
 
 	svcConfig := sc.createServiceConfig()
 	osArgs := os.Args[2:]
@@ -81,18 +92,21 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	// Without this, a typo like "--intercept-mode fds" would install the service,
 	// the child process would Fatal() on the invalid value, and the parent would
 	// then uninstall — confusing and destructive.
-	if interceptMode != "" && !validInterceptMode(interceptMode) {
-		logger.Fatal().Msgf("invalid --intercept-mode value %q: must be 'off', 'dns', or 'hard'", interceptMode)
+	if !validateInterceptModeFlag(interceptMode) {
+		return nil
 	}
-	if firewallModeFlagChanged && !validFirewallMode(firewallMode) {
-		logger.Fatal().Msgf("invalid --firewall-mode value %q: must be 'off' or 'on'", firewallMode)
+	if !validateFirewallModeFlag(firewallModeFlagChanged, firewallMode, nil) {
+		return nil
 	}
 
 	// Initialize service manager with proper configuration
 	s, p, err := sc.initializeServiceManagerWithServiceConfig(svcConfig)
 	if err != nil {
 		logger.Error().Err(err).Msg("Failed to initialize service manager")
-		return err
+		// A bare error return would exit 1 with no result file, so support
+		// could not tell this failure from a start that never ran.
+		failProvisionUnclassified("initialize service manager: "+err.Error(), nil)
+		return nil
 	}
 
 	p.cfg = &cfg
@@ -121,7 +135,8 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 		// An explicit "off" argument must override a previously persisted config
 		// value while the service clears that value on startup.
 		if err := removeServiceFlag("--intercept-mode"); err != nil {
-			logger.Fatal().Err(err).Msg("failed to remove existing intercept mode from service arguments")
+			failRunUnclassified(logger.Error().Err(err), fmt.Sprintf("failed to remove existing intercept mode from service arguments: %v", err), nil)
+			return nil
 		}
 
 		if interceptMode == "off" {
@@ -130,10 +145,12 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 			logger.Notice().Msgf("Existing service detected — appending --intercept-mode %s to service arguments", interceptMode)
 		}
 		if err := appendServiceFlag("--intercept-mode"); err != nil {
-			logger.Fatal().Err(err).Msg("failed to append intercept flag to service arguments")
+			failRunUnclassified(logger.Error().Err(err), fmt.Sprintf("failed to append intercept flag to service arguments: %v", err), nil)
+			return nil
 		}
 		if err := appendServiceFlag(interceptMode); err != nil {
-			logger.Fatal().Err(err).Msg("failed to append intercept mode value to service arguments")
+			failRunUnclassified(logger.Error().Err(err), fmt.Sprintf("failed to append intercept mode value to service arguments: %v", err), nil)
+			return nil
 		}
 
 		// Stop the service if running (bypasses ctrld pin — this is an
@@ -250,7 +267,8 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	if startOnly && isCtrldInstalled {
 		tryReadingConfigWithNotice(false, true)
 		if err := v.Unmarshal(&cfg); err != nil {
-			logger.Fatal().Msgf("Failed to unmarshal config: %v", err)
+			failRunUnclassified(logger.Error(), fmt.Sprintf("failed to unmarshal config: %v", err), nil)
+			return nil
 		}
 
 		// if already running, dont restart
@@ -277,8 +295,6 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 			{s.Start, true, "Start"},
 			{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 		}
-		// Any result found later must come from this attempt, not a stale run.
-		clearProvisionResult()
 		startAttemptAt := time.Now()
 		logger.Notice().Msg("Starting existing ctrld service")
 		failedTask, taskErr := doTasksE(tasks)
@@ -287,12 +303,13 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 				failProvision(newProvisionResult(code, serviceTaskErrorSummary(failedTask, taskErr), nil, provisionSecrets()...), nil)
 				return nil
 			}
-			os.Exit(1)
+			failProvisionUnclassified(serviceTaskErrorSummary(failedTask, taskErr), nil)
+			return nil
 		}
 		sockDir, err := socketDir()
 		if err != nil {
-			logger.Warn().Err(err).Msg("Failed to get socket directory")
-			os.Exit(1)
+			failRunUnclassified(logger.Error(), fmt.Sprintf("failed to get socket directory: %v", err), nil)
+			return nil
 		}
 
 		// The daemon can start and still fail provisioning (for example a
@@ -325,7 +342,9 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	}
 
 	if cdUID != "" {
-		_ = doValidateCdRemoteConfig(cdUID, true)
+		if err := doValidateCdRemoteConfig(cdUID, true); err != nil {
+			return nil
+		}
 	} else if uid := cdUIDFromProvToken(); uid != "" {
 		cdUID = uid
 		logger.Debug().Msg("Using uid from provision token")
@@ -334,7 +353,9 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 		svcConfig.Arguments = append(svcConfig.Arguments, "--cd="+cdUID)
 	}
 	if cdUID != "" {
-		validateCdUpstreamProtocol()
+		if !validateCdUpstreamProtocol(nil) {
+			return nil
+		}
 	}
 
 	if configPath != "" {
@@ -344,7 +365,8 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	tryReadingConfigWithNotice(writeDefaultConfig, true)
 
 	if err := v.Unmarshal(&cfg); err != nil {
-		logger.Fatal().Msgf("Failed to unmarshal config: %v", err)
+		failRunUnclassified(logger.Error(), fmt.Sprintf("failed to unmarshal config: %v", err), nil)
+		return nil
 	}
 
 	initInteractiveLogging()
@@ -384,8 +406,6 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 		// generated after s.Start, so we notice users here for consistent with nextdns mode.
 		{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 	}
-	// Any result found later must come from this attempt, not a stale run.
-	clearProvisionResult()
 	startAttemptAt := time.Now()
 	logger.Notice().Msg("Starting service")
 	failedTask, taskErr := doTasksE(tasks)
@@ -394,9 +414,9 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 			failProvision(newProvisionResult(code, serviceTaskErrorSummary(failedTask, taskErr), nil, provisionSecrets()...), nil)
 			return nil
 		}
-		// Not a service-stage task. doTasksE already logged the cause; exit
-		// non-zero instead of the old silent fall-through that exited 0.
-		os.Exit(1)
+		// Not a service-stage task. doTasksE already logged the cause; classify
+		// UNCLASSIFIED instead of the old silent fall-through that exited 0.
+		failProvisionUnclassified(serviceTaskErrorSummary(failedTask, taskErr), nil)
 		return nil
 	}
 

@@ -20,8 +20,21 @@ func overrideProvisionResultPath(t *testing.T) string {
 	return path
 }
 
+// The result file must obey the same homedir override as the log and the
+// config file, so a daemon started with --homedir writes it next to them.
+func TestProvisionResultPathHonorsHomedir(t *testing.T) {
+	old := homedir
+	homedir = t.TempDir()
+	t.Cleanup(func() { homedir = old })
+	want := filepath.Join(homedir, provisionResultFileName)
+	if got := provisionResultPath(); got != want {
+		t.Errorf("provisionResultPath() = %q, want %q", got, want)
+	}
+}
+
 func TestProvisionCodesMapToOneStageAndInRangeExit(t *testing.T) {
 	stageRanges := map[provisionStage][2]int{
+		provisionStageInput:     {20, 29},
 		provisionStageBootstrap: {30, 39},
 		provisionStageListener:  {40, 49},
 		provisionStageService:   {50, 59},
@@ -55,8 +68,8 @@ func TestProvisionCodesMapToOneStageAndInRangeExit(t *testing.T) {
 		}
 		seenExits[exit] = code
 	}
-	if len(allProvisionFailureCodes) != 8 {
-		t.Errorf("expected 8 codes, got %d", len(allProvisionFailureCodes))
+	if len(allProvisionFailureCodes) != 17 {
+		t.Errorf("expected 17 codes, got %d", len(allProvisionFailureCodes))
 	}
 }
 

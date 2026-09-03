@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -66,6 +68,140 @@ func TestApiFailureCode(t *testing.T) {
 			}
 			if code != tc.wantCode {
 				t.Errorf("apiFailureCode() code = %s, want %s", code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// TestApiFailureCodeMapsRejectionReason covers the token_* reasons the API sends in
+// error.metadata.reason on a provisioning-token rejection. An absent or unknown
+// reason must fall back to the generic API_REJECTED exactly as before this reason
+// field existed.
+func TestApiFailureCodeMapsRejectionReason(t *testing.T) {
+	rejectionWithReason := func(reason string) error {
+		e := &controld.ErrorResponse{StatusCode: http.StatusBadRequest}
+		e.ErrorField.Code = 40003
+		e.ErrorField.Message = "invalid token"
+		e.ErrorField.Metadata.Reason = reason
+		return e
+	}
+
+	tests := []struct {
+		name     string
+		reason   string
+		wantCode provisionFailureCode
+	}{
+		{name: "token_invalid", reason: "token_invalid", wantCode: provisionCodeTokenInvalid},
+		{name: "token_expired", reason: "token_expired", wantCode: provisionCodeTokenExpired},
+		{name: "token_limit_reached", reason: "token_limit_reached", wantCode: provisionCodeTokenLimitReached},
+		{name: "token_disabled", reason: "token_disabled", wantCode: provisionCodeTokenDisabled},
+		{name: "reason absent falls back", reason: "", wantCode: provisionCodeAPIRejected},
+		{name: "unknown reason falls back", reason: "some_future_reason", wantCode: provisionCodeAPIRejected},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			code, ok := apiFailureCode(rejectionWithReason(tc.reason))
+			if !ok {
+				t.Fatal("apiFailureCode() ok = false, want true")
+			}
+			if code != tc.wantCode {
+				t.Errorf("apiFailureCode() code = %s, want %s", code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// TestApiFailureCodeSurvivesMalformedReasonType covers a rejection body whose
+// metadata.reason is the wrong JSON type end to end: decode it exactly as
+// internal/controld does (json.Unmarshal into the same exported type), then
+// classify it. Before the metadata decode fix, this body failed the whole
+// decode and apiFailureCode never saw an *ErrorResponse at all, so it fell
+// back to API_UNREACHABLE - the retryable bootstrap code - instead of the
+// permanent rejection this HTTP 400 with a known error code actually is.
+func TestApiFailureCodeSurvivesMalformedReasonType(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "reason as a number", body: `{"error":{"message":"invalid token","code":40003,"metadata":{"reason":12345}}}`},
+		{name: "reason as an object", body: `{"error":{"message":"invalid token","code":40003,"metadata":{"reason":{"inner":"value"}}}}`},
+		{name: "reason as null", body: `{"error":{"message":"invalid token","code":40003,"metadata":{"reason":null}}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &controld.ErrorResponse{StatusCode: http.StatusBadRequest}
+			if err := json.Unmarshal([]byte(tc.body), e); err != nil {
+				t.Fatalf("a malformed reason must not fail the whole decode: %v", err)
+			}
+			code, ok := apiFailureCode(e)
+			if !ok {
+				t.Fatal("apiFailureCode() ok = false, want true")
+			}
+			if code != provisionCodeAPIRejected {
+				t.Errorf("apiFailureCode() code = %s, want %s (not %s)", code, provisionCodeAPIRejected, provisionCodeAPIUnreachable)
+			}
+		})
+	}
+}
+
+// TestCdUIDFromProvTokenReasonCodes covers the full path from an API rejection
+// reason to a persisted result file: each known reason gets its own code, exit
+// code, and stage, with a message naming the field and a next action but never
+// echoing the token. Absent and unknown reasons keep the generic rejection.
+func TestCdUIDFromProvTokenReasonCodes(t *testing.T) {
+	const secretToken = "org-secret-token-999"
+
+	tests := []struct {
+		name         string
+		reason       string
+		wantCode     provisionFailureCode
+		wantContains string
+	}{
+		{name: "token_invalid", reason: "token_invalid", wantCode: provisionCodeTokenInvalid, wantContains: "provisioning code"},
+		{name: "token_expired", reason: "token_expired", wantCode: provisionCodeTokenExpired, wantContains: "expired"},
+		{name: "token_limit_reached", reason: "token_limit_reached", wantCode: provisionCodeTokenLimitReached, wantContains: "limit"},
+		{name: "token_disabled", reason: "token_disabled", wantCode: provisionCodeTokenDisabled, wantContains: "invalidated"},
+		{name: "reason absent", reason: "", wantCode: provisionCodeAPIRejected, wantContains: ""},
+		{name: "unknown reason", reason: "brand_new_reason", wantCode: provisionCodeAPIRejected, wantContains: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exitCode, _ := stubProvisionGlobals(t)
+			oldFetch, oldHostname := fetchResolverUIDFn, customHostname
+			t.Cleanup(func() { fetchResolverUIDFn, customHostname = oldFetch, oldHostname })
+			cdUID = ""
+			cdOrg = secretToken
+			customHostname = ""
+
+			rejected := &controld.ErrorResponse{StatusCode: http.StatusBadRequest}
+			rejected.ErrorField.Code = 40003
+			rejected.ErrorField.Message = "invalid token " + secretToken
+			rejected.ErrorField.Metadata.Reason = tc.reason
+			fetchResolverUIDFn = func(context.Context, *controld.UtilityOrgRequest, string, bool) (*controld.ResolverConfig, error) {
+				return nil, rejected
+			}
+
+			if got := cdUIDFromProvToken(); got != "" {
+				t.Errorf("cdUIDFromProvToken() = %q, want empty on failure", got)
+			}
+			if *exitCode != provisionExitCodeForCode[tc.wantCode] {
+				t.Errorf("exit = %d, want %d", *exitCode, provisionExitCodeForCode[tc.wantCode])
+			}
+			r, err := readProvisionResult()
+			if err != nil {
+				t.Fatalf("no provision result written: %v", err)
+			}
+			if r.Code != string(tc.wantCode) {
+				t.Errorf("code = %q, want %q", r.Code, tc.wantCode)
+			}
+			if r.Stage != string(provisionStageBootstrap) {
+				t.Errorf("stage = %q, want bootstrap", r.Stage)
+			}
+			if tc.wantContains != "" && !strings.Contains(r.Message, tc.wantContains) {
+				t.Errorf("message = %q, want it to contain %q", r.Message, tc.wantContains)
+			}
+			if strings.Contains(r.Message, secretToken) {
+				t.Errorf("token leaked into result message: %q", r.Message)
 			}
 		})
 	}
@@ -175,6 +311,108 @@ func TestHandleAPIPreflightFailure(t *testing.T) {
 			t.Errorf("bare uid leaked into message: %q", r.Message)
 		}
 	})
+}
+
+// TestDoValidateCdRemoteConfigClassifiesAPIFailure covers the direct
+// "--cd <uid>" install path (fatal=true): a fetch failure must classify on
+// the provisioning boundary with the same per-class codes as the daemon-side
+// preflight, instead of a bare fatal.
+func TestDoValidateCdRemoteConfigClassifiesAPIFailure(t *testing.T) {
+	exitCode, _ := stubProvisionGlobals(t)
+	oldFetch := fetchResolverConfig
+	t.Cleanup(func() { fetchResolverConfig = oldFetch })
+
+	deviceInvalid := func() error {
+		e := &controld.ErrorResponse{StatusCode: http.StatusNotFound}
+		e.ErrorField.Code = controld.InvalidConfigCode
+		e.ErrorField.Message = "device does not exist"
+		return e
+	}
+	rejected := func() error {
+		e := &controld.ErrorResponse{StatusCode: http.StatusUnauthorized}
+		e.ErrorField.Message = "bad token"
+		return e
+	}
+
+	tests := []struct {
+		name     string
+		err      error
+		wantCode provisionFailureCode
+	}{
+		{name: "device invalid", err: deviceInvalid(), wantCode: provisionCodeAPIDeviceInvalid},
+		{name: "permanent rejection", err: rejected(), wantCode: provisionCodeAPIRejected},
+		{name: "unreachable", err: retryableNetworkErr(), wantCode: provisionCodeAPIUnreachable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fetchResolverConfig = func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+				return nil, tc.err
+			}
+			if err := doValidateCdRemoteConfig("device-uid-123", true); err == nil {
+				t.Error("doValidateCdRemoteConfig() error = nil, want the fetch error back")
+			}
+			if *exitCode != provisionExitCodeForCode[tc.wantCode] {
+				t.Errorf("exit = %d, want %d", *exitCode, provisionExitCodeForCode[tc.wantCode])
+			}
+			r, err := readProvisionResult()
+			if err != nil {
+				t.Fatalf("no provision result written: %v", err)
+			}
+			if r.Code != string(tc.wantCode) {
+				t.Errorf("code = %q, want %q", r.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// TestDoValidateCdRemoteConfigNonFatalReturnsError proves the restart path
+// (fatal=false) is unaffected: it still just warns and hands the error back,
+// with no process exit and no result file.
+func TestDoValidateCdRemoteConfigNonFatalReturnsError(t *testing.T) {
+	exitCode, _ := stubProvisionGlobals(t)
+	oldFetch := fetchResolverConfig
+	t.Cleanup(func() { fetchResolverConfig = oldFetch })
+
+	wantErr := errors.New("network unreachable")
+	fetchResolverConfig = func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+		return nil, wantErr
+	}
+
+	if err := doValidateCdRemoteConfig("device-uid-123", false); !errors.Is(err, wantErr) {
+		t.Errorf("doValidateCdRemoteConfig() error = %v, want %v", err, wantErr)
+	}
+	if *exitCode != -1 {
+		t.Errorf("provisionExit called with %d, want no exit", *exitCode)
+	}
+	if _, err := readProvisionResult(); err == nil {
+		t.Error("expected no provision result written for the non-fatal path")
+	}
+}
+
+// TestDoValidateCdRemoteConfigDoesNotSelfUninstall proves the direct-cd
+// install path never triggers self-uninstall on a device-invalid failure:
+// this runs before the service is installed, so there is nothing to remove.
+func TestDoValidateCdRemoteConfigDoesNotSelfUninstall(t *testing.T) {
+	_, _ = stubProvisionGlobals(t)
+	oldFetch, oldUninstall := fetchResolverConfig, uninstallInvalidCdUIDFn
+	t.Cleanup(func() { fetchResolverConfig, uninstallInvalidCdUIDFn = oldFetch, oldUninstall })
+
+	uninstallCalled := false
+	uninstallInvalidCdUIDFn = func(*prog, *ctrld.Logger, bool) bool {
+		uninstallCalled = true
+		return true
+	}
+	e := &controld.ErrorResponse{StatusCode: http.StatusNotFound}
+	e.ErrorField.Code = controld.InvalidConfigCode
+	fetchResolverConfig = func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+		return nil, e
+	}
+
+	_ = doValidateCdRemoteConfig("device-uid-123", true)
+
+	if uninstallCalled {
+		t.Error("doValidateCdRemoteConfig triggered self-uninstall; nothing is installed yet on this path")
+	}
 }
 
 func TestCdUIDFromProvTokenFailureEmitsCode(t *testing.T) {

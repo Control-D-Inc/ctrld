@@ -37,6 +37,16 @@ const (
 	sendLogTimeout     = 300 * time.Second
 )
 
+// Provisioning-token rejection reasons the API sends in error.metadata.reason
+// (HTTP 400, code 40003). This list can grow; a value outside it is not an
+// error, just one cmd/cli does not classify yet.
+const (
+	ReasonTokenInvalid      = "token_invalid"
+	ReasonTokenExpired      = "token_expired"
+	ReasonTokenLimitReached = "token_limit_reached"
+	ReasonTokenDisabled     = "token_disabled"
+)
+
 // ResolverConfig represents Control D resolver data.
 type ResolverConfig struct {
 	DOH   string `json:"doh"`
@@ -64,10 +74,41 @@ type utilityResponse struct {
 	} `json:"body"`
 }
 
+// errorMetadata carries additive, optional detail on top of Code/Message.
+// Older API deployments omit it, so it must decode to its zero value rather
+// than fail the whole response. Its custom UnmarshalJSON gives the same
+// tolerance to a malformed value: a metadata that is not an object, or a
+// Reason that is not a string (a number, an object, or null), degrades to
+// the zero value rather than failing the response that contains it.
+type errorMetadata struct {
+	// Reason is a machine-readable rejection reason sent on provisioning-token
+	// errors (HTTP 400, code 40003): token_invalid, token_expired,
+	// token_limit_reached, or token_disabled. Empty when absent or malformed;
+	// callers must treat any other value as unknown rather than reject the
+	// response.
+	Reason string `json:"reason"`
+}
+
+func (m *errorMetadata) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Reason json.RawMessage `json:"reason"`
+	}
+	// Best-effort: a metadata that is not an object, or a reason that is not
+	// a string (number, object, null), leaves the zero value instead of
+	// failing this decode. Code and Message still classify the failure.
+	if err := json.Unmarshal(data, &raw); err != nil {
+		*m = errorMetadata{}
+		return nil
+	}
+	_ = json.Unmarshal(raw.Reason, &m.Reason)
+	return nil
+}
+
 type ErrorResponse struct {
 	ErrorField struct {
-		Message string `json:"message"`
-		Code    int    `json:"code"`
+		Message  string        `json:"message"`
+		Code     int           `json:"code"`
+		Metadata errorMetadata `json:"metadata"`
 	} `json:"error"`
 	// StatusCode is the HTTP status the API answered with. It is not part of the JSON
 	// body: this type is built for *any* non-200 whose body decodes, so the body alone

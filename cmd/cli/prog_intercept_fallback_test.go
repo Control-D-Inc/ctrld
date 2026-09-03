@@ -121,7 +121,7 @@ func newInterceptFallbackHarness(t *testing.T, lc *ctrld.ListenerConfig) *interc
 		return nil
 	}
 	resetDNSFn = func(_ *prog, _ bool, _ bool) { h.resetCalls++ }
-	refuseFallbackFatal = func(format string, v ...any) {
+	refuseFallbackFatal = func(_ *prog, format string, v ...any) {
 		h.refusals = append(h.refusals, fmt.Sprintf(format, v...))
 	}
 

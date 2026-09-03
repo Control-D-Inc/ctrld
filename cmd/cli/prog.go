@@ -710,6 +710,16 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 	p.ptrNameservers = ptrNameservers
 }
 
+// reportServeDNSFailure classifies a listener that bound successfully - the
+// LISTENER_* codes already rule out a bind conflict - but failed to actually
+// serve DNS. No dedicated code exists for this, so it falls back to
+// UNCLASSIFIED. notifyExitToLogServer unblocks a waiting "ctrld start" before
+// the process exits.
+func (p *prog) reportServeDNSFailure(listenerNum string, err error) {
+	msg := fmt.Sprintf("unable to start dns proxy on listener.%s: %v", listenerNum, err)
+	failRunUnclassified(p.Error().Err(err), msg, p.notifyExitToLogServer)
+}
+
 // run runs the ctrld main components.
 //
 // The reload boolean indicates that the function is run when ctrld first start
@@ -827,7 +837,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				// Changes to listeners config require a service restart, not just reload.
 				serveCtx := context.Background()
 				if err := p.serveDNS(serveCtx, listenerNum); err != nil {
-					p.Fatal().Err(err).Msgf("Unable to start dns proxy on listener.%s", listenerNum)
+					p.reportServeDNSFailure(listenerNum, err)
 				}
 				p.Debug().Msgf("End of serveDNS listener.%s: %s", listenerNum, addr)
 			}(listenerNum)
@@ -994,8 +1004,11 @@ var (
 	initializeOsResolverWithSystemNameserversFn = ctrld.InitializeOsResolverWithSystemNameservers
 	setDnsForRunningIfaceFn                     = (*prog).setDnsForRunningIface
 	resetDNSFn                                  = (*prog).resetDNS
-	refuseFallbackFatal                         = func(format string, v ...any) {
-		mainLog.Load().Fatal().Msgf(format, v...)
+	// refuseFallbackFatal reports a startup failure the interface-DNS fallback
+	// cannot safely paper over, then exits. No dedicated code exists for this,
+	// so it falls back to UNCLASSIFIED.
+	refuseFallbackFatal = func(p *prog, format string, v ...any) {
+		failRunUnclassified(p.Error(), fmt.Sprintf(format, v...), p.notifyExitToLogServer)
 	}
 )
 
@@ -1081,7 +1094,7 @@ func (p *prog) setDNS(systemNameservers []string) {
 				// Leave the host resolvable: restore static settings or DHCP rather than
 				// exiting with an interface still pointed at a ctrld that is not serving.
 				resetDNSFn(p, false, true)
-				refuseFallbackFatal("Refusing to fall back to interface DNS: it cannot direct queries to %s:%d, which would leave this host with no working resolver. Free port 53 for ctrld, or resolve the intercept failure, then start again.", lc.IP, lc.Port)
+				refuseFallbackFatal(p, "Refusing to fall back to interface DNS: it cannot direct queries to %s:%d, which would leave this host with no working resolver. Free port 53 for ctrld, or resolve the intercept failure, then start again.", lc.IP, lc.Port)
 				// Unreachable in production - the line above exits - but returning
 				// explicitly keeps the refusal from depending on that, so nothing can
 				// fall through to installing the fallback this just rejected.
