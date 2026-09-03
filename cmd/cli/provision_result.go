@@ -253,7 +253,11 @@ func writeProvisionResult(r *provisionResult) error {
 }
 
 func readProvisionResult() (*provisionResult, error) {
-	buf, err := os.ReadFile(provisionResultPath())
+	return readProvisionResultAt(provisionResultPath())
+}
+
+func readProvisionResultAt(path string) (*provisionResult, error) {
+	buf, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}

@@ -26,9 +26,11 @@ func dirWritable(dir string) (bool, error) {
 	return true, f.Close()
 }
 
-// UserHomeDir returns the home directory for user who is running ctrld.
-func UserHomeDir() (string, error) {
-	// viper will expand for us.
+// ServiceHomeDir returns the directory where a ctrld service with root or
+// administrator rights keeps its files. It has no fallback to the home
+// directory of the current user. A caller without root that only reads can
+// thus look where the service wrote.
+func ServiceHomeDir() (string, error) {
 	if runtime.GOOS == "windows" {
 		// If we're on windows, use the install path for this.
 		exePath, err := os.Executable()
@@ -38,7 +40,16 @@ func UserHomeDir() (string, error) {
 
 		return filepath.Dir(exePath), nil
 	}
-	dir := "/etc/controld"
+	return "/etc/controld", nil
+}
+
+// UserHomeDir returns the home directory for user who is running ctrld.
+func UserHomeDir() (string, error) {
+	// viper will expand for us.
+	dir, err := ServiceHomeDir()
+	if err != nil || runtime.GOOS == "windows" {
+		return dir, err
+	}
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return os.UserHomeDir() // fallback to user home directory
 	}

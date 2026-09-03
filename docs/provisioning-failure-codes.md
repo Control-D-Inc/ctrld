@@ -60,6 +60,19 @@ The file sits in the same directory as the persisted internal log
 (`ctrld.log`) for the user the service runs as. On a healthy install the
 file is absent.
 
+## Support: `ctrld-client diag`
+
+Run `sudo ctrld-client diag` (or `sudo ctrld-client diag --json`) to collect the facts
+support needs for a provisioning ticket in one copy-paste-safe command:
+client version, MDM-managed preferences (macOS only, token reported as
+present/absent only, an empty value counts as absent), the last
+provisioning result, service state, and whether the Control D API is
+reachable. It needs no config and always exits 0. A failure it finds is
+part of the report, not a command failure. It also runs without root, but
+then the last-provisioning-result and the service-state sections report
+permission denied. Never asks for or prints the provisioning
+token itself.
+
 ## Rules for maintainers
 
 - Codes are append-only once released. Never rename, renumber, or reuse a

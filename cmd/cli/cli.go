@@ -175,6 +175,7 @@ func initCLI() *cobra.Command {
 	InitClientsCmd(rootCmd)
 	InitUpgradeCmd(rootCmd)
 	InitLogCmd(rootCmd)
+	InitDiagCmd(rootCmd)
 
 	return rootCmd
 }
@@ -1379,6 +1380,17 @@ func userHomeDir() (string, error) {
 		return homedir, nil
 	}
 	return ctrld.UserHomeDir()
+}
+
+// serviceHomeDir returns the directory where a ctrld service with root or
+// administrator rights keeps its files. Unlike userHomeDir, it has no
+// fallback to the home directory of the current user, so a caller without
+// root that only reads looks where the service wrote.
+func serviceHomeDir() (string, error) {
+	if isMobile() {
+		return homedir, nil
+	}
+	return ctrld.ServiceHomeDir()
 }
 
 // absHomeDir returns the absolute path of filename in the ctrld home
