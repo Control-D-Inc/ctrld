@@ -44,6 +44,20 @@ stay in sync with `cmd/cli/provision_result.go` and changes in the same MR.
 | `SERVICE_SELFCHECK_FAILED` | service | 53 | The service started but never became healthy: no fresher failure was reported by the daemon, and the post-install DNS self-check failed. On a fresh install or an upgrade, the just-installed service is rolled back (uninstalled). A restart of an already installed service keeps that service installed. If the daemon itself recorded a more specific failure (e.g. a listener code), that code is reported instead of this one. | Ask for the drained service log printed by `ctrld-client start` and the result file. If the service was running but unreachable, check host firewall rules intercepting DNS to the listener. |
 | `UNCLASSIFIED` | service | 59 | A terminal failure on the provisioning boundary that predates a dedicated code: a config unmarshal, a file-system or environment failure (writing the config file, reading `socketDir`, respawning as a daemon), a service-argument update failing mid-upgrade, or a DNS-intercept failure the interface-DNS fallback cannot safely take over from. Every one of these used to be a bare crash with nothing to read; now they all persist a result file. | Read the result file `message`: it names the specific operation that failed and the underlying OS error. Treat this the same as any other stage-scoped failure when reporting it. |
 
+The package rows below are emitted by the macOS installer script
+(`scripts/pkg/postinstall`), not by ctrld itself, before ctrld ever runs.
+They only ever exit 1 (the script's own exit code) and never appear in
+`provision_result.json`. The same script also reuses `PROVISION_TOKEN_MALFORMED`
+and `CUSTOM_HOSTNAME_INVALID` from the table above for its own pre-flight checks
+on the managed-prefs `ProvisionToken`/`CustomHostname` values (same rule,
+also logged as `stage=package (exit 1)`), so those two codes can appear with
+either stage depending on which side rejected the value.
+
+| `PROFILE_PREFS_MISSING` | package | 1 | The MDM configuration profile (managed prefs domain `com.controld.ctrld`) has no `ProvisionToken`, or an empty one, after the postinstall script's wait loop runs out. | Scope the `com.controld.ctrld` configuration profile to the device, then reinstall the package or run `sudo ctrld-client start --cd-org=<token>` by hand. |
+| `INTERCEPT_MODE_INVALID` | package | 1 | On a fresh install, the profile's `InterceptMode` is set but is not one of the managed-prefs values (empty, `standard`, `intercept-dns`). A fresh install fails visibly rather than silently falling back, since a managed deployment should not provision into an unintended mode. On an upgrade the same bad value only logs a warning and keeps the existing service mode, so a bad profile edit cannot brick an already-working fleet. | Fix `InterceptMode` in the profile to one of the allowed values, then reinstall the package. |
+| `SERVICE_RELOAD_FAILED` | package | 1 | An upgrade reused the existing service mode (no managed `InterceptMode` override), and `launchctl load` on the installed plist failed. | Run `sudo launchctl load /Library/LaunchDaemons/ctrld-client.plist` by hand and check its error. |
+| `TEMP_FILE_UNAVAILABLE` | package | 1 | The script could not create the private temp file it uses to capture ctrld's output (`/tmp` or `TMPDIR` full or unwritable). ctrld is never invoked, so no diagnostics can be appended. | Free space in `/tmp` or `TMPDIR` (or fix its permissions), then reinstall the package. |
+
 ## Reading the result file
 
 macOS and Linux (default service home is `/etc/controld`):
@@ -79,6 +93,7 @@ token itself.
   code or exit number; add a new one and note the deprecation here.
 - Every code added in `cmd/cli/provision_result.go` needs a row here in the
   same MR. Tests enforce the code/stage/exit maps and that this table has
-  exactly one row per code.
+  exactly one `stage != package` row per ctrld code. The `package` rows
+  belong to `scripts/pkg/postinstall` and are not part of that count.
 - Detail must stay bounded and free of secrets: the constructor strips the
   provision token and cd UID and caps sizes; do not bypass it.

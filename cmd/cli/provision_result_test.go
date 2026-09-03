@@ -179,14 +179,17 @@ func TestFailureCodeDocTableMatchesConstants(t *testing.T) {
 		t.Fatalf("could not read the failure-code doc: %v", err)
 	}
 	doc := string(buf)
+	// Package-stage rows document identifiers scripts/pkg/postinstall emits
+	// on its own; they are not in this binary's failure-code registry, so
+	// they sit outside the one-row-per-code count below.
 	rows := 0
 	for _, line := range strings.Split(doc, "\n") {
-		if strings.HasPrefix(line, "| `") {
+		if strings.HasPrefix(line, "| `") && !strings.Contains(line, "| package |") {
 			rows++
 		}
 	}
 	if rows != len(allProvisionFailureCodes) {
-		t.Errorf("doc table has %d code rows, want %d", rows, len(allProvisionFailureCodes))
+		t.Errorf("doc table has %d non-package code rows, want %d", rows, len(allProvisionFailureCodes))
 	}
 	for _, code := range allProvisionFailureCodes {
 		row := "| `" + string(code) + "` | " + string(provisionStageForCode[code]) + " | " + strconv.Itoa(provisionExitCodeForCode[code]) + " |"

@@ -158,9 +158,10 @@ case_dir=$(run_case upgrade-intercept 1 1 intercept-dns)
 assert_contains 'ctrld-client start --intercept-mode dns' "$case_dir/calls"
 assert_not_contains 'launchctl load' "$case_dir/calls"
 
-case_dir=$(run_case fresh-invalid 0 1 invalid)
-assert_contains 'WARNING: unsupported InterceptMode in managed preferences; using standard mode' "$case_dir/output"
+case_dir=$(run_case fresh-invalid 0 1 invalid 0 1)
+assert_contains 'code=INTERCEPT_MODE_INVALID' "$case_dir/output"
 assert_not_contains '--intercept-mode' "$case_dir/calls"
+assert_not_contains 'ctrld-client start' "$case_dir/calls"
 
 case_dir=$(run_case upgrade-invalid 1 1 invalid)
 assert_contains 'WARNING: unsupported InterceptMode in managed preferences; preserving existing service mode' "$case_dir/output"
