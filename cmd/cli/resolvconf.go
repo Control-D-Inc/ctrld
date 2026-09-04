@@ -3,59 +3,45 @@ package cli
 import (
 	"net"
 	"net/netip"
-	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
 )
 
 // parseResolvConfNameservers reads the resolv.conf file and returns the nameservers found.
 // Returns nil if no nameservers are found.
+// This function parses the system DNS configuration to understand current nameserver settings
 func (p *prog) parseResolvConfNameservers(path string) ([]string, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the file for "nameserver" lines
-	var currentNS []string
-	lines := strings.Split(string(content), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "nameserver") {
-			parts := strings.Fields(trimmed)
-			if len(parts) >= 2 {
-				currentNS = append(currentNS, parts[1])
-			}
-		}
-	}
-
-	return currentNS, nil
+	return resolvconffile.NameserversFromFile(path)
 }
 
 // watchResolvConf watches any changes to /etc/resolv.conf file,
 // and reverting to the original config set by ctrld.
+// This ensures that DNS settings are not overridden by other applications or system processes
 func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn func(iface *net.Interface, ns []netip.Addr) error) {
 	resolvConfPath := "/etc/resolv.conf"
 	// Evaluating symbolics link to watch the target file that /etc/resolv.conf point to.
+	// This handles systems where resolv.conf is a symlink to another location
 	if rp, _ := filepath.EvalSymlinks(resolvConfPath); rp != "" {
 		resolvConfPath = rp
 	}
-	mainLog.Load().Debug().Msgf("start watching %s file", resolvConfPath)
+	p.Debug().Msgf("Start watching %s file", resolvConfPath)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not create watcher for /etc/resolv.conf")
+		p.Warn().Err(err).Msg("Could not create watcher for /etc/resolv.conf")
 		return
 	}
 	defer watcher.Close()
 
 	// We watch /etc instead of /etc/resolv.conf directly,
 	// see: https://github.com/fsnotify/fsnotify#watching-a-file-doesnt-work-well
+	// This is necessary because some systems don't properly notify on file changes
 	watchDir := filepath.Dir(resolvConfPath)
 	if err := watcher.Add(watchDir); err != nil {
-		mainLog.Load().Warn().Err(err).Msgf("could not add %s to watcher list", watchDir)
+		p.Warn().Err(err).Msgf("Could not add %s to watcher list", watchDir)
 		return
 	}
 
@@ -64,7 +50,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 		case <-p.dnsWatcherStopCh:
 			return
 		case <-p.stopCh:
-			mainLog.Load().Debug().Msgf("stopping watcher for %s", resolvConfPath)
+			p.Debug().Msgf("Stopping watcher for %s", resolvConfPath)
 			return
 		case event, ok := <-watcher.Events:
 			if p.recoveryRunning.Load() {
@@ -77,9 +63,10 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 				continue
 			}
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-				mainLog.Load().Debug().Msgf("/etc/resolv.conf changes detected, reading changes...")
+				p.Debug().Msgf("/etc/resolv.conf changes detected, reading changes...")
 
 				// Convert expected nameservers to strings for comparison
+				// This allows us to detect when the resolv.conf has been modified
 				expectedNS := make([]string, len(ns))
 				for i, addr := range ns {
 					expectedNS[i] = addr.String()
@@ -92,18 +79,20 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 				for retry := 0; retry < maxRetries; retry++ {
 					foundNS, err = p.parseResolvConfNameservers(resolvConfPath)
 					if err != nil {
-						mainLog.Load().Error().Err(err).Msg("failed to read resolv.conf content")
+						p.Error().Err(err).Msg("Failed to read resolv.conf content")
 						break
 					}
 
 					// If we found nameservers, break out of retry loop
+					// This handles cases where the file is being written but not yet complete
 					if len(foundNS) > 0 {
 						break
 					}
 
 					// Only retry if we found no nameservers
+					// This handles temporary file states during updates
 					if retry < maxRetries-1 {
-						mainLog.Load().Debug().Msgf("resolv.conf has no nameserver entries, retry %d/%d in 2 seconds", retry+1, maxRetries)
+						p.Debug().Msgf("resolv.conf has no nameserver entries, retry %d/%d in 2 seconds", retry+1, maxRetries)
 						select {
 						case <-p.stopCh:
 							return
@@ -113,7 +102,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 							continue
 						}
 					} else {
-						mainLog.Load().Debug().Msg("resolv.conf remained empty after all retries")
+						p.Debug().Msg("resolv.conf remained empty after all retries")
 					}
 				}
 
@@ -130,7 +119,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 						}
 					}
 
-					mainLog.Load().Debug().
+					p.Debug().
 						Strs("found", foundNS).
 						Strs("expected", expectedNS).
 						Bool("matches", matches).
@@ -139,16 +128,16 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 					// Only revert if the nameservers don't match
 					if !matches {
 						if err := watcher.Remove(watchDir); err != nil {
-							mainLog.Load().Error().Err(err).Msg("failed to pause watcher")
+							p.Error().Err(err).Msg("Failed to pause watcher")
 							continue
 						}
 
 						if err := setDnsFn(iface, ns); err != nil {
-							mainLog.Load().Error().Err(err).Msg("failed to revert /etc/resolv.conf changes")
+							p.Error().Err(err).Msg("Failed to revert /etc/resolv.conf changes")
 						}
 
 						if err := watcher.Add(watchDir); err != nil {
-							mainLog.Load().Error().Err(err).Msg("failed to continue running watcher")
+							p.Error().Err(err).Msg("Failed to continue running watcher")
 							return
 						}
 					}
@@ -158,7 +147,7 @@ func (p *prog) watchResolvConf(iface *net.Interface, ns []netip.Addr, setDnsFn f
 			if !ok {
 				return
 			}
-			mainLog.Load().Err(err).Msg("could not get event for /etc/resolv.conf")
+			p.Error().Err(err).Msg("Could not get event for /etc/resolv.conf")
 		}
 	}
 }

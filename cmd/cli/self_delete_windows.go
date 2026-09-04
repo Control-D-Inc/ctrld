@@ -33,6 +33,7 @@ type FILE_DISPOSITION_INFO struct {
 	DeleteFile bool
 }
 
+// dsOpenHandle opens a handle to the specified file with DELETE access
 func dsOpenHandle(pwPath *uint16) (windows.Handle, error) {
 	handle, err := windows.CreateFile(
 		pwPath,
@@ -51,6 +52,7 @@ func dsOpenHandle(pwPath *uint16) (windows.Handle, error) {
 	return handle, nil
 }
 
+// dsRenameHandle renames a file handle to a stream name
 func dsRenameHandle(hHandle windows.Handle) error {
 	var fRename FILE_RENAME_INFO
 	DS_STREAM_RENAME, err := windows.UTF16FromString(":deadbeef")
@@ -82,6 +84,7 @@ func dsRenameHandle(hHandle windows.Handle) error {
 	return nil
 }
 
+// dsDepositeHandle marks a file handle for deletion
 func dsDepositeHandle(hHandle windows.Handle) error {
 	var fDelete FILE_DISPOSITION_INFO
 	fDelete.DeleteFile = true
@@ -100,6 +103,7 @@ func dsDepositeHandle(hHandle windows.Handle) error {
 	return nil
 }
 
+// selfDeleteExe performs self-deletion on Windows platforms
 func selfDeleteExe() error {
 	var wcPath [windows.MAX_PATH + 1]uint16
 	var hCurrent windows.Handle

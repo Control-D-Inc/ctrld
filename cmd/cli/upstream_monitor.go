@@ -2,6 +2,7 @@ package cli
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -12,11 +13,31 @@ const (
 	maxFailureRequest = 50
 	// checkUpstreamBackoffSleep is the time interval between each upstream checks.
 	checkUpstreamBackoffSleep = 2 * time.Second
+	// checkUpstreamUnreachableBackoffMax caps the recovery retry interval for an
+	// endpoint that keeps failing with a network-unreachable error. It bounds
+	// the backoff so an unroutable endpoint is still re-probed periodically and
+	// recovers once the route returns.
+	checkUpstreamUnreachableBackoffMax = 60 * time.Second
 )
+
+// unreachableRecoveryBackoff returns the retry interval for the given streak of
+// consecutive network-unreachable failures. It starts at checkUpstreamBackoffSleep
+// and doubles each attempt, capped at checkUpstreamUnreachableBackoffMax.
+func unreachableRecoveryBackoff(streak int) time.Duration {
+	d := checkUpstreamBackoffSleep
+	for i := 1; i < streak; i++ {
+		d *= 2
+		if d >= checkUpstreamUnreachableBackoffMax {
+			return checkUpstreamUnreachableBackoffMax
+		}
+	}
+	return d
+}
 
 // upstreamMonitor performs monitoring upstreams health.
 type upstreamMonitor struct {
-	cfg *ctrld.Config
+	cfg    *ctrld.Config
+	logger atomic.Pointer[ctrld.Logger]
 
 	mu         sync.RWMutex
 	checking   map[string]bool
@@ -28,7 +49,8 @@ type upstreamMonitor struct {
 	failureTimerActive map[string]bool
 }
 
-func newUpstreamMonitor(cfg *ctrld.Config) *upstreamMonitor {
+// newUpstreamMonitor creates a new upstream monitor instance
+func newUpstreamMonitor(cfg *ctrld.Config, logger *ctrld.Logger) *upstreamMonitor {
 	um := &upstreamMonitor{
 		cfg:                cfg,
 		checking:           make(map[string]bool),
@@ -37,6 +59,7 @@ func newUpstreamMonitor(cfg *ctrld.Config) *upstreamMonitor {
 		recovered:          make(map[string]bool),
 		failureTimerActive: make(map[string]bool),
 	}
+	um.logger.Store(logger)
 	for n := range cfg.Upstream {
 		upstream := upstreamPrefix + n
 		um.reset(upstream)
@@ -53,7 +76,7 @@ func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 	defer um.mu.Unlock()
 
 	if um.recovered[upstream] {
-		mainLog.Load().Debug().Msgf("upstream %q is recovered, skipping failure count increase", upstream)
+		um.logger.Load().Debug().Msgf("Upstream %q is recovered, skipping failure count increase", upstream)
 		return
 	}
 
@@ -61,7 +84,7 @@ func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 	failedCount := um.failureReq[upstream]
 
 	// Log the updated failure count.
-	mainLog.Load().Debug().Msgf("upstream %q failure count updated to %d", upstream, failedCount)
+	um.logger.Load().Debug().Msgf("Upstream %q failure count updated to %d", upstream, failedCount)
 
 	// If this is the first failure and no timer is running, start a 10-second timer.
 	if failedCount == 1 && !um.failureTimerActive[upstream] {
@@ -74,7 +97,7 @@ func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 			// and the upstream is not in a recovered state, mark it as down.
 			if um.failureReq[upstream] > 0 && !um.recovered[upstream] {
 				um.down[upstream] = true
-				mainLog.Load().Warn().Msgf("upstream %q marked as down after 10 seconds (failure count: %d)", upstream, um.failureReq[upstream])
+				um.logger.Load().Warn().Msgf("Upstream %q marked as down after 10 seconds (failure count: %d)", upstream, um.failureReq[upstream])
 			}
 			// Reset the timer flag so that a new timer can be spawned if needed.
 			um.failureTimerActive[upstream] = false
@@ -84,7 +107,7 @@ func (um *upstreamMonitor) increaseFailureCount(upstream string) {
 	// If the failure count quickly reaches the threshold, mark the upstream as down immediately.
 	if failedCount >= maxFailureRequest {
 		um.down[upstream] = true
-		mainLog.Load().Warn().Msgf("upstream %q marked as down immediately (failure count: %d)", upstream, failedCount)
+		um.logger.Load().Warn().Msgf("Upstream %q marked as down immediately (failure count: %d)", upstream, failedCount)
 	}
 }
 

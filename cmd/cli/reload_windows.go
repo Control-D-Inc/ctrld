@@ -6,8 +6,10 @@ import (
 	"time"
 )
 
+// notifyReloadSigCh is a no-op on Windows platforms
 func notifyReloadSigCh(ch chan os.Signal) {}
 
+// sendReloadSignal sends a reload signal to the program
 func (p *prog) sendReloadSignal() error {
 	select {
 	case p.reloadCh <- struct{}{}:

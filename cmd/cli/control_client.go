@@ -8,10 +8,12 @@ import (
 	"time"
 )
 
+// controlClient represents an HTTP client for communicating with the control server
 type controlClient struct {
 	c *http.Client
 }
 
+// newControlClient creates a new control client with Unix socket transport
 func newControlClient(addr string) *controlClient {
 	return &controlClient{c: &http.Client{
 		Transport: &http.Transport{
@@ -29,6 +31,12 @@ func (c *controlClient) post(path string, data io.Reader) (*http.Response, error
 	if path == sendLogsPath {
 		c.c.Timeout = time.Minute * 5
 	}
+	return c.c.Post("http://unix"+path, contentTypeJson, data)
+}
+
+// postStream sends a POST request with no timeout, suitable for long-lived streaming connections.
+func (c *controlClient) postStream(path string, data io.Reader) (*http.Response, error) {
+	c.c.Timeout = 0
 	return c.c.Post("http://unix"+path, contentTypeJson, data)
 }
 

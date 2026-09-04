@@ -12,3 +12,9 @@ ctrld-*
 
 # generated file
 cmd/cli/rsrc_*.syso
+ctrld
+ctrld.exe
+
+# Local planning artifacts - never commit
+/SPEC.md
+/tasks/

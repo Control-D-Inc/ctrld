@@ -2,11 +2,14 @@
 
 package ctrld
 
-import "tailscale.com/net/netmon"
+import (
+	"context"
 
-// validInterfaces returns a set containing only default route interfaces.
-// TODO: deuplicated with cmd/cli/net_others.go in v2.
-func validInterfaces() map[string]struct{} {
+	"tailscale.com/net/netmon"
+)
+
+// ValidInterfaces returns a set containing only default route interfaces.
+func ValidInterfaces(_ context.Context) map[string]struct{} {
 	defaultRoute, err := netmon.DefaultRoute()
 	if err != nil {
 		return nil
