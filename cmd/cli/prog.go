@@ -637,6 +637,25 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 	p.ptrNameservers = ptrNameservers
 }
 
+// notifyExitToLogServer writes msgExit to the log connection, if one is
+// open, so a waiting "ctrld start" sees this run ended instead of waiting
+// out the full timeout. A terminal provisioning path calls this right
+// before failing.
+func (p *prog) notifyExitToLogServer() {
+	if p.logConn != nil {
+		_, _ = p.logConn.Write([]byte(msgExit))
+	}
+}
+
+// reportServeDNSFailure classifies a listener that bound successfully - the
+// LISTENER_* codes already rule out a bind conflict - but failed to actually
+// serve DNS. No dedicated code exists for this, so it falls back to
+// UNCLASSIFIED. notifyExitToLogServer unblocks a waiting "ctrld start"
+// before the process exits.
+func (p *prog) reportServeDNSFailure(listenerNum string, err error) {
+	failRunUnclassified(mainLog.Load().Error().Err(err), fmt.Sprintf("unable to start dns proxy on listener.%s: %v", listenerNum, err), p.notifyExitToLogServer)
+}
+
 // run runs the ctrld main components.
 //
 // The reload boolean indicates that the function is run when ctrld first start
@@ -754,7 +773,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				addr := net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port))
 				mainLog.Load().Info().Msgf("starting DNS server on listener.%s: %s", listenerNum, addr)
 				if err := p.serveDNS(listenerNum); err != nil {
-					mainLog.Load().Fatal().Err(err).Msgf("unable to start dns proxy on listener.%s", listenerNum)
+					p.reportServeDNSFailure(listenerNum, err)
 				}
 				mainLog.Load().Debug().Msgf("end of serveDNS listener.%s: %s", listenerNum, addr)
 			}(listenerNum)
@@ -927,8 +946,11 @@ var (
 	initializeOsResolverWithSystemNameserversFn = ctrld.InitializeOsResolverWithSystemNameservers
 	setDnsForRunningIfaceFn                     = (*prog).setDnsForRunningIface
 	resetDNSFn                                  = (*prog).resetDNS
-	refuseFallbackFatal                         = func(format string, v ...any) {
-		mainLog.Load().Fatal().Msgf(format, v...)
+	// refuseFallbackFatal reports a startup failure the interface-DNS fallback
+	// cannot safely paper over, then exits. No dedicated code exists for this,
+	// so it falls back to UNCLASSIFIED.
+	refuseFallbackFatal = func(p *prog, format string, v ...any) {
+		failRunUnclassified(mainLog.Load().Error(), fmt.Sprintf(format, v...), p.notifyExitToLogServer)
 	}
 )
 
@@ -1030,7 +1052,7 @@ func (p *prog) setDNS(systemNameservers []string) {
 				// Leave the host resolvable: restore static settings or DHCP rather than
 				// exiting with an interface still pointed at a ctrld that is not serving.
 				resetDNSFn(p, false, true)
-				refuseFallbackFatal("Refusing to fall back to interface DNS: it cannot direct queries to %s:%d, which would leave this host with no working resolver. Free port 53 for ctrld, or resolve the intercept failure, then start again.", lc.IP, lc.Port)
+				refuseFallbackFatal(p, "Refusing to fall back to interface DNS: it cannot direct queries to %s:%d, which would leave this host with no working resolver. Free port 53 for ctrld, or resolve the intercept failure, then start again.", lc.IP, lc.Port)
 				// Unreachable in production - the line above exits - but returning
 				// explicitly keeps the refusal from depending on that, so nothing can
 				// fall through to installing the fallback this just rejected.

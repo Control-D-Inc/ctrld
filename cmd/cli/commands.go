@@ -342,9 +342,20 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			return nil
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			checkStrFlagEmpty(cmd, cdUidFlagName)
-			checkStrFlagEmpty(cmd, cdOrgFlagName)
-			validateCdAndNextDNSFlags()
+			// Clear before any check runs, not just before doTasksE: a result from a
+			// previous attempt must never survive to mislead diag/postinstall on this
+			// one, even if this attempt fails before reaching doTasksE.
+			clearProvisionResult()
+
+			if !checkStrFlagEmpty(cmd, cdUidFlagName) {
+				return
+			}
+			if !checkStrFlagEmpty(cmd, cdOrgFlagName) {
+				return
+			}
+			if !validateCdAndNextDNSFlags() {
+				return
+			}
 			sc := &service.Config{}
 			*sc = *svcConfig
 			osArgs := os.Args[2:]
@@ -359,8 +370,8 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			// Without this, a typo like "--intercept-mode fds" would install the service,
 			// the child process would Fatal() on the invalid value, and the parent would
 			// then uninstall — confusing and destructive.
-			if interceptMode != "" && !validInterceptMode(interceptMode) {
-				mainLog.Load().Fatal().Msgf("invalid --intercept-mode value %q: must be 'off', 'dns', or 'hard'", interceptMode)
+			if !validateInterceptModeFlag(interceptMode) {
+				return
 			}
 
 			p := &prog{
@@ -370,6 +381,9 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			s, err := newService(p, sc)
 			if err != nil {
 				mainLog.Load().Error().Msg(err.Error())
+				// A bare return would exit 0 with no result file, so support
+				// could not tell this failure from a start that never ran.
+				failProvisionUnclassified("initialize service: "+err.Error(), nil)
 				return
 			}
 			p.preRun()
@@ -397,7 +411,8 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				// An explicit "off" argument must override a previously persisted config
 				// value while the service clears that value on startup.
 				if err := removeServiceFlag("--intercept-mode"); err != nil {
-					mainLog.Load().Fatal().Err(err).Msg("failed to remove existing intercept mode from service arguments")
+					failRunUnclassified(mainLog.Load().Error().Err(err), fmt.Sprintf("failed to remove existing intercept mode from service arguments: %v", err), nil)
+					return
 				}
 
 				if interceptMode == "off" {
@@ -406,10 +421,12 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					mainLog.Load().Notice().Msgf("Existing service detected — appending --intercept-mode %s to service arguments", interceptMode)
 				}
 				if err := appendServiceFlag("--intercept-mode"); err != nil {
-					mainLog.Load().Fatal().Err(err).Msg("failed to append intercept flag to service arguments")
+					failRunUnclassified(mainLog.Load().Error().Err(err), fmt.Sprintf("failed to append intercept flag to service arguments: %v", err), nil)
+					return
 				}
 				if err := appendServiceFlag(interceptMode); err != nil {
-					mainLog.Load().Fatal().Err(err).Msg("failed to append intercept mode value to service arguments")
+					failRunUnclassified(mainLog.Load().Error().Err(err), fmt.Sprintf("failed to append intercept mode value to service arguments: %v", err), nil)
+					return
 				}
 
 				// Stop the service if running (bypasses ctrld pin — this is an
@@ -538,7 +555,8 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			if startOnly && isCtrldInstalled {
 				tryReadingConfigWithNotice(false, true)
 				if err := v.Unmarshal(&cfg); err != nil {
-					mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
+					failRunUnclassified(mainLog.Load().Error(), fmt.Sprintf("failed to unmarshal config: %v", err), nil)
+					return
 				}
 
 				// if already running, dont restart
@@ -565,8 +583,6 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					{s.Start, true, "Start"},
 					{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 				}
-				// Any result found later must come from this attempt, not a stale run.
-				clearProvisionResult()
 				startAttemptAt := time.Now()
 				mainLog.Load().Notice().Msg("Starting existing ctrld service")
 				failedTask, taskErr := doTasksE(tasks)
@@ -575,12 +591,15 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 						failProvision(newProvisionResult(code, serviceTaskErrorSummary(failedTask, taskErr), nil, provisionSecrets()...), nil)
 						return
 					}
-					os.Exit(1)
+					// Not a service-stage task. doTasksE already logged the cause; classify
+					// UNCLASSIFIED instead of the old silent fall-through that exited 1.
+					failProvisionUnclassified(serviceTaskErrorSummary(failedTask, taskErr), nil)
+					return
 				}
 				sockDir, err := socketDir()
 				if err != nil {
-					mainLog.Load().Warn().Err(err).Msg("Failed to get socket directory")
-					os.Exit(1)
+					failRunUnclassified(mainLog.Load().Error(), fmt.Sprintf("failed to get socket directory: %v", err), nil)
+					return
 				}
 
 				// The daemon can start and still fail provisioning (for example a
@@ -623,11 +642,14 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				sc.Arguments = append(sc.Arguments, "--cd="+cdUID)
 			}
 			if cdUID != "" {
-				validateCdUpstreamProtocol()
+				if !validateCdUpstreamProtocol(nil) {
+					return
+				}
 			}
 
 			if err := p.router.ConfigureService(sc); err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to configure service on router")
+				failRunUnclassified(mainLog.Load().Error().Err(err), fmt.Sprintf("failed to configure service on router: %v", err), nil)
+				return
 			}
 
 			if configPath != "" {
@@ -637,7 +659,8 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			tryReadingConfigWithNotice(writeDefaultConfig, true)
 
 			if err := v.Unmarshal(&cfg); err != nil {
-				mainLog.Load().Fatal().Msgf("failed to unmarshal config: %v", err)
+				failRunUnclassified(mainLog.Load().Error(), fmt.Sprintf("failed to unmarshal config: %v", err), nil)
+				return
 			}
 
 			initInteractiveLogging()
@@ -682,8 +705,6 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				// generated after s.Start, so we notice users here for consistent with nextdns mode.
 				{noticeWritingControlDConfig, false, "Notice writing ControlD config"},
 			}
-			// Any result found later must come from this attempt, not a stale run.
-			clearProvisionResult()
 			startAttemptAt := time.Now()
 			mainLog.Load().Notice().Msg("Starting service")
 			failedTask, taskErr := doTasksE(tasks)
@@ -692,9 +713,9 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 					failProvision(newProvisionResult(code, serviceTaskErrorSummary(failedTask, taskErr), nil, provisionSecrets()...), nil)
 					return
 				}
-				// Not a service-stage task. doTasksE already logged the cause; exit
-				// non-zero instead of the old silent fall-through that exited 0.
-				os.Exit(1)
+				// Not a service-stage task. doTasksE already logged the cause; classify
+				// UNCLASSIFIED instead of the old silent fall-through that exited 0.
+				failProvisionUnclassified(serviceTaskErrorSummary(failedTask, taskErr), nil)
 				return
 			}
 

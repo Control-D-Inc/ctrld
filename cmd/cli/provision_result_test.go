@@ -20,8 +20,21 @@ func overrideProvisionResultPath(t *testing.T) string {
 	return path
 }
 
+// The result file must obey the same homedir override as the log and the
+// config file, so a daemon started with --homedir writes it next to them.
+func TestProvisionResultPathHonorsHomedir(t *testing.T) {
+	old := homedir
+	homedir = t.TempDir()
+	t.Cleanup(func() { homedir = old })
+	want := filepath.Join(homedir, provisionResultFileName)
+	if got := provisionResultPath(); got != want {
+		t.Errorf("provisionResultPath() = %q, want %q", got, want)
+	}
+}
+
 func TestProvisionCodesMapToOneStageAndInRangeExit(t *testing.T) {
 	stageRanges := map[provisionStage][2]int{
+		provisionStageInput:     {20, 29},
 		provisionStageBootstrap: {30, 39},
 		provisionStageListener:  {40, 49},
 		provisionStageService:   {50, 59},
@@ -55,8 +68,8 @@ func TestProvisionCodesMapToOneStageAndInRangeExit(t *testing.T) {
 		}
 		seenExits[exit] = code
 	}
-	if len(allProvisionFailureCodes) != 8 {
-		t.Errorf("expected 8 codes, got %d", len(allProvisionFailureCodes))
+	if len(allProvisionFailureCodes) != 17 {
+		t.Errorf("expected 17 codes, got %d", len(allProvisionFailureCodes))
 	}
 }
 
@@ -166,14 +179,17 @@ func TestFailureCodeDocTableMatchesConstants(t *testing.T) {
 		t.Fatalf("could not read the failure-code doc: %v", err)
 	}
 	doc := string(buf)
+	// Package-stage rows document identifiers scripts/pkg/postinstall emits
+	// on its own; they are not in this binary's failure-code registry, so
+	// they sit outside the one-row-per-code count below.
 	rows := 0
 	for _, line := range strings.Split(doc, "\n") {
-		if strings.HasPrefix(line, "| `") {
+		if strings.HasPrefix(line, "| `") && !strings.Contains(line, "| package |") {
 			rows++
 		}
 	}
 	if rows != len(allProvisionFailureCodes) {
-		t.Errorf("doc table has %d code rows, want %d", rows, len(allProvisionFailureCodes))
+		t.Errorf("doc table has %d non-package code rows, want %d", rows, len(allProvisionFailureCodes))
 	}
 	for _, code := range allProvisionFailureCodes {
 		row := "| `" + string(code) + "` | " + string(provisionStageForCode[code]) + " | " + strconv.Itoa(provisionExitCodeForCode[code]) + " |"
