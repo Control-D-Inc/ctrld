@@ -100,9 +100,14 @@ The **Name Resolution Policy Table** is a Windows feature (originally for Direct
 | `ConfigOptions` | REG_DWORD | `0x8` | Standard DNS resolution (no DirectAccess) |
 | `Version` | REG_DWORD | `0x2` | NRPT rule version 2 |
 
-**Registry path**: `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig\CtrldCatchAll`
+**Registry path**: the primary key is the local store, written on every start:
+`HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig\{B2E9A3C1-7F4D-4A8E-9D6B-5C1E0F3A2B8D}`.
+The GP-store key
+`HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig\CtrldCatchAll`
+is written only when foreign GP rules would otherwise hide the local store, and never when
+the foreign rule is an administrator catch-all for this listener.
 
-**Group Policy refresh**: The DNS Client service only reads NRPT from registry during Group Policy processing cycles (default: every 90 minutes). ctrld calls `RefreshPolicyEx(bMachine=TRUE, dwOptions=RP_FORCE)` when activating or repairing rules it owns. While Group Policy remains the owner, ctrld does not run NRPT activation/heal signaling; the one transition that removes a ctrld fallback is signaled after the external rule has been proven.
+**Group Policy refresh**: The DNS Client service only reads NRPT from registry during Group Policy processing cycles (default: every 90 minutes). ctrld calls `RefreshPolicyEx(bMachine=TRUE, dwOptions=RP_FORCE)` when activating or repairing rules it owns. While Group Policy remains the owner, ctrld does not run NRPT activation/heal signaling. For the transition that removes a ctrld fallback, ctrld signals once after removing its keys and then probes. If the proof finds no route, ctrld writes back only its local key and signals again.
 
 #### GP-managed NRPT ownership
 
@@ -120,7 +125,7 @@ The health monitor keeps using functional probes:
 - matching GP rule + failed probe: retry loopback WFP protection, then report the external policy as ineffective without running NRPT heal signals;
 - matching GP rule disappears: create the normal ctrld-owned fallback and verify it, unless another GP catch-all targets a different resolver;
 - GP catch-all targets another resolver: report the conflict and do not create a second ambiguous catch-all;
-- matching GP rule returns: prove it with a probe, remove only ctrld's deterministic fallback keys, and return ownership to Group Policy.
+- matching GP rule returns: prove it with a probe, remove only ctrld's deterministic fallback keys, and return ownership to Group Policy. If the proof finds no route while the same rule stays on disk, ctrld puts back only its local-store key, keeps ownership, and does not write its GP-store rule adjacent to the administrator's rule.
 
 Deploy the GPO **before** starting or restarting ctrld if adapter DNS must remain completely untouched. Remove or unlink the GP rule before intentionally removing the ctrld service. A GP catch-all that remains pointed at loopback while no listener is running causes DNS failure by design; ctrld cannot safely delete an administrator-owned policy during uninstall.
 
@@ -174,7 +179,7 @@ A dedicated background goroutine (`nrptHealthMonitor`) runs every 30 seconds and
 
 1. **Ownership check:** Distinguish a matching external GP child from ctrld's deterministic local/GP keys.
 2. **Active probe:** Verify Windows DNS Client still routes to the listener.
-3. **Transition:** If the external child disappears, activate ctrld's normal fallback. If it returns while the fallback is active, prove it before removing only ctrld's keys.
+3. **Transition:** If the external child disappears, activate ctrld's normal fallback. If it returns while the fallback is active, prove it before removing only ctrld's keys. If the proof finds no route while the same rule stays on disk, ctrld puts back only its local-store key, keeps ownership, and does not write its GP-store rule adjacent to the administrator's rule.
 4. **Owned recovery:** Restore/heal only when ctrld owns the NRPT rule.
 5. **(hard mode)** Verify the WFP sublayer exists and fully restart intercept state on loss.
 
@@ -235,7 +240,8 @@ DNS intercept: pf redirect active — all outbound DNS (port 53) redirected to 1
 ### Windows
 
 ```powershell
-# Check NRPT rules (should show CtrldCatchAll with . → 127.0.0.1)
+# Check NRPT rules (should show ctrld's catch-all, . → 127.0.0.1; the primary key is the
+# local-store GUID rule, and CtrldCatchAll appears only when ctrld also wrote the GP store)
 Get-DnsClientNrptRule
 
 # Check NRPT registry directly
