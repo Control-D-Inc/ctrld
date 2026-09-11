@@ -38,10 +38,11 @@ func newInterceptTestProg(t *testing.T) (*prog, *wfpState, *fakeNRPTOps) {
 // would have hit the host's real policy.
 func assertNoNRPTSideEffects(t *testing.T, f *fakeNRPTOps) {
 	t.Helper()
-	add, remove, signal, _ := f.counts()
-	if add != 0 || remove != 0 || signal != 0 {
-		t.Errorf("addRule = %d, removeRule = %d, signal = %d, want 0/0/0: this path must not write NRPT policy",
-			add, remove, signal)
+	add, restoreLocal := f.writes()
+	_, remove, signal, _ := f.counts()
+	if add != 0 || restoreLocal != 0 || remove != 0 || signal != 0 {
+		t.Errorf("addRule = %d, restoreLocalRule = %d, removeRule = %d, signal = %d, want 0/0/0/0: this path must not write NRPT policy",
+			add, restoreLocal, remove, signal)
 	}
 	if flush := f.flushCount(); flush != 0 {
 		t.Errorf("flush calls = %d, want 0: this path must not flush the resolver cache", flush)

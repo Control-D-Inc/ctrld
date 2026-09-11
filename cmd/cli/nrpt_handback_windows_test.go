@@ -28,11 +28,23 @@ type fakeNRPTOps struct {
 	parentEmpty     bool   // whether the GP parent key reads as present but empty
 	cleanCalls      int
 	gpConflictCalls int
-	ctrldRule       bool // whether ctrld's own catch-all exists
-	existsCalls     int
-	addCalls        int
-	removeCalls     int
-	signalCalls     int
+	ctrldRule       bool // whether ctrld's own catch-all exists in the local store
+	// ctrldGPRule is whether ctrld's own catch-all also exists in the GP store. The two
+	// stores are modelled separately because that is where the duplicate lives: the
+	// production writer adds ctrld's GP rule whenever any other GP rule is present, so a
+	// fake with a single "ctrld rule exists" flag cannot see a sibling being written
+	// beside an administrator's catch-all.
+	ctrldGPRule bool
+	// otherGPRules models GP rules that are not catch-alls. Production
+	// otherGPRulesExist is true for any GP rule at all, so the full writer places
+	// ctrld's GP rule for these too - a shape a gpRule-only fake cannot express.
+	otherGPRules      bool
+	dropGPCalls       int
+	existsCalls       int
+	addCalls          int
+	restoreLocalCalls int
+	removeCalls       int
+	signalCalls       int
 
 	addErr    error
 	removeErr error
@@ -74,7 +86,9 @@ func (f *fakeNRPTOps) ops() *nrptOps {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.existsCalls++
-			return f.ctrldRule
+			// nrptCatchAllRuleExists reads the local GUID key and the GP CtrldCatchAll
+			// key, so a store holding only the sibling still reports "a rule exists".
+			return f.ctrldRule || f.ctrldGPRule
 		},
 		addRule: func(string) error {
 			f.mu.Lock()
@@ -82,12 +96,25 @@ func (f *fakeNRPTOps) ops() *nrptOps {
 			f.addCalls++
 			if err == nil {
 				f.ctrldRule = true
+				// Mirror addNRPTCatchAllRule: with any other GP rule present it also
+				// writes ctrld's GP-path rule, otherwise it cleans the GP path.
+				f.ctrldGPRule = f.gpRule != "" || f.gpConflict || f.otherGPRules
 			}
 			f.mu.Unlock()
 			if beforeAdd != nil {
 				beforeAdd()
 			}
 			return err
+		},
+		restoreLocalRule: func(string) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.restoreLocalCalls++
+			if f.addErr != nil {
+				return f.addErr
+			}
+			f.ctrldRule = true // local store only; the GP store is left as found
+			return nil
 		},
 		removeRule: func() error {
 			f.mu.Lock()
@@ -97,12 +124,19 @@ func (f *fakeNRPTOps) ops() *nrptOps {
 				return f.removeErr
 			}
 			f.ctrldRule = false
+			f.ctrldGPRule = false
 			return nil
 		},
 		signal: func() {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.signalCalls++
+		},
+		dropGPRule: func() {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.dropGPCalls++
+			f.ctrldGPRule = false // the local store and the administrator's rule are untouched
 		},
 		findGPRule: func(string) string {
 			f.mu.Lock()
@@ -191,6 +225,37 @@ func (f *fakeNRPTOps) hasCtrldRule() bool {
 	return f.ctrldRule
 }
 
+// hasCtrldGPSibling reports whether ctrld's own rule is sitting in the GP store, which
+// beside an administrator's catch-all is the second GP catch-all that an administrator
+// did not write.
+func (f *fakeNRPTOps) hasCtrldGPSibling() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ctrldGPRule
+}
+
+// writes reports every way this file can put ctrld's catch-all back, so a "nothing was
+// written" assertion cannot pass by checking one writer while the other ran.
+func (f *fakeNRPTOps) writes() (add, restoreLocal int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.addCalls, f.restoreLocalCalls
+}
+
+// dropGPCount is how many times ctrld's GP-store key was deleted on its own.
+func (f *fakeNRPTOps) dropGPCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dropGPCalls
+}
+
+// restoreLocalCount is how many times the local-store-only restore ran.
+func (f *fakeNRPTOps) restoreLocalCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.restoreLocalCalls
+}
+
 // installedFakeNRPTOps is the fake currently standing in for the production NRPT
 // operations, so fixtures can hand it to tests and can tell whether one is installed at
 // all.
@@ -215,6 +280,8 @@ type fakeNRPTSeed struct {
 	gpConflict   bool
 	parentEmpty  bool
 	ctrldRule    bool
+	ctrldGPRule  bool
+	otherGPRules bool
 	addErr       error
 	removeErr    error
 }
@@ -229,6 +296,8 @@ func (f *fakeNRPTOps) configure(seed fakeNRPTSeed) {
 	f.gpConflict = seed.gpConflict
 	f.parentEmpty = seed.parentEmpty
 	f.ctrldRule = seed.ctrldRule
+	f.ctrldGPRule = seed.ctrldGPRule
+	f.otherGPRules = seed.otherGPRules
 	f.addErr = seed.addErr
 	f.removeErr = seed.removeErr
 }
@@ -306,7 +375,15 @@ func newHandbackTestProg(t *testing.T) (*prog, *wfpState, *fakeNRPTOps) {
 // Getting this wrong deletes the last working route and declares external ownership: in
 // hard mode a machine-wide DNS outage, because WFP keeps blocking outbound DNS with
 // nothing redirecting it to ctrld.
+//
+// How it comes back matters just as much, and is the #576 owned-lab regression: the
+// administrator's child is still on disk, so restoring through addNRPTCatchAllRule leaves
+// CtrldCatchAll sitting in the GP store beside it - a machine that started with one GP
+// catch-all ends the failed handback with two, both naming the same listener. Only the
+// local store may be rewritten here.
 func TestHandbackRestoresFallbackWhenGPCannotRoute(t *testing.T) {
+	// The lab fixture: ctrld holds only its local rule, and the GP store holds only the
+	// administrator's exact catch-all - ctrld has no GP rule to begin with.
 	f := &fakeNRPTOps{probeResults: []bool{true, false}, gpRule: "{GP-RULE}", ctrldRule: true}
 	installFakeNRPTOps(t, f)
 
@@ -323,11 +400,48 @@ func TestHandbackRestoresFallbackWhenGPCannotRoute(t *testing.T) {
 	if remove != 1 {
 		t.Errorf("removeRule calls = %d, want 1: the handback probe must run with ctrld's keys gone", remove)
 	}
-	if add != 1 {
-		t.Errorf("addRule calls = %d, want 1: the ctrld fallback must be restored after the probe fails", add)
+	if f.restoreLocalCount() != 1 {
+		t.Errorf("restoreLocalRule calls = %d, want 1: the ctrld fallback must be restored after the probe fails", f.restoreLocalCount())
+	}
+	if add != 0 {
+		t.Errorf("addRule calls = %d, want 0: the full writer adds ctrld's GP rule beside the administrator's child", add)
 	}
 	if !f.hasCtrldRule() {
 		t.Error("ctrld's NRPT rule is missing after a failed handback; the host has no working route")
+	}
+	if f.hasCtrldGPSibling() {
+		t.Error("the failed handback left ctrld's rule in the GP store beside the administrator's catch-all")
+	}
+}
+
+// TestHandbackRestoreDropsAPreexistingGPSibling covers the machine that is already in the
+// forbidden state: ctrld wrote its GP rule while only unrelated GP rules existed, and an
+// administrator catch-all arrived afterwards. The failed handback must not preserve that
+// duplicate on the way out.
+//
+// It does not, and gets there without a special case. removeRule takes all of ctrld's keys
+// for the probe - the local GUID key, the legacy local name and the GP CtrldCatchAll - and
+// the local-only write puts back just the first, so the store converges to a single
+// catch-all, the administrator's. What is asserted is the shape of the store, not that DNS
+// is flowing: this branch exists because the probe failed.
+func TestHandbackRestoreDropsAPreexistingGPSibling(t *testing.T) {
+	p, state, f := newHandbackTestProg(t)
+	f.configure(fakeNRPTSeed{
+		probeResults: []bool{true, false},
+		gpRule:       "{GP-RULE}",
+		ctrldRule:    true,
+		ctrldGPRule:  true, // the duplicate this run inherited
+	})
+	state.setNRPTPolicyOwner(nrptRuleOwnerCtrld, "")
+
+	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "test"); got != nrptHandbackKeptCtrld {
+		t.Fatalf("nrptHandbackToExternal() = %v, want nrptHandbackKeptCtrld", got)
+	}
+	if f.hasCtrldGPSibling() {
+		t.Error("the inherited GP sibling survived the handback; the store still holds two catch-alls")
+	}
+	if !f.hasCtrldRule() {
+		t.Error("ctrld's local-store rule was not restored; the transition dropped ctrld's own key instead of putting it back")
 	}
 }
 
@@ -349,8 +463,8 @@ func TestHandbackAcceptsGPWhenItRoutesWithoutCtrld(t *testing.T) {
 		t.Errorf("owner = %v, rule = %q, want GroupPolicy/{GP-RULE}", owner, ruleName)
 	}
 	add, remove, _, _ := f.counts()
-	if remove != 1 || add != 0 {
-		t.Errorf("removeRule = %d, addRule = %d, want 1/0: ctrld's rule must be removed and not restored", remove, add)
+	if remove != 1 || add != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("removeRule = %d, addRule = %d, restoreLocalRule = %d, want 1/0/0: ctrld's rule must be removed and not restored", remove, add, f.restoreLocalCount())
 	}
 	if f.hasCtrldRule() {
 		t.Error("ctrld's rule is still installed beside the adopted GP catch-all")
@@ -381,8 +495,9 @@ func TestIneffectiveGPRuleTriggersNoSignalling(t *testing.T) {
 	if signal != 0 {
 		t.Errorf("signal calls = %d, want 0: ctrld must not force GP refresh, paramchange or a cache flush while external policy owns NRPT", signal)
 	}
-	if add != 0 || remove != 0 {
-		t.Errorf("addRule = %d, removeRule = %d, want 0/0: external policy must be left untouched", add, remove)
+	if add != 0 || remove != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule = %d, restoreLocalRule = %d, removeRule = %d, want 0/0/0: external policy must be left untouched",
+			add, f.restoreLocalCount(), remove)
 	}
 	if owner, _ := state.nrptPolicyOwner(); owner != nrptRuleOwnerGroupPolicy {
 		t.Errorf("owner = %v, want nrptRuleOwnerGroupPolicy: ctrld must not seize a namespace an administrator owns", owner)
@@ -544,9 +659,9 @@ func TestOwnedRecoveryDefersToIneffectiveExternalPolicy(t *testing.T) {
 	p.nrptProbeAndHeal(state)
 
 	add, remove, signal, _ := f.counts()
-	if add != 0 || remove != 0 || signal != 0 {
-		t.Errorf("addRule = %d, removeRule = %d, signal = %d, want 0/0/0: owned recovery must stop once external policy owns the namespace",
-			add, remove, signal)
+	if add != 0 || remove != 0 || signal != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule = %d, removeRule = %d, signal = %d, restoreLocalRule = %d, want 0/0/0/0: owned recovery must stop once external policy owns the namespace",
+			add, remove, signal, f.restoreLocalCount())
 	}
 	if f.hasCtrldRule() {
 		t.Error("owned recovery recreated ctrld's catch-all beside the administrator's rule")
@@ -601,8 +716,12 @@ func TestHandbackRestoresFallbackWhenGPChildDisappearsMidProbe(t *testing.T) {
 	if !f.hasCtrldRule() {
 		t.Error("ctrld's rule was not restored after the GP child disappeared; the host has no route")
 	}
-	if add, remove, _, _ := f.counts(); add != 1 || remove != 1 {
-		t.Errorf("addRule = %d, removeRule = %d, want 1/1", add, remove)
+	// A freed namespace is the one case the full writer is still correct for: with no
+	// external catch-all left to sit beside, it may place ctrld's GP rule where unrelated
+	// GP rules would otherwise hide the local store, or drop an empty parent to leave GP
+	// mode. Narrowing this case to a local-only write would leave ctrld invisible there.
+	if add, remove, _, _ := f.counts(); add != 1 || remove != 1 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule = %d, restoreLocalRule = %d, removeRule = %d, want 1/0/1", add, f.restoreLocalCount(), remove)
 	}
 }
 
@@ -629,8 +748,8 @@ func TestHandbackWritesNoSiblingWhenGPChildTurnsConflicting(t *testing.T) {
 	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "test"); got != nrptHandbackConflict {
 		t.Fatalf("nrptHandbackToExternal() = %v, want nrptHandbackConflict", got)
 	}
-	if add, _, _, _ := f.counts(); add != 0 {
-		t.Errorf("addRule calls = %d, want 0: restoring here writes a competing rule beside administrator policy", add)
+	if add, restoreLocal := f.writes(); add != 0 || restoreLocal != 0 {
+		t.Errorf("addRule calls = %d, restoreLocalRule calls = %d, want 0/0: restoring here writes a competing rule beside administrator policy", add, restoreLocal)
 	}
 	if f.hasCtrldRule() {
 		t.Error("ctrld's rule is installed beside a GP catch-all that targets another resolver")
@@ -659,8 +778,8 @@ func TestHandbackWithoutCtrldRuleClassifiesAfterFailedProbe(t *testing.T) {
 	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "test"); got != nrptHandbackConflict {
 		t.Fatalf("nrptHandbackToExternal() = %v, want nrptHandbackConflict", got)
 	}
-	if add, remove, signal, _ := f.counts(); add != 0 || remove != 0 || signal != 0 {
-		t.Errorf("addRule = %d, removeRule = %d, signal = %d, want 0/0/0", add, remove, signal)
+	if add, remove, signal, _ := f.counts(); add != 0 || remove != 0 || signal != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule = %d, removeRule = %d, signal = %d, restoreLocalRule = %d, want 0/0/0/0", add, remove, signal, f.restoreLocalCount())
 	}
 	owner, ruleName := state.nrptPolicyOwner()
 	if owner != nrptRuleOwnerNone || ruleName != "" {
@@ -686,8 +805,8 @@ func TestHandbackGivesReplacementChildItsOwnPass(t *testing.T) {
 	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "test"); got != nrptHandbackUnverified {
 		t.Fatalf("nrptHandbackToExternal() = %v, want nrptHandbackUnverified", got)
 	}
-	if add, remove, signal, _ := f.counts(); add != 0 || remove != 0 || signal != 0 {
-		t.Errorf("addRule = %d, removeRule = %d, signal = %d, want 0/0/0", add, remove, signal)
+	if add, remove, signal, _ := f.counts(); add != 0 || remove != 0 || signal != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule = %d, removeRule = %d, signal = %d, restoreLocalRule = %d, want 0/0/0/0", add, remove, signal, f.restoreLocalCount())
 	}
 	owner, ruleName := state.nrptPolicyOwner()
 	if owner != nrptRuleOwnerGroupPolicy || ruleName != "{NEW-GP-RULE}" {
@@ -720,8 +839,9 @@ func TestHandbackWritesNoSiblingWhenReplacementChildTakesOver(t *testing.T) {
 	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "test"); got != nrptHandbackUnverified {
 		t.Fatalf("nrptHandbackToExternal() = %v, want nrptHandbackUnverified", got)
 	}
-	if add, remove, _, _ := f.counts(); add != 0 || remove != 1 {
-		t.Errorf("addRule = %d, removeRule = %d, want 0/1: ctrld's rule must not be restored beside a replacement catch-all", add, remove)
+	if add, remove, _, _ := f.counts(); add != 0 || remove != 1 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule = %d, restoreLocalRule = %d, removeRule = %d, want 0/0/1: ctrld's rule must not be restored beside a replacement catch-all",
+			add, f.restoreLocalCount(), remove)
 	}
 	if f.hasCtrldRule() {
 		t.Error("ctrld's rule is installed beside an administrator catch-all that took the namespace")
@@ -749,8 +869,8 @@ func TestHandbackAdoptsReplacementChildThatRoutes(t *testing.T) {
 	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "test"); got != nrptHandbackVerified {
 		t.Fatalf("nrptHandbackToExternal() = %v, want nrptHandbackVerified", got)
 	}
-	if add, _, _, _ := f.counts(); add != 0 {
-		t.Errorf("addRule calls = %d, want 0", add)
+	if add, restoreLocal := f.writes(); add != 0 || restoreLocal != 0 {
+		t.Errorf("addRule calls = %d, restoreLocalRule calls = %d, want 0/0", add, restoreLocal)
 	}
 	owner, ruleName := state.nrptPolicyOwner()
 	if owner != nrptRuleOwnerGroupPolicy || ruleName != "{NEW-GP-RULE}" {
@@ -788,8 +908,8 @@ func TestHandbackChurnFailsSafeToCurrentExternalOwner(t *testing.T) {
 	if !nrptExternalOwns(got) {
 		t.Error("the churn disposition is not terminal external ownership; callers would fall through and write a sibling")
 	}
-	if add, _, _, _ := f.counts(); add != 0 {
-		t.Errorf("addRule calls = %d, want 0: no sibling write while the GP store is churning", add)
+	if add, restoreLocal := f.writes(); add != 0 || restoreLocal != 0 {
+		t.Errorf("addRule calls = %d, restoreLocalRule calls = %d, want 0/0: no sibling write while the GP store is churning", add, restoreLocal)
 	}
 	owner, ruleName := state.nrptPolicyOwner()
 	if owner != nrptRuleOwnerGroupPolicy || ruleName != "{GP-RULE-3}" {
@@ -817,8 +937,8 @@ func TestHandbackChurnFailsSafeToConflict(t *testing.T) {
 	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "test"); got != nrptHandbackConflict {
 		t.Fatalf("nrptHandbackToExternal() = %v, want nrptHandbackConflict", got)
 	}
-	if add, _, _, _ := f.counts(); add != 0 {
-		t.Errorf("addRule calls = %d, want 0", add)
+	if add, _, _, _ := f.counts(); add != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule = %d, restoreLocalRule = %d, want 0/0", add, f.restoreLocalCount())
 	}
 	if owner, _ := state.nrptPolicyOwner(); owner != nrptRuleOwnerNone {
 		t.Errorf("owner = %v, want nrptRuleOwnerNone", owner)
@@ -878,8 +998,8 @@ func TestActivationWritesNoSiblingWhileGPStoreChurns(t *testing.T) {
 		t.Error("activateCtrldNRPTFallback() = true while an external catch-all owns the namespace")
 	}
 	add, remove, signal, _ := f.counts()
-	if add != 0 || signal != 0 {
-		t.Errorf("addRule = %d, signal = %d, want 0/0: ctrld must not write beside the administrator's catch-all", add, signal)
+	if add != 0 || signal != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule = %d, signal = %d, restoreLocalRule = %d, want 0/0/0: ctrld must not write beside the administrator's catch-all", add, signal, f.restoreLocalCount())
 	}
 	if remove != 0 {
 		t.Errorf("removeRule calls = %d, want 0: there was no ctrld rule to remove", remove)
@@ -905,9 +1025,9 @@ func TestStopLeavesGPManagedPolicyAlone(t *testing.T) {
 	}
 
 	add, remove, signal, _ := f.counts()
-	if remove != 0 || signal != 0 || add != 0 {
-		t.Errorf("removeRule = %d, signal = %d, addRule = %d, want 0/0/0: shutdown must not touch externally owned NRPT policy",
-			remove, signal, add)
+	if remove != 0 || signal != 0 || add != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("removeRule = %d, signal = %d, addRule = %d, restoreLocalRule = %d, want 0/0/0/0: shutdown must not touch externally owned NRPT policy",
+			remove, signal, add, f.restoreLocalCount())
 	}
 	if f.flushCount() != 0 {
 		t.Errorf("flush calls = %d, want 0: no cache flush is owed for a rule ctrld does not own", f.flushCount())
@@ -935,8 +1055,8 @@ func TestStopRemovesOrphanWhileLeavingGPPolicy(t *testing.T) {
 	if remove != 1 || signal != 1 {
 		t.Errorf("removeRule = %d, signal = %d, want 1/1: the orphaned ctrld rule must be removed on the way out", remove, signal)
 	}
-	if add != 0 {
-		t.Errorf("addRule calls = %d, want 0", add)
+	if add != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule calls = %d, restoreLocalRule calls = %d, want 0/0", add, f.restoreLocalCount())
 	}
 	if f.hasCtrldRule() {
 		t.Error("the orphaned ctrld rule survived shutdown; a later GP removal would activate it")
@@ -958,8 +1078,8 @@ func TestRemoveOrphanedCtrldNRPTRule(t *testing.T) {
 		p.removeOrphanedCtrldNRPTRule("test")
 
 		add, remove, signal, _ := f.counts()
-		if remove != 1 || signal != 1 || add != 0 {
-			t.Errorf("removeRule = %d, signal = %d, addRule = %d, want 1/1/0", remove, signal, add)
+		if remove != 1 || signal != 1 || add != 0 || f.restoreLocalCount() != 0 {
+			t.Errorf("removeRule = %d, signal = %d, addRule = %d, restoreLocalRule = %d, want 1/1/0/0", remove, signal, add, f.restoreLocalCount())
 		}
 		if f.hasCtrldRule() {
 			t.Error("the ctrld rule is still installed")
@@ -974,9 +1094,9 @@ func TestRemoveOrphanedCtrldNRPTRule(t *testing.T) {
 		p.removeOrphanedCtrldNRPTRule("test")
 
 		add, remove, signal, _ := f.counts()
-		if remove != 0 || signal != 0 || add != 0 {
-			t.Errorf("removeRule = %d, signal = %d, addRule = %d, want 0/0/0: nothing to sweep must cost no registry writes and no signalling",
-				remove, signal, add)
+		if remove != 0 || signal != 0 || add != 0 || f.restoreLocalCount() != 0 {
+			t.Errorf("removeRule = %d, signal = %d, addRule = %d, restoreLocalRule = %d, want 0/0/0/0: nothing to sweep must cost no registry writes and no signalling",
+				remove, signal, add, f.restoreLocalCount())
 		}
 	})
 }
@@ -1073,8 +1193,8 @@ func TestHealLadderStopsWhenGPAppearsBeforeTwoPhase(t *testing.T) {
 	if remove != 0 {
 		t.Errorf("removeRule calls = %d, want 0: the ladder must stop before the delete half of the two-phase recovery", remove)
 	}
-	if add != 0 {
-		t.Errorf("addRule calls = %d, want 0: the ladder must not recreate ctrld's rule beside a new GP catch-all", add)
+	if add != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule calls = %d, restoreLocalRule calls = %d, want 0/0: the ladder must not recreate ctrld's rule beside a new GP catch-all", add, f.restoreLocalCount())
 	}
 	if !f.hasCtrldRule() {
 		t.Error("ctrld's rule was deleted after an administrator catch-all appeared")
@@ -1100,8 +1220,8 @@ func TestHealLadderCleansEmptyGPParentBeforeRetrying(t *testing.T) {
 	if f.cleanCalls != 1 {
 		t.Errorf("cleanParent calls = %d, want 1: the empty GP parent must be removed before burning retries", f.cleanCalls)
 	}
-	if add, remove, _, _ := f.counts(); add != 0 || remove != 0 {
-		t.Errorf("addRule = %d, removeRule = %d, want 0/0: the probe passed after the cleanup, so no recovery was needed", add, remove)
+	if add, remove, _, _ := f.counts(); add != 0 || remove != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule = %d, removeRule = %d, restoreLocalRule = %d, want 0/0/0: the probe passed after the cleanup, so no recovery was needed", add, remove, f.restoreLocalCount())
 	}
 }
 
@@ -1185,8 +1305,8 @@ func TestPhaseTwoRevalidatesOwnershipAfterWaitingForTheLock(t *testing.T) {
 
 	p.nrptProbeAndHeal(state)
 
-	if add, _, _, _ := f.counts(); add != 0 {
-		t.Errorf("addRule calls = %d, want 0: phase two re-added ctrld's rule beside a GP catch-all that took ownership while it waited for the lock", add)
+	if add, restoreLocal := f.writes(); add != 0 || restoreLocal != 0 {
+		t.Errorf("addRule calls = %d, restoreLocalRule calls = %d, want 0/0: phase two re-added ctrld's rule beside a GP catch-all that took ownership while it waited for the lock", add, restoreLocal)
 	}
 	if f.hasCtrldRule() {
 		t.Error("ctrld's rule is installed beside the administrator's catch-all")
@@ -1267,8 +1387,9 @@ func TestStartupReportsFailureWhenExternalPolicyNeverRoutes(t *testing.T) {
 	if interceptFailedWithVerifiedExternalDNS(err) {
 		t.Errorf("err = %v; this route was never verified, so it must not read as the verified case", err)
 	}
-	if add, remove, signal, _ := f.counts(); add != 0 || remove != 0 || signal != 0 {
-		t.Errorf("addRule = %d, removeRule = %d, signal = %d, want 0/0/0: no owned fallback may be written beside an administrator catch-all", add, remove, signal)
+	if add, remove, signal, _ := f.counts(); add != 0 || remove != 0 || signal != 0 || f.restoreLocalCount() != 0 {
+		t.Errorf("addRule = %d, restoreLocalRule = %d, removeRule = %d, signal = %d, want 0/0/0/0: no owned fallback may be written beside an administrator catch-all",
+			add, f.restoreLocalCount(), remove, signal)
 	}
 
 	// Recovery must stay live so the rule can be re-tested.
@@ -1305,5 +1426,276 @@ func TestFakeNRPTOpsPreconditionDetectsBypass(t *testing.T) {
 	// would be read from an object nothing consults.
 	if err := checkFakeNRPTOpsInstalled(&fakeNRPTOps{}); err == nil {
 		t.Error("a fake that is not the installed one passed the precondition")
+	}
+}
+
+// startupInterceptMode puts the globals startDNSInterceptLocked reads into dns mode with a
+// single loopback listener, and puts them back afterwards.
+func startupInterceptMode(t *testing.T) {
+	t.Helper()
+	originalCfg, originalMode, originalIntercept, originalHard := cfg, interceptMode, dnsIntercept, hardIntercept
+	t.Cleanup(func() {
+		cfg, interceptMode, dnsIntercept, hardIntercept = originalCfg, originalMode, originalIntercept, originalHard
+	})
+	cfg = ctrld.Config{}
+	cfg.Listener = map[string]*ctrld.ListenerConfig{"0": {IP: "127.0.0.1", Port: 53}}
+	interceptMode, dnsIntercept, hardIntercept = "dns", true, false
+}
+
+// TestHandbackAbortsWhenTheLocalWriteFails covers the write failure on the put-back path.
+// Nothing else exercises it: every other test lets restoreLocalRule succeed.
+//
+// The rule is gone by then - removeRule ran before the probe - so a failed put-back leaves
+// the host with no ctrld route at all. What the transition owes is an accurate report:
+// ownership goes back to none so the health monitor treats it as unowned and retries, and
+// no signal is sent for a change that did not happen.
+func TestHandbackAbortsWhenTheLocalWriteFails(t *testing.T) {
+	p, state, f := newHandbackTestProg(t)
+	f.configure(fakeNRPTSeed{
+		probeResults: []bool{true, false},
+		gpRule:       "{GP-RULE}",
+		ctrldRule:    true,
+		addErr:       errors.New("registry write failed"),
+	})
+	state.setNRPTPolicyOwner(nrptRuleOwnerCtrld, "")
+
+	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "local write fails"); got != nrptHandbackAborted {
+		t.Errorf("nrptHandbackToExternal() = %v, want nrptHandbackAborted", got)
+	}
+	if owner, _ := state.nrptPolicyOwner(); owner != nrptRuleOwnerNone {
+		t.Errorf("NRPT owner = %v, want nrptRuleOwnerNone: a failed put-back owns nothing", owner)
+	}
+	if f.restoreLocalCount() != 1 {
+		t.Errorf("restoreLocalRule calls = %d, want 1", f.restoreLocalCount())
+	}
+	if add, _, _, _ := f.counts(); add != 0 {
+		t.Errorf("addRule calls = %d, want 0: the failing writer must not be retried through the full writer", add)
+	}
+	if f.hasCtrldRule() {
+		t.Error("ctrld's local rule reads as present after the write that was supposed to create it failed")
+	}
+	if f.hasCtrldGPSibling() {
+		t.Error("a failed put-back left ctrld's rule in the GP store")
+	}
+}
+
+// TestHandbackKeepsCtrldWhenTheStoreReturnsToTheInitialRule covers the spent-budget branch
+// of externalAfterRemoval when the churn ends where it began.
+//
+// The three existing churn tests all end somewhere else - a third rule, a rule targeting
+// another resolver, or a free namespace - so none of them reaches this line with the
+// original rule name still current. That combination selects the writer: the class is
+// gpChildSameExact, the administrator's catch-all is on disk, and only the local key may
+// be written.
+func TestHandbackKeepsCtrldWhenTheStoreReturnsToTheInitialRule(t *testing.T) {
+	p, state, f := newHandbackTestProg(t)
+	f.configure(fakeNRPTSeed{
+		probeResults: []bool{true, false, false},
+		gpRule:       "{GP-RULE}",
+		ctrldRule:    true,
+	})
+	f.onProbe = func(call int) {
+		switch call {
+		case 2:
+			f.setGPRule("{GP-RULE-2}", false)
+		case 3:
+			f.setGPRule("{GP-RULE}", false) // back to the rule the transition started on
+		}
+	}
+	state.setNRPTPolicyOwner(nrptRuleOwnerCtrld, "")
+
+	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "churn returns to the initial rule"); got != nrptHandbackKeptCtrld {
+		t.Errorf("nrptHandbackToExternal() = %v, want nrptHandbackKeptCtrld", got)
+	}
+	if owner, _ := state.nrptPolicyOwner(); owner != nrptRuleOwnerCtrld {
+		t.Errorf("NRPT owner = %v, want nrptRuleOwnerCtrld", owner)
+	}
+	if f.restoreLocalCount() != 1 {
+		t.Errorf("restoreLocalRule calls = %d, want 1", f.restoreLocalCount())
+	}
+	if add, _, _, _ := f.counts(); add != 0 {
+		t.Errorf("addRule calls = %d, want 0: the spent-budget path must not write a sibling either", add)
+	}
+	if f.hasCtrldGPSibling() {
+		t.Error("the spent-budget path left ctrld's rule in the GP store beside the administrator's catch-all")
+	}
+}
+
+// TestGPChildGoneWritesTheGPRuleWhenOtherGPRulesRemain is the counterpart to the
+// no-sibling tests: with the administrator's catch-all gone but unrelated GP rules still
+// present, the full writer is correct and must place ctrld's GP rule, or DNS Client's GP
+// mode hides the local store and ctrld routes nothing.
+func TestGPChildGoneWritesTheGPRuleWhenOtherGPRulesRemain(t *testing.T) {
+	p, state, f := newHandbackTestProg(t)
+	f.configure(fakeNRPTSeed{
+		probeResults: []bool{true, false},
+		gpRule:       "{GP-RULE}",
+		ctrldRule:    true,
+		otherGPRules: true, // unrelated GP policy that keeps DNS Client in GP mode
+	})
+	f.onProbe = func(call int) {
+		if call == 2 {
+			f.setGPRule("", false) // the administrator's catch-all disappears mid-probe
+		}
+	}
+	state.setNRPTPolicyOwner(nrptRuleOwnerCtrld, "")
+
+	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "child gone with other GP rules"); got != nrptHandbackKeptCtrld {
+		t.Errorf("nrptHandbackToExternal() = %v, want nrptHandbackKeptCtrld", got)
+	}
+	if add, _, _, _ := f.counts(); add != 1 {
+		t.Errorf("addRule calls = %d, want 1: a free namespace is what the full writer is for", add)
+	}
+	if f.restoreLocalCount() != 0 {
+		t.Errorf("restoreLocalRule calls = %d, want 0", f.restoreLocalCount())
+	}
+	if !f.hasCtrldGPSibling() {
+		t.Error("ctrld's GP rule is missing while unrelated GP rules keep DNS Client in GP mode; the local store is hidden and nothing routes")
+	}
+}
+
+// TestStartupKeepsCtrldRuleWhenExternalPolicyCannotRoute is the owned-lab regression as
+// startup runs it: a service start with ctrld's rule from an earlier run and a matching
+// administrator catch-all that cannot carry DNS alone.
+//
+// The existing startup test has no ctrld rule and a single failing probe, so it never
+// reaches the put-back. This one does, and the assertion that matters is which writer ran.
+//
+// Ownership is deliberately not asserted: startup launches nrptProbeAndHeal, whose own
+// handback is throttled and whose undecided branch moves the owner to Group Policy within
+// seconds, so any owner assertion here is a race.
+func TestStartupKeepsCtrldRuleWhenExternalPolicyCannotRoute(t *testing.T) {
+	startupInterceptMode(t)
+
+	p, _, f := newHandbackTestProg(t)
+	p.cfg = &cfg
+	p.dnsInterceptState = nil // startup publishes its own state
+	f.configure(fakeNRPTSeed{probeResults: []bool{true, false}, gpRule: "{GP-RULE}", ctrldRule: true})
+
+	if err := p.startDNSInterceptLocked(); err != nil {
+		t.Fatalf("startDNSInterceptLocked() = %v, want nil: ctrld's own route was put back, so startup succeeded", err)
+	}
+	if f.restoreLocalCount() != 1 {
+		t.Errorf("restoreLocalRule calls = %d, want 1: startup must put back only the local key", f.restoreLocalCount())
+	}
+	if add, _, _, _ := f.counts(); add != 0 {
+		t.Errorf("addRule calls = %d, want 0: the full writer would place ctrld's GP rule beside the administrator's", add)
+	}
+	if !f.hasCtrldRule() {
+		t.Error("ctrld's local rule is missing after startup; the host has no route")
+	}
+	if f.hasCtrldGPSibling() {
+		t.Error("startup left ctrld's rule in the GP store beside the administrator's catch-all")
+	}
+	_ = p.stopDNSIntercept()
+}
+
+// TestStartupDropsAnInheritedGPSibling covers the machine that boots already holding the
+// forbidden pair: ctrld's GP rule from an earlier run beside an administrator catch-all.
+//
+// Adoption used to inherit it. Nothing downstream removes it: every handback from here
+// stops at the pre-probe while the administrator's rule stays unproven, the monitor calls
+// removeRule only inside a handback, and the orphan sweep runs at stop. The second
+// catch-all would therefore stand for the life of the process, through the very outage the
+// operator is trying to diagnose.
+//
+// The GP-key-only case is the one that proves the cleanup is not self-defeating. Dropping
+// the sibling empties the store of ctrld keys, so startup has to write its rule after all -
+// and the full writer would put the sibling straight back, beside the rule it was just
+// removed from.
+func TestStartupDropsAnInheritedGPSibling(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ctrldRule bool
+		// wantRestoreLocal is whether startup had to write ctrld's rule itself, which it
+		// may only ever do into the local store while an administrator rule is present.
+		wantRestoreLocal int
+	}{
+		{name: "local and GP keys", ctrldRule: true, wantRestoreLocal: 0},
+		{name: "GP key only", ctrldRule: false, wantRestoreLocal: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			startupInterceptMode(t)
+
+			p, _, f := newHandbackTestProg(t)
+			p.cfg = &cfg
+			p.dnsInterceptState = nil
+			f.configure(fakeNRPTSeed{
+				probeResults: []bool{false}, // the pre-probe never answers, so the handback decides nothing
+				gpRule:       "{GP-RULE}",
+				ctrldRule:    tc.ctrldRule,
+				ctrldGPRule:  true,
+			})
+
+			err := p.startDNSInterceptLocked()
+			if f.hasCtrldGPSibling() {
+				t.Error("startup left ctrld's rule in the GP store beside the administrator's catch-all; nothing later removes it")
+			}
+			if f.dropGPCount() != 1 {
+				t.Errorf("dropGPRule calls = %d, want 1", f.dropGPCount())
+			}
+			if add, restoreLocal := f.writes(); add != 0 || restoreLocal != tc.wantRestoreLocal {
+				t.Errorf("addRule calls = %d, restoreLocalRule calls = %d, want 0/%d: the full writer re-creates the sibling",
+					add, restoreLocal, tc.wantRestoreLocal)
+			}
+			if !f.hasCtrldRule() {
+				t.Error("no ctrld rule after startup; the host has no route")
+			}
+			if err == nil {
+				_ = p.stopDNSIntercept()
+			}
+		})
+	}
+}
+
+// TestHandbackPutBackSettlesToGroupPolicyOwnership pins the registry and ownership state a
+// failed handback actually leaves behind, which is what QA will find on the machine.
+//
+// After the put-back the health monitor keeps running: its handback is throttled, so the
+// heal reaches deferToExternalCatchAll undecided and records Group Policy ownership. The
+// end state is ctrld's local key on disk, the administrator's rule on disk, no sibling,
+// and no further writes - and stop then removes the local key as an orphan.
+func TestHandbackPutBackSettlesToGroupPolicyOwnership(t *testing.T) {
+	p, state, f := newHandbackTestProg(t)
+	f.configure(fakeNRPTSeed{probeResults: []bool{true, false}, gpRule: "{GP-RULE}", ctrldRule: true})
+	state.setNRPTPolicyOwner(nrptRuleOwnerCtrld, "")
+
+	if got := p.nrptHandbackToExternal(state, "{GP-RULE}", "probe finds no route"); got != nrptHandbackKeptCtrld {
+		t.Fatalf("nrptHandbackToExternal() = %v, want nrptHandbackKeptCtrld", got)
+	}
+	_, _, signalBefore, _ := f.counts()
+	restoreBefore := f.restoreLocalCount()
+
+	p.nrptProbeAndHeal(state)
+
+	if owner, _ := state.nrptPolicyOwner(); owner != nrptRuleOwnerGroupPolicy {
+		t.Errorf("NRPT owner = %v, want nrptRuleOwnerGroupPolicy: the throttled heal ends undecided and defers", owner)
+	}
+	addAfter, _, signalAfter, _ := f.counts()
+	// Absolute, not "unchanged": the whole sequence must never reach the full writer,
+	// so a first call that had already happened would be a defect too.
+	if addAfter != 0 {
+		t.Errorf("addRule calls = %d, want 0: neither the handback nor the heal may write a sibling", addAfter)
+	}
+	if signalAfter != signalBefore {
+		t.Errorf("signal calls = %d, want %d: nothing changed, so nothing is signalled", signalAfter, signalBefore)
+	}
+	if f.restoreLocalCount() != restoreBefore {
+		t.Errorf("restoreLocalRule calls = %d, want %d: the rule is already back", f.restoreLocalCount(), restoreBefore)
+	}
+	if !f.hasCtrldRule() {
+		t.Error("ctrld's local key is missing; the put-back did not survive the heal")
+	}
+	if f.hasCtrldGPSibling() {
+		t.Error("the heal wrote ctrld's rule into the GP store")
+	}
+
+	_, removeBefore, _, _ := f.counts()
+	_ = p.stopDNSIntercept()
+	if _, removeAfter, _, _ := f.counts(); removeAfter != removeBefore+1 {
+		t.Errorf("removeRule calls = %d, want %d: stop must sweep the local key it left on disk", removeAfter, removeBefore+1)
+	}
+	if f.hasCtrldRule() {
+		t.Error("stop left ctrld's local key behind")
 	}
 }

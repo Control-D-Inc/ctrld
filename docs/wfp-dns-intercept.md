@@ -82,7 +82,9 @@ ctrld uses an adaptive strategy (matching [Tailscale's approach](https://github.
    on all non-domain machines.
 2. **Check if other software has GP NRPT rules** (`otherGPRulesExist()`). If
    foreign GP rules are present (IT policy, VPN), DNS Client is already in GP mode
-   and our local rule would be invisible — so we also write to the GP path.
+   and our local rule would be invisible — so we also write to the GP path. ctrld does
+   not write to the GP path when the foreign rule is an administrator catch-all for this
+   listener: a second catch-all in that store is never written, whatever the cost.
 3. **If no foreign GP rules exist**, clean any stale ctrld GP rules and delete
    the empty GP parent key. This ensures DNS Client stays in "local mode" where
    the local-path rule activates immediately via `paramchange`.
@@ -100,7 +102,7 @@ When the rule remains unchanged and the probe arrives, Group Policy owns NRPT:
 - `RefreshPolicyEx`, Dnscache `paramchange`, and cache flush are not used for that policy;
 - shutdown/uninstall leave the GP child untouched.
 
-A matching GP child that remains present but fails its probe is reported as ineffective and is not rewritten. If the child disappears, ctrld activates its normal owned fallback. A GP catch-all that instead changes to another resolver is reported as a conflict; ctrld does not create a second ambiguous catch-all. If the matching rule later returns, ctrld probes first, removes only its deterministic fallback keys, signals the ownership transition once, and resumes observing Group Policy.
+A matching GP child that remains present but fails its probe is reported as ineffective and is not rewritten. If the proof finds no route while the same rule stays on disk, ctrld puts back only its local-store key, keeps ownership, and does not write its GP-store rule adjacent to the administrator's rule. If the child disappears, ctrld activates its normal owned fallback. A GP catch-all that instead changes to another resolver is reported as a conflict; ctrld does not create a second ambiguous catch-all. If the matching rule later returns, ctrld probes first, removes only its deterministic fallback keys, signals the ownership transition once, and resumes observing Group Policy.
 
 **Deployment ordering:** apply the GPO before starting ctrld to guarantee adapter DNS is never reset. Remove/unlink it before intentionally stopping or uninstalling ctrld. A GP catch-all still targeting loopback with no listener running is a deliberate fail-closed state and will break DNS.
 
@@ -315,6 +317,8 @@ Every 30s:
     │
     ├─ ctrld-owned owner
     │   ├─ Working matching GP child returns → remove only ctrld keys; adopt GP
+    │   │   └─ Probe finds no route, rule still on disk → write back only the
+    │   │      local-store key, keep ownership, write no GP sibling
     │   ├─ ctrld key missing → restore + signal + verify
     │   └─ ctrld key present → probe; run owned heal sequence on failure
     │

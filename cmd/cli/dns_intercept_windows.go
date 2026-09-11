@@ -447,6 +447,11 @@ const (
 	// (Get-DnsClientNrptPolicy returns empty). This is a deterministic GUID
 	// so we can reliably find and clean up our own rule.
 	nrptDirectRuleName = `{B2E9A3C1-7F4D-4A8E-9D6B-5C1E0F3A2B8D}`
+
+	// nrptDirectRulePath is the full path of ctrld's local-store catch-all: the
+	// primary key, written on every start and the only one a failed handback puts
+	// back. Named once so the writers, the reader and the remover cannot drift.
+	nrptDirectRulePath = nrptDirectKey + `\` + nrptDirectRuleName
 )
 
 func (p *prog) nrptListenerIP() string {
@@ -570,7 +575,7 @@ func findConflictingGPCatchAll(listenerIP string) (string, string) {
 //   - After GP writes, call RefreshPolicyEx to activate.
 func addNRPTCatchAllRule(listenerIP string) error {
 	// Always write to local/direct service store path.
-	if err := writeNRPTRule(nrptDirectKey+`\`+nrptDirectRuleName, listenerIP); err != nil {
+	if err := writeNRPTRule(nrptDirectRulePath, listenerIP); err != nil {
 		return fmt.Errorf("failed to write NRPT local path rule: %w", err)
 	}
 
@@ -585,6 +590,41 @@ func addNRPTCatchAllRule(listenerIP string) error {
 		// No other GP rules — clean our stale GP entry and delete the empty
 		// GP parent key so DNS Client stays in "local mode".
 		cleanGPPath()
+	}
+	return nil
+}
+
+// restoreNRPTLocalCatchAllRule writes ctrld's catch-all to the local/direct store and
+// touches nothing else. It is the only writer ctrld may use while an administrator's
+// catch-all is on disk: the handback whose probe found no route, and startup when it must
+// install ctrld's own rule beside external policy.
+//
+// addNRPTCatchAllRule cannot be used there. It writes ctrld's GP-path rule whenever any
+// other GP rule exists, and the administrator's catch-all under test is exactly such a
+// rule - so "restoring" through it plants CtrldCatchAll beside that child: the second GP
+// catch-all that an administrator did not write.
+//
+// The contract this file keeps, which is narrower than a restore:
+//
+//   - ctrld does not write its GP rule next to an administrator catch-all.
+//   - This writes back the local GUID key, and only that key.
+//   - Every other key removeNRPTCatchAllRule deleted stays deleted: the legacy local name
+//     and ctrld's GP CtrldCatchAll. A GP sibling left behind by an earlier run does not
+//     come back, so the store after this write is not the store the transition started
+//     from.
+//   - What comes back is ownership, not delivery. The branch is reached because the
+//     post-removal probe failed, and while GP policy is in effect the DNS Client can
+//     ignore the local key entirely. Nor is the withheld sibling knowably useless:
+//     isMatchingGPNRPTRule reads only Name and GenericDNSServers, so a child it accepts
+//     can still be one the DNS Client skips for want of Comment, DisplayName or
+//     IPSECCARestriction - in which case ctrld's GP rule was the route.
+//
+// The cost of that contract is that there may be no DNS until the administrator's rule is
+// corrected. ctrld logs a warning, keeps ownership, and re-tests the external child after
+// nrptHandbackRetryInterval.
+func restoreNRPTLocalCatchAllRule(listenerIP string) error {
+	if err := writeNRPTRule(nrptDirectRulePath, listenerIP); err != nil {
+		return fmt.Errorf("failed to restore NRPT local path rule: %w", err)
 	}
 	return nil
 }
@@ -616,6 +656,12 @@ func otherGPRulesExist() bool {
 //
 // Do not leave an empty GP parent behind: Windows treats the parent key itself
 // as the policy store boundary, so an empty key can still hide local-path rules.
+// removeCtrldGPRule deletes ctrld's GP-store catch-all and nothing else: not the parent
+// key, which an administrator rule still occupies, and not the local store.
+func removeCtrldGPRule() {
+	registry.DeleteKey(registry.LOCAL_MACHINE, nrptBaseKey+`\`+nrptRuleName)
+}
+
 func cleanGPPath() bool {
 	// Delete our specific rule.
 	registry.DeleteKey(registry.LOCAL_MACHINE, nrptBaseKey+`\`+nrptRuleName)
@@ -683,7 +729,7 @@ func writeNRPTRule(keyPath, listenerIP string) error {
 // the empty parent on stop, we ensure a clean slate for the next start.
 func removeNRPTCatchAllRule() error {
 	// Remove our GUID-named rule from local/direct path.
-	if err := registry.DeleteKey(registry.LOCAL_MACHINE, nrptDirectKey+`\`+nrptDirectRuleName); err != nil {
+	if err := registry.DeleteKey(registry.LOCAL_MACHINE, nrptDirectRulePath); err != nil {
 		if err != registry.ErrNotExist {
 			return fmt.Errorf("failed to delete NRPT local rule: %w", err)
 		}
@@ -713,7 +759,7 @@ func deleteEmptyParentKey(keyPath string) {
 // in either the local or GP path.
 func nrptCatchAllRuleExists() bool {
 	for _, path := range []string{
-		nrptDirectKey + `\` + nrptDirectRuleName,
+		nrptDirectRulePath,
 		nrptBaseKey + `\` + nrptRuleName,
 	} {
 		k, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.QUERY_VALUE)
@@ -1006,7 +1052,20 @@ func (p *prog) startDNSInterceptLocked() error {
 
 	owner, _ = state.nrptPolicyOwner()
 	if owner == nrptRuleOwnerNone {
-		if ops.ruleExists() {
+		exists := ops.ruleExists()
+		if exists && ops.findGPRule(listenerIP) != "" {
+			// An earlier run left ctrld's GP-store catch-all beside an administrator
+			// catch-all, and adopting would inherit it: nothing downstream removes it.
+			// Every handback from here stops at the pre-probe while that rule is
+			// unproven, the monitor calls removeRule only inside a handback, and the
+			// orphan sweep runs at stop - so the second catch-all would stand for the
+			// whole process lifetime, through a DNS outage. Drop it before adopting,
+			// then re-read: ruleExists is also true for the sibling alone, and a store
+			// holding nothing else must fall through to the writer below.
+			ops.dropGPRule()
+			exists = ops.ruleExists()
+		}
+		if exists {
 			// A rule from an earlier run already points at this listener. Adopt it rather
 			// than writing a second time: with a GP child present, addNRPTCatchAllRule
 			// would also write ctrld's GP-path sibling.
@@ -1014,10 +1073,22 @@ func (p *prog) startDNSInterceptLocked() error {
 			mainLog.Load().Info().Str("listener", listenerIP).
 				Msg("DNS intercept: adopting the ctrld NRPT catch-all already present from an earlier run")
 		} else {
+			// Which writer is allowed here is decided the same way the handback decides
+			// it: with an administrator catch-all on disk, addNRPTCatchAllRule would
+			// place ctrld's GP rule beside it, so only the local key may be written.
+			//
+			// This is not a hypothetical branch. The sibling cleanup above falls into it
+			// whenever the store held nothing but ctrld's GP key - having just deleted
+			// that key, the full writer would put it straight back, next to the very
+			// rule it was removed from.
+			write := ops.addRule
+			if ops.findGPRule(listenerIP) != "" {
+				write = ops.restoreLocalRule
+			}
 			if ops.cleanParent() {
 				ops.signal()
 			}
-			if err := ops.addRule(listenerIP); err != nil {
+			if err := write(listenerIP); err != nil {
 				return fmt.Errorf("dns intercept: failed to add NRPT catch-all rule: %w", err)
 			}
 			logNRPTParentKeyState("post-write")
@@ -2410,12 +2481,18 @@ func gpCatchAllConflictBlocksFallback(state *wfpState, reason string) bool {
 // they cause. Tests substitute it to drive a transition - probe outcomes, registry
 // state, concurrency - without touching the host's registry or DNS Client.
 type nrptOps struct {
-	probe         func(state *wfpState) bool
-	ruleExists    func() bool
-	addRule       func(listenerIP string) error
-	removeRule    func() error
-	signal        func()
-	findGPRule    func(listenerIP string) string
+	probe      func(state *wfpState) bool
+	ruleExists func() bool
+	addRule    func(listenerIP string) error
+	// restoreLocalRule re-writes only ctrld's local-store catch-all, leaving the GP
+	// store exactly as found. See restoreNRPTLocalCatchAllRule.
+	restoreLocalRule func(listenerIP string) error
+	removeRule       func() error
+	signal           func()
+	findGPRule       func(listenerIP string) string
+	// dropGPRule deletes ctrld's GP-store catch-all, leaving the administrator's rule
+	// and the local store alone. See removeCtrldGPRule.
+	dropGPRule    func()
 	gpRuleMatches func(ruleName, listenerIP string) bool
 	gpConflicts   func(state *wfpState, reason string) bool
 	loopback      func(state *wfpState) error
@@ -2434,20 +2511,22 @@ func (p *prog) nrptOps() nrptOps {
 		return *nrptOpsForTest
 	}
 	return nrptOps{
-		probe:         p.probeNRPT,
-		ruleExists:    nrptCatchAllRuleExists,
-		addRule:       addNRPTCatchAllRule,
-		removeRule:    removeNRPTCatchAllRule,
-		signal:        signalNRPTChange,
-		findGPRule:    findMatchingGPNRPTRule,
-		gpRuleMatches: gpNRPTRuleMatches,
-		gpConflicts:   p.gpCatchAllConflictBlocksFallbackOps,
-		loopback:      p.activateLoopbackWFPProtect,
-		wait:          p.interceptWait,
-		flush:         flushDNSCache,
-		parentEmpty:   nrptParentKeyEmpty,
-		cleanParent:   cleanEmptyNRPTParent,
-		startWFP:      p.startWFPFilters,
+		probe:            p.probeNRPT,
+		ruleExists:       nrptCatchAllRuleExists,
+		addRule:          addNRPTCatchAllRule,
+		restoreLocalRule: restoreNRPTLocalCatchAllRule,
+		removeRule:       removeNRPTCatchAllRule,
+		signal:           signalNRPTChange,
+		findGPRule:       findMatchingGPNRPTRule,
+		dropGPRule:       removeCtrldGPRule,
+		gpRuleMatches:    gpNRPTRuleMatches,
+		gpConflicts:      p.gpCatchAllConflictBlocksFallbackOps,
+		loopback:         p.activateLoopbackWFPProtect,
+		wait:             p.interceptWait,
+		flush:            flushDNSCache,
+		parentEmpty:      nrptParentKeyEmpty,
+		cleanParent:      cleanEmptyNRPTParent,
+		startWFP:         p.startWFPFilters,
 	}
 }
 
@@ -2609,10 +2688,22 @@ func (p *prog) nrptHandbackToExternal(state *wfpState, ruleName, reason string) 
 
 	}
 
-	// The original child is still exact but cannot carry DNS, or external policy is gone
-	// altogether: ctrld's route is the one that has to come back. This only restores the
-	// state the transition started from, so it creates no new sibling.
-	if err := ops.addRule(state.listenerIP); err != nil {
+	// ctrld's route has to come back. Class decides the writer:
+	//
+	//   gpChildGone      the namespace is free, so the full writer is correct - it may
+	//                    place ctrld's GP rule where unrelated GP rules would otherwise
+	//                    hide the local store, or drop an empty parent to leave GP mode.
+	//   anything else    an external catch-all is still on disk, so only the local key
+	//                    may be written. See restoreNRPTLocalCatchAllRule.
+	//
+	// The local writer is the default rather than the exception: reaching the full writer
+	// with any external catch-all present writes the sibling that must never exist, so a
+	// class added later must opt in to it deliberately.
+	restore := ops.restoreLocalRule
+	if class == gpChildGone {
+		restore = ops.addRule
+	}
+	if err := restore(state.listenerIP); err != nil {
 		mainLog.Load().Error().Err(err).Str("rule", ruleName).
 			Msg("DNS intercept: handback probe failed and the ctrld NRPT rule could not be restored; the health monitor will retry")
 		state.setNRPTPolicyOwner(nrptRuleOwnerNone, "")
@@ -2625,7 +2716,7 @@ func (p *prog) nrptHandbackToExternal(state *wfpState, ruleName, reason string) 
 			Msg("DNS intercept: GP-managed catch-all disappeared during the handback probe; restored the ctrld fallback and kept ctrld ownership")
 	} else {
 		mainLog.Load().Warn().Str("rule", ruleName).Str("reason", reason).
-			Msg("DNS intercept: GP-managed catch-all did not carry DNS without ctrld's rule; restored the ctrld fallback and kept ctrld ownership")
+			Msg("DNS intercept: GP-managed catch-all could not be proved to carry DNS without ctrld's rule; wrote back ctrld's local-store key without writing a GP sibling, and kept ctrld ownership")
 	}
 	return nrptHandbackKeptCtrld
 }
