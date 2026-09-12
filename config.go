@@ -532,6 +532,12 @@ func (uc *UpstreamConfig) ForceReBootstrap() {
 	uc.rebootstrap.Store(rebootstrapNotStarted)
 }
 
+// CloseTransports releases all network resources held by this upstream.
+// Callers must not use the upstream afterward without calling SetupTransport.
+func (uc *UpstreamConfig) CloseTransports() {
+	uc.closeTransports()
+}
+
 // closeTransports closes idle connections on all existing transports.
 // This is called before creating new transports during re-bootstrap to
 // force in-flight requests on stale connections to fail quickly, rather

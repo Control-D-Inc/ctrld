@@ -1638,6 +1638,14 @@ func (p *prog) monitorNetworkChanges() error {
 		}
 	})
 
+	p.netMonitorMu.Lock()
+	old := p.netMonitor
+	p.netMonitor = mon
+	p.netMonitorMu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+
 	mon.Start()
 	mainLog.Load().Debug().Msg("Network monitor started")
 	return nil

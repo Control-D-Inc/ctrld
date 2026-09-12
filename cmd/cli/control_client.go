@@ -12,6 +12,16 @@ type controlClient struct {
 	c *http.Client
 }
 
+// closeRespBody drains and closes resp body, so the underlying connection
+// can be reused or released instead of being kept open until GC.
+func closeRespBody(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+}
+
 func newControlClient(addr string) *controlClient {
 	return &controlClient{c: &http.Client{
 		Transport: &http.Transport{

@@ -1,12 +1,18 @@
 package ctrld_library
 
 import (
+	"time"
+
 	"github.com/Control-D-Inc/ctrld/cmd/cli"
 )
+
+// stopTimeout bounds how long Stop waits for ctrld to release its resources.
+const stopTimeout = 15 * time.Second
 
 // Controller holds global state
 type Controller struct {
 	stopCh      chan struct{}
+	doneCh      chan struct{}
 	AppCallback AppCallback
 	Config      cli.AppConfig
 }
@@ -31,6 +37,8 @@ type AppCallback interface {
 func (c *Controller) Start(CdUID string, ProvisionID string, CustomHostname string, HomeDir string, UpstreamProto string, logLevel int, logPath string) {
 	if c.stopCh == nil {
 		c.stopCh = make(chan struct{})
+		c.doneCh = make(chan struct{})
+		defer close(c.doneCh)
 		c.Config = cli.AppConfig{
 			CdUID:          CdUID,
 			ProvisionID:    ProvisionID,
@@ -73,6 +81,13 @@ func (c *Controller) Stop(restart bool, pin int64) int {
 	if errorCode == 0 && c.stopCh != nil {
 		close(c.stopCh)
 		c.stopCh = nil
+		if c.doneCh != nil {
+			select {
+			case <-c.doneCh:
+			case <-time.After(stopTimeout):
+			}
+			c.doneCh = nil
+		}
 	}
 	return errorCode
 }

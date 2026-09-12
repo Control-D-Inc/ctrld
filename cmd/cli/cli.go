@@ -50,6 +50,7 @@ const (
 	oldBinSuffix              = "_previous"
 	oldLogSuffix              = ".1"
 	msgExit                   = "$$EXIT$$"
+	shutdownTimeout           = 10 * time.Second
 )
 
 var (
@@ -235,6 +236,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		dnsWatcherStopCh: make(chan struct{}),
 		apiReloadCh:      make(chan *ctrld.Config),
 		apiForceReloadCh: make(chan struct{}),
+		runDone:          make(chan struct{}),
 		cfg:              &cfg,
 		appCallback:      appCallback,
 	}
@@ -489,6 +491,17 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	close(waitCh)
 	<-stopCh
+
+	// The mobile library keeps the process alive across start/stop cycles, so
+	// everything must be released here rather than relying on process exit.
+	select {
+	case <-p.runDone:
+	case <-time.After(shutdownTimeout):
+		mainLog.Load().Warn().Msg("timeout waiting for ctrld components to stop")
+	}
+	if err := p.shutdown(); err != nil {
+		mainLog.Load().Warn().Err(err).Msg("error during shutdown")
+	}
 }
 
 func writeConfigFile(cfg *ctrld.Config) error {
@@ -2021,8 +2034,9 @@ func newSocketControlClientMobile(dir string, stopCh chan struct{}) *controlClie
 		case <-stopCh:
 			return nil
 		default:
-			_, err := cc.post("/", nil)
+			resp, err := cc.post("/", nil)
 			if err == nil {
+				closeRespBody(resp)
 				return cc
 			} else {
 				bo.BackOff(ctx, err)
@@ -2136,6 +2150,7 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	mainLog.Load().Debug().Msg("Posting deactivation request")
 	resp, err := cc.post(deactivationPath, bytes.NewReader(data))
 	mainLog.Load().Debug().Msg("Posting deactivation request done")
+	defer closeRespBody(resp)
 	if resp != nil {
 		switch resp.StatusCode {
 		case http.StatusBadRequest:

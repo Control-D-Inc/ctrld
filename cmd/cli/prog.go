@@ -279,6 +279,11 @@ type prog struct {
 	onStartedDone chan struct{}
 	onStarted     []func()
 	onStopped     []func()
+
+	netMonitorMu sync.Mutex
+	netMonitor   *netmon.Monitor
+	shutdownOnce sync.Once
+	runDone      chan struct{}
 }
 
 func (p *prog) Start(s service.Service) error {
@@ -288,10 +293,14 @@ func (p *prog) Start(s service.Service) error {
 
 // runWait runs ctrld components, waiting for signal to reload.
 func (p *prog) runWait() {
+	if p.runDone != nil {
+		defer close(p.runDone)
+	}
 	p.mu.Lock()
 	p.cfg = &cfg
 	p.mu.Unlock()
 	reloadSigCh := make(chan os.Signal, 1)
+	defer stopNotifyReloadSigCh(reloadSigCh)
 	notifyReloadSigCh(reloadSigCh)
 
 	reload := false
@@ -315,6 +324,7 @@ func (p *prog) runWait() {
 			newCfg = apiCfg
 		case <-p.stopCh:
 			close(reloadCh)
+			<-done
 			return
 		}
 
@@ -829,18 +839,65 @@ func (p *prog) metricsEnabled() bool {
 	return p.cfg.Service.MetricsQueryStats || p.cfg.Service.MetricsListener != ""
 }
 
-func (p *prog) Stop(s service.Service) error {
-	p.stopDnsWatchers()
-	mainLog.Load().Debug().Msg("dns watchers stopped")
-	for _, f := range p.onStopped {
-		f()
+// shutdown releases all resources held by p. It is safe to call multiple times,
+// and must be called on every stop path, including the mobile one where the OS
+// never terminates the process.
+func (p *prog) shutdown() (err error) {
+	p.shutdownOnce.Do(func() {
+		p.stopDnsWatchers()
+		mainLog.Load().Debug().Msg("dns watchers stopped")
+		for _, f := range p.onStopped {
+			f()
+		}
+		mainLog.Load().Debug().Msg("finish running onStopped functions")
+		p.stopNetMonitor()
+		if p.cs != nil {
+			if cerr := p.cs.stop(); cerr != nil {
+				mainLog.Load().Warn().Err(cerr).Msg("could not stop control server")
+			}
+		}
+		p.closeUpstreamTransports()
+		if derr := p.deAllocateIP(); derr != nil {
+			mainLog.Load().Error().Err(derr).Msg("de-allocate ip failed")
+			err = derr
+		}
+	})
+	return err
+}
+
+// stopNetMonitor closes the network monitor started by monitorNetworkChanges.
+func (p *prog) stopNetMonitor() {
+	p.netMonitorMu.Lock()
+	mon := p.netMonitor
+	p.netMonitor = nil
+	p.netMonitorMu.Unlock()
+	if mon != nil {
+		_ = mon.Close()
+		mainLog.Load().Debug().Msg("network monitor stopped")
 	}
-	mainLog.Load().Debug().Msg("finish running onStopped functions")
+}
+
+// closeUpstreamTransports releases connections pooled by upstream transports.
+func (p *prog) closeUpstreamTransports() {
+	p.mu.Lock()
+	cfg := p.cfg
+	p.mu.Unlock()
+	if cfg == nil {
+		return
+	}
+	for _, uc := range cfg.Upstream {
+		if uc != nil {
+			uc.CloseTransports()
+		}
+	}
+	mainLog.Load().Debug().Msg("upstream transports closed")
+}
+
+func (p *prog) Stop(s service.Service) error {
 	defer func() {
 		mainLog.Load().Info().Msg("Service stopped")
 	}()
-	if err := p.deAllocateIP(); err != nil {
-		mainLog.Load().Error().Err(err).Msg("de-allocate ip failed")
+	if err := p.shutdown(); err != nil {
 		return err
 	}
 	if deactivationPinSet() {
