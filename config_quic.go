@@ -31,9 +31,16 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 			}
 			remoteAddr, err := net.ResolveUDPAddr("udp", addr)
 			if err != nil {
+				udpConn.Close()
 				return nil, err
 			}
-			return quic.DialEarly(ctx, udpConn, remoteAddr, tlsCfg, cfg)
+			conn, err := quic.DialEarly(ctx, udpConn, remoteAddr, tlsCfg, cfg)
+			if err != nil {
+				udpConn.Close()
+				return nil, err
+			}
+			closeUDPConnWhenDone(conn, udpConn)
+			return conn, nil
 		}
 		dialAddrs := make([]string, len(addrs))
 		for i := range addrs {
@@ -73,18 +80,25 @@ func (uc *UpstreamConfig) dotTransport(dnsType uint16) *dotConnPool {
 //   - quic dialer is different with net.Dialer
 //   - simplification for quic free version
 type parallelDialerResult struct {
-	conn *quic.Conn
-	err  error
+	conn    *quic.Conn
+	udpConn *net.UDPConn
+	err     error
+}
+
+// closeUDPConnWhenDone closes udpConn once conn terminates. quic.DialEarly does
+// not take ownership of the socket it is handed, so the caller must.
+func closeUDPConnWhenDone(conn *quic.Conn, udpConn *net.UDPConn) {
+	go func() {
+		<-conn.Context().Done()
+		_ = udpConn.Close()
+	}()
 }
 
 // quicParallelDialer races DialEarly across a list of remote addresses and
-// returns the first successful connection. When transport is non-nil, all
-// dials share that transport's UDP socket, which removes both the per-dial
-// socket allocation and the winner-path socket leak that an owner-of-the-conn
-// receiver cannot clean up. When transport is nil, the dialer falls back to a
-// fresh UDP socket per attempt (compat path used where no shared transport is
-// available yet); the loser paths close their sockets, and the winner path's
-// socket is owned by quic.DialEarly's internal transport.
+// returns the first successful connection. When transport is non-nil, all dials
+// share that transport's UDP socket. When transport is nil, the dialer falls
+// back to a fresh UDP socket per attempt; losing sockets are closed as their
+// dials settle, and the winning one is closed with the connection it carries.
 type quicParallelDialer struct {
 	transport *quic.Transport
 }
@@ -97,8 +111,6 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	done := make(chan struct{})
-	defer close(done)
 	ch := make(chan *parallelDialerResult, len(addrs))
 	var wg sync.WaitGroup
 	wg.Add(len(addrs))
@@ -133,16 +145,7 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 					udpConn = nil
 				}
 			}
-			select {
-			case ch <- &parallelDialerResult{conn: conn, err: err}:
-			case <-done:
-				if conn != nil {
-					conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
-				}
-				if udpConn != nil {
-					udpConn.Close()
-				}
-			}
+			ch <- &parallelDialerResult{conn: conn, udpConn: udpConn, err: err}
 		}(addr)
 	}
 
@@ -150,12 +153,28 @@ func (d *quicParallelDialer) Dial(ctx context.Context, addrs []string, tlsCfg *t
 	for res := range ch {
 		if res.err == nil {
 			cancel()
-			return res.conn, res.err
+			if res.udpConn != nil {
+				closeUDPConnWhenDone(res.conn, res.udpConn)
+			}
+			go closeLosingQuicConns(ch)
+			return res.conn, nil
 		}
 		errs = append(errs, res.err)
 	}
 
 	return nil, errors.Join(errs...)
+}
+
+// closeLosingQuicConns drains ch and releases everything left in it.
+func closeLosingQuicConns(ch <-chan *parallelDialerResult) {
+	for res := range ch {
+		if res.conn != nil {
+			res.conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+		}
+		if res.udpConn != nil {
+			_ = res.udpConn.Close()
+		}
+	}
 }
 
 func (uc *UpstreamConfig) newDOQConnPool(addrs []string) *doqConnPool {

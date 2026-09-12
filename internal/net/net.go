@@ -295,8 +295,6 @@ func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	done := make(chan struct{})
-	defer close(done)
 	ch := make(chan *parallelDialerResult, len(live))
 	var wg sync.WaitGroup
 	wg.Add(len(live))
@@ -318,25 +316,31 @@ func (d *ParallelDialer) DialContext(ctx context.Context, network string, addrs 
 			} else {
 				unreachable.markReachable(addr)
 			}
-			select {
-			case ch <- &parallelDialerResult{conn: conn, err: err}:
-			case <-done:
-				if conn != nil {
-					logger.Debug().Msgf("connection closed: %s", conn.RemoteAddr())
-					conn.Close()
-				}
-			}
+			ch <- &parallelDialerResult{conn: conn, err: err}
 		}(addr)
 	}
 
-	errs := make([]error, 0, len(addrs))
+	errs := make([]error, 0, len(live))
 	for res := range ch {
 		if res.err == nil {
 			cancel()
 			logger.Debug().Msgf("connected to %s", res.conn.RemoteAddr())
-			return res.conn, res.err
+			// Losing dials may already have connected, or may still connect
+			// after cancel; close whatever they hand back.
+			go closeLosingConns(ch, logger)
+			return res.conn, nil
 		}
 		errs = append(errs, res.err)
 	}
 	return nil, errors.Join(errs...)
+}
+
+// closeLosingConns drains ch and closes every connection left in it.
+func closeLosingConns(ch <-chan *parallelDialerResult, logger *zerolog.Logger) {
+	for res := range ch {
+		if res.conn != nil {
+			logger.Debug().Msgf("connection closed: %s", res.conn.RemoteAddr())
+			_ = res.conn.Close()
+		}
+	}
 }
