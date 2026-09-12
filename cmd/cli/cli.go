@@ -2043,7 +2043,7 @@ func newSocketControlClientMobile(dir string, stopCh chan struct{}) *controlClie
 		default:
 			resp, err := cc.post("/", nil)
 			if err == nil {
-				closeRespBody(resp)
+				resp.Body.Close()
 				return cc
 			} else {
 				bo.BackOff(ctx, err)
@@ -2157,8 +2157,8 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	mainLog.Load().Debug().Msg("Posting deactivation request")
 	resp, err := cc.post(deactivationPath, bytes.NewReader(data))
 	mainLog.Load().Debug().Msg("Posting deactivation request done")
-	defer closeRespBody(resp)
 	if resp != nil {
+		defer resp.Body.Close()
 		switch resp.StatusCode {
 		case http.StatusBadRequest:
 			mainLog.Load().Error().Msg(errRequiredDeactivationPin.Error())

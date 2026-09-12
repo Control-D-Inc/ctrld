@@ -1638,11 +1638,7 @@ func (p *prog) monitorNetworkChanges() error {
 		}
 	})
 
-	p.netMonitorMu.Lock()
-	old := p.netMonitor
-	p.netMonitor = mon
-	p.netMonitorMu.Unlock()
-	if old != nil {
+	if old := p.netMonitor.Swap(mon); old != nil {
 		_ = old.Close()
 	}
 

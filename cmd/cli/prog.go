@@ -280,8 +280,7 @@ type prog struct {
 	onStarted     []func()
 	onStopped     []func()
 
-	netMonitorMu sync.Mutex
-	netMonitor   *netmon.Monitor
+	netMonitor   atomic.Pointer[netmon.Monitor]
 	shutdownOnce sync.Once
 	runDone      chan struct{}
 }
@@ -853,13 +852,19 @@ func (p *prog) shutdown() (err error) {
 			f()
 		}
 		mainLog.Load().Debug().Msg("finish running onStopped functions")
-		p.stopNetMonitor()
+		if mon := p.netMonitor.Swap(nil); mon != nil {
+			_ = mon.Close()
+			mainLog.Load().Debug().Msg("network monitor stopped")
+		}
 		if p.cs != nil {
 			if cerr := p.cs.stop(); cerr != nil {
 				mainLog.Load().Warn().Err(cerr).Msg("could not stop control server")
 			}
 		}
-		p.closeUpstreamTransports()
+		p.mu.Lock()
+		upstreams := p.cfg.Upstream
+		p.mu.Unlock()
+		closeReplacedUpstreams(upstreams, nil)
 		if derr := p.deAllocateIP(); derr != nil {
 			mainLog.Load().Error().Err(derr).Msg("de-allocate ip failed")
 			err = derr
@@ -868,21 +873,10 @@ func (p *prog) shutdown() (err error) {
 	return err
 }
 
-// stopNetMonitor closes the network monitor started by monitorNetworkChanges.
-func (p *prog) stopNetMonitor() {
-	p.netMonitorMu.Lock()
-	mon := p.netMonitor
-	p.netMonitor = nil
-	p.netMonitorMu.Unlock()
-	if mon != nil {
-		_ = mon.Close()
-		mainLog.Load().Debug().Msg("network monitor stopped")
-	}
-}
-
 // closeReplacedUpstreams releases the transports of upstreams that cur no longer
-// refers to. Requests in flight on them fail fast and are retried, the same way
-// a re-bootstrap treats connections it replaces.
+// refers to, or all of them when cur is nil. Requests in flight on them fail
+// fast and are retried, the same way a re-bootstrap treats connections it
+// replaces.
 func closeReplacedUpstreams(old, cur map[string]*ctrld.UpstreamConfig) {
 	inUse := make(map[*ctrld.UpstreamConfig]struct{}, len(cur))
 	for _, uc := range cur {
@@ -896,22 +890,6 @@ func closeReplacedUpstreams(old, cur map[string]*ctrld.UpstreamConfig) {
 			uc.CloseTransports()
 		}
 	}
-}
-
-// closeUpstreamTransports releases connections pooled by upstream transports.
-func (p *prog) closeUpstreamTransports() {
-	p.mu.Lock()
-	cfg := p.cfg
-	p.mu.Unlock()
-	if cfg == nil {
-		return
-	}
-	for _, uc := range cfg.Upstream {
-		if uc != nil {
-			uc.CloseTransports()
-		}
-	}
-	mainLog.Load().Debug().Msg("upstream transports closed")
 }
 
 func (p *prog) Stop(s service.Service) error {
