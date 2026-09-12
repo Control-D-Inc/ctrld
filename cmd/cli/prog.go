@@ -404,6 +404,7 @@ func (p *prog) runWait() {
 		p.setupUpstream(newCfg)
 
 		p.mu.Lock()
+		oldUpstreams := p.cfg.Upstream
 		*p.cfg = *newCfg
 		// In DNS-intercept mode on macOS, the DNS listener is bound once at startup and is
 		// NOT re-bound on reload (see prog.run: serveDNS is started only when !reload). When
@@ -418,6 +419,8 @@ func (p *prog) runWait() {
 			preserveBoundListeners(p.cfg.Listener, curListener)
 		}
 		p.mu.Unlock()
+
+		closeReplacedUpstreams(oldUpstreams, newCfg.Upstream)
 
 		logger.Notice().Msg("reloading config successfully")
 
@@ -874,6 +877,24 @@ func (p *prog) stopNetMonitor() {
 	if mon != nil {
 		_ = mon.Close()
 		mainLog.Load().Debug().Msg("network monitor stopped")
+	}
+}
+
+// closeReplacedUpstreams releases the transports of upstreams that cur no longer
+// refers to. Requests in flight on them fail fast and are retried, the same way
+// a re-bootstrap treats connections it replaces.
+func closeReplacedUpstreams(old, cur map[string]*ctrld.UpstreamConfig) {
+	inUse := make(map[*ctrld.UpstreamConfig]struct{}, len(cur))
+	for _, uc := range cur {
+		inUse[uc] = struct{}{}
+	}
+	for _, uc := range old {
+		if uc == nil {
+			continue
+		}
+		if _, ok := inUse[uc]; !ok {
+			uc.CloseTransports()
+		}
 	}
 }
 
