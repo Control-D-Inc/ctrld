@@ -273,7 +273,14 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		mainLog.Load().Fatal().Msg("Cannot run in daemon mode. Please install a Windows service.")
 	}
 
-	if !daemon {
+	switch {
+	case isMobile():
+		// There is no OS service manager here, and s.Run parks a goroutine on a
+		// signal that never arrives, leaking one per start/stop cycle.
+		if err := p.Start(nil); err != nil {
+			mainLog.Load().Fatal().Err(err).Msg("failed to start ctrld")
+		}
+	case !daemon:
 		// We need to call s.Run() as soon as possible to response to the OS manager, so it
 		// can see ctrld is running and don't mark ctrld as failed service.
 		go func() {
