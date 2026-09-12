@@ -658,7 +658,7 @@ func (uc *UpstreamConfig) isNextDNS() bool {
 			domain = u.Hostname()
 		}
 	}
-	return domain == "dns.nextdns.io"
+	return strings.HasSuffix(strings.ToLower(domain), ".nextdns.io")
 }
 
 func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
