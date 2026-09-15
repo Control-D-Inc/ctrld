@@ -483,6 +483,7 @@ exemption).
 | No VPN | None | ✅ All traffic | N/A |
 | Split DNS (Tailscale non-exit) | ✅ VPN interface | ✅ Non-VPN domains | ✅ Via MagicDNS |
 | Exit mode (Tailscale exit node) | ❌ None | ✅ All traffic | ✅ Via ctrld split routing |
+| Zscaler Private Access | None | ✅ All traffic except one health-check name | ✅ Via Client Connector |
 | Windscribe | None (different flow) | ✅ All traffic | N/A |
 | Hard intercept | None | ✅ All traffic | ❌ Not forwarded |
 
@@ -523,6 +524,71 @@ F5 BIG-IP APM VPN is a known source of DNS conflicts with ctrld (Support ticket 
 - CrowdStrike Falcon and similar endpoint security with network inspection can compound the conflict (three-way DNS stomping)
 - F5's relay proxy (`F5FltSrv`) performs similar functions to ctrld — they are in direct conflict when both active
 - The seemingly random failure pattern is caused by timing-dependent race conditions between ctrld's watchdog, F5's DNS enforcement, and (optionally) endpoint security inspection
+
+### Zscaler Private Access (macOS)
+
+Zscaler Client Connector will not synthesize addresses for Private Access
+applications until it has confirmed that DNS answers reach it on its own DNS
+path. It confirms this by resolving one fixed public name,
+`dnsechotest.zscaler.com`, and observing the answer.
+
+**How the conflict manifests:**
+
+1. `--intercept-mode dns` is active, so pf redirects port 53 to ctrld
+2. Client Connector's query for `dnsechotest.zscaler.com` is redirected into ctrld
+3. ctrld answers it from the Control D upstream, so Client Connector never sees the
+   answer arrive on its own DNS path
+4. Client Connector treats domain validation as failed and keeps Private Access
+   disabled — while ordinary Control D DNS stays perfectly healthy, which is why the
+   symptom looks like "ZPA is broken" rather than "DNS is broken"
+
+**How ctrld handles it:**
+
+On macOS in `dns` mode, ctrld routes that one exact name the same way a Control D
+"bypass" rule does: with an empty upstream list, which resolves through
+`upstream.os` — the system resolver set, which under Intercept Mode still includes
+Client Connector's own DNS servers. Because the decision is made on the name alone,
+it covers every record type.
+
+The answer is **not cached**. Client Connector enables Private Access only after it
+observes the echo answer arrive on its own DNS path, so an answer ctrld served from
+its cache reads as silence to Client Connector — the query has to reach the OS
+resolver on every poll. This matters most on reconnect: an answer cached while ZPA
+was disconnected would otherwise outlive `InitializeOsResolver()` and keep Private
+Access disabled for the rest of that entry's TTL (or `cache_ttl_override`).
+
+The scope is deliberately narrow — a single fixed public health-check name:
+
+- Private Access **application** domains are not special-cased. Once Client Connector
+  has validated its DNS path it answers them itself, so they never need a ctrld
+  routing exception; anything it does not claim stays on Control D.
+- No interface, resolver range, or pf rule is exempted. There is no ZPA interface
+  detection, no CGNAT probing, and no passthrough rule.
+- Everything else, including every other `zscaler.com` name, stays intercepted and
+  filtered by Control D.
+- `--intercept-mode hard` opts out, the same as it opts out of VPN DNS split
+  routing: all DNS goes through ctrld and ZPA is not accommodated.
+- The route does **not** authorize the query. A `Restricted` listener still answers
+  only sources that match its policy, so the built-in route is not a hole in
+  source authorization.
+- An explicit listener **domain rule** that routes this name to a specific upstream
+  outranks the built-in route, and is the supported way to opt out without leaving
+  Intercept Mode. Network- and MAC-policy targets do not: they route every name
+  from a source and so state nothing about this one.
+- A rule that itself selects the OS path — empty targets, which is how a Control D
+  profile's bypass list reaches ctrld — keeps its own routing and labels but is still
+  treated as the health check, so it gets the no-cache behavior too. A machine
+  upgraded while still carrying the bypass-folder workaround therefore gets the full
+  fix rather than just the routing half.
+
+Adding `dnsechotest.zscaler.com` to a Control D bypass folder produces the same
+routing and remains a valid workaround on releases without this fix. Disabling
+Intercept Mode entirely (`ctrld start --intercept-mode off`) also restores ZPA, at
+the cost of interface-based DNS handling.
+
+**Status:** the routing decision is confirmed by a customer running the bypass-folder
+equivalent. It has not yet been verified against a real ZPA tenant with a compiled
+build; see the implementation tracker for the outstanding smoke test.
 
 ### Cisco AnyConnect
 
