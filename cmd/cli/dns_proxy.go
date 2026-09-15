@@ -31,6 +31,17 @@ import (
 const (
 	staleTTL = 60 * time.Second
 	localTTL = 3600 * time.Second
+	// zpaDNSEchoDomain is Zscaler Client Connector's fixed public health-check
+	// name. Client Connector must see the answer to it arrive on its own DNS
+	// path before it will synthesize addresses for Private Access applications.
+	zpaDNSEchoDomain = "dnsechotest.zscaler.com"
+	// zpaDNSEchoPolicyName is reported as the matched policy when the built-in
+	// ZPA DNS echo bypass routes a query, so log lines name the reason.
+	zpaDNSEchoPolicyName = "Built-in ZPA DNS echo bypass"
+	// noRuleMatched is the matchedRule placeholder used when no listener domain
+	// rule matched the query. It is compared, not only logged: the built-in ZPA
+	// echo bypass yields to an explicit domain rule for the same name.
+	noRuleMatched = "no rule"
 	// EDNS0_OPTION_MAC is dnsmasq EDNS0 code for adding mac option.
 	// https://thekelleys.org.uk/gitweb/?p=dnsmasq.git;a=blob;f=src/dns-protocol.h;h=76ac66a8c28317e9c121a74ab5fd0e20f6237dc8;hb=HEAD#l81
 	// This is also dns.EDNS0LOCALSTART, but define our own constant here for clarification.
@@ -39,6 +50,19 @@ const (
 	// selfUninstallMaxQueries is number of REFUSED queries seen before checking for self-uninstallation.
 	selfUninstallMaxQueries = 32
 )
+
+// zpaDNSEchoBypassEnabled limits the built-in ZPA DNS echo bypass to macOS,
+// the only platform where pf interception is known to break Zscaler Private
+// Access. Tests override it.
+var zpaDNSEchoBypassEnabled = runtime.GOOS == "darwin"
+
+// zpaDNSEchoBypassActive reports whether the built-in Zscaler DNS echo bypass
+// applies. Like every other VPN accommodation it is skipped in
+// --intercept-mode hard, where the operator has asked for all DNS to go
+// through ctrld with no split routing.
+func zpaDNSEchoBypassActive() bool {
+	return zpaDNSEchoBypassEnabled && dnsIntercept && !hardIntercept
+}
 
 var osUpstreamConfig = &ctrld.UpstreamConfig{
 	Name:    "OS resolver",
@@ -82,6 +106,10 @@ type upstreamForResult struct {
 	matchedRule    string
 	matched        bool
 	srcAddr        string
+	// zpaDNSEcho reports that the built-in Zscaler DNS echo bypass chose the
+	// upstreams. proxy() keeps this query out of the response cache so Client
+	// Connector's health check reaches the OS resolver on every poll.
+	zpaDNSEcho bool
 }
 
 func (p *prog) addCachedResponse(key dnscache.Key, answer *dns.Msg) {
@@ -316,16 +344,68 @@ func (p *prog) upstreamFor(ctx context.Context, defaultUpstreamNum string, lc *c
 	upstreams := []string{upstreamPrefix + defaultUpstreamNum}
 	matchedPolicy := "no policy"
 	matchedNetwork := "no network"
-	matchedRule := "no rule"
+	matchedRule := noRuleMatched
 	matched := false
+	zpaDNSEcho := false
 	res = &upstreamForResult{srcAddr: addr.String()}
 
 	defer func() {
+		// Zscaler Private Access: under macOS Intercept Mode, pf routes Client
+		// Connector's health-check query for zpaDNSEchoDomain into ctrld, which
+		// answers it from the Control D upstream. Client Connector never sees the
+		// answer on its own DNS path, so it keeps Private Access disabled.
+		//
+		// Route only that one exact name the way a Control D "bypass" rule does:
+		// an empty upstream list, which proxy() resolves through upstream.os —
+		// the system resolver set, which under Intercept Mode still includes
+		// Client Connector's own DNS servers. Matching on the name alone covers
+		// every record type, the same as a bypass rule.
+		//
+		// This runs after policy evaluation, and never touches `matched`. That
+		// flag is also the source authorization bit: serveDNS refuses a query on
+		// a Restricted listener when it is false, so forcing it true here would
+		// let an unauthorized client resolve this name through such a listener.
+		//
+		// The scope is one fixed public health-check name: every other domain,
+		// including all Private Access application domains, stays intercepted and
+		// filtered by Control D. --intercept-mode hard opts out, the same as it
+		// opts out of VPN DNS split routing.
+		if zpaDNSEchoBypassActive() && canonicalName(domain) == zpaDNSEchoDomain {
+			switch {
+			case matchedRule == noRuleMatched:
+				// The listener policy says nothing about this name, so the
+				// built-in route decides. Network- and MAC-policy targets route
+				// every name from a source and so state nothing about this one:
+				// override them, and the default upstream, and label the result
+				// so logs name the reason.
+				upstreams = nil
+				matchedPolicy = zpaDNSEchoPolicyName
+				matchedRule = zpaDNSEchoDomain
+				zpaDNSEcho = true
+			case len(upstreams) == 0:
+				// An explicit domain rule already selects the OS path: a rule
+				// with empty targets, which is how a Control D profile's bypass
+				// list reaches us (see the cfg.Listener rules built from
+				// resolverConfig.Exclude). That is the documented pre-fix
+				// workaround for this very bug, so keep the operator's own
+				// labels but still classify it as the health check — otherwise
+				// anyone who keeps the workaround after upgrading would route
+				// correctly and then have the answer served from our cache,
+				// losing the reconnect fix.
+				zpaDNSEcho = true
+			default:
+				// Any other explicit domain rule is a deliberate non-OS route
+				// for this exact name. That is operator intent, and the
+				// supported way to opt out without leaving Intercept Mode, so
+				// leave the policy's decision untouched.
+			}
+		}
 		res.upstreams = upstreams
 		res.matched = matched
 		res.matchedPolicy = matchedPolicy
 		res.matchedNetwork = matchedNetwork
 		res.matchedRule = matchedRule
+		res.zpaDNSEcho = zpaDNSEcho
 	}()
 
 	if lc.Policy == nil {
@@ -501,6 +581,21 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale
 	upstreamConfigs := p.upstreamConfigsFromUpstreamNumbers(upstreams)
 
+	// Inverse queries must not be cached:
+	// https://www.rfc-editor.org/rfc/rfc1035#section-7.4
+	//
+	// Neither must the Zscaler health check. Its whole purpose is to be observed
+	// arriving on Client Connector's own DNS path, so it has to reach the OS
+	// resolver on every poll — a locally served answer looks like a successful
+	// lookup to us and like silence to Client Connector. This matters most on
+	// reconnect: an answer cached while ZPA was disconnected would otherwise
+	// outlive InitializeOsResolver() and keep Private Access disabled until the
+	// entry's TTL (or Service.CacheTTLOverride) expired.
+	cacheable := p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR && !req.ufr.zpaDNSEcho
+	if req.ufr.zpaDNSEcho {
+		serveStaleCache = false
+	}
+
 	if len(upstreamConfigs) == 0 {
 		upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
 		upstreams = []string{upstreamOS}
@@ -530,6 +625,11 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
 	} else {
 		switch {
+		case req.ufr.zpaDNSEcho:
+			// Reached when no policy matched the source, so the branch above did
+			// not log the bypass. Named explicitly rather than falling into the
+			// "no explicit policy matched" default.
+			ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedRule, upstreams)
 		case isSrvLanLookup(req.msg):
 			upstreams = []string{upstreamOS}
 			upstreamConfigs = []*ctrld.UpstreamConfig{osUpstreamConfig}
@@ -561,8 +661,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 	}
 
-	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
-	if p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR {
+	if cacheable {
 		dns64Prefix, dns64Active := netip.Prefix{}, false
 		if req.msg.Question[0].Qtype == dns.TypeAAAA {
 			dns64Prefix, dns64Active = p.activeDNS64Prefix()
@@ -611,7 +710,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				if answer != nil {
 					p.vpnDNS.VPNDNSReachable()
 					ctrld.Log(ctx, mainLog.Load().Debug(), "VPN DNS query successful")
-					if p.cache != nil {
+					if cacheable {
 						ttl := 60 * time.Second
 						if len(answer.Answer) > 0 {
 							ttl = time.Duration(answer.Answer[0].Header().Ttl) * time.Second
@@ -808,7 +907,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		// set compression, as it is not set by default when unpacking
 		answer.Compress = true
 
-		if p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR {
+		if cacheable {
 			p.addCachedResponse(dnscache.NewKey(req.msg, upstreams[n]), answer)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
 		}
@@ -822,7 +921,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		var synthesizedPrefix netip.Prefix
 		answer, synthesizedPrefix = p.maybeDNS64(ctx, req.msg, answer, func(aReq *dns.Msg) *dns.Msg {
 			key := dnscache.NewKey(aReq, upstreams[n])
-			if p.cache != nil {
+			if cacheable {
 				if cachedValue := p.cache.Get(key); cachedValue != nil {
 					now := time.Now()
 					if cachedValue.Expire.After(now) {
@@ -834,12 +933,12 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				}
 			}
 			resolved := resolve(upstreams[n], upstreamConfig, aReq)
-			if p.cache != nil && resolved != nil && sameQuestion(aReq, resolved) {
+			if cacheable && resolved != nil && sameQuestion(aReq, resolved) {
 				p.addCachedResponse(key, resolved)
 			}
 			return resolved
 		})
-		if p.cache != nil && synthesizedPrefix.IsValid() {
+		if cacheable && synthesizedPrefix.IsValid() {
 			p.addCachedResponse(dns64CacheKey(req.msg, upstreams[n], synthesizedPrefix), answer)
 			ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: add cached response variant")
 		}
