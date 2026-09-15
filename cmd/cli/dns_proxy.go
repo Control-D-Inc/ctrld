@@ -561,7 +561,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// DNS intercept recovery bypass: forward all queries to OS/DHCP resolver.
 	// This runs when upstreams are unreachable (e.g., captive portal network)
 	// and allows the network's DNS to handle authentication pages.
-	if dnsIntercept && p.recoveryBypass.Load() {
+	//
+	// An Internal Domain with explicit resolvers does not take part. The bypass
+	// exists because general DNS is broken, which says nothing about the
+	// administrator's own resolvers: they may well be reachable, and sending a
+	// private name to the network's DNS is the disclosure the explicit
+	// selection exists to prevent. Such a query continues to the normal flow,
+	// where it reaches only its configured resolvers and fails if none answer.
+	if dnsIntercept && p.recoveryBypass.Load() && !internalDomainExplicitUpstreams(req.ufr.upstreams) {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "Recovery bypass active: forwarding to OS resolver")
 		resolver, err := ctrld.NewResolver(osUpstreamConfig)
 		if err == nil {
@@ -688,8 +695,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 	}
 
-	// VPN DNS split routing (only in dns-intercept mode)
-	if dnsIntercept && p.vpnDNS != nil && len(req.msg.Question) > 0 {
+	// VPN DNS split routing (only in dns-intercept mode).
+	//
+	// An Internal Domain with explicit resolvers is skipped here: the
+	// administrator named the resolvers for that suffix, and VPN suffixes
+	// are auto-detected, so handing the query to a VPN DNS server would
+	// override an explicit selection with a discovered one.
+	//
+	// Internal Domains in OS-resolver mode are not skipped, they ask for the
+	// endpoint's default resolution, which under intercept mode includes
+	// the VPN's own resolver.
+	if dnsIntercept && p.vpnDNS != nil && len(req.msg.Question) > 0 && !internalDomainExplicitUpstreams(upstreams) {
 		domain := req.msg.Question[0].Name
 		if vpnServers := p.vpnDNS.UpstreamForDomain(domain); len(vpnServers) > 0 {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "VPN DNS route matched for domain %s, using servers: %v", domain, vpnServers)
@@ -836,7 +852,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			return answer
 		}
 
-		ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
+		// A transport error names the endpoint it failed to reach, which for a
+		// generated Internal Domain upstream is the organization's private
+		// resolver address. Report the classification at error level and keep
+		// the address-bearing error at debug.
+		if isInternalDomainUpstream(upstream) {
+			ctrld.Log(ctx, mainLog.Load().Debug().Err(err), "failed to resolve query")
+			ctrld.Log(ctx, mainLog.Load().Error().Str("failure", internalDomainFailureReason(err)),
+				"failed to resolve query using an Internal Domain resolver")
+		} else {
+			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
+		}
 
 		// increase failure count when there is no answer
 		// rehardless of what kind of error we get
@@ -949,8 +975,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	}
 	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
 
-	// if we have no healthy upstreams, trigger recovery flow
-	if p.leakOnUpstreamFailure() {
+	// An Internal Domain with explicit resolvers is served only by the
+	// configured resolvers. When all of them are unreachable the query fails
+	// here: the OS-resolver catch-all below would send a private name to a resolver
+	// that was not selected for it, and the recovery flow exists for the loss of
+	// general DNS, not for one unavailable internal server.
+	if internalDomainExplicitUpstreams(upstreams) {
+		ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolvers unreachable; not falling back")
+	} else if p.leakOnUpstreamFailure() {
 		if p.um.countHealthy(upstreams) == 0 {
 			p.recoveryCancelMu.Lock()
 			if p.recoveryCancel == nil {
@@ -1943,7 +1975,8 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 
 	resolver, err := ctrld.NewResolver(uc)
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msgf("Failed to create resolver for upstream %s", upstream)
+		logUpstreamProbeFailure(isGeneratedInternalDomainUpstreamRef(upstream, uc), uc, err,
+			mainLog.Load().Error, "Failed to create resolver for upstream %s", upstream)
 		return err
 	}
 
@@ -1982,7 +2015,8 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 			mainLog.Load().Debug().Err(err).Msgf("Upstream %s check failed after %v (network unreachable)", upstream, duration)
 			return err
 		}
-		mainLog.Load().Error().Err(err).Msgf("Upstream %s check failed after %v", upstream, duration)
+		logUpstreamProbeFailure(isGeneratedInternalDomainUpstreamRef(upstream, uc), uc, err,
+			mainLog.Load().Error, "Upstream %s check failed after %v", upstream, duration)
 		return err
 	}
 	mainLog.Load().Debug().Msgf("Upstream %s responded successfully in %v", upstream, duration)

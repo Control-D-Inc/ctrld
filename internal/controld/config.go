@@ -56,9 +56,36 @@ type ResolverConfig struct {
 		CustomLastUpdate int64  `json:"custom_last_update"`
 		VersionTarget    string `json:"version_target"`
 	} `json:"ctrld"`
-	Exclude         []string `json:"exclude"`
-	UID             string   `json:"uid"`
-	DeactivationPin *int64   `json:"deactivation_pin,omitempty"`
+	Exclude         []string   `json:"exclude"`
+	SplitDNS        []SplitDNS `json:"split_dns"`
+	UID             string     `json:"uid"`
+	DeactivationPin *int64     `json:"deactivation_pin,omitempty"`
+}
+
+// Internal Domain resolution modes. Mode is what the administrator selected;
+// Resolvers is only meaningful under SplitDNSModeResolvers.
+const (
+	// SplitDNSModeOS resolves the domain through the endpoint's own OS/default
+	// resolver, so it follows DHCP and VPN resolver changes.
+	SplitDNSModeOS = "os"
+	// SplitDNSModeResolvers resolves the domain through the addresses in
+	// Resolvers and nothing else.
+	SplitDNSModeResolvers = "resolvers"
+)
+
+// SplitDNS is one organization Internal Domain: a domain suffix, the resolution
+// mode the organization administrator selected for it, and the resolver
+// addresses that mode may need.
+//
+// Mode decides the routing. Resolvers is read only under
+// SplitDNSModeResolvers, so addresses left behind by an earlier selection
+// cannot resurrect themselves once the administrator switches back to the OS
+// resolver. An empty Mode is a deployment that predates the field; the caller
+// infers the mode from Resolvers in that case.
+type SplitDNS struct {
+	Domain    string   `json:"domain"`
+	Mode      string   `json:"mode"`
+	Resolvers []string `json:"resolvers"`
 }
 
 type utilityResponse struct {
