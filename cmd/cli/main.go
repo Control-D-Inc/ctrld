@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/hex"
 	"io"
 	"net"
 	"os"
@@ -214,18 +213,7 @@ func initCache() {
 //
 // Usage: ctrld pf-probe-send <host> <hex-encoded-dns-packet>
 func pfProbeSend(host, hexPacket string) {
-	packet, err := hex.DecodeString(hexPacket)
-	if err != nil {
+	if err := sendPFProbe(host, hexPacket, net.DialTimeout, os.Stdout); err != nil {
 		os.Exit(1)
 	}
-	conn, err := net.DialTimeout("udp", net.JoinHostPort(host, "53"), time.Second)
-	if err != nil {
-		os.Exit(1)
-	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(time.Second))
-	_, _ = conn.Write(packet)
-	// Read response (don't care about result, just need the send to happen)
-	buf := make([]byte, 512)
-	_, _ = conn.Read(buf)
 }
