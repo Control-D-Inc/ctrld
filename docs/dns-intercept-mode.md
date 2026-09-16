@@ -312,12 +312,14 @@ Programs like Parallels Desktop reload `/etc/pf.conf` when creating/destroying v
 
 ctrld detects interface appearance/disappearance and spawns an async probe monitor:
 
-1. **Probe mechanism:** A subprocess runs with GID=0 (wheel, not `_ctrld`) and sends a DNS query to the OS resolver. If pf interception is working, the query gets redirected to ctrld (127.0.0.1:53) and is detected in the DNS handler. If broken, it times out after 1s.
+1. **Probe mechanism:** A subprocess runs with GID=0 (wheel, not `_ctrld`) and sends a DNS query to the OS resolver. If pf interception is working, the query gets redirected to ctrld (127.0.0.1:53) and is detected in the DNS handler. A confirmed send without local receipt within 1s gives `not_intercepted`.
 2. **Backoff schedule:** Probes at 0, 0.5, 1, 2, 4 seconds (~8s window) to win the race against async pf reloads by the hypervisor. Only one monitor runs at a time (atomic singleton).
-3. **Auto-heal:** On probe failure, `forceReloadPFMainRuleset()` dumps the running ruleset and pipes it back through `pfctl -f -`, resetting pf's translation engine. VPN-safe because it reassembles from the current running state.
+3. **Auto-heal:** Only after `not_intercepted`, `forceReloadPFMainRuleset()` dumps the running ruleset and pipes it back through `pfctl -f -`, resetting pf's translation engine. VPN-safe because it reassembles from the current running state.
 4. **Watchdog integration:** The 30s watchdog also runs the probe when rule text checks pass, as a safety net for unknown corruption causes.
 
-This approach detects **actual broken DNS** rather than guessing from trigger events, making it robust against future unknown corruption scenarios.
+The probe uses IPv4 only. Missing targets and helper failures give `indeterminate`, which does not cause a reload.
+See [target selection and diagnostics](network-recovery-diagnostics.md#pf-probes-macos).
+A successful probe proves local interception delivery, not remote DNS health.
 
 ### 5. Proactive DoH Connection Pool Reset
 

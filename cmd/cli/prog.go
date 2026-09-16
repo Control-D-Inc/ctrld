@@ -163,6 +163,14 @@ type prog struct {
 	recoveryRunning  atomic.Bool
 	recoveryGen      atomic.Uint64
 
+	// All deltas get an ID. Only accepted deltas replace recovery ownership.
+	networkTransitionGen    atomic.Uint64
+	networkAcceptedGen      atomic.Uint64
+	networkSourceMu         sync.Mutex
+	networkSourceState      *netmon.State
+	networkSourceEpoch      *netmon.State
+	networkSourceReadFailed bool
+
 	// recoveryDebounceTimer coalesces rapid NetworkChange recovery triggers
 	// into a single handleRecovery call. Only handleRecovery is debounced —
 	// all other state updates (IP, pf anchor, VPN DNS) run immediately.

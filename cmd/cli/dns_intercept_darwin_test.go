@@ -838,13 +838,16 @@ func stubStabilizationProbe(t *testing.T, probeResults []bool, reloadOK bool) (p
 		probePFInterceptFn, forceReloadPFInterceptFn = originalProbe, originalReload
 	})
 	probeCalls, reloadCalls := 0, 0
-	probePFInterceptFn = func(*prog) bool {
+	probePFInterceptFn = func(*prog) pfProbeObservation {
 		result := false
 		if probeCalls < len(probeResults) {
 			result = probeResults[probeCalls]
 		}
 		probeCalls++
-		return result
+		if result {
+			return pfProbeObservation{result: pfProbeIntercepted}
+		}
+		return pfProbeObservation{result: pfProbeNotIntercepted}
 	}
 	forceReloadPFInterceptFn = func(*prog) bool {
 		reloadCalls++

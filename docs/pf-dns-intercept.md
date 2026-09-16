@@ -238,9 +238,12 @@ change handler and spawns an asynchronous interception probe monitor:
 1. A subprocess sends a DNS query WITHOUT the `_ctrld` group GID, so pf
    intercept rules apply to it
 2. If ctrld receives the query → pf interception is working
-3. If the query times out (1s) → pf translation is broken
-4. On failure: `forceReloadPFMainRuleset()` does `pfctl -f -` with the current
+3. A successful UDP write without local receipt within 1s gives `not_intercepted`.
+4. Only this meaningful failure permits probe-triggered repair: `forceReloadPFMainRuleset()` does `pfctl -f -` with the current
    running ruleset, resetting pf's translation engine
+
+A missing target or helper failure gives `indeterminate` and does not cause a reload.
+The probe uses IPv4 only. See [target selection and diagnostics](network-recovery-diagnostics.md#pf-probes-macos).
 
 The monitor probes with exponential backoff (0, 0.5, 1, 2, 4s) to win the race
 against async pf reloads. Only one monitor runs at a time (singleton). The
@@ -260,8 +263,8 @@ Some pf.conf files include `set skip on lo0` which tells pf to skip ALL processi
 
 **Mitigation:** the interception probe. `probePFIntercept()` sends a real query from
 outside the `_ctrld` group and confirms the listener received the redirect, which cannot
-succeed while pf is bypassing loopback — so a skip on `lo0` shows up as a probe failure
-and triggers a full reload.
+succeed while pf bypasses loopback. A confirmed send without receipt permits a full reload.
+An unsent or unavailable probe is indeterminate and does not trigger repair.
 
 **Not implemented, contrary to earlier versions of this document:** ctrld does *not*
 strip `lo0` from `set skip on` directives, and the watchdog does *not* inspect skip

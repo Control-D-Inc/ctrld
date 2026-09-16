@@ -1823,7 +1823,7 @@ func FlushDNSCache() error {
 
 // monitorNetworkChanges starts monitoring for network interface changes
 func (p *prog) monitorNetworkChanges(ctx context.Context) error {
-	mon, err := netmon.New(func(format string, args ...any) {
+	mon, err := newNetworkChangeMonitorFn(func(format string, args ...any) {
 		// Always fetch the latest logger (and inject the prefix)
 		p.logger.Load().Printf("netmon: "+format, args...)
 	})
@@ -1832,193 +1832,277 @@ func (p *prog) monitorNetworkChanges(ctx context.Context) error {
 	}
 
 	mon.RegisterChangeCallback(func(delta *netmon.ChangeDelta) {
-		isMajorChange := mon.IsMajorChangeFrom(delta.Old, delta.New)
-		p.handleDNS64NetworkChange(delta, isMajorChange)
-
-		// Get map of valid interfaces
-		validIfaces := ctrld.ValidInterfaces(ctrld.LoggerCtx(ctx, p.logger.Load()))
-
-		p.Debug().
-			Interface("old_state", delta.Old).
-			Interface("new_state", delta.New).
-			Bool("is_major_change", isMajorChange).
-			Msg("Network change detected")
-
-		changed := false
-		activeInterfaceExists := false
-		var changeIPs []netip.Prefix
-		// Check each valid interface for changes
-		for ifaceName := range validIfaces {
-			oldIface, oldExists := delta.Old.Interface[ifaceName]
-			newIface, newExists := delta.New.Interface[ifaceName]
-			if !newExists {
-				continue
-			}
-
-			oldIPs := delta.Old.InterfaceIPs[ifaceName]
-			newIPs := delta.New.InterfaceIPs[ifaceName]
-
-			// if a valid interface did not exist in old
-			// check that its up and has usable IPs
-			if !oldExists {
-				// The interface is new (was not present in the old state).
-				usableNewIPs := filterUsableIPs(newIPs)
-				if newIface.IsUp() && len(usableNewIPs) > 0 {
-					changed = true
-					changeIPs = usableNewIPs
-					p.Debug().
-						Str("interface", ifaceName).
-						Interface("new_ips", usableNewIPs).
-						Msg("Interface newly appeared (was not present in old state)")
-					break
-				}
-				continue
-			}
-
-			// Filter new IPs to only those that are usable.
-			usableNewIPs := filterUsableIPs(newIPs)
-
-			// Check if interface is up and has usable IPs.
-			if newIface.IsUp() && len(usableNewIPs) > 0 {
-				activeInterfaceExists = true
-			}
-
-			// Compare interface states and IPs (interfaceIPsEqual will itself filter the IPs).
-			if !interfaceStatesEqual(&oldIface, &newIface) || !interfaceIPsEqual(oldIPs, newIPs) {
-				if newIface.IsUp() && len(usableNewIPs) > 0 {
-					changed = true
-					changeIPs = usableNewIPs
-					p.Debug().
-						Str("interface", ifaceName).
-						Interface("old_ips", oldIPs).
-						Interface("new_ips", usableNewIPs).
-						Msg("Interface state or IPs changed")
-					break
-				}
-			}
-		}
-
-		// if the default route changed, set changed to true
-		if delta.New.DefaultRouteInterface != delta.Old.DefaultRouteInterface {
-			changed = true
-			p.Debug().Msgf("Default route changed from %s to %s", delta.Old.DefaultRouteInterface, delta.New.DefaultRouteInterface)
-		}
-
-		if !changed {
-			p.Debug().Msg("Ignoring interface change - no valid interfaces affected")
-			// check if the default IPs are still on an interface that is up
-			ValidateDefaultLocalIPsFromDelta(delta.New)
-			// Minor interface changes can still accompany pf/WFP or VPN DNS changes.
-			// On macOS, bound the immediate full reconciliation so link-local-only
-			// notification storms do not run pfctl/scutil work for every event.
-			// Windows keeps the existing immediate behavior. Tunnel changes always
-			// bypass the macOS limit, and delayed checks provide a trailing refresh.
-			if dnsIntercept && p.dnsInterceptState != nil {
-				p.handleDNSInterceptIgnoredNetworkChange(delta, time.Now())
-			}
-			return
-		}
-
-		if !activeInterfaceExists {
-			p.Debug().Msg("No active interfaces found, skipping reinitialization")
-			return
-		}
-
-		p.Debug().Msg("Link state changed, re-bootstrapping")
-		for _, uc := range p.cfg.Upstream {
-			uc.ReBootstrap(ctrld.LoggerCtx(ctx, p.logger.Load()))
-		}
-
-		// Get IPs from default route interface in new state
-		selfIP := p.defaultRouteIP()
-
-		// Ensure that selfIP is an IPv4 address.
-		// If defaultRouteIP mistakenly returns an IPv6 (such as a ULA), clear it
-		if ip := net.ParseIP(selfIP); ip != nil && ip.To4() == nil {
-			p.Debug().Msgf("DefaultRouteIP returned a non-ipv4 address: %s, ignoring it", selfIP)
-			selfIP = ""
-		}
-		var ipv6 string
-
-		if delta.New.DefaultRouteInterface != "" {
-			p.Debug().Msgf("Default route interface: %s, ips: %v", delta.New.DefaultRouteInterface, delta.New.InterfaceIPs[delta.New.DefaultRouteInterface])
-			for _, ip := range delta.New.InterfaceIPs[delta.New.DefaultRouteInterface] {
-				ipAddr, _ := netip.ParsePrefix(ip.String())
-				addr := ipAddr.Addr()
-				if selfIP == "" && addr.Is4() {
-					p.Debug().Msgf("Checking ip: %s", addr.String())
-					if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
-						selfIP = addr.String()
-					}
-				}
-				if addr.Is6() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
-					ipv6 = addr.String()
-				}
-			}
-		} else {
-			// If no default route interface is set yet, use the changed IPs
-			p.Debug().Msgf("No default route interface found, using changed ips: %v", changeIPs)
-			for _, ip := range changeIPs {
-				ipAddr, _ := netip.ParsePrefix(ip.String())
-				addr := ipAddr.Addr()
-				if selfIP == "" && addr.Is4() {
-					p.Debug().Msgf("Checking ip: %s", addr.String())
-					if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
-						selfIP = addr.String()
-					}
-				}
-				if addr.Is6() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
-					ipv6 = addr.String()
-				}
-			}
-		}
-
-		// Only set the IPv4 default if selfIP is a valid IPv4 address.
-		if ip := net.ParseIP(selfIP); ip != nil && ip.To4() != nil {
-			ctrld.SetDefaultLocalIPv4(ctrld.LoggerCtx(ctx, p.logger.Load()), ip)
-			if !isMobile() && p.ciTable != nil {
-				p.ciTable.SetSelfIP(selfIP)
-			}
-		}
-		if ip := net.ParseIP(ipv6); ip != nil {
-			ctrld.SetDefaultLocalIPv6(ctrld.LoggerCtx(ctx, p.logger.Load()), ip)
-		}
-		p.Debug().Msgf("Set default local IPv4: %s, IPv6: %s", selfIP, ipv6)
-
-		p.debounceRecovery()
-
-		// Firewall mode: flush allowlist on network changes. Stale IPs from
-		// the old network may no longer be routable. DNS queries on the new
-		// network will repopulate the allowlist.
-		p.firewallOnNetworkChange()
-
-		// After network changes, verify our pf anchor is still active and
-		// refresh VPN DNS state. Order matters: tunnel checks first (may rebuild
-		// anchor), then VPN DNS refresh (updates exemptions in anchor), then
-		// delayed re-checks for async VPN teardown.
-		if dnsIntercept && p.dnsInterceptState != nil {
-			if !p.pfStabilizing.Load() {
-				p.ensurePFAnchorActive()
-			}
-			// Check tunnel interfaces unconditionally — it decides internally
-			// whether to enter stabilization or rebuild immediately.
-			p.checkTunnelInterfaceChanges()
-			// Refresh VPN DNS routes — runs after tunnel checks so the anchor
-			// rebuild includes current VPN DNS exemptions.
-			if p.vpnDNS != nil {
-				p.vpnDNS.Refresh(ctrld.LoggerCtx(ctx, p.logger.Load()), true)
-			}
-			// Rebuild the anchor if a VM/container bridge appeared/disappeared
-			// on this network change (no-op when the forwarded-source set is unchanged).
-			p.reconcileForwardedSources()
-			// Schedule delayed re-checks to catch async VPN teardown changes.
-			p.scheduleDelayedRechecks()
-		}
+		p.handleNetworkChange(ctx, delta, mon.IsMajorChangeFrom(delta.Old, delta.New))
 	})
 
 	mon.Start()
-	p.Debug().Msg("Network monitor started")
+	p.logger.Load().Debug().Msg("Network monitor started")
 	return nil
+}
+
+// handleNetworkChange is the network monitor callback, kept separate for synthetic deltas.
+func (p *prog) handleNetworkChange(ctx context.Context, delta *netmon.ChangeDelta, isMajorChange bool) {
+	// netmon v1.74.0 dispatches callbacks concurrently and caches only major
+	// snapshots. Minor events refer to that cache through Old. The synthetic
+	// delta.Major flag after a time jump does not change the cache.
+	p.networkSourceMu.Lock()
+	currentState := networkChangeCurrentStateFn(delta)
+	if !networkSnapshotCurrent(delta, isMajorChange, currentState) {
+		p.networkSourceMu.Unlock()
+		p.logger.Load().Debug().Msg("Network transition skipped: snapshot superseded")
+		return
+	}
+	transitionID := p.networkTransitionGen.Add(1)
+	sourceState := delta.New
+	// A late major callback and reordered minor callbacks share one cache
+	// epoch. For these cases, source validity comes from the OS, not ordering.
+	if delta.Monitor != nil && (!isMajorChange || (p.networkSourceEpoch == currentState && p.networkSourceState != currentState)) {
+		fresh, err := readNetworkSourceStateFn()
+		if err != nil || fresh == nil {
+			if !p.networkSourceReadFailed {
+				p.logger.Load().Warn().Uint64("transition_id", transitionID).
+					Msg("Network source snapshot unavailable; source writes deferred")
+			}
+			p.networkSourceReadFailed = true
+			sourceState = nil
+		} else {
+			snapshot := *fresh
+			snapshot.DefaultRouteInterface = currentState.DefaultRouteInterface
+			sourceState = &snapshot
+			if p.networkSourceReadFailed {
+				p.logger.Load().Warn().Uint64("transition_id", transitionID).Msg("Network source snapshot available again")
+			}
+			p.networkSourceReadFailed = false
+		}
+	}
+	p.networkSourceState, p.networkSourceEpoch = sourceState, currentState
+	sourceSnapshotAvailable := sourceState != nil
+	before4, before6 := ctrld.GetDefaultLocalIPv4(), ctrld.GetDefaultLocalIPv6()
+	validateDefaultLocalIPsFromDelta(ctrld.LoggerCtx(ctx, p.logger.Load()), sourceState, transitionID)
+	after4, after6 := ctrld.GetDefaultLocalIPv4(), ctrld.GetDefaultLocalIPv6()
+	p.networkSourceMu.Unlock()
+
+	p.handleDNS64NetworkChange(delta, isMajorChange)
+	validIfaces := networkChangeValidInterfacesFn(ctrld.LoggerCtx(ctx, p.logger.Load()))
+
+	changed := false
+	changedInterface := ""
+	outcome := "ignored"
+	defer func() {
+		p.logger.Load().Debug().Uint64("transition_id", transitionID).
+			Bool("is_major_change", isMajorChange).Bool("changed", changed).
+			Str("interface", changedInterface).
+			Str("default_route_before", delta.Old.DefaultRouteInterface).
+			Str("default_route_after", delta.New.DefaultRouteInterface).
+			Str("source_ipv4_before", before4.String()).Str("source_ipv6_before", before6.String()).
+			Str("source_ipv4_after", after4.String()).
+			Str("source_ipv6_after", after6.String()).
+			Bool("source_snapshot_available", sourceSnapshotAvailable).Str("outcome", outcome).Msg("Network transition")
+	}()
+	activeInterfaceExists := false
+	var changeIPs []netip.Prefix
+	// Check each valid interface for changes
+	for ifaceName := range validIfaces {
+		oldIface, oldExists := delta.Old.Interface[ifaceName]
+		newIface, newExists := delta.New.Interface[ifaceName]
+		if !newExists {
+			continue
+		}
+
+		oldIPs := delta.Old.InterfaceIPs[ifaceName]
+		newIPs := delta.New.InterfaceIPs[ifaceName]
+
+		// if a valid interface did not exist in old
+		// check that its up and has usable IPs
+		if !oldExists {
+			// The interface is new (was not present in the old state).
+			usableNewIPs := filterUsableIPs(newIPs)
+			if newIface.IsUp() && len(usableNewIPs) > 0 {
+				changed = true
+				changeIPs = usableNewIPs
+				changedInterface = ifaceName
+				p.logger.Load().Debug().
+					Str("interface", ifaceName).
+					Interface("new_ips", usableNewIPs).
+					Msg("Interface newly appeared (was not present in old state)")
+				break
+			}
+			continue
+		}
+
+		// Filter new IPs to only those that are usable.
+		usableNewIPs := filterUsableIPs(newIPs)
+
+		// Check if interface is up and has usable IPs.
+		if newIface.IsUp() && len(usableNewIPs) > 0 {
+			activeInterfaceExists = true
+		}
+
+		// Compare interface states and IPs (interfaceIPsEqual will itself filter the IPs).
+		if !interfaceStatesEqual(&oldIface, &newIface) || !interfaceIPsEqual(oldIPs, newIPs) {
+			if newIface.IsUp() && len(usableNewIPs) > 0 {
+				changed = true
+				changeIPs = usableNewIPs
+				changedInterface = ifaceName
+				p.logger.Load().Debug().
+					Str("interface", ifaceName).
+					Interface("old_ips", oldIPs).
+					Interface("new_ips", usableNewIPs).
+					Msg("Interface state or IPs changed")
+				break
+			}
+		}
+	}
+
+	// if the default route changed, set changed to true
+	if delta.New.DefaultRouteInterface != delta.Old.DefaultRouteInterface {
+		changed = true
+		p.logger.Load().Debug().Msgf("Default route changed from %s to %s", delta.Old.DefaultRouteInterface, delta.New.DefaultRouteInterface)
+	}
+
+	if !changed {
+		p.logger.Load().Debug().Msg("Ignoring interface change - no valid interfaces affected")
+		// Minor interface changes can still accompany pf/WFP or VPN DNS changes.
+		// On macOS, bound the immediate full reconciliation so link-local-only
+		// notification storms do not run pfctl/scutil work for every event.
+		// Windows keeps the existing immediate behavior. Tunnel changes always
+		// bypass the macOS limit, and delayed checks provide a trailing refresh.
+		if dnsIntercept && p.dnsInterceptState != nil {
+			networkChangeIgnoredInterceptFn(p, delta, time.Now())
+		}
+		return
+	}
+
+	if !activeInterfaceExists {
+		outcome = "no_active_interface"
+		p.logger.Load().Debug().Msg("No active interfaces found, skipping reinitialization")
+		return
+	}
+
+	// An ignored event must not cancel this accepted transition. Only a newer
+	// accepted transition can replace its source commit or debounced recovery.
+	p.networkSourceMu.Lock()
+	if p.networkAcceptedGen.Load() > transitionID {
+		p.networkSourceMu.Unlock()
+		outcome = "superseded"
+		return
+	}
+	p.networkAcceptedGen.Store(transitionID)
+	p.networkSourceMu.Unlock()
+
+	p.logger.Load().Debug().Msg("Link state changed, re-bootstrapping")
+	for _, uc := range p.cfg.Upstream {
+		uc.ReBootstrap(ctrld.LoggerCtx(ctx, p.logger.Load()))
+	}
+
+	// Get IPs from default route interface in new state
+	selfIP := networkChangeDefaultRouteIPFn(p)
+
+	// Ensure that selfIP is an IPv4 address.
+	// If defaultRouteIP mistakenly returns an IPv6 (such as a ULA), clear it
+	if ip := net.ParseIP(selfIP); ip != nil && ip.To4() == nil {
+		p.logger.Load().Debug().Msgf("defaultRouteIP returned a non-IPv4 address: %s, ignoring it", selfIP)
+		selfIP = ""
+	}
+	// Route discovery can lag the delta; do not reintroduce an invalid source.
+	if ip := net.ParseIP(selfIP); ip != nil && sourceInvalidReason(delta.New, ip) != "" {
+		selfIP = ""
+	}
+	var ipv6 string
+
+	if delta.New.DefaultRouteInterface != "" {
+		p.logger.Load().Debug().Msgf("default route interface: %s, IPs: %v", delta.New.DefaultRouteInterface, delta.New.InterfaceIPs[delta.New.DefaultRouteInterface])
+		for _, ip := range delta.New.InterfaceIPs[delta.New.DefaultRouteInterface] {
+			if sourceInvalidReason(delta.New, net.ParseIP(ip.Addr().String())) != "" {
+				continue
+			}
+			ipAddr, _ := netip.ParsePrefix(ip.String())
+			addr := ipAddr.Addr()
+			if selfIP == "" && addr.Is4() {
+				p.logger.Load().Debug().Msgf("checking IP: %s", addr.String())
+				if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+					selfIP = addr.String()
+				}
+			}
+			if addr.Is6() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+				ipv6 = addr.String()
+			}
+		}
+	} else {
+		// If no default route interface is set yet, use the changed IPs
+		p.logger.Load().Debug().Msgf("no default route interface found, using changed IPs: %v", changeIPs)
+		for _, ip := range changeIPs {
+			ipAddr, _ := netip.ParsePrefix(ip.String())
+			addr := ipAddr.Addr()
+			if selfIP == "" && addr.Is4() {
+				p.logger.Load().Debug().Msgf("checking IP: %s", addr.String())
+				if !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+					selfIP = addr.String()
+				}
+			}
+			if addr.Is6() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() {
+				ipv6 = addr.String()
+			}
+		}
+	}
+
+	// An ignored event can change source validity without replacing recovery.
+	// Recheck addresses against the newest state after blocking route lookup.
+	p.networkSourceMu.Lock()
+	if p.networkAcceptedGen.Load() != transitionID {
+		p.networkSourceMu.Unlock()
+		outcome = "superseded"
+		return
+	}
+	latestState := p.sourceCommitState(delta)
+	sourceSnapshotAvailable = latestState != nil
+	validateDefaultLocalIPsFromDelta(ctrld.LoggerCtx(ctx, p.logger.Load()), latestState, transitionID)
+	// Only keep candidate addresses that still exist on an up interface.
+	if ip := net.ParseIP(selfIP); ip != nil && ip.To4() != nil && latestState != nil && sourceInvalidReason(latestState, ip) == "" {
+		ctrld.SetDefaultLocalIPv4(ctrld.LoggerCtx(ctx, p.logger.Load()), ip)
+		if !isMobile() && p.ciTable != nil {
+			p.ciTable.SetSelfIP(selfIP)
+		}
+	}
+	if ip := net.ParseIP(ipv6); ip != nil && latestState != nil && sourceInvalidReason(latestState, ip) == "" {
+		ctrld.SetDefaultLocalIPv6(ctrld.LoggerCtx(ctx, p.logger.Load()), ip)
+	}
+	after4, after6 = ctrld.GetDefaultLocalIPv4(), ctrld.GetDefaultLocalIPv6()
+	p.networkSourceMu.Unlock()
+	p.logger.Load().Debug().Msgf("Set default local IPv4: %s, IPv6: %s", selfIP, ipv6)
+
+	outcome = "accepted"
+	networkChangeReconcileFn(p, ctx, transitionID)
+}
+
+// reconcileNetworkChange is the first DNS/PF mutation boundary after source updates.
+func (p *prog) reconcileNetworkChange(ctx context.Context, transitionID uint64) {
+	p.debounceRecovery(transitionID)
+
+	// Drop stale firewall allowances from the previous network.
+	p.firewallOnNetworkChange()
+
+	// After network changes, verify our pf anchor is still active and
+	// refresh VPN DNS state. Order matters: tunnel checks first (may rebuild
+	// anchor), then VPN DNS refresh (updates exemptions in anchor), then
+	// delayed re-checks for async VPN teardown.
+	if dnsIntercept && p.dnsInterceptState != nil {
+		if !p.pfStabilizing.Load() {
+			p.ensurePFAnchorActive()
+		}
+		// Check tunnel interfaces unconditionally — it decides internally
+		// whether to enter stabilization or rebuild immediately.
+		p.checkTunnelInterfaceChanges()
+		// Refresh VPN DNS routes — runs after tunnel checks so the anchor
+		// rebuild includes current VPN DNS exemptions.
+		if p.vpnDNS != nil {
+			p.vpnDNS.Refresh(ctrld.LoggerCtx(ctx, p.logger.Load()), true)
+		}
+		// Preserve master VM/container forwarded-source reconciliation.
+		p.reconcileForwardedSources()
+		// Schedule delayed re-checks to catch async VPN teardown changes.
+		p.scheduleDelayedRechecks()
+	}
 }
 
 // handleDNSInterceptIgnoredNetworkChange runs the DNS-intercept work for a
@@ -2214,7 +2298,12 @@ const recoveryDebounceWindow = 500 * time.Millisecond
 // recovery runs once with the final network state. All other state updates (IP,
 // pf anchor, VPN DNS, tunnel checks) run immediately — only the recovery flow
 // with its upstream probing and DHCP bypass logic is debounced.
-func (p *prog) debounceRecovery() {
+func (p *prog) debounceRecovery(transitionID uint64) {
+	p.networkSourceMu.Lock()
+	defer p.networkSourceMu.Unlock()
+	if p.networkAcceptedGen.Load() != transitionID {
+		return
+	}
 	p.recoveryDebounceMu.Lock()
 	defer p.recoveryDebounceMu.Unlock()
 
@@ -2223,21 +2312,45 @@ func (p *prog) debounceRecovery() {
 		p.Debug().Msg("Recovery debounce: resetting timer (rapid network change)")
 	}
 	p.recoveryDebounceTimer = time.AfterFunc(recoveryDebounceWindow, func() {
+		p.networkSourceMu.Lock()
+		if p.networkAcceptedGen.Load() != transitionID {
+			p.networkSourceMu.Unlock()
+			return
+		}
 		p.recoveryDebounceMu.Lock()
 		p.recoveryDebounceTimer = nil
 		p.recoveryDebounceMu.Unlock()
-		p.handleRecovery(RecoveryReasonNetworkChange)
+		p.networkSourceMu.Unlock()
+		handleRecoveryForTransitionFn(p, RecoveryReasonNetworkChange, transitionID)
 	})
 	p.Debug().Msg("Recovery debounce: scheduled (500ms window)")
 }
 
 func (p *prog) handleRecovery(reason RecoveryReason) {
-	p.Debug().Msg("Starting recovery process: removing DNS settings")
+	p.handleRecoveryForTransition(reason, 0)
+}
 
-	recoveryCtx, gen, interceptRecovery, ok := p.beginRecovery(reason)
-	if !ok {
-		p.Debug().Msg("Upstream recovery already in progress; skipping duplicate trigger")
+func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID uint64) {
+	p.networkSourceMu.Lock()
+	if transitionID != 0 && p.networkAcceptedGen.Load() != transitionID {
+		p.networkSourceMu.Unlock()
+		p.logger.Load().Debug().Uint64("transition_id", transitionID).Msg("Recovery skipped: transition superseded")
 		return
+	}
+	recoveryCtx, gen, interceptRecovery, ok := p.beginRecovery(reason)
+	p.networkSourceMu.Unlock()
+	if !ok {
+		p.logger.Load().Debug().Uint64("transition_id", transitionID).
+			Uint64("recovery_generation", p.recoveryGen.Load()).
+			Msg("Upstream recovery already in progress; skipping duplicate trigger")
+		return
+	}
+	diagnostic := recoveryDiagnostic{logger: p.logger.Load(), transitionID: transitionID, generation: gen, reason: reason, started: time.Now()}
+	diagnostic.event(p.logger.Load().Debug()).Bool("intercept", interceptRecovery).Msg("Recovery begin")
+	outcome := "superseded"
+	defer func() { diagnostic.end(outcome) }()
+	if reason == RecoveryReasonNetworkChange {
+		p.logger.Load().Debug().Msg("Network change recovery now owns shared recovery state")
 	}
 
 	// For network changes, force-reset all upstream transports synchronously.
@@ -2264,9 +2377,11 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 	}
 
 	upstreams := p.buildRecoveryUpstreams(reason)
-	recovered, err := p.waitForUpstreamRecovery(recoveryCtx, upstreams)
+	recovered, err := p.waitForUpstreamRecovery(recoveryCtx, upstreams, &diagnostic)
 	if err != nil {
-		p.Error().Err(err).Msg("Recovery failed; DNS settings remain removed")
+		if p.recoveryOwnsState(gen) {
+			outcome = "canceled"
+		}
 		p.recoveryCanceledCleanup(gen)
 		return
 	}
@@ -2285,6 +2400,7 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 		return
 	}
 
+	outcome = "completed"
 	p.Info().Msgf("Recovery completed successfully for upstream %q", recovered)
 }
 
@@ -2337,7 +2453,7 @@ func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool)
 	// we do not want to restore any static DNS settings
 	// we must try to get the DHCP values, any static DNS settings
 	// will be appended to nameservers from the saved interface values
-	p.resetDNS(false, false)
+	recoveryResetDNSFn(p, false, false)
 
 	// For an OS failure, reinitialize OS resolver nameservers immediately.
 	if reason == RecoveryReasonOSFailure {
@@ -2398,7 +2514,7 @@ func (p *prog) completeRecoveryWork(reason RecoveryReason, recovered string, int
 
 // waitForUpstreamRecovery checks the provided upstreams concurrently until one recovers.
 // It returns the name of the recovered upstream or an error if the check times out.
-func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string]*ctrld.UpstreamConfig) (string, error) {
+func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string]*ctrld.UpstreamConfig, diagnostic *recoveryDiagnostic) (string, error) {
 	recoveryCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -2434,6 +2550,7 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 						}
 						return
 					}
+					diagnostic.failure(err)
 					// Back off the retry cadence for an unroutable endpoint so a
 					// host with IPv6 up but no route to the IPv6 DoH endpoint does
 					// not re-bootstrap/re-check every checkUpstreamBackoffSleep and
@@ -2521,27 +2638,8 @@ func (p *prog) buildRecoveryUpstreams(reason RecoveryReason) map[string]*ctrld.U
 // are still present in the new network state (provided by delta.New).
 // If a stored default IP is no longer active, it resets that default (sets it to nil)
 // so that it won't be used in subsequent custom dialer contexts.
+// Deprecated: retained for callers of the existing exported cli API.
+// The network monitor uses transition-aware validation instead.
 func ValidateDefaultLocalIPsFromDelta(newState *netmon.State) {
-	currentIPv4 := ctrld.GetDefaultLocalIPv4()
-	currentIPv6 := ctrld.GetDefaultLocalIPv6()
-
-	// Build a map of active IP addresses from the new state.
-	activeIPs := make(map[string]bool)
-	for _, prefixes := range newState.InterfaceIPs {
-		for _, prefix := range prefixes {
-			activeIPs[prefix.Addr().String()] = true
-		}
-	}
-
-	// Check if the default IPv4 is still active.
-	if currentIPv4 != nil && !activeIPs[currentIPv4.String()] {
-		mainLog.Load().Debug().Msgf("DefaultLocalIPv4 %s is no longer active in the new state. Resetting.", currentIPv4)
-		ctrld.SetDefaultLocalIPv4(ctrld.LoggerCtx(context.Background(), mainLog.Load()), nil)
-	}
-
-	// Check if the default IPv6 is still active.
-	if currentIPv6 != nil && !activeIPs[currentIPv6.String()] {
-		mainLog.Load().Debug().Msgf("DefaultLocalIPv6 %s is no longer active in the new state. Resetting.", currentIPv6)
-		ctrld.SetDefaultLocalIPv6(ctrld.LoggerCtx(context.Background(), mainLog.Load()), nil)
-	}
+	validateDefaultLocalIPsFromDelta(ctrld.LoggerCtx(context.Background(), mainLog.Load()), newState, 0)
 }

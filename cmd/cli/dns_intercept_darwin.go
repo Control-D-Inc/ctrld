@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +76,11 @@ const (
 
 const (
 	// pfProbeDomain is the suffix used for pf interception probe queries.
+	// The full probe domain is "_pf-probe-<hex>.<pfProbeDomain>".
+	// These queries are sent by a subprocess WITHOUT the _ctrld group GID,
+	// so pf should intercept them and redirect to ctrld. If ctrld receives
+	// the query, interception is working. A sent query without receipt permits
+	// repair. An unsent or unavailable probe is indeterminate.
 	// No trailing dot — canonicalName() in the DNS handler strips trailing dots.
 	pfProbeDomain = "pf-probe.ctrld.test"
 
@@ -1505,10 +1511,19 @@ func (p *prog) finishPFStabilization(stableRequired time.Duration) {
 }
 
 // probePFInterceptFn and forceReloadPFInterceptFn are the functional verification seams
-// shared by both probers.
+// shared by all four probe callers.
 var (
 	probePFInterceptFn       = (*prog).probePFIntercept
 	forceReloadPFInterceptFn = (*prog).forceReloadPFMainRuleset
+	pfProbeNameservers       = ctrld.OsResolverNameservers
+	newPFProbeCommand        = func(ctx context.Context, host, packet string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "pf-probe-send", host, packet)
+		// wheel, not _ctrld: the probe must traverse interception.
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Credential: &syscall.Credential{Uid: 0, Gid: 0},
+		}
+		return cmd
+	}
 )
 
 // pfFunctionalProbeOwnerWait bounds how long the post-stabilization verifier waits for
@@ -1579,17 +1594,29 @@ func (p *prog) verifyInterceptAfterStabilization() {
 		return
 	}
 
-	if probePFInterceptFn(p) {
+	result := probePFInterceptFn(p)
+	if result.result == pfProbeIndeterminate {
+		mainLog.Load().Debug().Msg("DNS intercept: post-stabilization probe indeterminate; repair deferred")
+		return
+	}
+	if result.result == pfProbeIntercepted {
 		mainLog.Load().Debug().Msg("DNS intercept: post-stabilization probe passed — interception is translating")
 		return
 	}
 
 	mainLog.Load().Warn().Msg("DNS intercept: post-stabilization rules are intact but the probe FAILED — forcing one reload")
-	if !forceReloadPFInterceptFn(p) {
+	if !p.repairPFIntercept(result, "post_stabilization") {
 		mainLog.Load().Error().Msg("DNS intercept: post-stabilization forced reload did not run — leaving recovery to the watchdog")
 		return
 	}
-	if probePFInterceptFn(p) {
+	cause := result
+	result = probePFInterceptFn(p)
+	logPFRepair(cause, "post_stabilization", result.result.String(), true, result)
+	if result.result == pfProbeIndeterminate {
+		mainLog.Load().Warn().Msg("DNS intercept: post-stabilization reload completed; verification indeterminate")
+		return
+	}
+	if result.result == pfProbeIntercepted {
 		mainLog.Load().Info().Msg("DNS intercept: interception restored by the post-stabilization reload")
 		return
 	}
@@ -1628,8 +1655,8 @@ var pfWakeProbeOwnerWait = 250 * time.Millisecond
 // drive the post-stabilization verifier; without that reconnect nothing would have probed.
 //
 // The OS resolver list is refreshed before every probe. probePFIntercept aims at the
-// first OS nameserver and reports success when it has no target, so a list still holding
-// a pre-sleep VPN resolver turns this into a meaningless pass or a false failure.
+// first usable IPv4 LAN target, or the original usable first public target.
+// No target is indeterminate. Refreshing avoids probing a stale VPN resolver.
 func (p *prog) verifyInterceptAfterWake(gap time.Duration) {
 	if p.dnsInterceptState == nil {
 		return
@@ -1681,7 +1708,7 @@ func (p *prog) verifyInterceptAfterWake(gap time.Duration) {
 		mainLog.Load().Warn().Msg("DNS intercept: post-wake verification never probed - every attempt was deferred or skipped - the watchdog will retry")
 		return
 	}
-	mainLog.Load().Error().Msgf("DNS intercept: interception still not translating after resume (%d probe attempts, %d forced reloads) - the watchdog will retry",
+	mainLog.Load().Error().Msgf("DNS intercept: interception not verified after resume (%d probe attempts, %d forced reloads) - the watchdog will retry",
 		probed, repairs)
 }
 
@@ -1708,7 +1735,12 @@ func (p *prog) waitBeforeWakeProbe(delay time.Duration) bool {
 // The caller holds functional-probe ownership for the call.
 func (p *prog) runWakeProbeAttempt(attempt, repairs int) (restored, repaired bool) {
 	initializeOsResolver(ctrld.LoggerCtx(context.Background(), mainLog.Load()), true)
-	if probePFInterceptFn(p) {
+	result := probePFInterceptFn(p)
+	if result.result == pfProbeIndeterminate {
+		mainLog.Load().Debug().Msg("DNS intercept: post-wake probe indeterminate; repair deferred")
+		return false, false
+	}
+	if result.result == pfProbeIntercepted {
 		if attempt > 0 || repairs > 0 {
 			mainLog.Load().Info().Msgf("DNS intercept: post-wake probe %d/%d passed - interception is translating", attempt+1, len(pfWakeProbeDelays))
 		} else {
@@ -1720,16 +1752,19 @@ func (p *prog) runWakeProbeAttempt(attempt, repairs int) (restored, repaired boo
 	if repairs >= pfWakeMaxRepairs {
 		mainLog.Load().Warn().Msgf("DNS intercept: post-wake probe %d/%d FAILED - repair budget of %d forced reloads is spent, not reloading again",
 			attempt+1, len(pfWakeProbeDelays), pfWakeMaxRepairs)
+		logPFRepair(result, "post_wake", "budget_exhausted", false, pfProbeObservation{})
 		return false, false
 	}
 
 	mainLog.Load().Warn().Msgf("DNS intercept: post-wake probe %d/%d FAILED - rules survived the suspend but pf is not translating, forcing a reload",
 		attempt+1, len(pfWakeProbeDelays))
-	if !forceReloadPFInterceptFn(p) {
+	if !p.repairPFIntercept(result, "post_wake") {
 		mainLog.Load().Error().Msg("DNS intercept: post-wake forced reload did not run")
 		return false, false
 	}
-	if probePFInterceptFn(p) {
+	confirmation := probePFInterceptFn(p)
+	logPFRepair(result, "post_wake", confirmation.result.String(), true, confirmation)
+	if confirmation.result == pfProbeIntercepted {
 		mainLog.Load().Info().Msg("DNS intercept: interception restored by the post-wake reload")
 		return true, true
 	}
@@ -2042,18 +2077,7 @@ func (p *prog) pfWatchdog() {
 			ensureInterceptDNSTargetFn(p, []string{})
 
 			result := p.ensurePFAnchorActive()
-			if result == pfAnchorCheckIntact {
-				// Only an authoritative intact result may trigger the functional probe.
-				// Skipped/backoff/failed checks must not be treated as healthy text state.
-				if !p.pfMonitorRunning.Load() && !p.probePFIntercept() {
-					mainLog.Load().Warn().Msg("DNS intercept watchdog: rules intact but probe FAILED — forcing full reload")
-					if p.forceReloadPFMainRuleset() {
-						result = pfAnchorCheckRestored
-					} else {
-						result = pfAnchorCheckFailed
-					}
-				}
-			}
+			result = p.checkPFWatchdogProbe(result)
 
 			if result == pfAnchorCheckIntact {
 				// Check if backoff should be reset only after an authoritative healthy check.
@@ -2106,6 +2130,27 @@ func (p *prog) pfWatchdog() {
 			p.reconcileForwardedSources()
 		}
 	}
+}
+
+// A successful forced reload following a probe miss is not evidence that an
+// anchor was missing. Keep that repair out of the missing-anchor counter.
+func (p *prog) checkPFWatchdogProbe(result pfAnchorCheckResult) pfAnchorCheckResult {
+	if result != pfAnchorCheckIntact || p.pfMonitorRunning.Load() {
+		return result
+	}
+	probe := probePFInterceptFn(p)
+	switch probe.result {
+	case pfProbeIntercepted:
+		return result
+	case pfProbeNotIntercepted:
+		mainLog.Load().Warn().Msg("DNS intercept watchdog: sent probe was not intercepted; forcing full reload")
+		if !p.repairPFIntercept(probe, "watchdog") {
+			mainLog.Load().Warn().Msg("DNS intercept watchdog: probe repair did not complete; will retry")
+		}
+	case pfProbeIndeterminate:
+		mainLog.Load().Debug().Msg("DNS intercept watchdog: probe indeterminate; repair deferred")
+	}
+	return pfAnchorCheckDeferred
 }
 
 // exemptVPNDNSServers updates the pf anchor rules with interface-scoped exemptions
@@ -2175,67 +2220,91 @@ func (p *prog) exemptVPNDNSServers(exemptions []vpnDNSExemption) error {
 	return nil
 }
 
-// probePFIntercept tests whether pf's rdr translation is actually working by
-// sending a DNS query through the interception path from a subprocess that does
-// NOT have the _ctrld group GID. If pf interception is working, the query gets
-// redirected to 127.0.0.1:53 (ctrld), and the DNS handler signals us. If broken
-// (rdr rules present but not evaluating), the query goes to the real DNS server
-// and we time out.
-//
-// Returns true if interception is working, false if broken or indeterminate.
-func (p *prog) probePFIntercept() bool {
+// Keep warning coalescing available throughout intercept startup and recovery.
+var pfProbeLogs pfProbeLogState
+
+// probePFIntercept distinguishes a meaningful interception failure from a probe
+// that could not send. Only pfProbeNotIntercepted permits destructive repair.
+func (p *prog) probePFIntercept() pfProbeObservation {
+	observed := pfProbeObservation{
+		probeID:            fmt.Sprintf("_pf-probe-%x.%s", time.Now().UnixNano(), pfProbeDomain),
+		recoveryGeneration: p.recoveryGen.Load(),
+		stage:              "target", code: "unavailable",
+	}
 	if p.dnsInterceptState == nil {
-		return true
+		return observed
 	}
-
-	nsIPs := ctrld.OsResolverNameservers()
-	if len(nsIPs) == 0 {
-		mainLog.Load().Debug().Msg("DNS intercept probe: no OS resolver nameservers available")
-		return true // can't probe without a target
+	started := time.Now()
+	servers := pfProbeNameservers()
+	host := pfProbeTarget(servers)
+	family := "none"
+	if len(servers) > 0 {
+		if first, _, err := net.SplitHostPort(servers[0]); err == nil {
+			if addr, err := netip.ParseAddr(first); err == nil {
+				observed.target = net.JoinHostPort(addr.String(), "53")
+				family = "ipv6"
+				if addr.Is4() {
+					family = "ipv4"
+				}
+			}
+		}
 	}
-	host, _, _ := net.SplitHostPort(nsIPs[0])
-	if host == "" || host == "127.0.0.1" || host == "::1" {
-		mainLog.Load().Debug().Msg("DNS intercept probe: OS resolver is localhost, skipping probe")
-		return true // can't probe through localhost
+	if host != "" {
+		observed.target = net.JoinHostPort(host, "53")
+		family = "ipv4"
+		probeCh, deregister := p.registerInterceptProbe(observed.probeID)
+		defer deregister()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		go func() {
+			select {
+			case <-p.stopCh:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		cmd := newPFProbeCommand(ctx, host, fmt.Sprintf("%x", buildDNSQueryPacket(observed.probeID)))
+		result := runPFProbe(ctx, cmd, probeCh, pfProbeTimeout)
+		observed.result, observed.stage, observed.code = result.result, result.stage, result.code
 	}
-
-	// Generate unique probe domain
-	probeID := fmt.Sprintf("_pf-probe-%x.%s", time.Now().UnixNano()&0xFFFFFFFF, pfProbeDomain)
-
-	// Register this attempt's own domain: overlapping probes must not cancel each other.
-	probeCh, deregister := p.registerInterceptProbe(probeID)
-	defer deregister()
-
-	// Build a minimal DNS query packet for the probe domain.
-	// We use exec.Command to send from a subprocess with GID=0 (wheel),
-	// so pf's _ctrld group exemption does NOT apply and the query gets intercepted.
-	dnsPacket := buildDNSQueryPacket(probeID)
-
-	// Send via a helper subprocess that drops the _ctrld group
-	cmd := exec.Command(os.Args[0], "pf-probe-send", host, fmt.Sprintf("%x", dnsPacket))
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid: 0,
-			Gid: 0, // wheel group — NOT _ctrld, so pf intercepts it
-		},
+	// Cancellation is a shutdown diagnostic, not a change in PF health.
+	retain, repeats := false, uint64(0)
+	if observed.code != "canceled" {
+		retain, repeats = pfProbeLogs.change(observed)
 	}
-
-	if err := cmd.Start(); err != nil {
-		mainLog.Load().Debug().Err(err).Msg("DNS intercept probe: failed to start probe subprocess")
-		return true // can't probe, assume OK
+	event := mainLog.Load().Debug()
+	if retain {
+		event = mainLog.Load().Warn()
 	}
+	event.Str("probe_id", observed.probeID).Uint64("recovery_generation", observed.recoveryGeneration).
+		Str("resolver_target", observed.target).Str("resolver_family", family).
+		Str("stage", observed.stage).Str("error_code", observed.code).
+		Str("outcome", observed.result.String()).Uint64("repeated_results", repeats).
+		Bool("repair_eligible", observed.result == pfProbeNotIntercepted).
+		Int64("elapsed_ms", time.Since(started).Milliseconds()).Msg("DNS intercept probe result")
+	return observed
+}
 
-	// Don't leak the subprocess
-	go func() {
-		_ = cmd.Wait()
-	}()
-
-	select {
-	case <-probeCh:
-		return true
-	case <-time.After(pfProbeTimeout):
-		return false
+// Carry the cause by value. A concurrent probe cannot replace its correlation fields.
+func (p *prog) repairPFIntercept(cause pfProbeObservation, caller string) bool {
+	logPFRepair(cause, caller, "started", false, pfProbeObservation{})
+	performed := forceReloadPFInterceptFn(p)
+	outcome := "not_run"
+	if performed {
+		outcome = "reload_completed"
 	}
+	logPFRepair(cause, caller, outcome, performed, pfProbeObservation{})
+	return performed
+}
+
+func logPFRepair(cause pfProbeObservation, caller, outcome string, performed bool, confirmation pfProbeObservation) {
+	mainLog.Load().Warn().Str("probe_id", cause.probeID).
+		Uint64("recovery_generation", cause.recoveryGeneration).
+		Str("caller", caller).Str("cause", cause.result.String()).
+		Str("stage", cause.stage).Str("error_code", cause.code).
+		Str("resolver_target", cause.target).Str("outcome", outcome).
+		Bool("reload_performed", performed).Str("confirmation_probe_id", confirmation.probeID).
+		Msg("PF repair")
 }
 
 // buildDNSQueryPacket constructs a minimal DNS query packet (wire format) for the given domain.
@@ -2272,6 +2341,8 @@ func buildDNSQueryPacket(domain string) []byte {
 // block traffic until ctrld loads rules into it.
 func cleanupStaleDNSInterceptState() {}
 
+var pfInterceptMonitorDelays = []time.Duration{0, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
+
 // pfInterceptMonitor runs asynchronously after interface changes are detected.
 // It probes pf interception with exponential backoff and forces a full pf reload
 // if the probe fails. Only one instance runs at a time (singleton via atomic.Bool).
@@ -2296,7 +2367,7 @@ func (p *prog) pfInterceptMonitor() {
 
 	// Backoff schedule: probe quickly first, then space out.
 	// Total monitoring window: ~0 + 0.5 + 1 + 2 + 4 = ~7.5s
-	delays := []time.Duration{0, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
+	delays := pfInterceptMonitorDelays
 
 	for i, delay := range delays {
 		if delay > 0 {
@@ -2307,22 +2378,33 @@ func (p *prog) pfInterceptMonitor() {
 			return
 		}
 
-		if probePFInterceptFn(p) {
+		result := probePFInterceptFn(p)
+		if result.result == pfProbeIndeterminate {
+			mainLog.Load().Debug().Msg("DNS intercept monitor: probe indeterminate; repair deferred")
+			continue
+		}
+		if result.result == pfProbeIntercepted {
 			mainLog.Load().Debug().Msgf("DNS intercept monitor: probe %d/%d passed", i+1, len(delays))
 			continue // working now — keep monitoring in case it breaks later in the window
 		}
 
 		// Probe failed — pf translation is broken. Force full reload.
 		mainLog.Load().Warn().Msgf("DNS intercept monitor: probe %d/%d FAILED — pf translation broken, forcing full ruleset reload", i+1, len(delays))
-		forceReloadPFInterceptFn(p)
+		if !p.repairPFIntercept(result, "monitor") {
+			continue
+		}
 
 		// Verify the reload fixed it
 		time.Sleep(200 * time.Millisecond)
-		if probePFInterceptFn(p) {
-			mainLog.Load().Info().Msg("DNS intercept monitor: probe passed after reload — interception restored")
-			// Continue monitoring in case the hypervisor reloads pf again
-		} else {
-			mainLog.Load().Error().Msg("DNS intercept monitor: probe still failing after reload — pf may need manual intervention")
+		confirmation := probePFInterceptFn(p)
+		logPFRepair(result, "monitor", confirmation.result.String(), true, confirmation)
+		switch confirmation.result {
+		case pfProbeIntercepted:
+			mainLog.Load().Info().Msg("DNS intercept monitor: probe passed after reload - interception restored")
+		case pfProbeNotIntercepted:
+			mainLog.Load().Warn().Msg("DNS intercept monitor: probe still failing after reload - pf may need manual intervention")
+		case pfProbeIndeterminate:
+			mainLog.Load().Warn().Msg("DNS intercept monitor: reload completed; verification indeterminate")
 		}
 	}
 

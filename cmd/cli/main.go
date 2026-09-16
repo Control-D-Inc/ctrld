@@ -1,13 +1,11 @@
 package cli
 
 import (
-	"encoding/hex"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"sync/atomic"
-	"time"
 
 	"github.com/kardianos/service"
 	"go.uber.org/zap"
@@ -250,17 +248,7 @@ func initCache() {
 // pfProbeSend is a minimal subprocess that sends a pre-built DNS query packet
 // to the specified host on port 53.
 func pfProbeSend(host, hexPacket string) {
-	packet, err := hex.DecodeString(hexPacket)
-	if err != nil {
+	if err := sendPFProbe(host, hexPacket, net.DialTimeout, os.Stdout); err != nil {
 		os.Exit(1)
 	}
-	conn, err := net.DialTimeout("udp", net.JoinHostPort(host, "53"), time.Second)
-	if err != nil {
-		os.Exit(1)
-	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(time.Second))
-	_, _ = conn.Write(packet)
-	buf := make([]byte, 512)
-	_, _ = conn.Read(buf)
 }
