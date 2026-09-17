@@ -644,17 +644,25 @@ func (p *prog) applyFetchedResolverConfig(
 
 	noCustomConfig := resolverConfig.Ctrld.CustomConfig == ""
 	noExcludeListChanged := true
+	// Regenerate Internal Domains on add, removal, domain, mode or resolver change.
+	noInternalDomainsChanged := true
 	if rc != nil {
 		slices.Sort(rc.Exclude)
 		slices.Sort(resolverConfig.Exclude)
 		noExcludeListChanged = slices.Equal(rc.Exclude, resolverConfig.Exclude)
+		noInternalDomainsChanged = internalDomainsEqual(rc.SplitDNS, resolverConfig.SplitDNS)
 	}
-	if noCustomConfig && noExcludeListChanged {
+	if noCustomConfig && noExcludeListChanged && noInternalDomainsChanged {
 		return lastUpdated
 	}
 
-	if noCustomConfig && !noExcludeListChanged {
-		logger.Debug().Msg("Exclude list changes detected, reloading...")
+	if noCustomConfig && (!noExcludeListChanged || !noInternalDomainsChanged) {
+		if !noExcludeListChanged {
+			logger.Debug().Msg("Exclude list changes detected, reloading...")
+		}
+		if !noInternalDomainsChanged {
+			logger.Info().Msg("Internal domain changes detected, reloading...")
+		}
 		p.firewallOnConfigReload()
 		p.apiReloadCh <- nil
 		return lastUpdated
@@ -700,11 +708,18 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 			p.Debug().Msgf("Initialized dns stamps with endpoint: %s, type: %s", uc.Endpoint, uc.Type)
 		}
 		isControlDUpstream = isControlDUpstream || uc.IsControlD()
+		// Generated resolver bootstrap addresses are private organization data.
+		bootstrapEvent := func() *ctrld.LogEvent {
+			if strings.HasPrefix(n, internalDomainUpstreamPrefix) {
+				return p.Debug()
+			}
+			return p.Info()
+		}
 		if uc.BootstrapIP == "" {
 			uc.SetupBootstrapIP(ctrld.LoggerCtx(context.Background(), p.logger.Load()))
-			p.Info().Msgf("Bootstrap ips for upstream.%s: %q", n, uc.BootstrapIPs())
+			bootstrapEvent().Msgf("Bootstrap ips for upstream.%s: %q", n, uc.BootstrapIPs())
 		} else {
-			p.Info().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap ip for upstream.%s", n)
+			bootstrapEvent().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap ip for upstream.%s", n)
 		}
 		uc.SetCertPool(rootCertPool)
 		go uc.Ping(loggerCtx)
@@ -717,9 +732,16 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 		}
 	}
 	// Self-uninstallation is ok If there is only 1 ControlD upstream, and no remote config.
-	if len(cfg.Upstream) == 1 && isControlDUpstream {
-		p.canSelfUninstall.Store(true)
+	// Generated Internal Domain resolvers are part of the managed configuration,
+	// not independent user upstreams. Recompute eligibility on every setup/reload;
+	// uninstall still requires API confirmation that the device is gone.
+	managedUpstreams := 0
+	for n, uc := range cfg.Upstream {
+		if !isGeneratedInternalDomainUpstream(n, uc) {
+			managedUpstreams++
+		}
 	}
+	p.canSelfUninstall.Store(managedUpstreams == 1 && isControlDUpstream)
 	p.localUpstreams = localUpstreams
 	p.ptrNameservers = ptrNameservers
 }

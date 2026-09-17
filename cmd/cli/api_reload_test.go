@@ -29,6 +29,65 @@ func refresh(t *testing.T, p *prog, forced bool, rc *controld.ResolverConfig) {
 	p.applyFetchedResolverConfig(context.Background(), discardLogger(), rc, forced, time.Now().Unix())
 }
 
+// TestRefreshInternalDomains covers the master-specific refresh handler after
+// apiConfigReload delegates to it, including changes with unchanged excludes.
+func TestRefreshInternalDomains(t *testing.T) {
+	for _, forced := range []bool{false, true} {
+		name := "scheduled"
+		if forced {
+			name = "forced"
+		}
+		t.Run(name, func(t *testing.T) {
+			// No platform firewall or service is installed by this fixture.
+			p := &prog{rc: &controld.ResolverConfig{}, apiReloadCh: make(chan *ctrld.Config, 1)}
+			p.logger.Store(discardLogger())
+			for _, step := range []struct {
+				name    string
+				entries []controld.SplitDNS
+				reload  bool
+			}{
+				{"absent", nil, false},
+				{"add", []controld.SplitDNS{{Domain: "corp.example", Mode: "os"}}, true},
+				{"unchanged", []controld.SplitDNS{{Domain: "CORP.EXAMPLE.", Mode: "os"}}, false},
+				{"mode", []controld.SplitDNS{{Domain: "corp.example", Mode: "resolvers", Resolvers: []string{"127.0.0.2"}}}, true},
+				{"resolver", []controld.SplitDNS{{Domain: "corp.example", Mode: "resolvers", Resolvers: []string{"127.0.0.3"}}}, true},
+				{"domain", []controld.SplitDNS{{Domain: "office.example", Mode: "resolvers", Resolvers: []string{"127.0.0.3"}}}, true},
+				{"remove", nil, true},
+				{"empty unchanged", []controld.SplitDNS{}, false},
+			} {
+				t.Run(step.name, func(t *testing.T) {
+					rc := &controld.ResolverConfig{SplitDNS: step.entries}
+					refresh(t, p, forced, rc)
+					gotReload := false
+					select {
+					case cfg := <-p.apiReloadCh:
+						gotReload = true
+						if cfg != nil {
+							t.Fatal("managed change must request config regeneration")
+						}
+					default:
+					}
+					if gotReload != step.reload {
+						t.Fatalf("reload = %v, want %v", gotReload, step.reload)
+					}
+					if p.rc != rc {
+						t.Fatal("refresh did not retain the authoritative response")
+					}
+				})
+			}
+			// Changes to Internal Domains must not override a custom config.
+			rc := &controld.ResolverConfig{SplitDNS: []controld.SplitDNS{{Domain: "corp.example", Mode: "os"}}}
+			rc.Ctrld.CustomConfig = "custom-config-is-authoritative"
+			refresh(t, p, false, rc)
+			select {
+			case <-p.apiReloadCh:
+				t.Fatal("Internal Domains overrode unchanged custom config")
+			default:
+			}
+		})
+	}
+}
+
 // TestRefreshAppliesAllowedDestinations drives the real refresh handler for both
 // the scheduled and the forced path, in the case where nothing else about the
 // configuration changed - no custom config, unchanged exclusions - so the

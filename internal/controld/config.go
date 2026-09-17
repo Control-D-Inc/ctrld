@@ -55,7 +55,8 @@ type ResolverConfig struct {
 		CustomLastUpdate int64  `json:"custom_last_update"`
 		VersionTarget    string `json:"version_target"`
 	} `json:"ctrld"`
-	Exclude []string `json:"exclude"`
+	Exclude  []string   `json:"exclude"`
+	SplitDNS []SplitDNS `json:"split_dns"`
 	// DestinationIPs is the organization's effective Allowed Destination IP list:
 	// the entries configured for this endpoint's organization plus any inherited
 	// from a parent organization. Each entry is an IPv4/IPv6 address or a CIDR
@@ -65,6 +66,24 @@ type ResolverConfig struct {
 	DestinationIPs  []string `json:"destination_ips"`
 	UID             string   `json:"uid"`
 	DeactivationPin *int64   `json:"deactivation_pin,omitempty"`
+}
+
+// Internal Domain resolution modes. Mode is what the administrator selected;
+// Resolvers is only meaningful under SplitDNSModeResolvers.
+const (
+	// SplitDNSModeOS follows the endpoint's own OS/default resolver.
+	SplitDNSModeOS = "os"
+	// SplitDNSModeResolvers uses the configured addresses and nothing else.
+	SplitDNSModeResolvers = "resolvers"
+)
+
+// SplitDNS is one organization Internal Domain. Mode decides the routing;
+// Resolvers is read only under SplitDNSModeResolvers. An empty Mode predates
+// the field, so the caller infers the mode from Resolvers in that case.
+type SplitDNS struct {
+	Domain    string   `json:"domain"`
+	Mode      string   `json:"mode"`
+	Resolvers []string `json:"resolvers"`
 }
 
 type utilityResponse struct {

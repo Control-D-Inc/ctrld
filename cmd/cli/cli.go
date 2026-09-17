@@ -1111,11 +1111,36 @@ func processCDFlags(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverC
 	}
 	cfg.Listener["0"] = lc
 
+	// Organization Internal Domains. Applied after the Magic Folder excludes
+	// above, so an excluded domain keeps its exclusion, and before the
+	// platform AD auto-detection in addExtraSplitDnsRule, which skips any
+	// domain that already has a rule.
+	if summary := applyInternalDomains(cfg, resolverConfig.SplitDNS); !summary.empty() {
+		logInternalDomainsSummary(logger, summary)
+	}
+
 	// Set default value.
 	setListenerDefaultValue(cfg)
 	setNetworkDefaultValue(cfg)
 
 	return resolverConfig, nil
+}
+
+// logInternalDomainsSummary reports what the Internal Domains list produced,
+// as counts only. Domain names and resolver addresses are private to the
+// organization and stay at debug level.
+func logInternalDomainsSummary(logger *ctrld.Logger, summary internalDomainsSummary) {
+	event := logger.Info()
+	if summary.skipped > 0 || summary.preempted > 0 {
+		event = logger.Warn()
+	}
+	event.Int("domains", summary.domains).
+		Int("os_resolver", summary.osMode).
+		Int("explicit_resolver", summary.explicit).
+		Int("resolvers", summary.resolvers).
+		Int("skipped", summary.skipped).
+		Int("preempted", summary.preempted).
+		Msg("applied organization Internal Domains")
 }
 
 // setListenerDefaultValue sets the default value for cfg.Listener if none existed.

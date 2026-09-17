@@ -65,6 +65,15 @@ func LanQueryCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, LanQueryCtxKey{}, true)
 }
 
+type privateResolverCtxKey struct{}
+
+// PrivateResolverCtx keeps legacy resolver transport errors, which include
+// private endpoint addresses, at debug level. The caller reports a sanitized
+// failure classification at its normal level.
+func PrivateResolverCtx(ctx context.Context) context.Context {
+	return context.WithValue(ctx, privateResolverCtxKey{}, true)
+}
+
 // defaultNameservers is like nameservers with each element formed "ip:53".
 func defaultNameservers(ctx context.Context) []string {
 	ns := nameservers(ctx)
@@ -689,7 +698,11 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 	Log(ctx, logger.Debug(), "Sending legacy request to: %s", endpoint)
 	answer, _, err := dnsClient.ExchangeContext(ctx, msg, endpoint)
 	if err != nil {
-		Log(ctx, logger.Error().Err(err), "Legacy request failed")
+		event := logger.Error()
+		if private, _ := ctx.Value(privateResolverCtxKey{}).(bool); private {
+			event = logger.Debug()
+		}
+		Log(ctx, event.Err(err), "Legacy request failed")
 	} else {
 		Log(ctx, logger.Debug(), "Legacy resolver query successful")
 	}
