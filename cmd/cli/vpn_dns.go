@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"runtime"
 	"strings"
@@ -60,9 +61,15 @@ type vpnDNSManager struct {
 	refreshRunning bool
 	refreshPending bool
 	discoveryMu    sync.Mutex
+	// repeats holds the last refresh summary. The manager has no prog, and a
+	// network change storm runs one refresh per delta.
+	repeats repeatLogger
 	// Called when VPN DNS server list changes, to update intercept exemptions.
 	onServersChanged vpnDNSExemptFunc
 }
+
+// vpnDNSRefreshKey names the repeat counter of the refresh summary.
+const vpnDNSRefreshKey = "vpn_dns_refresh"
 
 // newVPNDNSManager creates a new manager. Only call when dnsIntercept is active.
 // exemptFunc is called whenever VPN DNS servers are discovered/changed, to update
@@ -220,8 +227,11 @@ func (m *vpnDNSManager) refreshOnce(guardAgainstNoNameservers bool) {
 	}
 	m.domainlessServers = domainlessServers
 
-	logger.Debug().Msgf("VPN DNS refresh completed: %d configs, %d routes, %d domainless servers, %d unique exemptions",
+	summary := fmt.Sprintf("%d configs, %d routes, %d domainless servers, %d unique exemptions",
 		len(m.configs), len(m.routes), len(m.domainlessServers), len(exemptions))
+	if changed, repeats := m.repeats.changed(vpnDNSRefreshKey, summary); changed {
+		logger.Debug().Uint64("repeats", repeats).Msgf("VPN DNS refresh completed: %s", summary)
+	}
 
 	// Update intercept rules only when desired exemptions differ from the last
 	// successfully applied set. Failed PF/WFP callbacks remain retryable on the

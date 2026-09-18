@@ -230,6 +230,44 @@ func (um *upstreamMonitor) noteSuccess(upstream string) {
 	um.markUp(upstream, "recovered")
 }
 
+// countDown reports how many upstreams are down at this time.
+func (um *upstreamMonitor) countDown() int {
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+	return len(um.down)
+}
+
+// countDownExcept reports how many upstreams are down at this time, without
+// the ones that skip accepts. The grade of the query path leaves out the
+// resolvers that only an endpoint on the organization network can reach.
+func (um *upstreamMonitor) countDownExcept(skip func(string) bool) int {
+	if skip == nil {
+		return um.countDown()
+	}
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+	count := 0
+	for upstream := range um.down {
+		if skip(upstream) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+// downFor reports how long an upstream has been down. An upstream that is up
+// gives zero, so a caller logs the field without a branch.
+func (um *upstreamMonitor) downFor(upstream string) time.Duration {
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+	state, down := um.down[upstream]
+	if !down {
+		return 0
+	}
+	return um.now().Sub(state.since)
+}
+
 // isDown reports whether the given upstream is being marked as down.
 func (um *upstreamMonitor) isDown(upstream string) bool {
 	um.mu.Lock()

@@ -6,10 +6,12 @@ import (
 	"regexp"
 
 	"github.com/rs/zerolog"
+	"github.com/Control-D-Inc/ctrld"
 )
 
-// journalField marks an event for the retained journal stream.
-const journalField = "journal"
+// journalField marks an event for the retained journal stream. Both packages
+// share the name, so one writer keeps the lines of both.
+const journalField = ctrld.JournalField
 
 // journalMarker is the serialized form of the journal field. The journal
 // writer keeps a line below warn level only when the line contains it.
@@ -30,7 +32,7 @@ func redactRetainedLine(p []byte) []byte {
 // journal marks an event for the retained journal stream. The event keeps
 // its own level, so an info event stays info on the console.
 func journal(e *zerolog.Event) *zerolog.Event {
-	return e.Bool(journalField, true)
+	return ctrld.Journal(e)
 }
 
 // journalLevelWriter passes on the lines that the journal keeps and drops the

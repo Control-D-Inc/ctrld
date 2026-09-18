@@ -32,3 +32,12 @@ func Log(ctx context.Context, e *zerolog.Event, format string, v ...any) {
 		return fmt.Sprintf("[%s] %s", id, fmt.Sprintf(format, v...))
 	})
 }
+
+// JournalField marks an event for the retained journal stream.
+const JournalField = "journal"
+
+// Journal marks an event for the retained journal stream. The journal writer
+// keeps every line that carries the field, whatever the level of the line is.
+func Journal(e *zerolog.Event) *zerolog.Event {
+	return e.Bool(JournalField, true)
+}

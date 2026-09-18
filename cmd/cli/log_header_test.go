@@ -40,14 +40,26 @@ type logHeaderTestLine struct {
 	ResolverUID   string   `json:"resolver_uid"`
 	LogFiles      []string `json:"log_files"`
 	Network       struct {
-		DefaultRouteInterface string `json:"default_route_interface"`
-		HaveV4                bool   `json:"have_v4"`
-		HaveV6                bool   `json:"have_v6"`
-		Interfaces            []struct {
-			Name string   `json:"name"`
-			Up   bool     `json:"up"`
-			IPs  []string `json:"ips"`
+		DefaultRouteV4 string `json:"default_route_v4"`
+		DefaultRouteV6 string `json:"default_route_v6"`
+		GatewayV4      string `json:"gateway_v4"`
+		GatewayV6      string `json:"gateway_v6"`
+		HaveV4         bool   `json:"have_v4"`
+		HaveV6         bool   `json:"have_v6"`
+		Interfaces     []struct {
+			Name         string   `json:"name"`
+			Class        string   `json:"class"`
+			Up           bool     `json:"up"`
+			IPs          []string `json:"ips"`
+			HardwarePort string   `json:"hardware_port"`
+			Service      string   `json:"service"`
 		} `json:"interfaces"`
+		Resolvers       []string `json:"resolvers"`
+		SourceIPv4      string   `json:"source_ipv4"`
+		SourceIPv6      string   `json:"source_ipv6"`
+		InterceptTarget string   `json:"intercept_target"`
+		LinkType        string   `json:"link_type"`
+		Tethered        bool     `json:"tethered"`
 	} `json:"network"`
 	Trigger string `json:"trigger"`
 }
@@ -66,12 +78,15 @@ func logHeaderTestInput() logHeaderInput {
 		UpstreamTypes: []string{"doh", "os"},
 		ResolverUID:   redactToken("abcd1234"),
 		LogFiles:      []string{"/tmp/ctrld.log", "/tmp/ctrld-journal.log"},
-		Network: logHeaderNetwork{
-			DefaultRouteInterface: "en0",
-			HaveV4:                true,
-			Interfaces: []logHeaderInterface{
-				{Name: "en0", Up: true, IPs: []string{"192.0.2.10/24"}},
+		Network: networkSnapshot{
+			DefaultRouteV4: "en0",
+			GatewayV4:      "192.0.2.1",
+			HaveV4:         true,
+			Interfaces: []snapshotInterface{
+				{Name: "en0", Class: "hardware", Up: true, IPs: []string{"192.0.2.10/24"}, HardwarePort: "Wi-Fi", Service: "Wi-Fi"},
 			},
+			Resolvers: []string{"192.0.2.1:53"},
+			LinkType:  "wifi",
 		},
 	}
 }
@@ -135,9 +150,14 @@ func Test_renderLogHeaderHoldsEveryField(t *testing.T) {
 		// characters only.
 		{"resolver_uid", parsed.ResolverUID, "abcd***"},
 		{"log_files", parsed.LogFiles, in.LogFiles},
-		{"network.default_route_interface", parsed.Network.DefaultRouteInterface, in.Network.DefaultRouteInterface},
+		{"network.default_route_v4", parsed.Network.DefaultRouteV4, in.Network.DefaultRouteV4},
+		{"network.default_route_v6", parsed.Network.DefaultRouteV6, in.Network.DefaultRouteV6},
+		{"network.gateway_v4", parsed.Network.GatewayV4, in.Network.GatewayV4},
 		{"network.have_v4", parsed.Network.HaveV4, in.Network.HaveV4},
 		{"network.have_v6", parsed.Network.HaveV6, in.Network.HaveV6},
+		{"network.resolvers", parsed.Network.Resolvers, in.Network.Resolvers},
+		{"network.link_type", parsed.Network.LinkType, in.Network.LinkType},
+		{"network.tethered", parsed.Network.Tethered, in.Network.Tethered},
 	}
 	for _, c := range checks {
 		if !reflect.DeepEqual(c.got, c.want) {
@@ -149,8 +169,11 @@ func Test_renderLogHeaderHoldsEveryField(t *testing.T) {
 		t.Fatalf("network.interfaces holds %d entries, want 1", len(parsed.Network.Interfaces))
 	}
 	iface := parsed.Network.Interfaces[0]
-	if iface.Name != "en0" || !iface.Up || !reflect.DeepEqual(iface.IPs, []string{"192.0.2.10/24"}) {
-		t.Errorf("network.interfaces[0] = %+v, want en0 up with 192.0.2.10/24", iface)
+	if iface.Name != "en0" || iface.Class != "hardware" || !iface.Up || iface.HardwarePort != "Wi-Fi" {
+		t.Errorf("network.interfaces[0] = %+v, want the hardware port en0 up on Wi-Fi", iface)
+	}
+	if !reflect.DeepEqual(iface.IPs, []string{"192.0.2.10/24"}) {
+		t.Errorf("network.interfaces[0].ips = %v, want 192.0.2.10/24", iface.IPs)
 	}
 	if parsed.Time == "" {
 		t.Error("time is empty")
@@ -245,8 +268,12 @@ func Test_logHeaderFromConfigReportsOffWhenUnset(t *testing.T) {
 	}
 }
 
-func Test_logHeaderNetworkFromState(t *testing.T) {
+// Test_renderLogHeaderShowsTheSnapshotOfAState renders the header of one
+// network state, so a reader of the file sees every interface of the host in
+// one order.
+func Test_renderLogHeaderShowsTheSnapshotOfAState(t *testing.T) {
 	setLogHeaderTestGlobalLevel(t, zerolog.DebugLevel)
+	stubHeaderSnapshotSources(t)
 	state := &netmon.State{
 		DefaultRouteInterface: "en0",
 		HaveV4:                true,
@@ -255,44 +282,31 @@ func Test_logHeaderNetworkFromState(t *testing.T) {
 			"awdl0": {Interface: &net.Interface{Name: "awdl0"}},
 		},
 		InterfaceIPs: map[string][]netip.Prefix{
-			"en0": {netip.MustParsePrefix("192.0.2.10/24"), netip.MustParsePrefix("2001:db8::1/64")},
+			"en0":   {netip.MustParsePrefix("192.0.2.10/24"), netip.MustParsePrefix("2001:db8::1/64")},
+			"awdl0": {netip.MustParsePrefix("fe80::2/64")},
 		},
-	}
-
-	network := logHeaderNetworkFromState(state)
-
-	want := logHeaderNetwork{
-		DefaultRouteInterface: "en0",
-		HaveV4:                true,
-		Interfaces: []logHeaderInterface{
-			{Name: "awdl0", Up: false, IPs: []string{}},
-			{Name: "en0", Up: true, IPs: []string{"192.0.2.10/24", "2001:db8::1/64"}},
-		},
-	}
-	if !reflect.DeepEqual(network, want) {
-		t.Fatalf("network = %+v, want %+v", network, want)
 	}
 
 	in := logHeaderTestInput()
-	in.Network = network
+	in.Network = buildNetworkSnapshot(snapshotInputs{
+		State:   state,
+		RouteV4: defaultRoute{Gateway: "192.0.2.1", Interface: "en0"},
+		RouteV6: defaultRoute{Gateway: "fe80::1%en0", Interface: "en0"},
+		Meta:    interfaceMetaFor,
+	})
 	parsed, _ := parseLogHeader(t, renderLogHeader(in))
-	if parsed.Network.DefaultRouteInterface != "en0" {
-		t.Errorf("network.default_route_interface = %q, want %q", parsed.Network.DefaultRouteInterface, "en0")
+
+	if parsed.Network.DefaultRouteV4 != "en0" || parsed.Network.DefaultRouteV6 != "en0" {
+		t.Errorf("default route = %q, %q, want en0 for both families", parsed.Network.DefaultRouteV4, parsed.Network.DefaultRouteV6)
 	}
 	if len(parsed.Network.Interfaces) != 2 {
 		t.Fatalf("network.interfaces holds %d entries, want 2", len(parsed.Network.Interfaces))
 	}
-	if parsed.Network.Interfaces[0].Name != "awdl0" || parsed.Network.Interfaces[0].Up {
-		t.Errorf("network.interfaces[0] = %+v, want awdl0 down", parsed.Network.Interfaces[0])
+	if parsed.Network.Interfaces[0].Name != "awdl0" || parsed.Network.Interfaces[0].Class != "airdrop" || parsed.Network.Interfaces[0].Up {
+		t.Errorf("network.interfaces[0] = %+v, want awdl0 down in the airdrop class", parsed.Network.Interfaces[0])
 	}
 	if got := parsed.Network.Interfaces[1].IPs; !reflect.DeepEqual(got, []string{"192.0.2.10/24", "2001:db8::1/64"}) {
 		t.Errorf("network.interfaces[1].ips = %v", got)
-	}
-}
-
-func Test_logHeaderNetworkFromStateWithoutState(t *testing.T) {
-	if network := logHeaderNetworkFromState(nil); !reflect.DeepEqual(network, logHeaderNetwork{}) {
-		t.Errorf("network = %+v, want the zero value", network)
 	}
 }
 
@@ -301,6 +315,7 @@ func Test_logHeaderNetworkFromStateWithoutState(t *testing.T) {
 // the logging setup touches goes back when the test ends.
 func setupLogHeaderWiringTest(t *testing.T) string {
 	t.Helper()
+	stubHeaderSnapshotSources(t)
 	origSilent, origCdUID, origHomedir, origVerbose := silent, cdUID, homedir, verbose
 	origMainLog, origProxyLogger := mainLog.Load(), ctrld.ProxyLogger.Load()
 	origLevel := zerolog.GlobalLevel()
@@ -492,14 +507,22 @@ func Test_logHeaderWiring_restartAppendsHeader(t *testing.T) {
 
 func Test_logHeaderWiring_usesLastNetworkState(t *testing.T) {
 	setLogHeaderTestGlobalLevel(t, zerolog.DebugLevel)
+	stubHeaderSnapshotSources(t)
 	origRead := readNetworkSourceStateFn
 	t.Cleanup(func() { readNetworkSourceStateFn = origRead })
 	p := &prog{cfg: &ctrld.Config{}}
 
-	p.lastNetworkState.Store(&netmon.State{DefaultRouteInterface: "en7"})
+	p.lastNetworkState.Store(&netmon.State{
+		DefaultRouteInterface: "en7",
+		Interface:             map[string]netmon.Interface{"en7": {Interface: &net.Interface{Name: "en7", Flags: net.FlagUp}}},
+		InterfaceIPs:          map[string][]netip.Prefix{"en7": {netip.MustParsePrefix("192.0.2.7/24")}},
+	})
 
-	if got := p.logHeaderInput().Network.DefaultRouteInterface; got != "en7" {
-		t.Errorf("default_route_interface = %q, want %q", got, "en7")
+	if got := p.logHeaderInput().Network.DefaultRouteV4; got != "en7" {
+		t.Errorf("default_route_v4 = %q, want %q", got, "en7")
+	}
+	if got := p.logHeaderInput().Network.GatewayV4; got != "192.0.2.1" {
+		t.Errorf("gateway_v4 = %q, want %q", got, "192.0.2.1")
 	}
 
 	p.lastNetworkState.Store(nil)
@@ -522,10 +545,22 @@ func Test_logHeaderWiring_usesLastNetworkState(t *testing.T) {
 	}
 }
 
+// stubHeaderSnapshotSources keeps the header snapshot away from the host. One
+// render reads the hardware ports, the route table, and the NAT64 class, and no
+// test may run the commands behind them.
+func stubHeaderSnapshotSources(t *testing.T) {
+	t.Helper()
+	stubSnapshotDNS64(t)
+	stubSnapshotGateways(t, "192.0.2.1", "")
+	stubSnapshotPlatformMeta(t, nil)
+	stubSnapshotVirtualSet(t)
+}
+
 // stubLogHeaderNetworkRead makes the fresh network read return one up
 // interface, so a header test never depends on the host network.
 func stubLogHeaderNetworkRead(t *testing.T, name string) {
 	t.Helper()
+	stubHeaderSnapshotSources(t)
 	origRead := readNetworkSourceStateFn
 	t.Cleanup(func() { readNetworkSourceStateFn = origRead })
 	readNetworkSourceStateFn = func() (*netmon.State, error) {
@@ -538,6 +573,7 @@ func stubLogHeaderNetworkRead(t *testing.T, name string) {
 
 func Test_sendLogHeader_usesFreshNetworkAndTrigger(t *testing.T) {
 	setLogHeaderTestGlobalLevel(t, zerolog.DebugLevel)
+	stubHeaderSnapshotSources(t)
 	stubLogHeaderNetworkRead(t, "en9")
 	p := &prog{cfg: &ctrld.Config{}}
 	p.lastNetworkState.Store(&netmon.State{

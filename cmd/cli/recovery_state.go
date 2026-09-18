@@ -32,7 +32,7 @@ func (p *prog) recoveryOwnsState(gen uint64) bool {
 }
 
 func systemNameserversForInterceptRetry() []string {
-	_, system := initializeOsResolverWithSystemNameserversFn(true)
+	_, system := initializeOsResolverWithSystemNameserversFn(true, recoveryResolverReason)
 	if system == nil {
 		return []string{}
 	}
@@ -71,5 +71,5 @@ func (p *prog) recoveryCanceledCleanup(gen uint64) {
 		// Superseded: the newer recovery owns the shared state.
 		return
 	}
-	mainLog.Load().Info().Msg("Recovery canceled with no successor; cleared recovery state and DHCP bypass")
+	journal(mainLog.Load().Info()).Msg("Recovery canceled with no successor; cleared recovery state and DHCP bypass")
 }

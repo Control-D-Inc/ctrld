@@ -229,3 +229,58 @@ func Test_upstreamMonitorKeepsACustomNameOutOfTheJournal(t *testing.T) {
 		}
 	}
 }
+
+func Test_upstreamMonitorCountDown(t *testing.T) {
+	captureDebugMainLog(t)
+	um := newUpstreamMonitor(&ctrld.Config{})
+	if got := um.countDown(); got != 0 {
+		t.Fatalf("countDown on a new monitor = %d, want 0", got)
+	}
+	um.mu.Lock()
+	um.markDown(upstreamPrefix+"0", 3, "immediate")
+	um.markDown(upstreamPrefix+"1", 3, "immediate")
+	um.mu.Unlock()
+	if got := um.countDown(); got != 2 {
+		t.Fatalf("countDown with two down upstreams = %d, want 2", got)
+	}
+}
+
+func Test_upstreamMonitorDownFor(t *testing.T) {
+	const upstream = upstreamPrefix + "0"
+	um, _, now := downMonitor(t, upstream)
+
+	*now = now.Add(2500 * time.Millisecond)
+
+	if got := um.downFor(upstream); got != 2500*time.Millisecond {
+		t.Fatalf("downFor a down upstream = %s, want 2.5s", got)
+	}
+	if got := um.downFor(upstreamPrefix + "9"); got != 0 {
+		t.Fatalf("downFor an unknown upstream = %s, want 0", got)
+	}
+
+	um.reset(upstream)
+
+	if got := um.downFor(upstream); got != 0 {
+		t.Fatalf("downFor an upstream that is up = %s, want 0", got)
+	}
+}
+
+func Test_upstreamMonitorCountDownExcept(t *testing.T) {
+	captureDebugMainLog(t)
+	um := newUpstreamMonitor(&ctrld.Config{})
+	um.mu.Lock()
+	um.markDown(upstreamPrefix+"0", 3, "immediate")
+	um.markDown(upstreamPrefix+internalDomainUpstreamPrefix+"1", 3, "immediate")
+	um.markDown(upstreamPrefix+internalDomainUpstreamPrefix+"2", 3, "immediate")
+	um.mu.Unlock()
+
+	if got := um.countDown(); got != 3 {
+		t.Fatalf("countDown = %d, want 3", got)
+	}
+	if got := um.countDownExcept(isInternalDomainUpstream); got != 1 {
+		t.Fatalf("countDownExcept(isInternalDomainUpstream) = %d, want 1", got)
+	}
+	if got := um.countDownExcept(nil); got != 3 {
+		t.Fatalf("countDownExcept(nil) = %d, want 3", got)
+	}
+}

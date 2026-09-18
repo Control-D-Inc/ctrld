@@ -20,3 +20,18 @@ func validInterfacesMap() map[string]struct{} {
 	}
 	return map[string]struct{}{defaultRoute.InterfaceName: {}}
 }
+
+// platformInterfaceMeta returns no names. These platforms have no source for
+// them, so the interface name decides the class.
+func platformInterfaceMeta(name string) (class, hardwarePort, service string) {
+	return "", "", ""
+}
+
+// platformVirtualInterfaces returns no set.
+func platformVirtualInterfaces() map[string]struct{} {
+	return nil
+}
+
+// refreshInterfaceMeta does no work. These platforms keep no interface names,
+// so an adapter that appears leaves nothing stale.
+func refreshInterfaceMeta() {}

@@ -153,6 +153,13 @@ type recoveryDiagnostic struct {
 	started      time.Time
 	firstFailure sync.Once
 	failed       atomic.Bool
+
+	// The flow fills these while it runs. The end event reports them, so one
+	// journal line tells what the recovery found and what it changed.
+	recoveredUpstream     string
+	dhcpServers           []string
+	interceptTargetAction string
+	bypassActive          bool
 }
 
 func recoveryReasonName(reason RecoveryReason) string {
@@ -191,10 +198,33 @@ func (d *recoveryDiagnostic) failure(err error) {
 	})
 }
 
+// The outcomes that one recovery pass ends with.
+const (
+	recoveryOutcomeCompleted  = "completed"
+	recoveryOutcomeCanceled   = "canceled"
+	recoveryOutcomeSuperseded = "superseded"
+)
+
+// journalRecoveredUpstream bounds the upstream name of the end event. An empty
+// name means that no upstream recovered, so it stays empty.
+func journalRecoveredUpstream(upstream string) string {
+	if upstream == "" {
+		return ""
+	}
+	return journalUpstreamName(upstream)
+}
+
 func (d *recoveryDiagnostic) end(outcome string) {
-	e := mainLog.Load().Debug()
-	if outcome == "canceled" || d.failed.Load() {
+	e := mainLog.Load().Info()
+	if outcome == recoveryOutcomeCanceled || d.failed.Load() {
 		e = mainLog.Load().Warn()
 	}
-	d.event(e).Str("outcome", outcome).Bool("had_failure", d.failed.Load()).Dur("duration_ms", time.Since(d.started)).Msg("Recovery end")
+	journal(d.event(e)).Str("outcome", outcome).Bool("had_failure", d.failed.Load()).
+		Dur("duration_ms", time.Since(d.started)).
+		Str("recovered_upstream", journalRecoveredUpstream(d.recoveredUpstream)).
+		Strs("dhcp_servers", d.dhcpServers).
+		Int("dhcp_server_count", len(d.dhcpServers)).
+		Str("intercept_target_action", d.interceptTargetAction).
+		Bool("bypass_active", d.bypassActive).
+		Msg("Recovery end")
 }

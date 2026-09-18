@@ -45,11 +45,24 @@ The message of the line is `Log header`. The line carries these fields:
 - Mode: `intercept_mode`, `listeners`, `upstream_count`, and `upstream_types`
 - Identity: `resolver_uid`
 - Files: `log_files`
-- Network: `network` with `default_route_interface`, `have_v4`, `have_v6`, and `interfaces`
+- Network: `network`, the network snapshot of the host
 
 The header holds no provisioning token, no upstream endpoint URL, and no query name. `upstream_types` holds the type words, for example `doh` or `os`. `listeners` holds the listen addresses.
 
+The `network` object holds the routes, the gateways, the interfaces, the resolvers, the link type, and the intercept state. It has no `default_route_interface` field. The runbook [Network-recovery diagnostics](network-recovery-diagnostics.md) lists every field of the object.
+
 After each rotation ctrld logs one `Log rotated` event at info level, with the fields `file`, `bytes_written`, `first_event_at`, `last_event_at`, and `backups`. This event is a journal event, so it lands in the debug stream and in the journal.
+
+## Network state events
+
+The journal holds the events that describe the host network. `Network snapshot` renders the `network` object at start, at each accepted transition, and at each begin and end of a recovery.
+A snapshot equal to the snapshot written last reaches no journal, and one snapshot per 60 s is the limit. A new default route and a new resolver set pass that limit. `Network interface changed`, `Network transition`, `Host woke`, `OS resolver set changed`, and `DNS configuration changed` name each change of the network. `Recovery begin`, `Recovery end`, `PF anchor list changed`, and `Tunnel interface changed` name the repair work.
+
+AirDrop and virtual adapters produce a storm of network callbacks. ctrld puts these interfaces in a noise class. A delta that touches noise interfaces alone skips the handler. The first delta of a storm writes one `Network delta noise` journal line, and one more line covers each 10 minutes of the storm.
+
+`Query health` grades the query path over a window of 15 minutes. It logs at each change between the classes `healthy`, `degraded`, and `failing`, and once every 15 minutes as a heartbeat. A class change reports after it holds for two reads of the window.
+
+The runbook [Network-recovery diagnostics](network-recovery-diagnostics.md) lists every event with its trigger, its level, and its fields.
 
 ## Sampling of per-query errors
 
@@ -79,7 +92,7 @@ Both keys also apply to the `log_path` file, which rotates the same way. The jou
 - The marker `=== LOG_END ===`
 - Every journal file, oldest first
 
-The `network` object of the send-time header comes from a fresh read of the interfaces and the default route. `ctrld log send --full` sends every debug file in place of the newest 10 MB. The reported size equals the number of bytes uploaded.
+The `network` object of the send-time header comes from a fresh read of the interfaces and of the route table. The resolvers come from the list that ctrld stored at its last resolver initialization, not from a fresh read. `ctrld log send --full` sends every debug file in place of the newest 10 MB. The reported size equals the number of bytes uploaded.
 
 `ctrld log view` prints the same composition on the terminal and takes the same `--full` flag. ctrld accepts one upload per minute. The body is plain text without gzip.
 

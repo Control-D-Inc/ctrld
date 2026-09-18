@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -125,8 +126,7 @@ func persistInterceptTargetForTest(t *testing.T, p *prog, service, value string)
 	p.interceptDNSTargetMu.Lock()
 	defer p.interceptDNSTargetMu.Unlock()
 	p.interceptDNSTargetLoaded = true
-	p.interceptDNSTargetService = service
-	p.interceptDNSTargetSetValue = value
+	p.setInterceptDNSTargetLocked(service, value)
 	p.persistInterceptDNSTargetStateLocked()
 }
 
@@ -244,5 +244,106 @@ func TestRemoveInterceptDNSTargetRetainsStateOnFailure(t *testing.T) {
 				t.Fatalf("failed cleanup removed persisted retry state: %v", err)
 			}
 		})
+	}
+}
+
+// interceptTargetEvent returns the single event whose message starts with the
+// given text. The two target events name the service and the value in their
+// message, so no test can match a whole message.
+func interceptTargetEvent(t *testing.T, logs *syncBuffer, prefix string) map[string]any {
+	t.Helper()
+	var found []map[string]any
+	for _, event := range jsonLogEvents(t, logs, "") {
+		message, _ := event["message"].(string)
+		if strings.HasPrefix(message, prefix) {
+			found = append(found, event)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("events with prefix %q: got %d, want 1", prefix, len(found))
+	}
+	return found[0]
+}
+
+func TestEnsureInterceptDNSTargetJournalsTheSetTarget(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	newInterceptTargetHarness(t)
+	p := newInterceptTargetProg()
+
+	p.ensureInterceptDNSTarget([]string{})
+
+	event := interceptTargetEvent(t, logs, "intercept DNS target: service ")
+	wantField(t, event, "journal", true)
+	wantField(t, event, "service", "Wi-Fi")
+	wantField(t, event, "target", "127.0.0.53")
+	wantField(t, event, "reason", "dns_less_network")
+}
+
+func TestRemoveInterceptDNSTargetJournalsTheRemovedTarget(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	h := newInterceptTargetHarness(t)
+	p := newInterceptTargetProg()
+	persistInterceptTargetForTest(t, p, "Wi-Fi", "127.0.0.53")
+	h.dns["Wi-Fi"] = []string{"127.0.0.53"}
+
+	p.removeInterceptDNSTarget("network has usable static IPv4 DNS")
+
+	event := interceptTargetEvent(t, logs, "intercept DNS target: removed ")
+	wantField(t, event, "journal", true)
+	wantField(t, event, "service", "Wi-Fi")
+	wantField(t, event, "target", "127.0.0.53")
+	wantField(t, event, "reason", "network has usable static IPv4 DNS")
+}
+
+// TestInterceptDNSTargetSnapshotFollowsTheWritesWithoutTheLock covers the read
+// that a network report uses. The target mutex is held across networksetup
+// calls that take seconds, so a report that takes it waits for them.
+func TestInterceptDNSTargetSnapshotFollowsTheWritesWithoutTheLock(t *testing.T) {
+	h := newInterceptTargetHarness(t)
+	p := newInterceptTargetProg()
+	h.dns["Wi-Fi"] = nil
+
+	p.ensureInterceptDNSTarget([]string{})
+
+	p.interceptDNSTargetMu.Lock()
+	written := p.interceptDNSTargetSetValue
+	got := p.interceptTargetSnapshot()
+	p.interceptDNSTargetMu.Unlock()
+	if written == "" {
+		t.Fatal("the pass wrote no target")
+	}
+	if got != written {
+		t.Fatalf("target snapshot = %q, want %q", got, written)
+	}
+
+	p.removeInterceptDNSTarget("test")
+
+	p.interceptDNSTargetMu.Lock()
+	got = p.interceptTargetSnapshot()
+	p.interceptDNSTargetMu.Unlock()
+	if got != "" {
+		t.Fatalf("target snapshot after the removal = %q, want an empty value", got)
+	}
+}
+
+// TestRemoveInterceptDNSTargetJournalsAnExternalChange covers the branch that
+// drops the ownership record. The user or another program owns the DNS of the
+// service from that moment, and the journal held nothing about it.
+func TestRemoveInterceptDNSTargetJournalsAnExternalChange(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	h := newInterceptTargetHarness(t)
+	p := newInterceptTargetProg()
+	persistInterceptTargetForTest(t, p, "Wi-Fi", "127.0.0.53")
+	h.dns["Wi-Fi"] = []string{"9.9.9.9"}
+
+	p.removeInterceptDNSTarget("intercept shutdown")
+
+	event := oneRecoveryEvent(t, logs, `intercept DNS target: "Wi-Fi" DNS changed externally; not removing (intercept shutdown)`)
+	wantField(t, event, "journal", true)
+	wantField(t, event, "service", "Wi-Fi")
+	wantField(t, event, "target", "127.0.0.53")
+	wantField(t, event, "reason", "external_change")
+	if p.interceptTargetSnapshot() != "" {
+		t.Fatal("the ownership record survived an external change")
 	}
 }

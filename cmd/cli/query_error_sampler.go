@@ -12,6 +12,10 @@ const (
 	sampleClassResolveFailed      = "resolve_failed"
 	sampleClassAllEndpointsFailed = "all_endpoints_failed"
 	sampleClassSendResponseFailed = "send_response_failed"
+	// sampleClassInternalDomain names a failure of an Internal Domain resolver.
+	// It stays apart from the other classes, because an endpoint away from the
+	// organization network cannot reach such a resolver.
+	sampleClassInternalDomain = "internal_domain"
 )
 
 const (
@@ -56,6 +60,9 @@ type errorSampler struct {
 	windows map[sampleKey]*sampleWindow
 	now     func() time.Time
 	after   func(time.Duration, func()) *time.Timer
+	// onFailure counts the event for the query health tracker. The daemon sets
+	// it once at start, before a listener serves a query.
+	onFailure func(class string)
 }
 
 // event returns the event a call site logs with. The first querySampleLimit
@@ -83,6 +90,11 @@ func (s *errorSampler) event(class, upstream string) *zerolog.Event {
 	}
 	s.mu.Unlock()
 
+	// A lowered line keeps its place in the breakdown of the window. It is one
+	// event, not one failed query, so it does not change the grade.
+	if s.onFailure != nil {
+		s.onFailure(class)
+	}
 	s.logSummaries(summaries)
 
 	if suppressed {

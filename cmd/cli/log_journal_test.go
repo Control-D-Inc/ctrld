@@ -195,6 +195,7 @@ func startInternalLogging(t *testing.T) (*prog, string) {
 	cdUID = "test-uid"
 	silent = false
 	verbose = 0
+	stubHeaderSnapshotSources(t)
 
 	p := &prog{cfg: &ctrld.Config{}}
 	p.initInternalLogging(nil)

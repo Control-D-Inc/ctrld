@@ -65,11 +65,63 @@ func init() {
 }
 
 var (
-	resolverMutex    sync.Mutex
-	or               *osResolver
+	resolverMutex sync.Mutex
+	or            *osResolver
+	// osResolverPtr holds the same resolver as or, for readers alone. An
+	// initialization holds resolverMutex across a scutil read of several
+	// seconds, and a log header render must not wait for it.
+	osResolverPtr    atomic.Pointer[osResolver]
 	defaultLocalIPv4 atomic.Value // holds net.IP (IPv4)
 	defaultLocalIPv6 atomic.Value // holds net.IP (IPv6)
 )
+
+// storeOsResolver keeps the resolver of the process and the copy that readers
+// take. The caller holds resolverMutex.
+func storeOsResolver(resolver *osResolver) {
+	or = resolver
+	osResolverPtr.Store(resolver)
+}
+
+// NameserversFn reads the nameservers of the system. A test of this package
+// or of a package that drives the OS resolver replaces it to stay off the host.
+var NameserversFn = nameservers
+
+// osResolverReasonUnspecified marks a resolver read that no caller explained.
+const osResolverReasonUnspecified = "unspecified"
+
+// nameserverReads remembers the last nameserver list of one read. The system
+// reports the same list many times, and only a change is news.
+type nameserverReads struct {
+	seen    bool
+	last    []string
+	repeats int
+}
+
+// record stores a new read. It reports whether the list changed, how many
+// reads repeated the list before it, and the list that this read replaces.
+func (n *nameserverReads) record(list []string) (changed bool, repeats int, before []string) {
+	if n.seen && slices.Equal(n.last, list) {
+		n.repeats++
+		return false, n.repeats, n.last
+	}
+	before, repeats = n.last, n.repeats
+	n.seen = true
+	n.last = slices.Clone(list)
+	n.repeats = 0
+	return true, repeats, before
+}
+
+// osResolverLogState keeps the last nameserver reads and the reason of the
+// initialization that runs. The read sits deep in the call chain, so the
+// reason cannot travel as a parameter.
+type osResolverLogState struct {
+	mu     sync.Mutex
+	system nameserverReads
+	final  nameserverReads
+	reason string
+}
+
+var osResolverLog = osResolverLogState{reason: osResolverReasonUnspecified}
 
 func newLocalResolver() Resolver {
 	var nss []string
@@ -117,9 +169,8 @@ func availableNameservers() []string {
 			"Added local IP to OS resolverexclusion map: %s", ipStr)
 	}
 
-	systemNameservers := nameservers()
-	Log(context.Background(), logger.Debug(),
-		"Got system nameservers: %v", systemNameservers)
+	systemNameservers := NameserversFn()
+	logSystemNameservers(systemNameservers)
 
 	for _, ns := range systemNameservers {
 		if _, ok := machineIPsMap[ns]; ok {
@@ -132,9 +183,73 @@ func availableNameservers() []string {
 			"Added non-local nameserver: %s", ns)
 	}
 
-	Log(context.Background(), logger.Debug(),
-		"Final available nameservers: %v", nss)
+	logFinalNameservers(nss)
 	return nss
+}
+
+// logSystemNameservers logs the system read at debug level on change only.
+func logSystemNameservers(list []string) {
+	osResolverLog.mu.Lock()
+	changed, repeats, _ := osResolverLog.system.record(list)
+	osResolverLog.mu.Unlock()
+	if !changed {
+		return
+	}
+	logger := *ProxyLogger.Load()
+	Log(context.Background(), logger.Debug().Int("repeats", repeats),
+		"Got system nameservers: %v", list)
+}
+
+// logFinalNameservers logs the effective read at debug level on change only,
+// and sends each change to the journal, where an outage report needs it.
+func logFinalNameservers(list []string) {
+	osResolverLog.mu.Lock()
+	changed, repeats, before := osResolverLog.final.record(list)
+	reason := osResolverLog.reason
+	osResolverLog.mu.Unlock()
+	if !changed {
+		return
+	}
+	logger := *ProxyLogger.Load()
+	Log(context.Background(), logger.Debug().Int("repeats", repeats),
+		"Final available nameservers: %v", list)
+	Journal(logger.Info()).
+		Str("source", osResolverSource()).
+		Strs("before", before).
+		Strs("after", list).
+		Str("default_route", defaultRouteInterfaceName()).
+		Str("reason", reason).
+		Msg("OS resolver set changed")
+}
+
+// osResolverSource names the place where the platform holds the nameservers.
+func osResolverSource() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "scutil"
+	case "windows":
+		return "dhcp"
+	case "linux", "dragonfly", "freebsd", "netbsd", "openbsd":
+		return "resolv.conf"
+	}
+	return "unknown"
+}
+
+// defaultRouteInterfaceName returns the interface of the default route, and an
+// empty string when the route table does not answer.
+func defaultRouteInterfaceName() string {
+	name, err := netmon.DefaultRouteInterface()
+	if err != nil {
+		return ""
+	}
+	return name
+}
+
+// setOsResolverReason keeps the reason of the initialization that runs.
+func setOsResolverReason(reason string) {
+	osResolverLog.mu.Lock()
+	defer osResolverLog.mu.Unlock()
+	osResolverLog.reason = reason
 }
 
 // InitializeOsResolver initializes OS resolver using the current system DNS settings.
@@ -143,8 +258,14 @@ func availableNameservers() []string {
 // It's the caller's responsibility to ensure the system DNS is in a clean state before
 // calling this function.
 func InitializeOsResolver(guardAgainstNoNameservers bool) []string {
-	ns, _ := InitializeOsResolverWithSystemNameservers(guardAgainstNoNameservers)
-	return ns
+	return InitializeOsResolverWithReason(guardAgainstNoNameservers, osResolverReasonUnspecified)
+}
+
+// InitializeOsResolverWithReason is InitializeOsResolver with the reason that
+// the journal reports when the resolver set changes.
+func InitializeOsResolverWithReason(guardAgainstNoNameservers bool, reason string) []string {
+	effective, _ := InitializeOsResolverWithSystemNameserversReason(guardAgainstNoNameservers, reason)
+	return effective
 }
 
 // InitializeOsResolverWithSystemNameservers initializes the OS resolver and
@@ -152,8 +273,18 @@ func InitializeOsResolver(guardAgainstNoNameservers bool) []string {
 // discovered from the system. The latter deliberately excludes synthetic
 // fallbacks added by initializeOsResolver.
 func InitializeOsResolverWithSystemNameservers(guardAgainstNoNameservers bool) (effective, system []string) {
+	return InitializeOsResolverWithSystemNameserversReason(guardAgainstNoNameservers, osResolverReasonUnspecified)
+}
+
+// InitializeOsResolverWithSystemNameserversReason is
+// InitializeOsResolverWithSystemNameservers with the reason that the journal
+// reports when the resolver set changes.
+func InitializeOsResolverWithSystemNameserversReason(guardAgainstNoNameservers bool, reason string) (effective, system []string) {
 	resolverMutex.Lock()
 	defer resolverMutex.Unlock()
+
+	setOsResolverReason(reason)
+	defer setOsResolverReason(osResolverReasonUnspecified)
 
 	system = availableNameservers()
 	if system == nil {
@@ -165,7 +296,7 @@ func InitializeOsResolverWithSystemNameservers(guardAgainstNoNameservers bool) (
 	if skip {
 		return effective, system
 	}
-	or = newResolverWithNameserver(effective)
+	storeOsResolver(newResolverWithNameserver(effective))
 	return effective, system
 }
 
@@ -230,7 +361,7 @@ func NewResolver(uc *UpstreamConfig) (Resolver, error) {
 		resolverMutex.Lock()
 		if or == nil {
 			ProxyLogger.Load().Debug().Msgf("Initialize new OS resolver")
-			or = newResolverWithNameserver(defaultNameservers())
+			storeOsResolver(newResolverWithNameserver(defaultNameservers()))
 		}
 		resolverMutex.Unlock()
 		return or, nil
@@ -269,10 +400,10 @@ type publicResponse struct {
 
 // OsResolverNameservers returns the current OS resolver nameservers (host:port format).
 // Returns nil if the OS resolver has not been initialized.
+// The read takes no lock, so a log header render never waits for a resolver
+// initialization.
 func OsResolverNameservers() []string {
-	resolverMutex.Lock()
-	r := or
-	resolverMutex.Unlock()
+	r := osResolverPtr.Load()
 	if r == nil {
 		return nil
 	}
@@ -727,7 +858,7 @@ func initDefaultOsResolver() []string {
 	defer resolverMutex.Unlock()
 	if or == nil {
 		ProxyLogger.Load().Debug().Msgf("Initialize new OS resolver with default nameservers")
-		or = newResolverWithNameserver(defaultNameservers())
+		storeOsResolver(newResolverWithNameserver(defaultNameservers()))
 	}
 	nss := *or.lanServers.Load()
 	nss = append(nss, *or.publicServers.Load()...)

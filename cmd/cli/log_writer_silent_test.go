@@ -59,6 +59,7 @@ func Test_initInternalLogging_silentCreatesNoFile(t *testing.T) {
 	homedir = dir
 	cdUID = "test-uid" // cd mode, which would otherwise enable internal logging
 	silent = true
+	stubHeaderSnapshotSources(t)
 
 	p := &prog{cfg: &ctrld.Config{}}
 	p.initInternalLogging(nil)
@@ -94,6 +95,7 @@ func Test_initInternalLogging_createsJournalFile(t *testing.T) {
 	cdUID = "test-uid"
 	silent = false
 	verbose = 0
+	stubHeaderSnapshotSources(t)
 
 	p := &prog{cfg: &ctrld.Config{}}
 	p.initInternalLogging(nil)
