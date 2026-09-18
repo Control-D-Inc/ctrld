@@ -50,6 +50,7 @@ const (
 	windowsForwardersFilename = ".forwarders.txt"
 	oldBinSuffix              = "_previous"
 	msgExit                   = "$$EXIT$$"
+	shutdownTimeout           = 10 * time.Second
 )
 
 var (
@@ -144,9 +145,14 @@ func initCLI() {
 }
 
 // isMobile reports whether the current OS is a mobile platform.
-func isMobile() bool {
+var isMobile = func() bool {
 	return runtime.GOOS == "android" || runtime.GOOS == "ios"
 }
+
+var (
+	networkUp = ctrldnet.Up
+	newRouter = router.New
+)
 
 func updateConfigInterceptMode(cfg *ctrld.Config, mode string) bool {
 	desired := ""
@@ -241,6 +247,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		dnsWatcherStopCh: make(chan struct{}),
 		apiReloadCh:      make(chan *ctrld.Config),
 		apiForceReloadCh: make(chan struct{}),
+		runDone:          make(chan struct{}),
+		runAbortCh:       make(chan struct{}),
 		cfg:              &cfg,
 		appCallback:      appCallback,
 	}
@@ -273,7 +281,15 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		return
 	}
 
-	if !daemon {
+	switch {
+	case isMobile():
+		defer p.finishRun()
+		// There is no OS service manager here, and s.Run parks a goroutine on a
+		// signal that never arrives, leaking one per start/stop cycle.
+		if err := p.Start(nil); err != nil {
+			mainLog.Load().Fatal().Err(err).Msg("failed to start ctrld")
+		}
+	case !daemon:
 		// We need to call s.Run() as soon as possible to response to the OS manager, so it
 		// can see ctrld is running and don't mark ctrld as failed service.
 		go func() {
@@ -316,12 +332,12 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	mainLog.Load().Info().Msgf("os: %s", osVersion())
 
 	// Wait for network up.
-	if !ctrldnet.Up() {
+	if !networkUp() {
 		failRunUnclassified(mainLog.Load().Error(), "network is not up yet", p.notifyExitToLogServer)
 		return
 	}
 
-	p.router = router.New(&cfg, cdUID != "")
+	p.router = newRouter(&cfg, cdUID != "")
 	cs, err := newControlServer(filepath.Join(sockDir, ControlSocketName()))
 	if err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not create control server")
@@ -492,6 +508,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	close(waitCh)
 	<-stopCh
+	if !isMobile() {
+		p.finishRun()
+	}
 }
 
 func writeConfigFile(cfg *ctrld.Config) error {
@@ -2200,8 +2219,9 @@ func newSocketControlClientMobile(dir string, stopCh chan struct{}) *controlClie
 		case <-stopCh:
 			return nil
 		default:
-			_, err := cc.post("/", nil)
+			resp, err := cc.post("/", nil)
 			if err == nil {
+				resp.Body.Close()
 				return cc
 			} else {
 				bo.BackOff(ctx, err)
@@ -2339,6 +2359,7 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	resp, err := cc.post(deactivationPath, bytes.NewReader(data))
 	mainLog.Load().Debug().Msg("Posting deactivation request done")
 	if resp != nil {
+		defer resp.Body.Close()
 		switch resp.StatusCode {
 		case http.StatusBadRequest:
 			mainLog.Load().Error().Msg(errRequiredDeactivationPin.Error())

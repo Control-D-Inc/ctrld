@@ -285,6 +285,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 				defer s.Shutdown()
 				select {
 				case <-p.stopCh:
+				case <-p.runAbortCh:
 				case <-ctx.Done():
 				case err := <-errCh:
 					// Local ipv6 listener should not terminate ctrld.
@@ -305,6 +306,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 						defer s.Shutdown()
 						select {
 						case <-p.stopCh:
+						case <-p.runAbortCh:
 						case <-ctx.Done():
 						case err := <-errCh:
 							// RFC1918 listener should not terminate ctrld.
@@ -321,10 +323,19 @@ func (p *prog) serveDNS(listenerNum string) error {
 			s, errCh := runDNSServer(addr, proto, handler)
 			defer s.Shutdown()
 
-			p.started <- struct{}{}
+			select {
+			case p.started <- struct{}{}:
+			case <-p.stopCh:
+				return nil
+			case <-p.runAbortCh:
+				return nil
+			case <-ctx.Done():
+				return nil
+			}
 
 			select {
 			case <-p.stopCh:
+			case <-p.runAbortCh:
 			case <-ctx.Done():
 			case err := <-errCh:
 				return err
@@ -1279,7 +1290,7 @@ func runDNSServer(addr, network string, handler dns.Handler) (*dns.Server, <-cha
 	startedCh := make(chan struct{})
 	s.NotifyStartedFunc = func() { sync.OnceFunc(func() { close(startedCh) })() }
 
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	go func() {
 		defer close(errCh)
 		if err := s.ListenAndServe(); err != nil {
@@ -1440,6 +1451,10 @@ func (p *prog) selfUninstallCoolOfPeriod() {
 // forceFetchingAPI sends signal to force syncing API config if run in cd mode,
 // and the domain == "cdUID.verify.controld.com"
 func (p *prog) forceFetchingAPI(domain string) {
+	if !p.beginNetworkActivity() {
+		return
+	}
+	defer p.netMonitorWG.Done()
 	if cdUID == "" {
 		return
 	}
@@ -1456,9 +1471,32 @@ func (p *prog) forceFetchingAPI(domain string) {
 		return
 	}
 	_ = p.apiForceReloadGroup.DoChan("force_sync_api", func() (interface{}, error) {
-		p.apiForceReloadCh <- struct{}{}
+		if !p.beginNetworkActivity() {
+			return nil, nil
+		}
+		defer p.netMonitorWG.Done()
+		shutdown := p.networkActivityDone()
+		select {
+		case <-shutdown:
+			return nil, nil
+		case p.apiForceReloadCh <- struct{}{}:
+		case <-p.stopCh:
+			return nil, nil
+		case <-p.runAbortCh:
+			return nil, nil
+		}
 		// Wait here to prevent abusing API if we are flooded.
-		time.Sleep(timeDurationOrDefault(p.cfg.Service.ForceRefetchWaitTime, 30) * time.Second)
+		p.mu.Lock()
+		wait := timeDurationOrDefault(p.cfg.Service.ForceRefetchWaitTime, 30) * time.Second
+		p.mu.Unlock()
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-shutdown:
+		case <-p.stopCh:
+		case <-p.runAbortCh:
+		}
 		return nil, nil
 	})
 }
@@ -1670,20 +1708,35 @@ func FlushDNSCache() error {
 	return nil
 }
 
-// monitorNetworkChanges starts monitoring for network interface changes
+// networkChangeCallback fences even callbacks already dispatched by netmon
+// when Close begins. The monitor does not track those callback goroutines.
+func (p *prog) networkChangeCallback(fn netmon.ChangeFunc) netmon.ChangeFunc {
+	return func(delta *netmon.ChangeDelta) {
+		if !p.beginNetworkActivity() {
+			return
+		}
+		defer p.netMonitorWG.Done()
+		fn(delta)
+	}
+}
+
+// monitorNetworkChanges starts monitoring for network interface changes.
 func (p *prog) monitorNetworkChanges() error {
 	mon, err := newNetworkChangeMonitorFn(func(format string, args ...any) {
-		// Always fetch the latest logger (and inject the prefix)
+		// Always fetch the latest logger (and inject the prefix).
 		mainLog.Load().Printf("netmon: "+format, args...)
 	})
 	if err != nil {
 		return fmt.Errorf("creating network monitor: %w", err)
 	}
-
-	mon.RegisterChangeCallback(func(delta *netmon.ChangeDelta) {
+	mon.RegisterChangeCallback(p.networkChangeCallback(func(delta *netmon.ChangeDelta) {
 		p.handleNetworkChange(delta, mon.IsMajorChangeFrom(delta.Old, delta.New))
-	})
-
+	}))
+	if !p.setNetMonitor(mon) {
+		_ = mon.Close()
+		mainLog.Load().Debug().Msg("network monitor discarded, ctrld is stopping")
+		return nil
+	}
 	mon.Start()
 	mainLog.Load().Debug().Msg("Network monitor started")
 	return nil
@@ -2222,12 +2275,19 @@ func (p *prog) debounceRecovery(transitionID uint64) {
 	}
 	p.recoveryDebounceMu.Lock()
 	defer p.recoveryDebounceMu.Unlock()
+	if p.networkActivityClosed() {
+		return
+	}
 
 	if p.recoveryDebounceTimer != nil {
 		p.recoveryDebounceTimer.Stop()
 		mainLog.Load().Debug().Msg("Recovery debounce: resetting timer (rapid network change)")
 	}
 	p.recoveryDebounceTimer = time.AfterFunc(recoveryDebounceWindow, func() {
+		if !p.beginNetworkActivity() {
+			return
+		}
+		defer p.netMonitorWG.Done()
 		p.networkSourceMu.Lock()
 		if p.networkAcceptedGen.Load() != transitionID {
 			p.networkSourceMu.Unlock()
@@ -2293,6 +2353,10 @@ func (p *prog) handleRecovery(reason RecoveryReason) {
 }
 
 func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID uint64) {
+	if !p.beginNetworkActivity() {
+		return
+	}
+	defer p.netMonitorWG.Done()
 	p.networkSourceMu.Lock()
 	if transitionID != 0 && p.networkAcceptedGen.Load() != transitionID {
 		p.networkSourceMu.Unlock()
@@ -2313,6 +2377,15 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 	targetBefore := p.interceptTargetSnapshot()
 	outcome := recoveryOutcomeSuperseded
 	defer func() { p.endRecovery(&diagnostic, outcome, targetBefore) }()
+	// Clean every exit, including shutdown before the first DNS mutation.
+	// Run cleanup before the end snapshot so it reports the final state.
+	defer p.recoveryCanceledCleanup(gen)
+	if recoveryCtx.Err() != nil {
+		if p.recoveryGen.Load() == gen {
+			outcome = recoveryOutcomeCanceled
+		}
+		return
+	}
 	if reason == RecoveryReasonNetworkChange {
 		mainLog.Load().Debug().Msg("Network change recovery now owns shared recovery state")
 	}
@@ -2399,10 +2472,9 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 	// Wait indefinitely until one of the upstreams recovers.
 	recovered, err := waitForUpstreamRecoveryFn(p, recoveryCtx, upstreams, &diagnostic)
 	if err != nil {
-		if p.recoveryOwnsState(gen) {
+		if p.recoveryGen.Load() == gen {
 			outcome = recoveryOutcomeCanceled
 		}
-		p.recoveryCanceledCleanup(gen)
 		return
 	}
 	diagnostic.recoveredUpstream = recovered
@@ -2482,6 +2554,10 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 	var wg sync.WaitGroup
 
 	mainLog.Load().Debug().Msgf("Starting upstream recovery check for %d upstreams", len(upstreams))
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
 
 	for name, uc := range upstreams {
 		wg.Add(1)
@@ -2561,7 +2637,6 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
-	wg.Wait()
 	return recovered, nil
 }
 

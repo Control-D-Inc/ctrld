@@ -1480,6 +1480,10 @@ func (p *prog) pfStabilizationLoop(ctx context.Context, stableRequired time.Dura
 
 func (p *prog) pfStabilizationLoopWithMaxWait(ctx context.Context, stableRequired, maxWaitDuration time.Duration) {
 	defer p.pfStabilizing.Store(false)
+	if !p.beginNetworkActivity() {
+		return
+	}
+	defer p.netMonitorWG.Done()
 
 	pollInterval := 1500 * time.Millisecond
 	pollTicker := time.NewTicker(pollInterval)
@@ -1504,6 +1508,9 @@ func (p *prog) pfStabilizationLoopWithMaxWait(ctx context.Context, stableRequire
 		case <-pollTicker.C:
 		}
 
+		if p.networkActivityClosed() {
+			return
+		}
 		if p.pfExecBackoffActive() {
 			continue
 		}
@@ -2075,6 +2082,10 @@ func (p *prog) scheduleDNSAfterVPNSettleRefresh(reason string, delay time.Durati
 		p.pfSettleFollowupTimer.Stop()
 	}
 	p.pfSettleFollowupTimer = time.AfterFunc(delay, func() {
+		if !p.beginNetworkActivity() {
+			return
+		}
+		defer p.netMonitorWG.Done()
 		if p.dnsInterceptState == nil {
 			return
 		}
@@ -2083,7 +2094,7 @@ func (p *prog) scheduleDNSAfterVPNSettleRefresh(reason string, delay time.Durati
 }
 
 // stopPFSettleFollowup cancels a pending post-settle refresh. A callback that already
-// fired still checks dnsInterceptState, so either teardown order is safe.
+// fired is fenced and joined by closeNetMonitor during program shutdown.
 func (p *prog) stopPFSettleFollowup() {
 	p.pfDelayedRecheckMu.Lock()
 	defer p.pfDelayedRecheckMu.Unlock()
@@ -2161,6 +2172,10 @@ func (p *prog) scheduleDelayedRechecks() {
 	for _, delay := range []time.Duration{pfAnchorRecheckDelay, pfAnchorRecheckDelayLong} {
 		delay := delay
 		timer := time.AfterFunc(delay, func() {
+			if !p.beginNetworkActivity() {
+				return
+			}
+			defer p.netMonitorWG.Done()
 			if p.dnsInterceptState == nil || p.pfStabilizing.Load() {
 				return
 			}
@@ -2471,6 +2486,10 @@ var pfInterceptMonitorDelays = []time.Duration{0, 500 * time.Millisecond, time.S
 // The backoff schedule provides both fast detection (immediate + 500ms) and extended
 // coverage (up to ~8s) to win the race against async pf reloads by hypervisors.
 func (p *prog) pfInterceptMonitor() {
+	if !p.beginNetworkActivity() {
+		return
+	}
+	defer p.netMonitorWG.Done()
 	// Eligibility first, ownership second. A monitor that is about to stand down must not
 	// take the flag on its way out: the post-stabilization verifier reads that flag as
 	// "another prober is working" and would step aside for a prober that never probes.
@@ -2494,7 +2513,7 @@ func (p *prog) pfInterceptMonitor() {
 		if delay > 0 {
 			time.Sleep(delay)
 		}
-		if !p.interceptProbeMonitorAllowed() {
+		if p.networkActivityClosed() || !p.interceptProbeMonitorAllowed() {
 			mainLog.Load().Debug().Msg("DNS intercept monitor: aborting — intercept disabled or stabilizing")
 			return
 		}

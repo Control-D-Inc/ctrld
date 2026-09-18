@@ -17,6 +17,7 @@ import (
 )
 
 type networkChangeMonitor interface {
+	Close() error
 	RegisterChangeCallback(netmon.ChangeFunc) func()
 	IsMajorChangeFrom(*netmon.State, *netmon.State) bool
 	Start()
