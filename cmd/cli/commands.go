@@ -36,11 +36,52 @@ import (
 // dialSocketControlServerTimeout is the default timeout to wait when ping control server.
 const dialSocketControlServerTimeout = 30 * time.Second
 
+// logRequestPath adds the query that makes the control server read every log
+// file, not only the newest debug bytes.
+func logRequestPath(path string, full bool) string {
+	if !full {
+		return path
+	}
+	return path + "?full=1"
+}
+
+// removeLogFiles deletes the log files of this installation and returns what
+// it could not remove. A missing file is not an error.
+func removeLogFiles(logPath string, backups int, internalPaths []string) []error {
+	for _, path := range internalPaths {
+		pruneNumberedBackups(path, 0)
+	}
+	var errs []error
+	for _, path := range logFilesToRemove(logPath, backups, internalPaths) {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove %s: %w", path, err))
+		}
+	}
+	return errs
+}
+
+// logFilesToRemove names the log files of this installation. The log_path
+// backups come from the configured count, because log_path can name a file in
+// a directory that holds the files of other programs, and a scan of that
+// directory would take their files too. An empty logPath leaves the internal
+// files alone.
+func logFilesToRemove(logPath string, backups int, internalPaths []string) []string {
+	var paths []string
+	if logPath != "" {
+		paths = append(paths, logPath)
+		for index := 1; index <= backups; index++ {
+			paths = append(paths, fmt.Sprintf("%s.%d", logPath, index))
+		}
+	}
+	return append(paths, internalPaths...)
+}
+
 func initLogCmd() *cobra.Command {
 	warnRuntimeLoggingNotEnabled := func() {
 		mainLog.Load().Warn().Msg("runtime debug logging is not enabled")
 		mainLog.Load().Warn().Msg(`ctrld may be running without "--cd" flag or logging is already enabled`)
 	}
+	var sendFullLogs bool
 	logSendCmd := &cobra.Command{
 		Use:   "send",
 		Short: "Send runtime debug logs to ControlD",
@@ -68,7 +109,7 @@ func initLogCmd() *cobra.Command {
 				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
 			}
 			cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
-			resp, err := cc.post(sendLogsPath, nil)
+			resp, err := cc.post(logRequestPath(sendLogsPath, sendFullLogs), nil)
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to send logs")
 			}
@@ -94,6 +135,9 @@ func initLogCmd() *cobra.Command {
 			}
 		},
 	}
+	logSendCmd.Flags().BoolVar(&sendFullLogs, "full", false, "Send every log file, not only the newest 10 MB of debug")
+
+	var viewFullLogs bool
 	logViewCmd := &cobra.Command{
 		Use:   "view",
 		Short: "View current runtime debug logs",
@@ -121,7 +165,7 @@ func initLogCmd() *cobra.Command {
 				mainLog.Load().Fatal().Err(err).Msg("failed to find ctrld home dir")
 			}
 			cc := newControlClient(filepath.Join(dir, ctrldControlUnixSock))
-			resp, err := cc.post(viewLogsPath, nil)
+			resp, err := cc.post(logRequestPath(viewLogsPath, viewFullLogs), nil)
 			if err != nil {
 				mainLog.Load().Fatal().Err(err).Msg("failed to get logs")
 			}
@@ -148,6 +192,8 @@ func initLogCmd() *cobra.Command {
 			fmt.Println(logs.Data)
 		},
 	}
+	logViewCmd.Flags().BoolVar(&viewFullLogs, "full", false, "Show every log file, not only the newest 10 MB of debug")
+
 	var tailLines int
 	logTailCmd := &cobra.Command{
 		Use:   "tail",
@@ -1247,14 +1293,16 @@ NOTE: Uninstalling will set DNS to values provided by DHCP.`,
 				var files []string
 				// Config file.
 				files = append(files, v.ConfigFileUsed())
-				// Log file and backup log file.
-				// For safety, only process if log file path is absolute.
-				if logFile := normalizeLogFilePath(cfg.Service.LogPath); filepath.IsAbs(logFile) {
-					files = append(files, logFile)
-					oldLogFile := logFile + oldLogSuffix
-					if _, err := os.Stat(oldLogFile); err == nil {
-						files = append(files, oldLogFile)
-					}
+				// Log files. For safety, only remove the log_path chain if
+				// that path is absolute.
+				logFile := normalizeLogFilePath(cfg.Service.LogPath)
+				if !filepath.IsAbs(logFile) {
+					logFile = ""
+				}
+				backups := debugLogBudget(&cfg.Service, router.Name() != "").backups
+				internalLogs := []string{absHomeDir(logFileName), absHomeDir(journalLogFileName)}
+				for _, err := range removeLogFiles(logFile, backups, internalLogs) {
+					mainLog.Load().Warn().Err(err).Msg("failed to remove log file")
 				}
 				// Socket files.
 				if dir, _ := socketDir(); dir != "" {

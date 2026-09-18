@@ -1,9 +1,12 @@
 # Network-recovery diagnostics
 
-Use continuous `ctrld log tail` capture during a reproduction. Internal logs rotate by size.
-A later `log send` can contain recent debug events and older warnings.
-Match timestamps and IDs. The last retained error does not necessarily describe the current network.
-Issue #604 tracks upload-time device and version headers separately.
+The retained stream is the journal, the file `ctrld-journal.log` in the ctrld home directory.
+It keeps every warning and every error, plus every event marked `journal=true`.
+The journal is on disk, so it keeps these events across a restart and a self-upgrade.
+Its budget is 2 MB with 2 backup files on a desktop, and 1 MB with 1 backup file on a router.
+Every `ctrld log send` upload holds the whole journal, so a reproduction does not need a continuous `ctrld log tail` capture.
+Match timestamps and IDs. The last retained error does not describe the current network in every case.
+Each upload starts with a header line that names the build, the intercept mode, and the network at send time.
 
 ## Transitions and recovery
 
@@ -16,10 +19,10 @@ For minor callbacks and late major callbacks in that epoch, ctrld reads current 
 This read does not change host DNS. A failed read defers source writes, but reconciliation continues.
 
 `Removed stale resolver source` is a warning only when ctrld removes an invalid address.
-The warning gives the reason and survives debug rotation.
+The warning gives the reason. Every warning enters the journal, so it stays on disk after a debug rotation and after a restart.
 `Recovery begin` and `Recovery end` connect the transition to a `recovery_generation`, reason, outcome, and elapsed time.
 Only the first upstream failure in each recovery produces a bounded summary.
-If a recovery encounters a failure, its final outcome also enters the warning stream.
+If a recovery encounters a failure, its final outcome also enters the journal.
 Normal successful recovery stays at debug level.
 
 These summaries exclude upstream URLs and queried names.
@@ -43,9 +46,9 @@ The cancellation event alone does not prove that interface DNS remains removed.
 
 A changed unsuccessful condition produces a warning. The condition consists of the stage, error code, outcome, and target.
 Equal results stay at debug level. The next changed condition includes the preceding repeat count.
-The first restored receipt also produces a warning-stream event. This event prevents an older failure from appearing current.
+The first restored receipt also produces a warning, which enters the journal. This event prevents an older failure from appearing current.
 Normal receipts and shutdown cancellation stay at debug level.
-The warning buffer is finite. These events do not guarantee indefinite retention.
+The journal budget is finite and the journal rotates by size. It does not keep these events without a limit.
 
 The outcomes have these meanings:
 

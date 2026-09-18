@@ -250,11 +250,14 @@ func TestRecoveryDebouncePreservesTransitionID(t *testing.T) {
 
 func TestTransitionWarningsSurviveDebugRotation(t *testing.T) {
 	sourceTestGlobals(t)
+	level := zerolog.GlobalLevel()
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	t.Cleanup(func() { zerolog.SetGlobalLevel(level) })
 	old := mainLog.Load()
 	debug, warnings := newLogWriterWithSize(2048), newSmallLogWriter()
 	// Runtime summaries occur after initialization, outside the preserved prefix.
 	debug.Write([]byte(logWriterInitEndMarker))
-	logger := zerolog.New(zerolog.MultiLevelWriter(debug, &zerolog.FilteredLevelWriter{Writer: zerolog.LevelWriterAdapter{Writer: warnings}, Level: zerolog.WarnLevel}))
+	logger := zerolog.New(zerolog.MultiLevelWriter(debug, newJournalLevelWriter(warnings)))
 	mainLog.Store(&logger)
 	t.Cleanup(func() { mainLog.Store(old) })
 	ctrld.SetDefaultLocalIPv4(net.ParseIP("192.0.2.10"))
@@ -272,6 +275,8 @@ func TestTransitionWarningsSurviveDebugRotation(t *testing.T) {
 	wg.Wait()
 	d.end("completed")
 	(&recoveryDiagnostic{transitionID: 8, generation: 10, started: time.Now()}).end("completed")
+	journal(logger.Info()).Str("interface", "en0").Msg("Network snapshot")
+	logger.Info().Msg("plain info line")
 	for range 100 {
 		logger.Debug().Msg(strings.Repeat("noise", 100))
 	}
@@ -289,6 +294,12 @@ func TestTransitionWarningsSurviveDebugRotation(t *testing.T) {
 	}
 	if strings.Contains(text, "private.customer") || strings.Contains(text, "secret payload") {
 		t.Fatalf("raw payload or normal debug elevated: %s", text)
+	}
+	if strings.Count(text, "Network snapshot") != 1 {
+		t.Fatalf("expected one retained marked info line: %s", text)
+	}
+	if strings.Contains(text, "plain info line") {
+		t.Fatalf("unmarked info line must not be retained: %s", text)
 	}
 }
 

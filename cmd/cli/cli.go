@@ -49,7 +49,6 @@ const selfCheckInternalTestDomain = "ctrld" + loopTestDomain
 const (
 	windowsForwardersFilename = ".forwarders.txt"
 	oldBinSuffix              = "_previous"
-	oldLogSuffix              = ".1"
 	msgExit                   = "$$EXIT$$"
 )
 
@@ -1497,6 +1496,8 @@ func fieldErrorMsg(fe validator.FieldError) string {
 		return fmt.Sprintf("minimum len: %q", fe.Param())
 	case "gte":
 		return fmt.Sprintf("must be greater than or equal to: %s", fe.Param())
+	case "lte":
+		return fmt.Sprintf("must be less than or equal to: %s", fe.Param())
 	case "cidr":
 		return fmt.Sprintf("invalid value: %s", fe.Value())
 	case "required_unless", "required":

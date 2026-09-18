@@ -270,7 +270,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 			p.forceFetchingAPI(domain)
 		}()
 		if err := w.WriteMsg(answer); err != nil {
-			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "serveDNS: failed to send DNS response to client")
+			ctrld.Log(ctx, p.querySampler.event(sampleClassSendResponseFailed, "").Err(err), "serveDNS: failed to send DNS response to client")
 		}
 	})
 
@@ -842,26 +842,25 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			ctx = context.WithValue(ctx, ctrld.ClientInfoCtxKey{}, req.ci)
 		}
 		answer, err := resolve1(upstream, upstreamConfig, msg)
-		// if we have an answer, we should reset the failure count
-		// we dont use reset here since we dont want to prevent failure counts from being incremented
+
+		// reset is not used here, because it also stops the failure count for
+		// one second, and the failures already in flight must still count.
 		if answer != nil {
-			p.um.mu.Lock()
-			p.um.failureReq[upstream] = 0
-			p.um.down[upstream] = false
-			p.um.mu.Unlock()
+			p.um.noteSuccess(upstream)
 			return answer
 		}
 
+		// A failing minute must not push the state events out of the retained log.
 		// A transport error names the endpoint it failed to reach, which for a
 		// generated Internal Domain upstream is the organization's private
-		// resolver address. Report the classification at error level and keep
-		// the address-bearing error at debug.
+		// resolver address. Report the classification through the sampler and
+		// keep the address-bearing error at debug.
 		if isInternalDomainUpstream(upstream) {
 			ctrld.Log(ctx, mainLog.Load().Debug().Err(err), "failed to resolve query")
-			ctrld.Log(ctx, mainLog.Load().Error().Str("failure", internalDomainFailureReason(err)),
+			ctrld.Log(ctx, p.querySampler.event(sampleClassResolveFailed, upstream).Str("failure", internalDomainFailureReason(err)),
 				"failed to resolve query using an Internal Domain resolver")
 		} else {
-			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to resolve query")
+			ctrld.Log(ctx, p.querySampler.event(sampleClassResolveFailed, upstream).Err(err), "failed to resolve query")
 		}
 
 		// increase failure count when there is no answer
@@ -973,7 +972,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		res.upstream = upstreamConfig.Endpoint
 		return res
 	}
-	ctrld.Log(ctx, mainLog.Load().Error(), "all %v endpoints failed", upstreams)
+	ctrld.Log(ctx, p.querySampler.event(sampleClassAllEndpointsFailed, ""), "all %v endpoints failed", upstreams)
 
 	// An Internal Domain with explicit resolvers is served only by the
 	// configured resolvers. When all of them are unreachable the query fails
@@ -1713,6 +1712,7 @@ func (p *prog) handleNetworkChange(delta *netmon.ChangeDelta, isMajorChange bool
 	validateDefaultLocalIPsFromDelta(sourceState, transitionID)
 	after4, after6 := ctrld.GetDefaultLocalIPv4(), ctrld.GetDefaultLocalIPv6()
 	p.networkSourceMu.Unlock()
+	p.noteNetworkState(currentState)
 
 	p.handleDNS64NetworkChange(delta, isMajorChange)
 	validIfaces := networkChangeValidInterfacesFn()
@@ -2055,9 +2055,26 @@ func interfaceIPsEqual(a, b []netip.Prefix) bool {
 
 var errOsHealthcheckSuppressed = errors.New("upstream os health check suppressed")
 
+// upstreamFailureLog keeps one error line for each upstream of one recovery
+// pass. The pass retries every two seconds until the upstream answers, and the
+// first line already names the fault, so the failures that follow it go to
+// debug.
+type upstreamFailureLog struct{ reported bool }
+
+// report logs one failed check of upstream.
+func (l *upstreamFailureLog) report(upstream string, uc *ctrld.UpstreamConfig, err error, duration time.Duration) {
+	level := mainLog.Load().Error
+	if l.reported {
+		level = mainLog.Load().Debug
+	}
+	l.reported = true
+	logUpstreamProbeFailure(isGeneratedInternalDomainUpstreamRef(upstream, uc), uc, err, level,
+		"Upstream %s check failed after %v", upstream, duration)
+}
+
 // checkUpstreamOnce sends a test query to the specified upstream.
 // Returns nil if the upstream responds successfully.
-func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) error {
+func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig, failures *upstreamFailureLog) error {
 	mainLog.Load().Debug().Msgf("Starting check for upstream: %s", upstream)
 
 	resolver, err := ctrld.NewResolver(uc)
@@ -2102,8 +2119,7 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 			mainLog.Load().Debug().Err(err).Msgf("Upstream %s check failed after %v (network unreachable)", upstream, duration)
 			return err
 		}
-		logUpstreamProbeFailure(isGeneratedInternalDomainUpstreamRef(upstream, uc), uc, err,
-			mainLog.Load().Error, "Upstream %s check failed after %v", upstream, duration)
+		failures.report(upstream, uc, err, duration)
 		return err
 	}
 	mainLog.Load().Debug().Msgf("Upstream %s responded successfully in %v", upstream, duration)
@@ -2339,6 +2355,7 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 			mainLog.Load().Debug().Msgf("Starting recovery check loop for upstream: %s", name)
 			attempts := 0
 			unreachableStreak := 0
+			var failures upstreamFailureLog
 			for {
 				select {
 				case <-recoveryCtx.Done():
@@ -2347,7 +2364,7 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 				default:
 					attempts++
 					// checkUpstreamOnce will reset any failure counters on success.
-					err := p.checkUpstreamOnce(name, uc)
+					err := p.checkUpstreamOnce(name, uc, &failures)
 					if err == nil || errors.Is(err, errOsHealthcheckSuppressed) {
 						mainLog.Load().Debug().Msgf("Upstream %s recovered successfully", name)
 						select {

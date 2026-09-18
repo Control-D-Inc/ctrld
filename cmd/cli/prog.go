@@ -137,7 +137,9 @@ type prog struct {
 	queryFromSelfMap          sync.Map
 	initInternalLogWriterOnce sync.Once
 	internalLogWriter         *logWriter
-	internalWarnLogWriter     *logWriter
+	internalJournalWriter     *logWriter
+	querySampler              errorSampler
+	lastNetworkState          atomic.Pointer[netmon.State]
 	internalLogSent           time.Time
 	runningIface              string
 	requiredMultiNICsConfig   bool
@@ -426,6 +428,10 @@ func (p *prog) runWait() {
 			preserveBoundListeners(p.cfg.Listener, curListener)
 		}
 		p.mu.Unlock()
+
+		// The header names the mode, the listeners, and the upstreams, so the
+		// open files take the values of the config that now runs.
+		p.refreshLogHeader()
 
 		logger.Notice().Msg("reloading config successfully")
 
@@ -764,6 +770,12 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		}
 	}
 
+	// The new monitor starts with every upstream up, so the old one closes its
+	// open outages first. Without this the journal holds a down event that no
+	// up event ever follows.
+	if p.um != nil {
+		p.um.retire()
+	}
 	p.um = newUpstreamMonitor(p.cfg)
 
 	if !reload {
@@ -908,6 +920,8 @@ func (p *prog) Stop(s service.Service) error {
 	mainLog.Load().Debug().Msg("finish running onStopped functions")
 	defer func() {
 		mainLog.Load().Info().Msg("Service stopped")
+		// The files take the last line of this run before they close.
+		p.closeInternalLogs()
 	}()
 	if err := p.deAllocateIP(); err != nil {
 		mainLog.Load().Error().Err(err).Msg("de-allocate ip failed")

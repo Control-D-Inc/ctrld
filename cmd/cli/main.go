@@ -143,30 +143,8 @@ func initInteractiveLogging() {
 // wrapper instead of calling this function directly.
 func initLoggingWithBackup(doBackup bool) []io.Writer {
 	var writers []io.Writer
-	if logFilePath := normalizeLogFilePath(cfg.Service.LogPath); logFilePath != "" {
-		// Create parent directory if necessary.
-		if err := os.MkdirAll(filepath.Dir(logFilePath), 0750); err != nil {
-			mainLog.Load().Error().Msgf("failed to create log path: %v", err)
-			os.Exit(1)
-		}
-
-		// Default open log file in append mode.
-		flags := os.O_CREATE | os.O_RDWR | os.O_APPEND
-		if doBackup {
-			// Backup old log file with .1 suffix.
-			if err := os.Rename(logFilePath, logFilePath+oldLogSuffix); err != nil && !os.IsNotExist(err) {
-				mainLog.Load().Error().Msgf("could not backup old log file: %v", err)
-			} else {
-				// Backup was created, set flags for truncating old log file.
-				flags = os.O_CREATE | os.O_RDWR
-			}
-		}
-		logFile, err := openLogFile(logFilePath, flags)
-		if err != nil {
-			mainLog.Load().Error().Msgf("failed to create log file: %v", err)
-			os.Exit(1)
-		}
-		writers = append(writers, logFile)
+	if rf := openLogPathWriter(doBackup); rf != nil {
+		writers = append(writers, rf)
 	}
 	writers = append(writers, consoleWriter)
 	multi := zerolog.MultiLevelWriter(writers...)

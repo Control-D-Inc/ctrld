@@ -592,7 +592,7 @@ func TestInternalDomainsRecoveryCheckHidesResolverAddress(t *testing.T) {
 			}
 
 			mark := len(logOutput.String())
-			if err := p.checkUpstreamOnce("upstream.internal_0", uc); err == nil {
+			if err := p.checkUpstreamOnce("upstream.internal_0", uc, &upstreamFailureLog{}); err == nil {
 				t.Fatal("expected the probe to fail")
 			}
 			above := logLinesAboveDebug(mark)
