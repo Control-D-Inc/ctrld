@@ -534,11 +534,36 @@ func (uc *UpstreamConfig) ForceReBootstrap() {
 	uc.rebootstrap.Store(rebootstrapNotStarted)
 }
 
+// CloseTransports retires the upstream's transports, including active DoT and
+// HTTP/3 connections. Callers must stop publishing this upstream before calling
+// it and must not reuse it without calling SetupTransport.
+func (uc *UpstreamConfig) CloseTransports() {
+	uc.retireTransports()
+}
+
+// retireTransports permanently closes DoT pools and HTTP/3 transports before
+// their owner discards them. Like closeTransports, it does not acquire an
+// upstream lock: callers that serialize slot access must keep that serialization
+// across retirement and replacement.
+func (uc *UpstreamConfig) retireTransports() {
+	uc.closeTransports()
+	for _, p := range []*dotConnPool{uc.dotClientPool, uc.dotClientPool4, uc.dotClientPool6} {
+		if p != nil {
+			p.Close()
+		}
+	}
+	// Unlike CloseIdleConnections, Close also cancels pending dials and active
+	// HTTP/3 requests, and prevents late requests from reviving the transport.
+	for _, rt := range []http.RoundTripper{uc.http3RoundTripper, uc.http3RoundTripper4, uc.http3RoundTripper6} {
+		if c, ok := rt.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+	}
+}
+
 // closeTransports closes idle connections on all existing transports.
-// This is called before creating new transports during re-bootstrap to
-// force in-flight requests on stale connections to fail quickly, rather
-// than waiting for the full context deadline (e.g. 5s) after a firewall
-// state table flush kills the underlying TCP/QUIC connections.
+// It does not retire DoT pools or HTTP/3 transports: active work may continue
+// and the resources remain usable. Use retireTransports before replacing them.
 func (uc *UpstreamConfig) closeTransports() {
 	if t := uc.transport; t != nil {
 		t.CloseIdleConnections()
@@ -588,11 +613,10 @@ func (uc *UpstreamConfig) SetupTransport() {
 		return
 	}
 
-	// Close existing transport connections before creating new ones.
-	// This forces in-flight requests on stale connections (e.g. after a
-	// firewall state table flush) to fail fast instead of waiting for
-	// the full context deadline timeout.
-	uc.closeTransports()
+	// Retire old DoT/HTTP3 resources before replacing their slots. Idle-only
+	// cleanup would leave active queries and late work owning orphaned resources.
+	// DoH and DoQ retain their existing cleanup semantics.
+	uc.retireTransports()
 
 	ips := uc.bootstrapIPs
 	switch uc.IPStack {
