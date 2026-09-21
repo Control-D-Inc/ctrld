@@ -1142,6 +1142,12 @@ func processLogAndCacheFlags(v *viper.Viper, cfg *ctrld.Config) {
 	v.Set("service", cfg.Service)
 }
 
+// errInterfaceNotFound reports that the named interface does not exist on the
+// host. Callers use errors.Is to tell this apart from a lookup that failed for
+// another reason, because an interface that is simply gone (an unplugged
+// adapter, a torn down tether) is an expected outcome rather than a failure.
+var errInterfaceNotFound = errors.New("interface not found")
+
 func netInterface(ifaceName string) (*net.Interface, error) {
 	if ifaceName == autoIface {
 		ifaceName = defaultIfaceName()
@@ -1152,13 +1158,18 @@ func netInterface(ifaceName string) (*net.Interface, error) {
 			iface = i.Interface
 		}
 	})
+	if err != nil {
+		// Enumeration itself failed, so the interface cannot be reported as
+		// missing: nothing was positively established about it.
+		return nil, err
+	}
 	if iface == nil {
-		return nil, errors.New("interface not found")
+		return nil, errInterfaceNotFound
 	}
 	if _, err := patchNetIfaceName(iface); err != nil {
 		return nil, err
 	}
-	return iface, err
+	return iface, nil
 }
 
 func defaultIfaceName() string {

@@ -1810,6 +1810,22 @@ func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 	}
 }
 
+// logIfaceLookupFailure reports a failed lookup of the interface the caller was
+// about to work on, naming that work in skipping, e.g. "DNS restoration". An
+// interface that no longer exists has nothing left to act on — an unplugged
+// adapter or a torn down tether is gone along with the settings ctrld changed —
+// so the skip is a debug diagnostic rather than a user-facing error: it
+// otherwise makes a successful upgrade look broken. Every other lookup failure
+// still says something went wrong and stays at error level, as does a failure
+// on an interface that does exist.
+func logIfaceLookupFailure(logger *zerolog.Logger, skipping string, err error) {
+	if errors.Is(err, errInterfaceNotFound) {
+		logger.Debug().Msgf("Skipping %s: previous interface is no longer present", skipping)
+		return
+	}
+	logger.Error().Err(err).Msg("could not get interface")
+}
+
 // resetDNSForRunningIface performs a DNS reset on the running interface.
 // The parameter isStart indicates whether this is being called as part of a start (or restart)
 // command. When true, we check if the current static DNS configuration already differs from the
@@ -1824,7 +1840,7 @@ func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runnin
 	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
 	netIface, err := netInterface(p.runningIface)
 	if err != nil {
-		logger.Error().Err(err).Msg("could not get interface")
+		logIfaceLookupFailure(&logger, "DNS restoration", err)
 		return
 	}
 	runningIface = netIface
