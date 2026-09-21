@@ -1810,6 +1810,15 @@ func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 	}
 }
 
+// The OS boundaries of the DNS reset path, as variables so tests can exercise
+// its failure handling without changing the host's DNS or NetworkManager state.
+var (
+	netInterfaceFn          = netInterface
+	restoreNetworkManagerFn = restoreNetworkManager
+	setIfaceDNSFn           = setDNS
+	resetIfaceDNSFn         = resetDNS
+)
+
 // logIfaceLookupFailure reports a failed lookup of the interface the caller was
 // about to work on, naming that work in skipping, e.g. "DNS restoration". An
 // interface that no longer exists has nothing left to act on — an unplugged
@@ -1838,13 +1847,13 @@ func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runnin
 		return
 	}
 	logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
-	netIface, err := netInterface(p.runningIface)
+	netIface, err := netInterfaceFn(p.runningIface)
 	if err != nil {
 		logIfaceLookupFailure(&logger, "DNS restoration", err)
 		return
 	}
 	runningIface = netIface
-	if err := restoreNetworkManager(); err != nil {
+	if err := restoreNetworkManagerFn(); err != nil {
 		logger.Error().Err(err).Msg("could not restore NetworkManager")
 		return
 	}
@@ -1874,13 +1883,13 @@ func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runnin
 	saved := savedStaticNameservers(netIface)
 	if len(saved) > 0 && restoreStatic {
 		logger.Debug().Msgf("Restoring interface %q from saved static config: %v", netIface.Name, saved)
-		if err := setDNS(netIface, saved); err != nil {
+		if err := setIfaceDNSFn(netIface, saved); err != nil {
 			logger.Error().Err(err).Msgf("failed to restore static DNS config on interface %q", netIface.Name)
 			return
 		}
 	} else {
 		logger.Debug().Msgf("No saved static DNS config for interface %q; resetting to DHCP", netIface.Name)
-		if err := resetDNS(netIface); err != nil {
+		if err := resetIfaceDNSFn(netIface); err != nil {
 			logger.Error().Err(err).Msgf("failed to reset DNS to DHCP on interface %q", netIface.Name)
 			return
 		}

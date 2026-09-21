@@ -1148,12 +1148,16 @@ func processLogAndCacheFlags(v *viper.Viper, cfg *ctrld.Config) {
 // adapter, a torn down tether) is an expected outcome rather than a failure.
 var errInterfaceNotFound = errors.New("interface not found")
 
+// foreachInterface enumerates the host network interfaces. It is a variable so
+// tests can make enumeration fail without depending on the host.
+var foreachInterface = netmon.ForeachInterface
+
 func netInterface(ifaceName string) (*net.Interface, error) {
 	if ifaceName == autoIface {
 		ifaceName = defaultIfaceName()
 	}
 	var iface *net.Interface
-	err := netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
+	err := foreachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		if i.Name == ifaceName {
 			iface = i.Interface
 		}
