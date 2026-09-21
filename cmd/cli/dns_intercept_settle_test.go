@@ -12,8 +12,10 @@ func TestRefreshDNSAfterVPNSettleRefreshesOSResolverAndVPNRoutes(t *testing.T) {
 	defer func() { initializeOsResolver = oldInitialize }()
 
 	var initialized []bool
-	initializeOsResolver = func(ctx context.Context, force bool) []string {
+	var reasons []string
+	initializeOsResolver = func(ctx context.Context, force bool, reason string) []string {
 		initialized = append(initialized, force)
+		reasons = append(reasons, reason)
 		return []string{"10.102.26.10:53"}
 	}
 
@@ -39,6 +41,9 @@ func TestRefreshDNSAfterVPNSettleRefreshesOSResolverAndVPNRoutes(t *testing.T) {
 	}
 	if len(initialized) != 1 || !initialized[0] {
 		t.Fatalf("expected forced OS resolver refresh once, got %v", initialized)
+	}
+	if len(reasons) != 1 || reasons[0] != osResolverReasonVPNSettle {
+		t.Fatalf("OS resolver reasons = %v, want [%s]", reasons, osResolverReasonVPNSettle)
 	}
 	if got := p.vpnDNS.UpstreamForDomain("jira.cc.bmwgroup.net."); len(got) != 1 || got[0] != "10.102.26.10" {
 		t.Fatalf("expected refreshed VPN DNS route, got %v", got)

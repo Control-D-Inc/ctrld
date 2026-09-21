@@ -4,9 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
+	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -14,6 +18,8 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func Test_osResolver_Resolve(t *testing.T) {
@@ -917,4 +923,257 @@ func generateEdns0ServerCookie(clientCookie string) string {
 		panic(err)
 	}
 	return clientCookie + hex.EncodeToString(cookie)
+}
+
+// syncLogBuffer collects the log lines that any goroutine writes.
+type syncLogBuffer struct {
+	mu sync.Mutex
+	sb strings.Builder
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sb.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sb.String()
+}
+
+// captureProxyLog returns a context whose logger writes one JSON object for
+// each line into the returned buffer, at debug level. The resolver code logs
+// through the logger of its context.
+func captureProxyLog(t *testing.T) (context.Context, *syncLogBuffer) {
+	t.Helper()
+	buf := &syncLogBuffer{}
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "time"
+	encoderConfig.LevelKey = "level"
+	encoderConfig.EncodeLevel = zapcore.LowercaseLevelEncoder
+	encoderConfig.MessageKey = "message"
+	core := zapcore.NewCore(zapcore.NewJSONEncoder(encoderConfig), zapcore.AddSync(buf), zapcore.DebugLevel)
+	return LoggerCtx(context.Background(), &Logger{Logger: zap.New(core)}), buf
+}
+
+// logEventsWithPrefix returns the log events whose message starts with prefix.
+func logEventsWithPrefix(t *testing.T, logs, prefix string) []map[string]any {
+	t.Helper()
+	var events []map[string]any
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		event := map[string]any{}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("log line is not JSON: %q: %v", line, err)
+		}
+		message, _ := event["message"].(string)
+		if !strings.HasPrefix(message, prefix) {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+// wantLogField fails the test when an event misses a field or holds another value.
+func wantLogField(t *testing.T, event map[string]any, field string, want any) {
+	t.Helper()
+	got, ok := event[field]
+	if !ok {
+		t.Fatalf("log event has no field %q: %v", field, event)
+	}
+	if got != want {
+		t.Fatalf("log event field %q = %v, want %v", field, got, want)
+	}
+}
+
+// wantLogStrings fails the test when a list field does not hold want.
+func wantLogStrings(t *testing.T, event map[string]any, field string, want []string) {
+	t.Helper()
+	values, ok := event[field].([]any)
+	if !ok {
+		t.Fatalf("log event field %q is not a list: %v", field, event[field])
+	}
+	got := make([]string, 0, len(values))
+	for _, value := range values {
+		text, ok := value.(string)
+		if !ok {
+			t.Fatalf("log event field %q holds a value that is not a string: %v", field, value)
+		}
+		got = append(got, text)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("log event field %q = %v, want %v", field, got, want)
+	}
+}
+
+// stubNameservers answers each system nameserver read from lists, in order.
+// The last list answers every read after it.
+func stubNameservers(t *testing.T, lists ...[]string) {
+	t.Helper()
+	previous := NameserversFn
+	reads := 0
+	NameserversFn = func(context.Context) []string {
+		list := lists[min(reads, len(lists)-1)]
+		reads++
+		return slices.Clone(list)
+	}
+	t.Cleanup(func() { NameserversFn = previous })
+}
+
+// resetOsResolverLog clears the change-only state, so one test does not see
+// the nameserver reads of another.
+func resetOsResolverLog(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		osResolverLog.mu.Lock()
+		defer osResolverLog.mu.Unlock()
+		osResolverLog.system = nameserverReads{}
+		osResolverLog.final = nameserverReads{}
+		osResolverLog.reason = osResolverReasonUnspecified
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+// keepOsResolver puts back the OS resolver that the process had before the test.
+func keepOsResolver(t *testing.T) {
+	t.Helper()
+	resolverMutex.Lock()
+	previous := or
+	resolverMutex.Unlock()
+	t.Cleanup(func() {
+		resolverMutex.Lock()
+		storeOsResolver(previous)
+		resolverMutex.Unlock()
+	})
+}
+
+// TestOsResolverNameserversReadsWithoutTheResolverLock covers a log header
+// render during a resolver initialization. That initialization holds
+// resolverMutex across a scutil read of several seconds, and the header must
+// not wait for it.
+func TestOsResolverNameserversReadsWithoutTheResolverLock(t *testing.T) {
+	keepOsResolver(t)
+	resolverMutex.Lock()
+	storeOsResolver(newResolverWithNameserver([]string{"192.0.2.1:53"}))
+
+	read := make(chan []string, 1)
+	go func() { read <- OsResolverNameservers() }()
+
+	select {
+	case nameservers := <-read:
+		resolverMutex.Unlock()
+		if want := []string{"192.0.2.1:53"}; !slices.Equal(nameservers, want) {
+			t.Fatalf("nameservers = %v, want %v", nameservers, want)
+		}
+	case <-time.After(5 * time.Second):
+		resolverMutex.Unlock()
+		t.Fatal("OsResolverNameservers waited for resolverMutex")
+	}
+}
+
+func TestJournalMarksTheEventAndKeepsItsLevel(t *testing.T) {
+	ctx, logs := captureProxyLog(t)
+
+	Journal(LoggerFromCtx(ctx).Info()).Msg("Journal test event")
+
+	events := logEventsWithPrefix(t, logs.String(), "Journal test event")
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1: %s", len(events), logs.String())
+	}
+	wantLogField(t, events[0], JournalField, true)
+	wantLogField(t, events[0], "level", "info")
+}
+
+func TestOsResolverNameserverReadsLogOnChange(t *testing.T) {
+	ctx, logs := captureProxyLog(t)
+	resetOsResolverLog(t)
+	keepOsResolver(t)
+	first := []string{"192.0.2.1", "192.0.2.2"}
+	second := []string{"192.0.2.3"}
+	stubNameservers(t, first, first, second)
+
+	for range 3 {
+		InitializeOsResolverWithReason(ctx, false, "transition")
+	}
+
+	systemReads := logEventsWithPrefix(t, logs.String(), "Got system nameservers")
+	if len(systemReads) != 2 {
+		t.Fatalf("got %d system nameserver lines, want 2: %s", len(systemReads), logs.String())
+	}
+	wantLogField(t, systemReads[0], "repeats", float64(0))
+	wantLogField(t, systemReads[1], "repeats", float64(1))
+	wantLogField(t, systemReads[1], "message", "Got system nameservers: [192.0.2.3]")
+
+	finalReads := logEventsWithPrefix(t, logs.String(), "Final available nameservers")
+	if len(finalReads) != 2 {
+		t.Fatalf("got %d final nameserver lines, want 2: %s", len(finalReads), logs.String())
+	}
+	wantLogField(t, finalReads[1], "repeats", float64(1))
+
+	changes := logEventsWithPrefix(t, logs.String(), "OS resolver set changed")
+	if len(changes) != 2 {
+		t.Fatalf("got %d resolver change events, want one for each changed list: %s", len(changes), logs.String())
+	}
+	last := changes[1]
+	wantLogStrings(t, last, "before", first)
+	wantLogStrings(t, last, "after", second)
+	wantLogField(t, last, JournalField, true)
+	wantLogField(t, last, "level", "info")
+	wantLogField(t, last, "reason", "transition")
+	if _, ok := last["default_route"]; !ok {
+		t.Fatalf("resolver change event has no default_route field: %v", last)
+	}
+	wantSource := map[string]string{"darwin": "scutil", "windows": "dhcp", "linux": "resolv.conf"}[runtime.GOOS]
+	if wantSource != "" {
+		wantLogField(t, last, "source", wantSource)
+	}
+}
+
+func TestInitializeOsResolverReportsTheUnspecifiedReason(t *testing.T) {
+	ctx, logs := captureProxyLog(t)
+	resetOsResolverLog(t)
+	keepOsResolver(t)
+	stubNameservers(t, []string{"192.0.2.10"})
+
+	InitializeOsResolver(ctx, false)
+
+	changes := logEventsWithPrefix(t, logs.String(), "OS resolver set changed")
+	if len(changes) != 1 {
+		t.Fatalf("got %d resolver change events, want 1: %s", len(changes), logs.String())
+	}
+	wantLogField(t, changes[0], "reason", "unspecified")
+	wantLogStrings(t, changes[0], "after", []string{"192.0.2.10"})
+}
+
+// TestOsResolverQueryFailureLogsAtDebug guards the level of the per-query
+// failure line. The journal keeps every error line, and a broken network
+// fails every query, so this line must not be an error.
+func TestOsResolverQueryFailureLogsAtDebug(t *testing.T) {
+	ctx, logs := captureProxyLog(t)
+	resolver := newResolverWithNameserver([]string{"127.0.0.1:1"})
+	resolver.exchangeDNS = func(_ context.Context, _ *dns.Msg, _ string, _ net.IP) (*dns.Msg, time.Duration, error) {
+		return nil, 0, errors.New("dial udp: connection refused")
+	}
+	msg := new(dns.Msg)
+	msg.SetQuestion("private.example.", dns.TypeA)
+
+	if _, err := resolver.Resolve(ctx, msg); err == nil {
+		t.Fatal("expected the query to fail")
+	}
+
+	events := logEventsWithPrefix(t, logs.String(), "OS resolver query failed")
+	if len(events) == 0 {
+		t.Fatalf("no failure line: %s", logs.String())
+	}
+	for _, event := range events {
+		if event["level"] != "debug" {
+			t.Fatalf("failure line at level %v, want debug: %v", event["level"], event)
+		}
+	}
 }

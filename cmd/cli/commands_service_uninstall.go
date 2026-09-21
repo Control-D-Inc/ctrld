@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -47,14 +48,15 @@ func (sc *ServiceCommand) Uninstall(cmd *cobra.Command, args []string) error {
 		var files []string
 		// Config file.
 		files = append(files, v.ConfigFileUsed())
-		// Log file and backup log file.
-		// For safety, only process if log file path is absolute.
-		if logFile := normalizeLogFilePath(cfg.Service.LogPath); filepath.IsAbs(logFile) {
-			files = append(files, logFile)
-			oldLogFile := logFile + oldLogSuffix
-			if _, err := os.Stat(oldLogFile); err == nil {
-				files = append(files, oldLogFile)
-			}
+		// Log files. For safety, only remove the log_path chain if that path
+		// is absolute.
+		logFile := normalizeLogFilePath(cfg.Service.LogPath)
+		if !filepath.IsAbs(logFile) {
+			logFile = ""
+		}
+		internalLogs := []string{absHomeDir(logFileName), absHomeDir(journalLogFileName)}
+		for _, err := range removeLogFiles(logFile, debugLogBudget(&cfg.Service).backups, internalLogs) {
+			logger.Warn().Err(err).Msg("Failed to remove log file")
 		}
 		// Socket files.
 		if dir, _ := socketDir(); dir != "" {
@@ -103,4 +105,35 @@ func (sc *ServiceCommand) Uninstall(cmd *cobra.Command, args []string) error {
 
 	logger.Debug().Msg("Service uninstall command completed")
 	return nil
+}
+
+// removeLogFiles deletes the log files of this installation and returns what
+// it could not remove. A missing file is not an error.
+func removeLogFiles(logPath string, backups int, internalPaths []string) []error {
+	for _, path := range internalPaths {
+		pruneNumberedBackups(path, 0)
+	}
+	var errs []error
+	for _, path := range logFilesToRemove(logPath, backups, internalPaths) {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove %s: %w", path, err))
+		}
+	}
+	return errs
+}
+
+// logFilesToRemove names the log files of this installation. The log_path
+// backups come from the configured count, because log_path can name a file in
+// a directory that holds the files of other programs, and a scan of that
+// directory would take their files too. An empty logPath leaves the internal
+// files alone.
+func logFilesToRemove(logPath string, backups int, internalPaths []string) []string {
+	var paths []string
+	if logPath != "" {
+		paths = append(paths, logPath)
+		for index := 1; index <= backups; index++ {
+			paths = append(paths, fmt.Sprintf("%s.%d", logPath, index))
+		}
+	}
+	return append(paths, internalPaths...)
 }

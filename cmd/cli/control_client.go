@@ -5,6 +5,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -27,11 +29,23 @@ func newControlClient(addr string) *controlClient {
 }
 
 func (c *controlClient) post(path string, data io.Reader) (*http.Response, error) {
-	// for log/send, set the timeout to 5 minutes
-	if path == sendLogsPath {
+	// A log send uploads many megabytes, so it needs more time than the other
+	// calls.
+	if isSendLogsPath(path) {
 		c.c.Timeout = time.Minute * 5
 	}
 	return c.c.Post("http://unix"+path, contentTypeJson, data)
+}
+
+// isSendLogsPath reports whether path addresses the log send handler. The path
+// can carry a query, so the comparison takes the path alone. A path that does
+// not parse keeps the prefix rule, because it still reaches that handler.
+func isSendLogsPath(path string) bool {
+	parsed, err := url.Parse(path)
+	if err != nil {
+		return strings.HasPrefix(path, sendLogsPath)
+	}
+	return parsed.Path == sendLogsPath
 }
 
 // postStream sends a POST request with no timeout, suitable for long-lived streaming connections.

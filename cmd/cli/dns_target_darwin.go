@@ -61,8 +61,7 @@ func (p *prog) loadInterceptDNSTargetStateLocked() {
 	if err := json.Unmarshal(data, &st); err != nil || st.Service == "" || st.Value == "" {
 		return
 	}
-	p.interceptDNSTargetService = st.Service
-	p.interceptDNSTargetSetValue = st.Value
+	p.setInterceptDNSTargetLocked(st.Service, st.Value)
 	mainLog.Load().Debug().Msgf("intercept DNS target: restored tracking of %s on %q from previous run", st.Value, st.Service)
 }
 
@@ -186,10 +185,11 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 		mainLog.Load().Warn().Err(err).Msgf("intercept DNS target: could not set %s on %q", target, iface.Name)
 		return
 	}
-	p.interceptDNSTargetService = iface.Name
-	p.interceptDNSTargetSetValue = target
+	p.setInterceptDNSTargetLocked(iface.Name, target)
 	p.persistInterceptDNSTargetStateLocked()
-	mainLog.Load().Warn().Msgf("intercept DNS target: service %q provides no usable IPv4 DNS; set %s so macOS can emit DNS queries (removed automatically when the network provides IPv4 DNS)", iface.Name, target)
+	journal(mainLog.Load().Warn()).Str("service", iface.Name).Str("target", target).
+		Str("reason", "dns_less_network").
+		Msgf("intercept DNS target: service %q provides no usable IPv4 DNS; set %s so macOS can emit DNS queries (removed automatically when the network provides IPv4 DNS)", iface.Name, target)
 }
 
 // removeInterceptDNSTarget removes a previously set intercept DNS target,
@@ -219,8 +219,12 @@ func (p *prog) removeInterceptDNSTargetLocked(reason string) {
 		return
 	}
 	if !isInterceptDNSTargetOnly(cur, val) {
-		mainLog.Load().Debug().Msgf("intercept DNS target: %q DNS changed externally; not removing (%s)", svc, reason)
 		p.clearInterceptDNSTargetStateLocked()
+		// ctrld owns the DNS of the service no longer, and a later outage
+		// report needs the moment that ownership ended.
+		journal(mainLog.Load().Info()).Str("service", svc).Str("target", val).
+			Str("reason", "external_change").
+			Msgf("intercept DNS target: %q DNS changed externally; not removing (%s)", svc, reason)
 		return
 	}
 	if saved := interceptSavedStaticNameserversFn(iface); len(saved) > 0 {
@@ -233,11 +237,20 @@ func (p *prog) removeInterceptDNSTargetLocked(reason string) {
 		return
 	}
 	p.clearInterceptDNSTargetStateLocked()
-	mainLog.Load().Info().Msgf("intercept DNS target: removed %s from %q (%s)", val, svc, reason)
+	journal(mainLog.Load().Info()).Str("service", svc).Str("target", val).Str("reason", reason).
+		Msgf("intercept DNS target: removed %s from %q (%s)", val, svc, reason)
 }
 
 func (p *prog) clearInterceptDNSTargetStateLocked() {
-	p.interceptDNSTargetService = ""
-	p.interceptDNSTargetSetValue = ""
+	p.setInterceptDNSTargetLocked("", "")
 	p.persistInterceptDNSTargetStateLocked()
+}
+
+// setInterceptDNSTargetLocked stores the service that ctrld owns and the value
+// it wrote, and publishes the value for the readers that take no lock. Callers
+// must hold interceptDNSTargetMu.
+func (p *prog) setInterceptDNSTargetLocked(service, value string) {
+	p.interceptDNSTargetService = service
+	p.interceptDNSTargetSetValue = value
+	p.publishInterceptTarget(value)
 }

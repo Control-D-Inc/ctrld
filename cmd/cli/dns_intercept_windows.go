@@ -3075,7 +3075,7 @@ func (p *prog) scheduleDelayedRechecks() {
 			// Refresh OS resolver — VPN may have finished DNS cleanup since the
 			// immediate handler ran.
 			ctx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-			ctrld.InitializeOsResolver(ctx, true)
+			ctrld.InitializeOsResolverWithReason(ctx, true, osResolverReasonDelayedRecheck)
 			if p.vpnDNS != nil {
 				p.vpnDNS.Refresh(ctx, true)
 			}

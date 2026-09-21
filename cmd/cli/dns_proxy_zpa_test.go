@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	ctrld "github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/testhelper"
 )

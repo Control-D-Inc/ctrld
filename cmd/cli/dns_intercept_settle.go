@@ -6,12 +6,21 @@ import (
 	"github.com/Control-D-Inc/ctrld"
 )
 
-var initializeOsResolver = ctrld.InitializeOsResolver
+var initializeOsResolver = ctrld.InitializeOsResolverWithReason
+
+// Reasons that the journal reports when the resolver set changes. Each one
+// names the code path that read the resolvers of the host.
+const (
+	osResolverReasonStart          = "start"
+	osResolverReasonWakeProbe      = "wake_probe"
+	osResolverReasonVPNSettle      = "vpn_settle"
+	osResolverReasonDelayedRecheck = "delayed_recheck"
+)
 
 func (p *prog) refreshDNSAfterVPNSettle(reason string) (routes, domainlessServers, exemptions int) {
 	mainLog.Load().Info().Msgf("DNS intercept: refreshing OS/VPN DNS route state after VPN settle (%s)", reason)
 	ctx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
-	ns := initializeOsResolver(ctx, true)
+	ns := initializeOsResolver(ctx, true, osResolverReasonVPNSettle)
 	mainLog.Load().Debug().Msgf("DNS intercept: post-settle OS resolver nameservers: %v", ns)
 
 	if p.vpnDNS == nil {

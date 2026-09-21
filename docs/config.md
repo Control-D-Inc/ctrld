@@ -117,9 +117,27 @@ Logging level you wish to enable.
 ### log_path
 Relative or absolute path of the log file. 
 
+Point `log_path` at a file that no other program rotates. ctrld renames `<log_path>.1` to `<log_path>.N` and uploads these files. A lower `log_max_backups` leaves the older numbered `log_path` files in place, but ctrld removes the extra numbered files of its internal logs.
+
 - Type: string
 - Required: no
 - Default: ""
+
+### log_max_size_mb
+Maximum size of the debug log file in MB. When the file reaches this size, ctrld rotates it. This limit also applies to the `log_path` file.
+
+- Type: integer
+- Required: no
+- Valid values: 1 to 1024
+- Default: 10
+
+### log_max_backups
+Number of rotated debug log files that ctrld keeps. If the value is 0, ctrld keeps no rotated file. This number also applies to the `log_path` file.
+
+- Type: integer
+- Required: no
+- Valid values: 0 to 64
+- Default: 4
 
 ### cache_enable
 When `cache_enable = true`, all resolved DNS query responses will be cached for duration of the upstream record TTLs.

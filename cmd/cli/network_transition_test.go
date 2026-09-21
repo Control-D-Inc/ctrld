@@ -46,6 +46,10 @@ func captureTransitionLogs(t *testing.T) *syncBuffer {
 
 func sourceTestGlobals(t *testing.T) {
 	t.Helper()
+	// A transition reads the hardware ports and the virtual adapters, and no
+	// test may start the commands behind them.
+	stubHeaderSnapshotSources(t)
+	stubSnapshotVirtualSet(t)
 	v4, v6 := ctrld.GetDefaultLocalIPv4(), ctrld.GetDefaultLocalIPv6()
 	valid, route := networkChangeValidInterfacesFn, networkChangeDefaultRouteIPFn
 	reconcile, ignored := networkChangeReconcileFn, networkChangeIgnoredInterceptFn
@@ -191,6 +195,7 @@ func TestNetworkChangeSourceMovedToUpInterface(t *testing.T) {
 
 func TestRecoveryTransitionDiagnostics(t *testing.T) {
 	logs := captureTransitionLogs(t)
+	stubHeaderSnapshotSources(t)
 	original, intercept := recoveryResetDNSFn, dnsIntercept
 	dnsIntercept = false
 	t.Cleanup(func() { recoveryResetDNSFn = original; dnsIntercept = intercept })
@@ -260,7 +265,7 @@ func TestTransitionWarningsSurviveDebugRotation(t *testing.T) {
 	config.MessageKey = "message"
 	logger := &ctrld.Logger{Logger: zap.New(zapcore.NewTee(
 		zapcore.NewCore(zapcore.NewJSONEncoder(config), zapcore.AddSync(debug), zap.DebugLevel),
-		zapcore.NewCore(zapcore.NewJSONEncoder(config), zapcore.AddSync(warnings), zap.WarnLevel),
+		newJournalCore(warnings),
 	))}
 	mainLog.Store(logger)
 	t.Cleanup(func() { mainLog.Store(old) })
@@ -279,6 +284,8 @@ func TestTransitionWarningsSurviveDebugRotation(t *testing.T) {
 	wg.Wait()
 	d.end("completed")
 	(&recoveryDiagnostic{transitionID: 8, generation: 10, started: time.Now()}).end("completed")
+	journal(logger.Info()).Str("interface", "en0").Msg("Network snapshot")
+	logger.Info().Msg("plain info line")
 	for range 100 {
 		logger.Debug().Msg(strings.Repeat("noise", 100))
 	}
@@ -291,11 +298,17 @@ func TestTransitionWarningsSurviveDebugRotation(t *testing.T) {
 			t.Fatalf("debug buffer did not rotate %q", msg)
 		}
 	}
-	if strings.Count(text, "Recovery end") != 1 || !strings.Contains(text, `"outcome":"completed"`) {
+	if strings.Count(text, "Recovery end") != 2 || !strings.Contains(text, `"outcome":"completed"`) {
 		t.Fatal("recovery completion must survive rotation beside its retained failure")
 	}
 	if strings.Contains(text, "private.customer") || strings.Contains(text, "secret payload") {
 		t.Fatalf("raw payload or normal debug elevated: %s", text)
+	}
+	if strings.Count(text, "Network snapshot") != 1 {
+		t.Fatalf("expected one retained marked info line: %s", text)
+	}
+	if strings.Contains(text, "plain info line") {
+		t.Fatalf("unmarked info line must not be retained: %s", text)
 	}
 }
 

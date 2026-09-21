@@ -147,7 +147,7 @@ func TestRecoveryCleanupClearsBypassAfterInterceptStateDisappears(t *testing.T) 
 func TestSystemNameserversForInterceptRetryNormalizesEmptyDiscovery(t *testing.T) {
 	original := initializeOsResolverWithSystemNameserversFn
 	called := false
-	initializeOsResolverWithSystemNameserversFn = func(_ context.Context, guard bool) ([]string, []string) {
+	initializeOsResolverWithSystemNameserversFn = func(_ context.Context, guard bool, _ string) ([]string, []string) {
 		called = true
 		if !guard {
 			t.Error("intercept retry discovery did not guard the existing resolver")

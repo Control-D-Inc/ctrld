@@ -153,7 +153,10 @@ removed domain leaves no rule and no `internal_*` upstream behind.
 Generated `internal_*` upstreams carry the organization's private resolver
 addresses, so anything naming one stays at debug, and the level above it carries
 only a classification (`timeout`, `refused`, `unreachable`, `source_unavailable`,
-`error`). That covers every consumer, not just query handling:
+`error`). The per-query error sampler applies to the classification line as
+well. After 5 lines in one minute for the same upstream and class, the next
+classification lines go to debug, and one `Per-query errors sampled` line gives
+the count. That covers every consumer, not just query handling:
 
 - the bootstrap-IP line in `setupUpstream`;
 - the transport error from a failed query, which names the endpoint;

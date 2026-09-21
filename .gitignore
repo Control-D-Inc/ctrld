@@ -18,3 +18,4 @@ ctrld.exe
 # Local planning artifacts - never commit
 /SPEC.md
 /tasks/
+/SPEC-*.md

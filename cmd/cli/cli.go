@@ -34,7 +34,6 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"go.uber.org/zap"
 	"tailscale.com/logtail/backoff"
 	"tailscale.com/net/netmon"
 
@@ -48,7 +47,6 @@ const selfCheckInternalTestDomain = "ctrld" + loopTestDomain
 const (
 	windowsForwardersFilename = ".forwarders.txt"
 	oldBinSuffix              = "_previous"
-	oldLogSuffix              = ".1"
 	msgExit                   = "$$EXIT$$"
 )
 
@@ -378,6 +376,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	oldLogPath := cfg.Service.LogPath
 	if uid := cdUIDFromProvToken(); uid != "" {
 		cdUID = uid
+		p.initLoggingAfterProvisioning()
 	}
 	if cdUID != "" {
 		if !validateCdUpstreamProtocol(p.notifyExitToLogServer) {
@@ -462,18 +461,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
-		// After processCDFlags, log config may change, so reset mainLog and re-init logging.
-		l := zap.NewNop()
-		mainLog.Store(&ctrld.Logger{Logger: l})
-
-		// Copy logs written so far to new log file if possible.
-		if buf, err := os.ReadFile(oldLogPath); err == nil {
-			if err := os.WriteFile(newLogPath, buf, os.FileMode(0o600)); err != nil {
-				p.Warn().Err(err).Msg("Could not copy old log file")
-			}
-		}
-		initLoggingWithBackup(false)
-		p.logger.Store(mainLog.Load())
+		p.switchLogPath(oldLogPath, newLogPath)
 	}
 
 	if err := validateConfig(&cfg); err != nil {
@@ -893,7 +881,9 @@ func apiRejectionSummary(statusCode int) string {
 
 // provisionSecrets lists every secret-bearing value to strip from provisioning
 // artifacts, including both parts of a composite "<uid>/<clientID>" --cd
-// value, which the API may echo back separately.
+// value, which the API may echo back separately. redactSecrets drops the
+// values that are too short to redact, so a client ID such as "os" leaves the
+// words of the message alone.
 func provisionSecrets() []string {
 	uid, clientID := controld.ParseRawUID(cdUID)
 	return []string{cdUID, cdOrg, uid, clientID}
@@ -1378,11 +1368,7 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 	mainLog.Load().Debug().Msgf("Self-check against %q failed", domain)
 	loggerCtx := ctrld.LoggerCtx(ctx, mainLog.Load())
 	// Ping all upstreams to provide better error message to users.
-	for name, uc := range cfg.Upstream {
-		if err := uc.ErrorPing(loggerCtx); err != nil {
-			mainLog.Load().Err(err).Msgf("Failed to connect to upstream.%s, endpoint: %s", name, uc.Endpoint)
-		}
-	}
+	logUpstreamPingFailures(loggerCtx, cfg.Upstream)
 	marker := strings.Repeat("=", 32)
 	mainLog.Load().Debug().Msg(marker)
 
@@ -1396,6 +1382,28 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 		}
 	}
 	return errSelfCheckNoAnswer
+}
+
+// upstreamPingFn is a var so tests can drive the self-check report without a
+// network probe.
+var upstreamPingFn = (*ctrld.UpstreamConfig).ErrorPing
+
+// logUpstreamPingFailures names the upstreams that do not answer after a
+// failed self-check, so the user learns which one is unreachable. The config
+// key and the endpoint are operator text that can hold a token, so both stay
+// at debug and the retained line names the upstream by its bounded name. The
+// self-check runs before the program exists, so a bare prog carries the main
+// logger into the probe report.
+func logUpstreamPingFailures(ctx context.Context, upstreams map[string]*ctrld.UpstreamConfig) {
+	reporter := &prog{}
+	reporter.logger.Store(mainLog.Load())
+	for name, uc := range upstreams {
+		err := upstreamPingFn(uc, ctx)
+		if err == nil {
+			continue
+		}
+		reporter.logUpstreamProbeFailure(upstreamPrefix+name, uc, err, reporter.Error, "Failed to connect to the upstream")
+	}
 }
 
 // userHomeDir returns the user's home directory
@@ -1576,6 +1584,8 @@ func fieldErrorMsg(fe validator.FieldError) string {
 		return fmt.Sprintf("minimum len: %q", fe.Param())
 	case "gte":
 		return fmt.Sprintf("must be greater than or equal to: %s", fe.Param())
+	case "lte":
+		return fmt.Sprintf("must be less than or equal to: %s", fe.Param())
 	case "cidr":
 		return fmt.Sprintf("invalid value: %s", fe.Value())
 	case "required_unless", "required":

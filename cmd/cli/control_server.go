@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/kardianos/service"
@@ -323,48 +324,31 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 	}))
-	p.cs.register(viewLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		lr, err := p.logReaderRaw()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		defer lr.r.Close()
-		if lr.size == 0 {
-			w.WriteHeader(http.StatusMovedPermanently)
-			return
-		}
-		data, err := io.ReadAll(lr.r)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("could not read log: %v", err), http.StatusInternalServerError)
-			return
-		}
-		if err := json.NewEncoder(w).Encode(&logViewResponse{Data: string(data)}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			http.Error(w, fmt.Sprintf("could not marshal log data: %v", err), http.StatusInternalServerError)
-			return
-		}
-	}))
+	p.cs.register(viewLogsPath, http.HandlerFunc(p.handleLogView))
 	p.cs.register(sendLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if time.Since(p.internalLogSent) < logWriterSentInterval {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		r, err := p.logReaderNoColor()
+		r, err := p.logReader(wantFullLogs(request), true)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		defer r.r.Close()
 		if r.size == 0 {
 			w.WriteHeader(http.StatusMovedPermanently)
 			return
 		}
+		// The upload loses its color codes on the way, so the answer reports
+		// the bytes that went out, not the bytes that the files hold.
+		upload := &countingReadCloser{rc: r.r}
 		req := &controld.LogsRequest{
 			UID:  cdUID,
-			Data: r.r,
+			Data: upload,
 		}
 		p.Debug().Msg("Sending log file to ControlD server")
-		resp := logSentResponse{Size: r.size}
+		resp := logSentResponse{}
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 		if err := controld.SendLogs(loggerCtx, req, cdDev); err != nil {
 			p.Error().Msgf("Could not send log file to ControlD server: %v", err)
@@ -374,6 +358,7 @@ func (p *prog) registerControlServerHandler() {
 			p.Debug().Msg("Sending log file successfully")
 			w.WriteHeader(http.StatusOK)
 		}
+		resp.Size = upload.count()
 		if err := json.NewEncoder(w).Encode(&resp); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -445,48 +430,136 @@ func (p *prog) registerControlServerHandler() {
 			}
 		} else {
 			// File-based logging mode: tail the log file.
-			logFile := normalizeLogFilePath(p.cfg.Service.LogPath)
-			f, err := os.Open(logFile)
-			if err != nil {
-				// Already committed 200, just return.
-				return
-			}
-			defer f.Close()
-
-			// Seek to show last N lines.
-			if numLines > 0 {
-				if tail := tailFileLastLines(f, numLines); len(tail) > 0 {
-					w.Write(tail)
-					flusher.Flush()
-				}
-			} else {
-				// Seek to end.
-				f.Seek(0, io.SeekEnd)
-			}
-
-			// Poll for new data.
-			buf := make([]byte, 4096)
-			ticker := time.NewTicker(200 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					n, err := f.Read(buf)
-					if n > 0 {
-						if _, werr := w.Write(buf[:n]); werr != nil {
-							return
-						}
-						flusher.Flush()
-					}
-					if err != nil && err != io.EOF {
-						return
-					}
-				case <-request.Context().Done():
-					return
-				}
-			}
+			followLogFile(request.Context(), w, flusher, normalizeLogFilePath(p.cfg.Service.LogPath), numLines)
 		}
 	}))
+}
+
+// jsonStringChunkSize bounds the memory that one log view answer needs. A log
+// of tens of megabytes must not get a second copy in the answer.
+const jsonStringChunkSize = 32 * 1024
+
+// wantFullLogs reports whether the request asks for every log file instead of
+// the newest debug bytes.
+func wantFullLogs(r *http.Request) bool {
+	return r.URL.Query().Get("full") == "1"
+}
+
+// handleLogView answers with the log bytes in the data field. It writes the
+// body while it reads the log, so the answer needs no copy of the whole log.
+func (p *prog) handleLogView(w http.ResponseWriter, r *http.Request) {
+	lr, err := p.logReader(wantFullLogs(r), false)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer lr.r.Close()
+	if lr.size == 0 {
+		w.WriteHeader(http.StatusMovedPermanently)
+		return
+	}
+	w.Header().Set("Content-Type", contentTypeJson)
+	if _, err := io.WriteString(w, `{"data":`); err != nil {
+		return
+	}
+	if err := writeJSONString(w, lr.r); err != nil {
+		// The answer is on its way, so it can only end short. This line tells
+		// the operator why.
+		p.Error().Err(err).Msg("Could not send log view answer")
+		return
+	}
+	_, _ = io.WriteString(w, `}`)
+}
+
+// writeJSONString writes what r yields as one JSON string, in chunks.
+func writeJSONString(w io.Writer, r io.Reader) error {
+	if _, err := io.WriteString(w, `"`); err != nil {
+		return err
+	}
+	chunk := make([]byte, jsonStringChunkSize)
+	for {
+		n, readErr := r.Read(chunk)
+		if n > 0 {
+			if err := writeJSONStringChunk(w, chunk[:n]); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	_, err := io.WriteString(w, `"`)
+	return err
+}
+
+// writeJSONStringChunk writes one chunk and escapes the bytes that a JSON
+// string cannot carry. It writes the bytes between two escapes in one call.
+func writeJSONStringChunk(w io.Writer, chunk []byte) error {
+	start := 0
+	for i, b := range chunk {
+		escaped := jsonStringEscape(b)
+		if escaped == "" {
+			continue
+		}
+		if _, err := w.Write(chunk[start:i]); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, escaped); err != nil {
+			return err
+		}
+		start = i + 1
+	}
+	_, err := w.Write(chunk[start:])
+	return err
+}
+
+// jsonStringEscape returns the escape of one byte, or an empty string for a
+// byte that a JSON string carries as it is. Every byte of a multi-byte
+// character is above 0x1f, so a chunk that ends inside a character still
+// writes the character whole.
+func jsonStringEscape(b byte) string {
+	switch b {
+	case '"':
+		return `\"`
+	case '\\':
+		return `\\`
+	case '\n':
+		return `\n`
+	case '\r':
+		return `\r`
+	case '\t':
+		return `\t`
+	}
+	if b < 0x20 {
+		return fmt.Sprintf(`\u%04x`, b)
+	}
+	return ""
+}
+
+// countingReadCloser counts the bytes that the HTTP client reads from an
+// upload. It closes the log files behind the upload, because the client only
+// closes the body it was given.
+type countingReadCloser struct {
+	rc io.ReadCloser
+	n  atomic.Int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error {
+	return c.rc.Close()
+}
+
+// count reports the bytes read so far.
+func (c *countingReadCloser) count() int64 {
+	return c.n.Load()
 }
 
 // tailFileLastLines reads the last n lines from a file and returns them.

@@ -235,6 +235,10 @@ DNS intercept: pf anchor "com.controld.ctrld" active with 3 rules
 DNS intercept: pf redirect active — all outbound DNS (port 53) redirected to 127.0.0.1:53
 ```
 
+DNS intercept mode on macOS also runs the wake detector. That detector reports a `Host woke` journal event with the source `detector` and the length of the sleep.
+Outside DNS intercept mode the netmon delta is the only wake source, and it reports no length of its own.
+The events of the journal are listed in [Network-recovery diagnostics](network-recovery-diagnostics.md#journal-events).
+
 ## Troubleshooting
 
 ### Windows
@@ -306,11 +310,13 @@ VPN apps commonly add rules like `pass out quick on ipsec0 inet all` that match 
 
 ### 3. Dynamic Tunnel Interface Detection
 
-The network change monitor (`validInterfacesMap()`) only tracks physical hardware ports (en0, bridge0, etc.) — it doesn't see tunnel interfaces (utun*, ipsec*, etc.) created by VPN software. When a VPN connects and creates a new interface (e.g., utun420 for WireGuard), ctrld detects this through a separate tunnel interface change check and rebuilds the pf anchor to include explicit intercept rules for the new interface. This runs on every network change event, even if no physical interface changed.
+The network change monitor (`validInterfacesMap()`) only tracks physical hardware ports (en0, bridge0, etc.) — it doesn't see tunnel interfaces (utun*, ipsec*, etc.) created by VPN software. When a VPN connects and creates a new interface (e.g., utun420 for WireGuard), ctrld detects this through a separate tunnel interface change check and rebuilds the pf anchor to include explicit intercept rules for the new interface. This runs on every network change event that is not noise, even if no physical interface changed. A delta that touches AirDrop or virtual adapters alone is noise, and ctrld skips the handler for it, so no tunnel discovery runs.
 
 ### 4. pf Watchdog + Network Change Hooks
 
 A background watchdog (30s interval) plus immediate checks on network change events detect when another program replaces the entire pf ruleset (e.g., Windscribe's `pfctl -f /etc/pf.conf`). When detected, ctrld rebuilds its anchor with up-to-date tunnel interface rules and re-injects the anchor reference at the top of the ruleset. A 2-second delayed re-check catches race conditions where the other program clears rules slightly after the network event.
+
+A noise delta starts no immediate check and no delayed re-check. The watchdog keeps its own 30 s cadence, so it still restores a missing anchor during a delta storm.
 
 ### 4a. Active Interception Probe (pf Translation State Corruption)
 
@@ -638,6 +644,8 @@ Network change detected (netmon callback)
     └─ Delayed re-check at 4s:
         └─ (same as 2s — catches slower VPN teardowns)
 ```
+
+A noise delta skips this whole chain. ctrld runs no pf read, no tunnel discovery, no OS resolver read, and no VPN DNS refresh for it. The noise class holds the AirDrop interfaces (`awdl*`, `llw*`) and the virtual adapters. The pf watchdog keeps its own 30 s cadence, so it still tests the rules during a delta storm.
 
 ### VPN Connect Sequence
 

@@ -145,10 +145,23 @@ type prog struct {
 	queryFromSelfMap          sync.Map
 	initInternalLogWriterOnce sync.Once
 	internalLogWriter         *logWriter
-	internalWarnLogWriter     *logWriter
+	internalJournalWriter     *logWriter
+	querySampler              errorSampler
+	lastNetworkState          atomic.Pointer[netmon.State]
 	internalLogSent           time.Time
 	runningIface              string
 	requiredMultiNICsConfig   bool
+
+	// The network journal state. The value fields here hold a mutex, so no
+	// code may copy a prog. Every user of a prog holds a pointer to it.
+	networkNoise    noiseCoalescer
+	wake            wakeReporter
+	repeats         repeatLogger //lint:ignore U1000 used on darwin
+	dnsConfig       *dnsConfigPoller
+	health          *queryHealth
+	snapshotWrites  snapshotLimiter
+	lastNAT64Mu     sync.Mutex
+	lastNAT64Logged string
 
 	selfUninstallMu       sync.Mutex
 	refusedQueryCount     int
@@ -170,6 +183,10 @@ type prog struct {
 	networkSourceState      *netmon.State
 	networkSourceEpoch      *netmon.State
 	networkSourceReadFailed bool
+	// netmon hands a minor callback the cached major snapshot in Old, so the
+	// diff keeps the state that the callback before it reported.
+	networkDeltaState *netmon.State
+	networkDeltaEpoch *netmon.State
 
 	// recoveryDebounceTimer coalesces rapid NetworkChange recovery triggers
 	// into a single handleRecovery call. Only handleRecovery is debounced —
@@ -194,6 +211,11 @@ type prog struct {
 	interceptDNSTargetSetValue string     //lint:ignore U1000 used on darwin
 	interceptDNSTargetLoaded   bool       //lint:ignore U1000 used on darwin
 
+	// interceptTargetMirror holds the same value as interceptDNSTargetSetValue
+	// for readers that must not wait: the mutex above covers networksetup
+	// calls that take seconds.
+	interceptTargetMirror atomic.Value // holds string
+
 	// DNS intercept mode state (platform-specific).
 	// On Windows: *wfpState, on macOS: *pfState, nil on other platforms.
 	dnsInterceptState any
@@ -217,7 +239,11 @@ type prog struct {
 	// lastTunnelIfaces tracks the tunnel set included in the last successfully loaded
 	// pf anchor. Pending tunnel state is kept separately so failed PF work is retried
 	// instead of being mistaken for an applied update. Protected by mu.
-	lastTunnelIfaces       []string //lint:ignore U1000 used on darwin
+	lastTunnelIfaces []string //lint:ignore U1000 used on darwin
+	// lastLoggedTunnelIfaces is the tunnel set of the last logged event. The
+	// reconcile retries a set until it succeeds, so a diff of the applied set
+	// repeats one event at every retry.
+	lastLoggedTunnelIfaces []string //lint:ignore U1000 used on darwin
 	pendingTunnelIfaces    []string //lint:ignore U1000 used on darwin
 	hasPendingTunnelIfaces bool     //lint:ignore U1000 used on darwin
 
@@ -464,6 +490,10 @@ func (p *prog) runWait() {
 		}
 		p.mu.Unlock()
 
+		// The header names the mode, the listeners, and the upstreams, so the
+		// open files take the values of the config that now runs.
+		p.refreshLogHeader()
+
 		p.Notice().Msg("Reloading config successfully")
 
 		select {
@@ -525,7 +555,7 @@ func (p *prog) postRun() {
 			p.resetDNS(false, false)
 		}
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-		ns, systemNameservers := initializeOsResolverWithSystemNameserversFn(loggerCtx, false)
+		ns, systemNameservers := initializeOsResolverWithSystemNameserversFn(loggerCtx, false, osResolverReasonStart)
 		p.Debug().Msgf("Initialized os resolver with nameservers: %v", ns)
 		p.setDNS(systemNameservers)
 		if p.allowList != nil {
@@ -533,7 +563,6 @@ func (p *prog) postRun() {
 		}
 		p.csSetDnsDone <- struct{}{}
 		close(p.csSetDnsDone)
-		p.logInterfacesState()
 	}
 }
 
@@ -824,7 +853,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		}
 	}
 
-	p.um = newUpstreamMonitor(p.cfg, p.logger.Load())
+	p.replaceUpstreamMonitor()
 
 	if !reload {
 		p.sema = &chanSemaphore{ready: make(chan struct{}, defaultSemaphoreCap)}
@@ -850,12 +879,8 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	}
 
 	if !reload {
-		go func() {
-			// Start network monitoring
-			if err := p.monitorNetworkChanges(ctx); err != nil {
-				p.Error().Err(err).Msg("Failed to start network monitoring")
-			}
-		}()
+		p.newNetworkJournal()
+		go p.startNetworkMonitorAndJournal(ctx)
 	}
 
 	for listenerNum := range p.cfg.Listener {
@@ -931,6 +956,96 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	wg.Wait()
 }
 
+// dnsConfigChangedMessage names the journal event of the resolver table of the
+// host. A log tool selects every resolver change of a run by this message.
+const dnsConfigChangedMessage = "DNS configuration changed"
+
+// runSCUtilDNSFn reads the resolver table of the host. A test replaces it,
+// because the configuration daemon of the host is not a fixture.
+var runSCUtilDNSFn = runSCUtilDNS
+
+// replaceUpstreamMonitor puts a new upstream monitor in place of the one of
+// the run before. The new monitor starts with every upstream up, so the old one
+// closes its open outages first. Without this the journal holds a down event
+// that no up event ever follows.
+func (p *prog) replaceUpstreamMonitor() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.um != nil {
+		p.um.retire()
+	}
+	p.um = newUpstreamMonitor(p.cfg, p.logger.Load())
+}
+
+// upstreamMonitorNow reads the monitor of this run under the lock that a
+// replacement takes, because a reload swaps it while the journal loops run.
+func (p *prog) upstreamMonitorNow() *upstreamMonitor {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.um
+}
+
+// newNetworkJournal creates the trackers that follow the host network. The
+// query path reads them without a lock, so they exist before a listener starts.
+func (p *prog) newNetworkJournal() {
+	p.health = newQueryHealth()
+	p.querySampler.onFailure = p.health.countFailure
+	if runtime.GOOS == "darwin" {
+		p.dnsConfig = newDNSConfigPoller(runSCUtilDNSFn)
+	}
+}
+
+// startNetworkMonitorAndJournal starts the network monitor and then opens the
+// journal. The trackers do not depend on the monitor, so a monitor that cannot
+// start leaves them running. It passes on the wait function of the journal.
+func (p *prog) startNetworkMonitorAndJournal(ctx context.Context) func() {
+	if err := p.monitorNetworkChanges(ctx); err != nil {
+		p.Error().Err(err).Msg("Failed to start network monitoring")
+	}
+	return p.startNetworkJournal()
+}
+
+// startNetworkJournal runs the trackers and opens the journal of this run with
+// one snapshot. Support reads the grade of the query path and the resolver
+// table of each moment after an incident. It returns a function that waits for
+// both loops, so a caller that closed the stop channel knows when they ended.
+func (p *prog) startNetworkJournal() func() {
+	healthDone := p.health.startLoop(p.stopCh, func() (int, bool) {
+		return p.upstreamMonitorNow().countDownExcept(isInternalDomainUpstream), p.recoveryBypass.Load()
+	})
+	var configDone <-chan struct{}
+	if p.dnsConfig != nil {
+		configDone = p.dnsConfig.startLoop(p.stopCh, p.logDNSConfigChanges)
+	}
+	p.logNetworkSnapshot("start")
+	return func() {
+		<-healthDone
+		if configDone != nil {
+			<-configDone
+		}
+	}
+}
+
+// logDNSConfigChanges puts each changed resolver of the host in the journal. A
+// resolver that vanished comes without a nameserver, so the reader sees the
+// drop. The search suffixes name the organization of the endpoint, so the
+// journal holds their number only.
+func (p *prog) logDNSConfigChanges(entries []dnsResolverEntry) {
+	for _, entry := range entries {
+		journal(mainLog.Load().Info()).
+			Strs("nameservers", entry.Nameservers).
+			Int("if_index", entry.IfIndex).
+			Str("interface", entry.Interface).
+			Bool("scoped", entry.Scoped).
+			Str("action", entry.Action).
+			Str("flags", entry.Flags).
+			Int("search_domain_count", len(entry.SearchDomains)).
+			Int("order", entry.Order).
+			Str("reachable", entry.Reachable).
+			Msg(dnsConfigChangedMessage)
+	}
+}
+
 // setupClientInfoDiscover performs necessary works for running client info discover.
 func (p *prog) setupClientInfoDiscover() {
 	selfIP := p.defaultRouteIP()
@@ -962,6 +1077,8 @@ func (p *prog) Stop(_ service.Service) error {
 	p.Debug().Msg("Finish running onStopped functions")
 	defer func() {
 		p.Info().Msg("Service stopped")
+		// The files take the last line of this run before they close.
+		p.closeInternalLogs()
 	}()
 	if err := p.deAllocateIP(); err != nil {
 		p.Error().Err(err).Msg("De-allocate ip failed")
@@ -1037,7 +1154,7 @@ var (
 	startDNSInterceptFn                         = (*prog).startDNSIntercept
 	ensureInterceptDNSTargetFn                  = (*prog).ensureInterceptDNSTarget
 	removeInterceptDNSTargetFn                  = (*prog).removeInterceptDNSTarget
-	initializeOsResolverWithSystemNameserversFn = ctrld.InitializeOsResolverWithSystemNameservers
+	initializeOsResolverWithSystemNameserversFn = ctrld.InitializeOsResolverWithSystemNameserversReason
 	setDnsForRunningIfaceFn                     = (*prog).setDnsForRunningIface
 	resetDNSFn                                  = (*prog).resetDNS
 	// refuseFallbackFatal reports a startup failure the interface-DNS fallback
@@ -1473,28 +1590,6 @@ func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runnin
 		}
 	}
 	return
-}
-
-func (p *prog) logInterfacesState() {
-	withEachPhysicalInterfaces("", "", func(i *net.Interface) error {
-		addrs, err := i.Addrs()
-		if err != nil {
-			p.Warn().Str("interface", i.Name).Err(err).Msg("Failed to get addresses")
-		}
-		nss, err := currentStaticDNS(i)
-		if err != nil {
-			p.Warn().Str("interface", i.Name).Err(err).Msg("Failed to get DNS")
-		}
-		if len(nss) == 0 {
-			nss = currentDNS(i)
-		}
-		p.Debug().
-			Any("addrs", addrs).
-			Strs("nameservers", nss).
-			Int("index", i.Index).
-			Msgf("interface state: %s", i.Name)
-		return nil
-	})
 }
 
 // findWorkingInterface looks for a network interface with a valid IP configuration

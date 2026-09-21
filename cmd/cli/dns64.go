@@ -293,6 +293,15 @@ func (p *prog) activeDNS64Prefix() (netip.Prefix, bool) {
 	return p.dns64.prefix, p.dns64.prefix.IsValid()
 }
 
+// dns64PrefixSnapshot reports the stored NAT64 prefix and whether synthesis
+// runs. It reads the state only, because a report of the network must not
+// reclassify it or start a discovery query.
+func (p *prog) dns64PrefixSnapshot() (netip.Prefix, bool) {
+	p.dns64.mu.Lock()
+	defer p.dns64.mu.Unlock()
+	return p.dns64.prefix, p.dns64.active
+}
+
 func dns64CacheVariant(prefix netip.Prefix) string {
 	return "dns64:" + prefix.String()
 }
@@ -399,13 +408,40 @@ func (p *prog) discoverNAT64Prefix(generation uint64) {
 	}
 	prefix, ok := nat64PrefixFromAnswer(answer)
 	if !ok {
-		mainLog.Load().Debug().Msg("dns64: no NAT64 prefix present (not a DNS64 network)")
+		p.logNAT64Result("")
 		return
 	}
 	if !p.storeDiscoveredNAT64Prefix(generation, prefix) {
 		return
 	}
-	mainLog.Load().Info().Msgf("dns64: discovered NAT64 prefix %s; enabling AAAA synthesis for IPv6-only network without CLAT", prefix)
+	p.logNAT64Result(prefix.String())
+}
+
+// logNAT64Result reports one discovery result. An empty prefix means that the
+// network has none. Both results report a change of the network, so both go to
+// the journal at info.
+func (p *prog) logNAT64Result(prefix string) {
+	if !p.noteNAT64Result(prefix) {
+		return
+	}
+	if prefix == "" {
+		journal(mainLog.Load().Info()).Msg("dns64: no NAT64 prefix present (not a DNS64 network)")
+		return
+	}
+	journal(mainLog.Load().Info()).Msgf("dns64: discovered NAT64 prefix %s; enabling AAAA synthesis for IPv6-only network without CLAT", prefix)
+}
+
+// noteNAT64Result reports whether this NAT64 result differs from the one that
+// the journal already holds. An empty prefix means no prefix. Discovery runs
+// every recheck window, and the journal keeps the changes only.
+func (p *prog) noteNAT64Result(prefix string) bool {
+	p.lastNAT64Mu.Lock()
+	defer p.lastNAT64Mu.Unlock()
+	if p.lastNAT64Logged == prefix {
+		return false
+	}
+	p.lastNAT64Logged = prefix
+	return true
 }
 
 // maybeDNS64 applies DNS64 synthesis to an already-filtered answer when the

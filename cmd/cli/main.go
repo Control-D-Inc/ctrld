@@ -148,34 +148,8 @@ func initInteractiveLogging() {
 // wrapper instead of calling this function directly.
 func initLoggingWithBackup(doBackup bool) []zapcore.Core {
 	var writers []io.Writer
-	if logFilePath := normalizeLogFilePath(cfg.Service.LogPath); logFilePath != "" {
-		// Create parent directory if necessary.
-		// This ensures log files can be created even if the directory doesn't exist
-		if err := os.MkdirAll(filepath.Dir(logFilePath), 0750); err != nil {
-			mainLog.Load().Error().Msgf("Failed to create log path: %v", err)
-			os.Exit(1)
-		}
-
-		// Default open log file in append mode.
-		// This preserves existing log entries across restarts
-		flags := os.O_CREATE | os.O_RDWR | os.O_APPEND
-		if doBackup {
-			// Backup old log file with .1 suffix.
-			// This prevents log file corruption during rotation
-			if err := os.Rename(logFilePath, logFilePath+oldLogSuffix); err != nil && !os.IsNotExist(err) {
-				mainLog.Load().Error().Msgf("Could not backup old log file: %v", err)
-			} else {
-				// Backup was created, set flags for truncating old log file.
-				// This ensures a clean start for the new log file
-				flags = os.O_CREATE | os.O_RDWR
-			}
-		}
-		logFile, err := openLogFile(logFilePath, flags)
-		if err != nil {
-			mainLog.Load().Error().Msgf("Failed to create log file: %v", err)
-			os.Exit(1)
-		}
-		writers = append(writers, logFile)
+	if rf := openLogPathWriter(doBackup); rf != nil {
+		writers = append(writers, rf)
 	}
 
 	// Create zap cores for different writers

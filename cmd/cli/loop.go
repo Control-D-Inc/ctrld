@@ -86,8 +86,9 @@ func (p *prog) detectLoop(msg *dns.Msg) {
 func (p *prog) checkDnsLoop() {
 	p.Debug().Msg("Start checking DNS loop")
 	upstream := make(map[string]*ctrld.UpstreamConfig)
-	// Preserve generated-upstream identity for privacy-safe probe diagnostics.
-	generated := make(map[string]bool)
+	// The probe loop below runs on the upstream UID, and the failure report
+	// needs the config key. Record the reference while the key is in hand.
+	reference := make(map[string]string)
 	p.loopMu.Lock()
 	for n, uc := range p.cfg.Upstream {
 		if p.um.isDown("upstream." + n) {
@@ -101,7 +102,7 @@ func (p *prog) checkDnsLoop() {
 		uid := uc.UID()
 		p.loop[uid] = false
 		upstream[uid] = uc
-		generated[uid] = isGeneratedInternalDomainUpstream(n, uc)
+		reference[uid] = upstreamPrefix + n
 	}
 	p.loopMu.Unlock()
 
@@ -115,11 +116,11 @@ func (p *prog) checkDnsLoop() {
 		}
 		resolver, err := ctrld.NewResolver(loggerCtx, uc)
 		if err != nil {
-			p.logUpstreamProbeFailure(generated[uid], uc, err, p.Warn, "Could not perform loop check")
+			p.logUpstreamProbeFailure(reference[uid], uc, err, p.Warn, "Could not perform loop check")
 			continue
 		}
 		if _, err := resolver.Resolve(context.Background(), msg); err != nil {
-			p.logUpstreamProbeFailure(generated[uid], uc, err, p.Warn, "Could not send DNS loop check query")
+			p.logUpstreamProbeFailure(reference[uid], uc, err, p.Warn, "Could not send DNS loop check query")
 		}
 	}
 	p.Debug().Msg("End checking DNS loop")

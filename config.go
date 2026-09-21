@@ -224,6 +224,8 @@ func (c *Config) FirstUpstream() *UpstreamConfig {
 type ServiceConfig struct {
 	LogLevel                string         `mapstructure:"log_level" toml:"log_level,omitempty"`
 	LogPath                 string         `mapstructure:"log_path" toml:"log_path,omitempty"`
+	LogMaxSizeMB            int            `mapstructure:"log_max_size_mb" toml:"log_max_size_mb,omitempty" validate:"omitempty,gte=1,lte=1024"`
+	LogMaxBackups           *int           `mapstructure:"log_max_backups" toml:"log_max_backups,omitempty" validate:"omitempty,gte=0,lte=64"`
 	CacheEnable             bool           `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
 	CacheSize               int            `mapstructure:"cache_size" toml:"cache_size,omitempty"`
 	CacheTTLOverride        int            `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`

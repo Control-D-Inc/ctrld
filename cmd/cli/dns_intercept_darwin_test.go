@@ -6,9 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -987,7 +990,7 @@ func TestFinishPFStabilizationRunsFunctionalVerification(t *testing.T) {
 		"-a com.controld.ctrld -sn": "rdr on lo0",
 	})
 	originalResolver := initializeOsResolver
-	initializeOsResolver = func(context.Context, bool) []string { return nil }
+	initializeOsResolver = func(context.Context, bool, string) []string { return nil }
 	t.Cleanup(func() { initializeOsResolver = originalResolver })
 
 	probes, reloads := stubStabilizationProbe(t, []bool{false, true}, true)
@@ -1092,7 +1095,7 @@ func stubWakeProbeSchedule(t *testing.T, attempts int) (refreshes *int) {
 	pfWakeProbeOwnerWait = 10 * time.Millisecond
 
 	calls := 0
-	initializeOsResolver = func(context.Context, bool) []string {
+	initializeOsResolver = func(context.Context, bool, string) []string {
 		calls++
 		return []string{"10.0.0.1:53"}
 	}
@@ -1275,7 +1278,7 @@ func TestWakeProbeStopsWhenServiceStops(t *testing.T) {
 	pfWakeProbeDelays = []time.Duration{0, time.Hour}
 	t.Cleanup(func() { pfWakeProbeDelays = originalDelays })
 	originalResolver := initializeOsResolver
-	initializeOsResolver = func(context.Context, bool) []string { return []string{"10.0.0.1:53"} }
+	initializeOsResolver = func(context.Context, bool, string) []string { return []string{"10.0.0.1:53"} }
 	t.Cleanup(func() { initializeOsResolver = originalResolver })
 
 	probes, _ := stubStabilizationProbe(t, nil, false) // first probe fails, reload refuses
@@ -1432,4 +1435,532 @@ func TestStartDNSInterceptSkipsBackgroundWorkWhenInstallFails(t *testing.T) {
 	// The goroutines above are started before this returns if at all, but give a failing
 	// wiring a moment to report rather than racing the test's end.
 	time.Sleep(50 * time.Millisecond)
+}
+
+// =============================================================================
+// pf anchor state, tunnel, and wake event tests
+// =============================================================================
+
+// pfStateCommandsMu guards the answer of the pf and tunnel state reads, because
+// a watchdog or stabilization goroutine can read while a test replaces it.
+var (
+	pfStateCommandsMu sync.Mutex
+	pfStateCommandFn  func(string, ...string) ([]byte, error)
+)
+
+// init keeps the whole test binary away from pfctl and ifconfig. A test that
+// needs values stubs them with stubPFStateCommands.
+func init() {
+	pfStateRunCommand = func(name string, args ...string) ([]byte, error) {
+		pfStateCommandsMu.Lock()
+		run := pfStateCommandFn
+		pfStateCommandsMu.Unlock()
+		if run == nil {
+			return nil, errors.New("pf state read is not stubbed")
+		}
+		return run(name, args...)
+	}
+}
+
+// stubPFStateCommands answers the pf and tunnel state reads from fixture text,
+// keyed by the whole command line.
+func stubPFStateCommands(t *testing.T, outputs map[string]string) {
+	t.Helper()
+	stubPFStateCommandFn(t, func(name string, args ...string) ([]byte, error) {
+		key := strings.Join(append([]string{name}, args...), " ")
+		output, ok := outputs[key]
+		if !ok {
+			return nil, fmt.Errorf("no fixture for %q", key)
+		}
+		return []byte(output), nil
+	})
+}
+
+// stubPFStateCommandFn answers the pf and tunnel state reads from run.
+func stubPFStateCommandFn(t *testing.T, run func(string, ...string) ([]byte, error)) {
+	t.Helper()
+	pfStateCommandsMu.Lock()
+	original := pfStateCommandFn
+	pfStateCommandFn = run
+	pfStateCommandsMu.Unlock()
+	t.Cleanup(func() {
+		pfStateCommandsMu.Lock()
+		pfStateCommandFn = original
+		pfStateCommandsMu.Unlock()
+	})
+}
+
+// pfIntactAnchorRules answers the anchor check of a healthy ruleset.
+var pfIntactAnchorRules = map[string]string{
+	"-sn":                       `rdr-anchor "com.controld.ctrld"`,
+	"-sr":                       `anchor "com.controld.ctrld"`,
+	"-a com.controld.ctrld -sr": "pass in quick on lo0",
+	"-a com.controld.ctrld -sn": "rdr on lo0",
+}
+
+// pfStateFixtures answers the anchor list and status reads with a real ruleset.
+var pfStateFixtures = map[string]string{
+	"pfctl -sr": pfShowRules,
+	"pfctl -sn": pfShowNAT,
+	"pfctl -si": pfStatusEnabled,
+}
+
+// waitForStabilizationExit waits for the stabilization loop to release pf.
+func waitForStabilizationExit(t *testing.T, p *prog) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for p.pfStabilizing.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if p.pfStabilizing.Load() {
+		t.Fatal("the stabilization loop did not observe the closed stop channel")
+	}
+}
+
+// Test_logPFAnchorListLogsStabilizationStartAndEnd covers the anchor list at the
+// two stabilization events. A capture of a VPN connect has to name the anchors
+// that were loaded before ctrld waited, and the ones that were loaded after.
+func Test_logPFAnchorListLogsStabilizationStartAndEnd(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	stubPFStateCommands(t, pfStateFixtures)
+	stubPFAnchorCheckCommand(t, pfIntactAnchorRules)
+	originalResolver := initializeOsResolver
+	initializeOsResolver = func(context.Context, bool, string) []string { return nil }
+	t.Cleanup(func() { initializeOsResolver = originalResolver })
+	stubStabilizationProbe(t, []bool{true}, true)
+
+	stopCh := make(chan struct{})
+	close(stopCh)
+	p := &prog{dnsInterceptState: &pfState{}, stopCh: stopCh}
+	p.pfStartStabilization()
+	waitForStabilizationExit(t, p)
+	p.pfStabilizing.Store(true)
+	p.finishPFStabilization(time.Millisecond)
+	stopPFTestTimers(p)
+
+	events := jsonLogEvents(t, logs, "PF anchor list changed")
+	if len(events) != 2 {
+		t.Fatalf("got %d anchor list events for one stabilization, want 2", len(events))
+	}
+	wantField(t, events[0], "reason", "stabilization_start")
+	wantField(t, events[0], "journal", true)
+	wantField(t, events[0], "pf_enabled", true)
+	wantField(t, events[0], "pf_since", "0 days 02:11:05")
+	wantAnchors(t, events[0], []string{"com.apple/*", "com.controld.ctrld"})
+	wantField(t, events[1], "reason", "stabilization_end")
+	wantField(t, events[1], "journal", true)
+
+	for _, prefix := range []string{
+		"DNS intercept: VPN connecting",
+		"DNS intercept: pf stable for",
+	} {
+		lines := eventsWithPrefix(t, logs, prefix)
+		if len(lines) != 1 {
+			t.Fatalf("got %d lines with prefix %q, want 1", len(lines), prefix)
+		}
+		wantField(t, lines[0], "journal", true)
+	}
+}
+
+// Test_logPFAnchorListReportsAMissingAnchorOnce covers the watchdog state. The
+// anchor stays missing for as long as another program holds pf, and one line per
+// tick would fill the journal with the same fact.
+func Test_logPFAnchorListReportsAMissingAnchorOnce(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	stubPFStateCommands(t, pfStateFixtures)
+	outputs := pfIntactAnchorRules
+	original := runPFAnchorCheckCommand
+	runPFAnchorCheckCommand = func(args ...string) ([]byte, error) {
+		return []byte(outputs[strings.Join(args, " ")]), nil
+	}
+	originalRestore := restorePFAnchorForReconcile
+	restorePFAnchorForReconcile = func(*prog, string) pfAnchorCheckResult { return pfAnchorCheckRestored }
+	t.Cleanup(func() {
+		runPFAnchorCheckCommand = original
+		restorePFAnchorForReconcile = originalRestore
+	})
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	for range 3 {
+		if result := p.ensurePFAnchorActive(); result != pfAnchorCheckIntact {
+			t.Fatalf("healthy check result = %v, want intact", result)
+		}
+	}
+	intact := eventsWithPrefix(t, logs, "DNS intercept watchdog: pf anchor intact")
+	if len(intact) != 1 {
+		t.Fatalf("got %d intact lines for three healthy checks, want 1", len(intact))
+	}
+	wantField(t, intact[0], "repeats", float64(0))
+
+	outputs = map[string]string{}
+	for range 2 {
+		if result := p.ensurePFAnchorActive(); result != pfAnchorCheckRestored {
+			t.Fatalf("wiped check result = %v, want restored", result)
+		}
+	}
+	missing := jsonLogEvents(t, logs, "PF anchor list changed")
+	if len(missing) != 1 {
+		t.Fatalf("got %d anchor list events for two wiped checks, want 1", len(missing))
+	}
+	wantField(t, missing[0], "reason", "missing")
+	wantField(t, missing[0], "level", "warn")
+	wantField(t, missing[0], "journal", true)
+
+	outputs = pfIntactAnchorRules
+	if result := p.ensurePFAnchorActive(); result != pfAnchorCheckIntact {
+		t.Fatalf("recovered check result = %v, want intact", result)
+	}
+	intact = eventsWithPrefix(t, logs, "DNS intercept watchdog: pf anchor intact")
+	if len(intact) != 2 {
+		t.Fatalf("got %d intact lines after the anchor came back, want 2", len(intact))
+	}
+	// The second wiped check repeated the state of the first one, and that held
+	// line is the count the recovered line carries.
+	wantField(t, intact[1], "repeats", float64(1))
+}
+
+// Test_logPFAnchorListReportsARestoredAnchor covers the restore report. The
+// missing event alone leaves a capture without the anchors ctrld ended with.
+func Test_logPFAnchorListReportsARestoredAnchor(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	stubPFStateCommands(t, pfStateFixtures)
+	originalReference := ensurePFAnchorReferenceForRestore
+	originalRebuild := rebuildPFAnchorRulesForReconcile
+	originalVerify := verifyPFStateFn
+	ensurePFAnchorReferenceForRestore = func(*prog) error { return nil }
+	rebuildPFAnchorRulesForReconcile = func(*prog, []vpnDNSExemption) ([]string, error) { return nil, nil }
+	verifyPFStateFn = func(*prog) bool { return true }
+	t.Cleanup(func() {
+		ensurePFAnchorReferenceForRestore = originalReference
+		rebuildPFAnchorRulesForReconcile = originalRebuild
+		verifyPFStateFn = originalVerify
+	})
+
+	p := &prog{dnsInterceptState: &pfState{}}
+	if result := p.restorePFAnchorWithTransportReset("test", false); result != pfAnchorCheckRestored {
+		t.Fatalf("restore result = %v, want restored", result)
+	}
+
+	events := jsonLogEvents(t, logs, "PF anchor list changed")
+	if len(events) != 1 {
+		t.Fatalf("got %d anchor list events for one restore, want 1", len(events))
+	}
+	wantField(t, events[0], "reason", "restored")
+	wantField(t, events[0], "level", "info")
+	wantField(t, events[0], "journal", true)
+	wantAnchors(t, events[0], []string{"com.apple/*", "com.controld.ctrld"})
+}
+
+// Test_logPFAnchorListMarksAnUnknownAnchorList covers a failed read. pfctl fails
+// on a host that revoked the privileges of ctrld, and an empty list there reads
+// as a ruleset that holds no anchor at all.
+func Test_logPFAnchorListMarksAnUnknownAnchorList(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	stubPFStateCommands(t, nil)
+
+	p := &prog{}
+	p.logPFAnchorList(pfAnchorReasonRestored, mainLog.Load().Info(), pfRuleDump{})
+
+	events := jsonLogEvents(t, logs, "PF anchor list changed")
+	if len(events) != 1 {
+		t.Fatalf("got %d anchor list events, want 1", len(events))
+	}
+	wantField(t, events[0], "anchors_known", false)
+	if _, ok := events[0]["anchors"]; ok {
+		t.Fatalf("a failed read reported an anchor list: %v", events[0])
+	}
+}
+
+// TestTunnelInterfaceChangedNamesTheOwner covers the tunnel event. The #611
+// capture could not tell a VPN tunnel from a mesh client, and the owner is the
+// field that names the program whose pf rules compete with the ctrld anchor.
+func TestTunnelInterfaceChangedNamesTheOwner(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	stubPFStateCommands(t, map[string]string{"ifconfig -v utun9": ifconfigWindscribeTunnel})
+	originalDiscover := discoverTunnelInterfacesForReconcile
+	discoverTunnelInterfacesForReconcile = func() []string { return []string{"utun9"} }
+	t.Cleanup(func() { discoverTunnelInterfacesForReconcile = originalDiscover })
+
+	p := &prog{dnsInterceptState: &pfState{}, lastTunnelIfaces: []string{"utun7"}}
+	// Stabilization owns the rebuild, so the event is all this drives.
+	p.pfStabilizing.Store(true)
+	if !p.checkTunnelInterfaceChanges() {
+		t.Fatal("the tunnel set change was not observed")
+	}
+
+	events := jsonLogEvents(t, logs, "Tunnel interface changed")
+	if len(events) != 1 {
+		t.Fatalf("got %d tunnel events for one set change, want 1", len(events))
+	}
+	wantField(t, events[0], "owner", "Windscribe VPN")
+	wantField(t, events[0], "journal", true)
+	wantStrings(t, events[0], "added", []string{"utun9"})
+	wantStrings(t, events[0], "removed", []string{"utun7"})
+
+	discovered := eventsWithPrefix(t, logs, "DNS intercept: discovered active tunnel interfaces")
+	if len(discovered) != 1 {
+		t.Fatalf("got %d discovery lines for one tunnel set, want 1", len(discovered))
+	}
+	if p.checkTunnelInterfaceChanges() {
+		t.Fatal("the identical pending tunnel set was not coalesced")
+	}
+	discovered = eventsWithPrefix(t, logs, "DNS intercept: discovered active tunnel interfaces")
+	if len(discovered) != 1 {
+		t.Fatalf("got %d discovery lines for an unchanged tunnel set, want 1", len(discovered))
+	}
+}
+
+// TestVerifyInterceptAfterWakeReportsTheWake covers the detector source of the
+// wake event. The 2026-09-14 capture has no wake line at all, and the resolver
+// table after a resume is the state the investigation needs next.
+func TestVerifyInterceptAfterWakeReportsTheWake(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	stubWakeProbeSchedule(t, 4)
+	stubStabilizationProbe(t, []bool{true}, true)
+	now := time.Date(2026, 9, 14, 7, 14, 0, 0, time.UTC)
+	originalNow := networkEventsNowFn
+	networkEventsNowFn = func() time.Time { return now }
+	t.Cleanup(func() { networkEventsNowFn = originalNow })
+
+	p := &prog{
+		dnsInterceptState: &pfState{},
+		dnsConfig:         newDNSConfigPoller(func() ([]dnsResolverEntry, error) { return nil, nil }),
+	}
+	p.verifyInterceptAfterWake(18 * time.Second)
+
+	events := jsonLogEvents(t, logs, hostWokeMessage)
+	if len(events) != 1 {
+		t.Fatalf("got %d Host woke events for one resume, want 1", len(events))
+	}
+	wantField(t, events[0], "source", "detector")
+	wantField(t, events[0], "gap_ms", float64(18000))
+	wantField(t, events[0], "journal", true)
+	if got := p.dnsConfig.nextDelay(now); got != dnsConfigFastInterval {
+		t.Fatalf("DNS configuration poll delay after a wake = %s, want %s", got, dnsConfigFastInterval)
+	}
+}
+
+func wantAnchors(t *testing.T, event map[string]any, want []string) {
+	t.Helper()
+	wantStrings(t, event, "anchors", want)
+}
+
+func wantStrings(t *testing.T, event map[string]any, field string, want []string) {
+	t.Helper()
+	values, ok := event[field].([]any)
+	if !ok {
+		t.Fatalf("field %q: got %v, want a list", field, event[field])
+	}
+	if len(values) != len(want) {
+		t.Fatalf("field %q: got %v, want %v", field, values, want)
+	}
+	for i, value := range values {
+		if value != want[i] {
+			t.Fatalf("field %q: got %v, want %v", field, values, want)
+		}
+	}
+}
+
+// TestIgnoredNetworkChangeJournalsTheInterfaceChange proves that an interface
+// that appears or disappears on the ignored path enters the journal with its
+// class and its action, so a hypervisor adapter storm is readable after the fact.
+func TestIgnoredNetworkChangeJournalsTheInterfaceChange(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	stubHeaderSnapshotSources(t)
+	stubSnapshotVirtualSet(t, "bridge101")
+	originalDiscover := discoverTunnelInterfacesForReconcile
+	discoverTunnelInterfacesForReconcile = func() []string { return nil }
+	t.Cleanup(func() { discoverTunnelInterfacesForReconcile = originalDiscover })
+
+	p := &prog{dnsInterceptState: &pfState{}, vpnDNS: newVPNDNSManager(&mainLog, nil)}
+	p.pfStabilizing.Store(true)
+	t.Cleanup(func() {
+		p.pfDelayedRecheckMu.Lock()
+		defer p.pfDelayedRecheckMu.Unlock()
+		for _, timer := range p.pfDelayedRecheckTimers {
+			if timer != nil {
+				timer.Stop()
+			}
+		}
+	})
+	stateWith := func(names ...string) *netmon.State {
+		state := &netmon.State{Interface: map[string]netmon.Interface{}}
+		for _, name := range names {
+			state.Interface[name] = netmon.Interface{Interface: &net.Interface{Name: name, Flags: net.FlagUp}}
+		}
+		return state
+	}
+	now := time.Unix(1_000_000, 0)
+
+	p.handleDNSInterceptIgnoredNetworkChange(&netmon.ChangeDelta{Old: stateWith("en0"), New: stateWith("en0", "bridge101")}, now)
+	p.handleDNSInterceptIgnoredNetworkChange(&netmon.ChangeDelta{Old: stateWith("en0", "bridge101"), New: stateWith("en0")}, now.Add(time.Second))
+
+	events := jsonLogEvents(t, logs, "DNS intercept: interface appeared/disappeared — starting interception probe monitor")
+	if len(events) != 2 {
+		t.Fatalf("interface events: got %d, want 2: %s", len(events), logs.String())
+	}
+	for i, action := range []string{"added", "removed"} {
+		wantField(t, events[i], "journal", true)
+		wantField(t, events[i], "interface", "bridge101")
+		wantField(t, events[i], "class", "virtual")
+		wantField(t, events[i], "action", action)
+	}
+}
+
+// TestTunnelInterfaceChangedLogsOncePerChange covers the retry path and the
+// flap back. The reconcile keeps a new tunnel set pending until it succeeds,
+// so every retry repeated the same event, and a set that returned to the one
+// before it reported nothing at all.
+func TestTunnelInterfaceChangedLogsOncePerChange(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	stubPFStateCommands(t, pfStateFixtures)
+	originalDiscover := discoverTunnelInterfacesForReconcile
+	originalRestore := restorePFAnchorForReconcile
+	discoverTunnelInterfacesForReconcile = func() []string { return []string{"utun7"} }
+	restorePFAnchorForReconcile = func(*prog, string) pfAnchorCheckResult { return pfAnchorCheckFailed }
+	t.Cleanup(func() {
+		discoverTunnelInterfacesForReconcile = originalDiscover
+		restorePFAnchorForReconcile = originalRestore
+	})
+
+	p := &prog{dnsInterceptState: &pfState{}, lastTunnelIfaces: []string{"utun7", "utun9"}}
+	for range 3 {
+		p.checkTunnelInterfaceChanges()
+	}
+
+	events := jsonLogEvents(t, logs, tunnelChangedMessage)
+	if len(events) != 1 {
+		t.Fatalf("got %d tunnel events for three retries of one change, want 1", len(events))
+	}
+	wantStrings(t, events[0], "removed", []string{"utun9"})
+
+	// The tunnel comes back before a reconcile applied its removal.
+	discoverTunnelInterfacesForReconcile = func() []string { return []string{"utun7", "utun9"} }
+	p.checkTunnelInterfaceChanges()
+
+	events = jsonLogEvents(t, logs, tunnelChangedMessage)
+	if len(events) != 2 {
+		t.Fatalf("got %d tunnel events after the tunnel came back, want 2", len(events))
+	}
+	wantStrings(t, events[1], "added", []string{"utun9"})
+}
+
+// TestPFAnchorWipeAfterRestoreReportsTheMissingAnchor covers the wipe that
+// follows a restore within ten seconds. That path enters stabilization instead
+// of a rebuild, and it left the journal without the wipe that caused it.
+func TestPFAnchorWipeAfterRestoreReportsTheMissingAnchor(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	stubPFStateCommands(t, pfStateFixtures)
+	stubPFAnchorCheckCommand(t, map[string]string{"-sn": ""})
+	stubStabilizationProbe(t, []bool{true}, true)
+	stopCh := make(chan struct{})
+	close(stopCh)
+
+	p := &prog{dnsInterceptState: &pfState{}, stopCh: stopCh}
+	p.pfLastRestoreTime.Store(time.Now().UnixMilli())
+
+	if result := p.ensurePFAnchorActive(); result != pfAnchorCheckDeferred {
+		t.Fatalf("wipe after restore result = %v, want deferred", result)
+	}
+	waitForStabilizationExit(t, p)
+	stopPFTestTimers(p)
+
+	events := jsonLogEvents(t, logs, pfAnchorListMessage)
+	if len(events) != 2 {
+		t.Fatalf("got %d anchor list events for one wipe, want 2", len(events))
+	}
+	wantField(t, events[0], "reason", pfAnchorReasonMissing)
+	wantField(t, events[0], "level", "warn")
+	wantField(t, events[1], "reason", pfAnchorReasonStabilizationStart)
+}
+
+// TestPFAnchorListParsesTheRulesTheCallerHolds covers the anchor read of the
+// watchdog. The watchdog already read both rule sets, and one more pair of
+// pfctl processes on the network change path is work the host does not need.
+func TestPFAnchorListParsesTheRulesTheCallerHolds(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	var reads []string
+	stubPFStateCommandFn(t, func(name string, args ...string) ([]byte, error) {
+		key := strings.Join(append([]string{name}, args...), " ")
+		reads = append(reads, key)
+		output, ok := pfStateFixtures[key]
+		if !ok {
+			return nil, fmt.Errorf("no fixture for %q", key)
+		}
+		return []byte(output), nil
+	})
+
+	p := &prog{}
+	p.logPFAnchorList(pfAnchorReasonMissing, mainLog.Load().Warn(), pfRuleDump{
+		rules: []byte(pfShowRules),
+		nat:   []byte(pfShowNAT),
+	})
+
+	if want := []string{"pfctl -si"}; !slices.Equal(reads, want) {
+		t.Fatalf("pf state reads = %v, want %v", reads, want)
+	}
+	events := jsonLogEvents(t, logs, pfAnchorListMessage)
+	if len(events) != 1 {
+		t.Fatalf("got %d anchor list events, want 1", len(events))
+	}
+	wantAnchors(t, events[0], []string{"com.apple/*", "com.controld.ctrld"})
+	wantField(t, events[0], "pf_enabled", true)
+}
+
+// TestPFAnchorListBacksOffOnExhaustedResources covers a failed anchor read.
+// Every other pfctl read feeds the backoff, so the anchor read kept starting
+// processes on a host that had none left.
+func TestPFAnchorListBacksOffOnExhaustedResources(t *testing.T) {
+	captureDebugMainLog(t)
+	stubPFStateCommandFn(t, func(string, ...string) ([]byte, error) {
+		return nil, errors.New("fork/exec /sbin/pfctl: resource temporarily unavailable")
+	})
+
+	p := &prog{}
+	p.logPFAnchorList(pfAnchorReasonRestored, mainLog.Load().Info(), pfRuleDump{})
+
+	if !p.pfExecBackoffActive() {
+		t.Fatal("a failed anchor read did not start the pfctl backoff")
+	}
+}
+
+// TestPFAnchorListMarksATruncatedRuleListUnknown covers an oversized read. A
+// reader stops at a line it cannot hold, and the anchors it collected before
+// that line read as a ruleset that lost the rest of them.
+func TestPFAnchorListMarksATruncatedRuleListUnknown(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	stubPFStateCommands(t, pfStateFixtures)
+
+	p := &prog{}
+	p.logPFAnchorList(pfAnchorReasonRestored, mainLog.Load().Info(), pfRuleDump{
+		rules: []byte(pfShowRules + strings.Repeat("a", 70<<10) + "\n"),
+		nat:   []byte(pfShowNAT),
+	})
+
+	events := jsonLogEvents(t, logs, pfAnchorListMessage)
+	if len(events) != 1 {
+		t.Fatalf("got %d anchor list events, want 1", len(events))
+	}
+	wantField(t, events[0], "anchors_known", false)
+	if _, ok := events[0]["anchors"]; ok {
+		t.Fatalf("a truncated read reported an anchor list: %v", events[0])
+	}
+}
+
+// TestPFStateOutputIsBounded covers the memory a state read can take. A pfctl
+// that prints without end must not grow the daemon.
+func TestPFStateOutputIsBounded(t *testing.T) {
+	out := &boundedBuffer{limit: 8}
+	if _, err := out.Write([]byte("12345")); err != nil {
+		t.Fatalf("write below the limit: %v", err)
+	}
+	if _, err := out.Write([]byte("67890")); err != nil {
+		t.Fatalf("write above the limit: %v", err)
+	}
+	if !out.exceeded {
+		t.Fatal("the writer did not report the dropped bytes")
+	}
+	if got := out.Len(); got > 8 {
+		t.Fatalf("the writer kept %d bytes, want at most 8", got)
+	}
 }

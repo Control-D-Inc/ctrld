@@ -259,3 +259,88 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 func (l *Logger) Printf(format string, v ...any) {
 	l.Info().Msgf(format, v...)
 }
+
+// JournalField marks an event for the retained journal stream.
+const JournalField = "journal"
+
+// Journal marks an event for the retained journal stream. The journal core
+// keeps every line that carries the field, whatever the level of the line is.
+func Journal(e *LogEvent) *LogEvent {
+	return e.Bool(JournalField, true)
+}
+
+// Time adds a time field to the event
+func (e *LogEvent) Time(key string, val time.Time) *LogEvent {
+	e.fields = append(e.fields, zap.Time(key, val))
+	return e
+}
+
+// Float64 adds a float64 field to the event
+func (e *LogEvent) Float64(key string, val float64) *LogEvent {
+	e.fields = append(e.fields, zap.Float64(key, val))
+	return e
+}
+
+// Dict starts a nested object. Dict on an event adds it under a key.
+func Dict() *LogEvent {
+	return &LogEvent{}
+}
+
+// Dict adds the fields of dict as a nested object under key
+func (e *LogEvent) Dict(key string, dict *LogEvent) *LogEvent {
+	e.fields = append(e.fields, zap.Object(key, logFields(dict.fields)))
+	return e
+}
+
+// Array adds an array field to the event
+func (e *LogEvent) Array(key string, arr *LogArray) *LogEvent {
+	e.fields = append(e.fields, zap.Array(key, arr))
+	return e
+}
+
+// logFields renders a field list as one nested object
+type logFields []zap.Field
+
+// MarshalLogObject implements zapcore.ObjectMarshaler
+func (f logFields) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	for _, field := range f {
+		field.AddTo(enc)
+	}
+	return nil
+}
+
+// LogArray holds the items of an array field. Arr starts one.
+type LogArray struct {
+	items []func(zapcore.ArrayEncoder) error
+}
+
+// Arr starts an array field. Array on an event adds it under a key.
+func Arr() *LogArray {
+	return &LogArray{}
+}
+
+// Dict appends a nested object to the array
+func (a *LogArray) Dict(dict *LogEvent) *LogArray {
+	fields := logFields(dict.fields)
+	a.items = append(a.items, func(enc zapcore.ArrayEncoder) error { return enc.AppendObject(fields) })
+	return a
+}
+
+// Str appends a string to the array
+func (a *LogArray) Str(val string) *LogArray {
+	a.items = append(a.items, func(enc zapcore.ArrayEncoder) error {
+		enc.AppendString(val)
+		return nil
+	})
+	return a
+}
+
+// MarshalLogArray implements zapcore.ArrayMarshaler
+func (a *LogArray) MarshalLogArray(enc zapcore.ArrayEncoder) error {
+	for _, item := range a.items {
+		if err := item(enc); err != nil {
+			return err
+		}
+	}
+	return nil
+}

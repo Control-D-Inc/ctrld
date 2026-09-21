@@ -35,6 +35,15 @@ func NewLogCommand() (*LogCommand, error) {
 	}, nil
 }
 
+// logRequestPath adds the query that makes the control server read every log
+// file, not only the newest debug bytes.
+func logRequestPath(path string, full bool) string {
+	if !full {
+		return path
+	}
+	return path + "?full=1"
+}
+
 // warnRuntimeLoggingNotEnabled logs a warning about runtime logging not being enabled
 func (lc *LogCommand) warnRuntimeLoggingNotEnabled() {
 	mainLog.Load().Warn().Msg("Runtime debug logging is not enabled")
@@ -59,7 +68,8 @@ func (lc *LogCommand) SendLogs(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	resp, err := lc.controlClient.post(sendLogsPath, nil)
+	full, _ := cmd.Flags().GetBool("full")
+	resp, err := lc.controlClient.post(logRequestPath(sendLogsPath, full), nil)
 	if err != nil {
 		return fmt.Errorf("failed to send logs: %w", err)
 	}
@@ -105,7 +115,8 @@ func (lc *LogCommand) ViewLogs(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	resp, err := lc.controlClient.post(viewLogsPath, nil)
+	full, _ := cmd.Flags().GetBool("full")
+	resp, err := lc.controlClient.post(logRequestPath(viewLogsPath, full), nil)
 	if err != nil {
 		return fmt.Errorf("failed to get logs: %w", err)
 	}
@@ -221,6 +232,7 @@ func InitLogCmd(rootCmd *cobra.Command) *cobra.Command {
 		},
 		RunE: lc.SendLogs,
 	}
+	logSendCmd.Flags().Bool("full", false, "Send every log file, not only the newest 10 MB of debug")
 
 	logViewCmd := &cobra.Command{
 		Use:   "view",
@@ -231,6 +243,7 @@ func InitLogCmd(rootCmd *cobra.Command) *cobra.Command {
 		},
 		RunE: lc.ViewLogs,
 	}
+	logViewCmd.Flags().Bool("full", false, "Show every log file, not only the newest 10 MB of debug")
 
 	logTailCmd := &cobra.Command{
 		Use:   "tail",

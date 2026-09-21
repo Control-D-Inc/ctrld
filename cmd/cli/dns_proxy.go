@@ -369,6 +369,8 @@ func (p *prog) processStandardQuery(req *standardQueryRequest) {
 		ctrld.Log(req.ctx, p.Debug(), "Query refused, %s does not match any network policy", remoteAddr.String())
 		answer = new(dns.Msg)
 		answer.SetRcode(req.msg, dns.RcodeRefused)
+		// The grade of the window must not depend on the goroutine below.
+		p.health.countQuery()
 		// Process the refused query
 		go p.postProcessStandardQuery(ci, req.listenerConfig, q, &proxyResponse{answer: answer, refused: true})
 	} else {
@@ -391,12 +393,14 @@ func (p *prog) processStandardQuery(req *standardQueryRequest) {
 			p.firewallRecordResolvedIPs(pr.answer, canonicalName(q.Name))
 		}
 
+		// The grade of the window must not depend on the goroutine below.
+		p.health.countQuery()
 		go p.postProcessStandardQuery(ci, req.listenerConfig, q, pr)
 		answer = pr.answer
 	}
 
 	if err := req.writer.WriteMsg(answer); err != nil {
-		ctrld.Log(req.ctx, p.Error().Err(err), "serveDNS: failed to send DNS response to client")
+		ctrld.Log(req.ctx, p.querySampler.event(sampleClassSendResponseFailed, "").Err(err), "serveDNS: failed to send DNS response to client")
 	}
 
 	ctrld.Log(req.ctx, p.Debug(), "Standard query processing completed")
@@ -761,6 +765,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 
 	if cachedRes := p.tryCache(ctx, req, upstreams); cachedRes != nil {
 		ctrld.Log(ctx, p.Debug(), "Cache hit, returning cached response")
+		p.health.countCacheHit()
 		return cachedRes
 	}
 
@@ -800,6 +805,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			if gotTransportFailure && p.vpnDNS.ShouldFailClosedAfterVPNDNSTransportFailure(domain, vpnServers) {
 				ctrld.Log(ctx, p.Debug(),
 					"All VPN DNS servers had transport failures for %s; returning SERVFAIL while retained VPN DNS state is active", domain)
+				p.countFailedClientQuery(upstreams)
 				answer := new(dns.Msg)
 				answer.SetRcode(req.msg, dns.RcodeServerFailure)
 				return &proxyResponse{answer: answer, cached: false}
@@ -859,6 +865,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			if !gotDNSAnswer && gotTransportFailure && p.vpnDNS.ShouldFailClosedAfterVPNDNSTransportFailure(domain, dlServers) {
 				ctrld.Log(ctx, p.Debug(),
 					"All domain-less VPN DNS servers had transport failures for %s; returning SERVFAIL while retained VPN DNS state is active", domain)
+				p.countFailedClientQuery(upstreams)
 				answer := new(dns.Msg)
 				answer.SetRcode(req.msg, dns.RcodeServerFailure)
 				return &proxyResponse{answer: answer, cached: false}
@@ -964,6 +971,7 @@ func (p *prog) updateCache(ctx context.Context, req *proxyRequest, answer *dns.M
 // serveStaleResponse serves a stale cached DNS response when an upstream query fails, updating TTL for cached records.
 func (p *prog) serveStaleResponse(ctx context.Context, staleAnswer *dns.Msg) *proxyResponse {
 	ctrld.Log(ctx, p.Debug(), "Serving stale cached response")
+	p.health.countCacheHit()
 	now := time.Now()
 	setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
 	return &proxyResponse{answer: staleAnswer, cached: true}
@@ -971,7 +979,7 @@ func (p *prog) serveStaleResponse(ctx context.Context, staleAnswer *dns.Msg) *pr
 
 // handleAllUpstreamsFailure handles the failure scenario when all upstream resolvers fail to respond or process the request.
 func (p *prog) handleAllUpstreamsFailure(ctx context.Context, req *proxyRequest, upstreams []string) *proxyResponse {
-	ctrld.Log(ctx, p.Error(), "All %v endpoints failed", upstreams)
+	ctrld.Log(ctx, p.querySampler.event(sampleClassAllEndpointsFailed, ""), "All %v endpoints failed", journalUpstreamNames(upstreams))
 
 	// An unavailable internal resolver must not trigger endpoint-wide recovery
 	// or send the private name through the OS-resolver catch-all.
@@ -996,9 +1004,21 @@ func (p *prog) handleAllUpstreamsFailure(ctx context.Context, req *proxyRequest,
 	}
 
 	ctrld.Log(ctx, p.Debug(), "Returning server failure response")
+	p.countFailedClientQuery(upstreams)
 	answer := new(dns.Msg)
 	answer.SetRcode(req.msg, dns.RcodeServerFailure)
 	return &proxyResponse{answer: answer}
+}
+
+// countFailedClientQuery grades one client query that ended without an answer.
+// A query that only Internal Domain resolvers serve stays out of the grade: an
+// endpoint away from the organization network never reaches them, and that is
+// not an outage of the query path.
+func (p *prog) countFailedClientQuery(upstreams []string) {
+	if internalDomainExplicitUpstreams(upstreams) {
+		return
+	}
+	p.health.countFailedQuery()
 }
 
 // shouldContinueWithNextUpstream determines whether processing should continue with the next upstream based on response conditions.
@@ -1176,21 +1196,22 @@ func (p *prog) queryUpstream(ctx context.Context, req *proxyRequest, upstream st
 	answer, err := dnsResolver.Resolve(resolveCtx, req.msg)
 	if answer != nil {
 		ctrld.Log(ctx, p.Debug(), "Upstream resolution successful")
-		p.um.mu.Lock()
-		p.um.failureReq[upstream] = 0
-		p.um.down[upstream] = false
-		p.um.mu.Unlock()
+		// reset is not used here, because it also stops the failure count for
+		// one second, and the failures already in flight must still count.
+		p.um.noteSuccess(upstream)
 		return answer
 	}
 
+	// A failing minute must not push the state events out of the retained log,
+	// so the sampler sets the level of these lines.
 	// Transport errors contain the organization's private resolver address.
 	// Keep that detail at debug while retaining a visible failure classification.
 	if isInternalDomainUpstream(upstream) {
 		ctrld.Log(ctx, p.Debug().Err(err), "Failed to resolve query")
-		ctrld.Log(ctx, p.Error().Str("failure", internalDomainFailureReason(err)),
+		ctrld.Log(ctx, p.querySampler.event(sampleClassInternalDomain, upstream).Str("failure", internalDomainFailureReason(err)),
 			"Failed to resolve query using an Internal Domain resolver")
 	} else {
-		ctrld.Log(ctx, p.Error().Err(err), "Failed to resolve query")
+		ctrld.Log(ctx, p.querySampler.event(sampleClassResolveFailed, upstream).Err(err), "Failed to resolve query")
 	}
 	// Increasing the failure count when there is no answer regardless of what kind of error we get
 	p.um.increaseFailureCount(upstream)
@@ -1866,12 +1887,66 @@ func (p *prog) handleNetworkChange(ctx context.Context, delta *netmon.ChangeDelt
 	// delta.Major flag after a time jump does not change the cache.
 	p.networkSourceMu.Lock()
 	currentState := networkChangeCurrentStateFn(delta)
-	if !networkSnapshotCurrent(delta, isMajorChange, currentState) {
+	current := networkSnapshotCurrent(delta, isMajorChange, currentState)
+	if delta.TimeJumped {
+		// A late callback still tells that the host woke, but the network of
+		// the wake is the one that netmon holds now.
+		wakeState := delta.New
+		if !current {
+			wakeState = currentState
+		}
+		p.noteHostWoke("netmon", 0, wakeState)
+	}
+	// Only a current callback becomes the baseline of the next diff. A late
+	// callback that a newer snapshot replaced would hide the changes between
+	// the callback before it and the callback after it.
+	before := p.deltaBeforeState(delta, currentState, current, isMajorChange)
+	changes := diffNetworkDelta(before, delta.New)
+	if current && hasAddOrRemove(changes) {
+		refreshInterfaceMeta()
+	}
+	// The noise test runs before any other work, because the point of the class
+	// is that a storm starts no pfctl and no scutil process.
+	if current && noiseDelta(before, delta.New, delta.TimeJumped, changes) {
 		p.networkSourceMu.Unlock()
-		p.logger.Load().Debug().Msg("Network transition skipped: snapshot superseded")
+		p.noteNoiseDelta(changes)
 		return
 	}
-	transitionID := p.networkTransitionGen.Add(1)
+	// A superseded snapshot never becomes a transition, so it takes no ID and
+	// reports zero.
+	var transitionID uint64
+	changed := false
+	changedInterface := ""
+	sourceSnapshotAvailable := false
+	before4, before6 := ctrld.GetDefaultLocalIPv4(), ctrld.GetDefaultLocalIPv6()
+	after4, after6 := before4, before6
+	// The newer callback of this epoch carries the same interface changes, so
+	// this outcome reports at debug and stays out of the journal.
+	outcome := transitionOutcomeSnapshotSuperseded
+	defer func() {
+		stateBefore, stateAfter := networkStateOrEmpty(before), networkStateOrEmpty(delta.New)
+		networkTransitionEvent(outcome).Uint64("transition_id", transitionID).
+			Bool("is_major_change", isMajorChange).Bool("changed", changed).
+			Str("interface", changedInterface).
+			Strs("changed_interfaces", changedInterfaceNames(changes)).
+			Bool("time_jumped", delta.TimeJumped).
+			Str("default_route_before", stateBefore.DefaultRouteInterface).
+			Str("default_route_after", stateAfter.DefaultRouteInterface).
+			Bool("have_v4_before", stateBefore.HaveV4).Bool("have_v4_after", stateAfter.HaveV4).
+			Bool("have_v6_before", stateBefore.HaveV6).Bool("have_v6_after", stateAfter.HaveV6).
+			Str("source_ipv4_before", before4.String()).Str("source_ipv6_before", before6.String()).
+			Str("source_ipv4_after", after4.String()).
+			Str("source_ipv6_after", after6.String()).
+			Bool("source_snapshot_available", sourceSnapshotAvailable).Str("outcome", outcome).
+			Msg(networkTransitionMessage)
+	}()
+	if !current {
+		p.networkSourceMu.Unlock()
+		return
+	}
+	p.flushNoiseSummary()
+	outcome = transitionOutcomeIgnored
+	transitionID = p.networkTransitionGen.Add(1)
 	sourceState := delta.New
 	// A late major callback and reordered minor callbacks share one cache
 	// epoch. For these cases, source validity comes from the OS, not ordering.
@@ -1895,29 +1970,25 @@ func (p *prog) handleNetworkChange(ctx context.Context, delta *netmon.ChangeDelt
 		}
 	}
 	p.networkSourceState, p.networkSourceEpoch = sourceState, currentState
-	sourceSnapshotAvailable := sourceState != nil
-	before4, before6 := ctrld.GetDefaultLocalIPv4(), ctrld.GetDefaultLocalIPv6()
+	sourceSnapshotAvailable = sourceState != nil
 	validateDefaultLocalIPsFromDelta(ctrld.LoggerCtx(ctx, p.logger.Load()), sourceState, transitionID)
-	after4, after6 := ctrld.GetDefaultLocalIPv4(), ctrld.GetDefaultLocalIPv6()
+	after4, after6 = ctrld.GetDefaultLocalIPv4(), ctrld.GetDefaultLocalIPv6()
+	// The network of this callback belongs to the epoch that the lines above
+	// store. A store after the unlock can overwrite the network of a newer
+	// callback. The header render reads the hardware ports, so it runs after
+	// the unlock and starts no process under the lock.
+	p.lastNetworkState.Store(currentState)
+	// HasIPv6 reads the flag that this callback stores, so one monitor serves
+	// the whole process.
+	ctrld.SetIPv6Available(currentState.HaveV6)
 	p.networkSourceMu.Unlock()
+	p.refreshLogHeader()
+	describeInterfaceChanges(changes, interfaceMetaFor)
+	logInterfaceChanges(transitionID, changes)
 
 	p.handleDNS64NetworkChange(delta, isMajorChange)
 	validIfaces := networkChangeValidInterfacesFn(ctrld.LoggerCtx(ctx, p.logger.Load()))
 
-	changed := false
-	changedInterface := ""
-	outcome := "ignored"
-	defer func() {
-		p.logger.Load().Debug().Uint64("transition_id", transitionID).
-			Bool("is_major_change", isMajorChange).Bool("changed", changed).
-			Str("interface", changedInterface).
-			Str("default_route_before", delta.Old.DefaultRouteInterface).
-			Str("default_route_after", delta.New.DefaultRouteInterface).
-			Str("source_ipv4_before", before4.String()).Str("source_ipv6_before", before6.String()).
-			Str("source_ipv4_after", after4.String()).
-			Str("source_ipv6_after", after6.String()).
-			Bool("source_snapshot_available", sourceSnapshotAvailable).Str("outcome", outcome).Msg("Network transition")
-	}()
 	activeInterfaceExists := false
 	var changeIPs []netip.Prefix
 	// Check each valid interface for changes
@@ -1937,6 +2008,9 @@ func (p *prog) handleNetworkChange(ctx context.Context, delta *netmon.ChangeDelt
 			// The interface is new (was not present in the old state).
 			usableNewIPs := filterUsableIPs(newIPs)
 			if newIface.IsUp() && len(usableNewIPs) > 0 {
+				// The new interface is the active one, or the change ends as
+				// no_active_interface and nothing reconciles.
+				activeInterfaceExists = true
 				changed = true
 				changeIPs = usableNewIPs
 				changedInterface = ifaceName
@@ -2092,6 +2166,10 @@ func (p *prog) handleNetworkChange(ctx context.Context, delta *netmon.ChangeDelt
 
 	outcome = "accepted"
 	networkChangeReconcileFn(p, ctx, transitionID)
+	p.logNetworkSnapshot("transition")
+	if p.dnsConfig != nil {
+		p.dnsConfig.noteActivity(networkEventsNowFn())
+	}
 }
 
 // reconcileNetworkChange is the first DNS/PF mutation boundary after source updates.
@@ -2152,32 +2230,16 @@ func (p *prog) handleDNSInterceptIgnoredNetworkChange(delta *netmon.ChangeDelta,
 	// Spawn an async monitor that probes pf interception with backoff and forces
 	// a full pf reload if broken.
 	if delta.Old != nil {
-		interfaceChanged := false
-		var changedIface string
-		for ifaceName := range delta.Old.Interface {
-			if ifaceName == "lo0" {
-				continue
-			}
-			if _, exists := delta.New.Interface[ifaceName]; !exists {
-				interfaceChanged = true
-				changedIface = ifaceName
-				break
-			}
+		changedAction := "removed"
+		changedIface := interfaceOnlyIn(delta.Old.Interface, delta.New.Interface)
+		if changedIface == "" {
+			changedAction = "added"
+			changedIface = interfaceOnlyIn(delta.New.Interface, delta.Old.Interface)
 		}
-		if !interfaceChanged {
-			for ifaceName := range delta.New.Interface {
-				if ifaceName == "lo0" {
-					continue
-				}
-				if _, exists := delta.Old.Interface[ifaceName]; !exists {
-					interfaceChanged = true
-					changedIface = ifaceName
-					break
-				}
-			}
-		}
-		if interfaceChanged {
-			mainLog.Load().Info().Str("interface", changedIface).
+		if changedIface != "" {
+			journal(mainLog.Load().Info()).Str("interface", changedIface).
+				Str("class", interfaceMetaFor(changedIface).Class).
+				Str("action", changedAction).
 				Msg("DNS intercept: interface appeared/disappeared — starting interception probe monitor")
 			go p.pfInterceptMonitor()
 			// A VM/container bridge appearing/disappearing changes the effective
@@ -2195,6 +2257,20 @@ func (p *prog) handleDNSInterceptIgnoredNetworkChange(delta *netmon.ChangeDelta,
 	if p.vpnDNS != nil && (reconcileNow || tunnelChanged) && !p.pfStabilizing.Load() {
 		p.vpnDNS.Refresh(ctrld.LoggerCtx(context.Background(), p.logger.Load()), true)
 	}
+}
+
+// interfaceOnlyIn names one interface that have holds and lack does not. The
+// loopback stays out, because it never appears and never goes away.
+func interfaceOnlyIn(have, lack map[string]netmon.Interface) string {
+	for name := range have {
+		if name == "lo0" {
+			continue
+		}
+		if _, exists := lack[name]; !exists {
+			return name
+		}
+	}
+	return ""
 }
 
 // interfaceStatesEqual compares two interface states
@@ -2247,15 +2323,30 @@ func interfaceIPsEqual(a, b []netip.Prefix) bool {
 
 var errOsHealthcheckSuppressed = errors.New("upstream os health check suppressed")
 
+// upstreamFailureLog keeps one error line for each upstream of one recovery
+// pass. The pass retries every two seconds until the upstream answers, and the
+// first line already names the fault, so the failures that follow it go to
+// debug.
+type upstreamFailureLog struct{ reported bool }
+
+// report logs one failed check of upstream.
+func (l *upstreamFailureLog) report(p *prog, upstream string, uc *ctrld.UpstreamConfig, err error, duration time.Duration) {
+	level := p.Error
+	if l.reported {
+		level = p.Debug
+	}
+	l.reported = true
+	p.logUpstreamProbeFailure(upstream, uc, err, level, "Upstream check failed after %v", duration)
+}
+
 // checkUpstreamOnce sends a test query to the specified upstream.
 // Returns nil if the upstream responds successfully.
-func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) error {
+func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig, failures *upstreamFailureLog) error {
 	p.Debug().Msgf("Starting check for upstream: %s", upstream)
 
 	resolver, err := ctrld.NewResolver(ctrld.LoggerCtx(context.Background(), p.logger.Load()), uc)
 	if err != nil {
-		p.logUpstreamProbeFailure(isGeneratedInternalDomainUpstreamRef(upstream, uc), uc, err,
-			p.Error, "Failed to create resolver for upstream %s", upstream)
+		p.logUpstreamProbeFailure(upstream, uc, err, p.Error, "Failed to create resolver")
 		return err
 	}
 
@@ -2294,8 +2385,7 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 			p.Debug().Err(err).Msgf("Upstream %s check failed after %v (network unreachable)", upstream, duration)
 			return err
 		}
-		p.logUpstreamProbeFailure(isGeneratedInternalDomainUpstreamRef(upstream, uc), uc, err,
-			p.Error, "Upstream %s check failed after %v", upstream, duration)
+		failures.report(p, upstream, uc, err, duration)
 		return err
 	}
 	p.Debug().Msgf("Upstream %s responded successfully in %v", upstream, duration)
@@ -2313,6 +2403,10 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig) erro
 // into a single recovery pass, avoiding the cancel-and-restart race that
 // leaves DoH transports in a stale state.
 const recoveryDebounceWindow = 500 * time.Millisecond
+
+// recoveryResolverReason names this flow in the OS resolver events, so a
+// reader tells a resolver read of the recovery from every other read.
+const recoveryResolverReason = "recovery"
 
 // debounceRecovery schedules a handleRecovery(NetworkChange) call after a debounce
 // window. If called again before the window expires, the timer is reset so that
@@ -2347,6 +2441,48 @@ func (p *prog) debounceRecovery(transitionID uint64) {
 	p.Debug().Msg("Recovery debounce: scheduled (500ms window)")
 }
 
+// endRecovery closes one recovery pass. Support reads the end event and the
+// snapshot that follows it to learn what the recovery left behind.
+func (p *prog) endRecovery(diagnostic *recoveryDiagnostic, outcome, targetBefore string) {
+	// A superseded pass changed nothing that it owns any more. Its successor
+	// owns the loopback target and the bypass flag, so reading them here would
+	// report the state of the successor.
+	if outcome == recoveryOutcomeSuperseded {
+		diagnostic.interceptTargetAction = interceptTargetActionUnchanged
+		diagnostic.bypassActive = false
+	} else {
+		diagnostic.interceptTargetAction = interceptTargetAction(targetBefore, p.interceptTargetSnapshot())
+		diagnostic.bypassActive = p.recoveryBypass.Load()
+	}
+	diagnostic.end(outcome)
+	p.logNetworkSnapshot("recovery_end")
+	// The resolver table of the host settles after the recovery, so the poll
+	// stays fast until it does.
+	if p.dnsConfig != nil {
+		p.dnsConfig.noteActivity(networkEventsNowFn())
+	}
+}
+
+// The actions that one recovery takes on the loopback DNS target.
+const (
+	interceptTargetActionUnchanged = "unchanged"
+	interceptTargetActionRemoved   = "removed"
+	interceptTargetActionSet       = "set"
+)
+
+// interceptTargetAction names what one recovery did to the loopback DNS
+// target. The target value alone does not say whether this pass wrote it.
+func interceptTargetAction(before, after string) string {
+	switch {
+	case before == after:
+		return interceptTargetActionUnchanged
+	case after == "":
+		return interceptTargetActionRemoved
+	default:
+		return interceptTargetActionSet
+	}
+}
+
 func (p *prog) handleRecovery(reason RecoveryReason) {
 	p.handleRecoveryForTransition(reason, 0)
 }
@@ -2367,9 +2503,11 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		return
 	}
 	diagnostic := recoveryDiagnostic{logger: p.logger.Load(), transitionID: transitionID, generation: gen, reason: reason, started: time.Now()}
-	diagnostic.event(p.logger.Load().Debug()).Bool("intercept", interceptRecovery).Msg("Recovery begin")
-	outcome := "superseded"
-	defer func() { diagnostic.end(outcome) }()
+	journal(diagnostic.event(p.logger.Load().Info())).Bool("intercept", interceptRecovery).Msg("Recovery begin")
+	p.logNetworkSnapshot("recovery_begin")
+	targetBefore := p.interceptTargetSnapshot()
+	outcome := recoveryOutcomeSuperseded
+	defer func() { p.endRecovery(&diagnostic, outcome, targetBefore) }()
 	if reason == RecoveryReasonNetworkChange {
 		p.logger.Load().Debug().Msg("Network change recovery now owns shared recovery state")
 	}
@@ -2391,26 +2529,34 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		p.Info().Msg("Force-reset upstream transports for network change recovery")
 	}
 
-	if err := p.prepareForRecovery(reason, interceptRecovery); err != nil {
+	if err := p.prepareForRecovery(reason, interceptRecovery, &diagnostic); err != nil {
 		p.Error().Err(err).Msg("Failed to prepare for recovery")
+		outcome = recoveryOutcomeFailed
 		p.recoveryCanceledCleanup(gen)
 		return
 	}
 
 	upstreams := p.buildRecoveryUpstreams(reason)
-	recovered, err := p.waitForUpstreamRecovery(recoveryCtx, upstreams, &diagnostic)
+	recovered, err := waitForUpstreamRecoveryFn(p, recoveryCtx, upstreams, &diagnostic)
 	if err != nil {
 		if p.recoveryOwnsState(gen) {
-			outcome = "canceled"
+			outcome = recoveryOutcomeCanceled
 		}
 		p.recoveryCanceledCleanup(gen)
 		return
 	}
+	diagnostic.recoveredUpstream = recovered
 	if !p.recoveryOwnsState(gen) {
 		p.Debug().Msgf("Recovery generation %d was superseded after upstream success; skipping stale completion", gen)
 		return
 	}
 
+	// The reset ends the outage, so the down time is read before it. The name
+	// of the line is bounded, because an upstream key is operator text.
+	journalName := journalUpstreamName(recovered)
+	journal(p.Info()).Str("upstream", journalName).
+		Int64("down_for_ms", p.um.downFor(recovered).Milliseconds()).
+		Msgf("Upstream %q recovered; re-applying DNS settings", journalName)
 	if err := p.completeRecoveryWork(reason, recovered, interceptRecovery); err != nil {
 		p.Error().Err(err).Msg("Failed to complete recovery")
 		p.recoveryCanceledCleanup(gen)
@@ -2421,29 +2567,36 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		return
 	}
 
-	outcome = "completed"
-	p.Info().Msgf("Recovery completed successfully for upstream %q", recovered)
+	outcome = recoveryOutcomeCompleted
+	if interceptRecovery {
+		journal(p.Info()).Msg("DNS intercept recovery complete: disabling DHCP bypass, resuming normal flow")
+	}
+	p.Info().Msgf("Recovery completed successfully for upstream %q", journalName)
 }
 
 // prepareForRecovery removes DNS settings and initializes OS resolver if needed.
-func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool) error {
+func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool, diagnostic *recoveryDiagnostic) error {
 	// In DNS intercept mode, don't tear down WFP/pf filters.
 	// Instead, enable recovery bypass so proxy() forwards queries to
 	// the OS/DHCP resolver. This handles captive portal authentication
 	// without the overhead of filter teardown/rebuild.
 	if interceptRecovery {
-		p.Info().Msg("DNS intercept recovery: enabling DHCP bypass (filters stay active)")
+		journal(p.Info()).Msg("DNS intercept recovery: enabling DHCP bypass (filters stay active)")
 
 		// Reinitialize OS resolver to discover DHCP servers on the new network.
 		// This is critical for captive portals — we need the network's DNS servers
 		// to resolve the auth page.
 		p.Debug().Msg("DNS intercept recovery: discovering DHCP nameservers")
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-		dhcpServers, systemNameservers := initializeOsResolverWithSystemNameserversFn(loggerCtx, true)
-		if len(dhcpServers) == 0 {
-			p.Warn().Msg("DNS intercept recovery: no DHCP nameservers found")
+		// The effective list adds a synthetic public resolver when the network
+		// gave none, so the journal reports the discovered list instead.
+		resolverNameservers, systemNameservers := initializeOsResolverWithSystemNameserversFn(loggerCtx, true, recoveryResolverReason)
+		diagnostic.dhcpServers = systemNameservers
+		if len(systemNameservers) == 0 {
+			journal(p.Warn()).Msg("DNS intercept recovery: no DHCP nameservers found")
 		} else {
-			p.Info().Msgf("DNS intercept recovery: found DHCP nameservers: %v", dhcpServers)
+			journal(p.Info()).Strs("dhcp_servers", systemNameservers).
+				Msgf("DNS intercept recovery: found DHCP nameservers: %v", systemNameservers)
 		}
 
 		ensureInterceptDNSTargetFn(p, systemNameservers)
@@ -2451,17 +2604,18 @@ func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool)
 		// Exempt DHCP nameservers from intercept filters so the OS resolver
 		// can actually reach them on port 53. Without this, the WFP block
 		// or pf redirect would intercept ctrld's own recovery queries.
-		if len(dhcpServers) > 0 {
+		// The OS resolver queries the effective list, so the exemptions follow it.
+		if len(resolverNameservers) > 0 {
 			// Strip :53 port suffix if present (exemptVPNDNSServers expects bare IPs).
 			var dhcpExemptions []vpnDNSExemption
-			for _, s := range dhcpServers {
+			for _, s := range resolverNameservers {
 				host := s
 				if h, _, err := net.SplitHostPort(s); err == nil {
 					host = h
 				}
 				dhcpExemptions = append(dhcpExemptions, vpnDNSExemption{Server: host})
 			}
-			p.Info().Msgf("DNS intercept recovery: exempting DHCP nameservers from filters: %v", dhcpServers)
+			p.Info().Msgf("DNS intercept recovery: exempting DHCP nameservers from filters: %v", resolverNameservers)
 			if err := p.exemptVPNDNSServers(dhcpExemptions); err != nil {
 				p.Warn().Err(err).Msg("DNS intercept recovery: failed to exempt DHCP nameservers — recovery queries may fail")
 			}
@@ -2490,11 +2644,11 @@ func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool)
 func (p *prog) reinitializeOSResolver(message string) error {
 	p.Debug().Msg(message)
 	loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-	ns := ctrld.InitializeOsResolver(loggerCtx, true)
+	ns := ctrld.InitializeOsResolverWithReason(loggerCtx, true, recoveryResolverReason)
 	if len(ns) == 0 {
 		p.Warn().Msg("No nameservers found for OS resolver; using existing values")
 	} else {
-		p.Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+		journal(p.Info()).Msgf("Reinitialized OS resolver with nameservers: %v", ns)
 	}
 	return nil
 }
@@ -2528,10 +2682,15 @@ func (p *prog) completeRecoveryWork(reason RecoveryReason, recovered string, int
 		}
 	}
 
+	// Apply our DNS settings back. The snapshot that follows the end event
+	// reports the interfaces.
 	p.setDNS(systemNameservers)
-	p.logInterfacesState()
 	return nil
 }
+
+// waitForUpstreamRecoveryFn is the seam of the upstream probe. A test drives
+// the whole recovery flow without a query to a real upstream.
+var waitForUpstreamRecoveryFn = (*prog).waitForUpstreamRecovery
 
 // waitForUpstreamRecovery checks the provided upstreams concurrently until one recovers.
 // It returns the name of the recovered upstream or an error if the check times out.
@@ -2551,6 +2710,7 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 			p.Debug().Msgf("Starting recovery check loop for upstream: %s", name)
 			attempts := 0
 			unreachableStreak := 0
+			var failures upstreamFailureLog
 			for {
 				select {
 				case <-recoveryCtx.Done():
@@ -2559,7 +2719,7 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 				default:
 					attempts++
 					// checkUpstreamOnce will reset any failure counters on success.
-					err := p.checkUpstreamOnce(name, uc)
+					err := p.checkUpstreamOnce(name, uc, &failures)
 					if err == nil || errors.Is(err, errOsHealthcheckSuppressed) {
 						p.Debug().Msgf("Upstream %s recovered successfully", name)
 						select {
@@ -2595,11 +2755,11 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 					// we should try to reinit the OS resolver to ensure we can recover
 					if name == upstreamOS && attempts%3 == 0 {
 						p.Debug().Msgf("UpstreamOS check failed on attempt %d, reinitializing OS resolver", attempts)
-						ns := ctrld.InitializeOsResolver(ctrld.LoggerCtx(ctx, p.logger.Load()), true)
+						ns := ctrld.InitializeOsResolverWithReason(ctrld.LoggerCtx(ctx, p.logger.Load()), true, recoveryResolverReason)
 						if len(ns) == 0 {
 							p.Warn().Msg("No nameservers found for OS resolver; using existing values")
 						} else {
-							p.Info().Msgf("Reinitialized OS resolver with nameservers: %v", ns)
+							journal(p.Info()).Msgf("Reinitialized OS resolver with nameservers: %v", ns)
 						}
 					}
 				}

@@ -249,6 +249,13 @@ The monitor probes with exponential backoff (0, 0.5, 1, 2, 4s) to win the race
 against async pf reloads. Only one monitor runs at a time (singleton). The
 watchdog also runs the probe every 30s as a safety net.
 
+A network delta that touches AirDrop or virtual adapters alone is noise. The
+handler returns at once for it, so no probe monitor starts and no pf read runs.
+A delta that moves the default route, that flips the v4 or the v6 family, or
+that carries a time jump is not noise, whatever its interfaces are.
+The watchdog keeps its own 30 s cadence, so it still tests the rules during a
+delta storm.
+
 The full pf reload is VPN-safe: it reassembles from `pfctl -sr` + `pfctl -sn`
 (the current running state), preserving all existing anchors and rules.
 

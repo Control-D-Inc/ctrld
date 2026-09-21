@@ -433,22 +433,25 @@ func isGeneratedInternalDomainUpstreamRef(upstream string, uc *ctrld.UpstreamCon
 	return isGeneratedInternalDomainUpstream(strings.TrimPrefix(upstream, upstreamPrefix), uc)
 }
 
-// logUpstreamProbeFailure reports a background probe failure against an
-// upstream.
+// logUpstreamProbeFailure reports a background probe failure against the
+// upstream that the reference upstream names.
 //
 // Loop checking and recovery checking run on timers, so for a generated
 // Internal Domain resolver they would publish the organization's private
-// address without any user ever querying the domain. They get the same
-// treatment as a query failure: endpoint and the address-bearing error at
-// debug, a classification above it, so the outcome stays visible while the
-// address does not.
-func (p *prog) logUpstreamProbeFailure(generated bool, uc *ctrld.UpstreamConfig, err error, level func() *ctrld.LogEvent, format string, args ...any) {
+// address without any user ever querying the domain. The name and the
+// endpoint of any upstream are operator text that can hold a token, so both
+// stay on the debug line. The leveled line names the upstream by its bounded
+// name, so the outcome stays visible while the operator text does not. A
+// generated Internal Domain resolver also trades the address-bearing error
+// for a classification.
+func (p *prog) logUpstreamProbeFailure(upstream string, uc *ctrld.UpstreamConfig, err error, level func() *ctrld.LogEvent, format string, args ...any) {
 	detail := append([]any{}, args...)
-	if !generated {
-		level().Err(err).Msgf(format+" for upstream: %q, endpoint: %q", append(detail, uc.Name, uc.Endpoint)...)
+	p.Debug().Err(err).Msgf(format+" for upstream: %q, endpoint: %q", append(detail, uc.Name, uc.Endpoint)...)
+	event := level().Str("upstream", journalUpstreamName(upstream))
+	if !isGeneratedInternalDomainUpstreamRef(upstream, uc) {
+		event.Err(err).Msgf(format, detail...)
 		return
 	}
-	p.Debug().Err(err).Msgf(format+" for upstream: %q, endpoint: %q", append(detail, uc.Name, uc.Endpoint)...)
-	level().Str("failure", internalDomainFailureReason(err)).
+	event.Str("failure", internalDomainFailureReason(err)).
 		Msgf(format+" for an Internal Domain resolver", detail...)
 }

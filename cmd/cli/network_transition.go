@@ -49,32 +49,69 @@ func readNetworkSourceState() (*netmon.State, error) {
 	if err != nil {
 		return nil, err
 	}
+	return networkSourceState(interfaces, (*net.Interface).Addrs)
+}
+
+// networkSourceState builds the state of the given interfaces. The address
+// reader is a parameter, so a test feeds addresses without a host network.
+func networkSourceState(interfaces []net.Interface, addressesOf func(*net.Interface) ([]net.Addr, error)) (*netmon.State, error) {
 	state := &netmon.State{Interface: map[string]netmon.Interface{}, InterfaceIPs: map[string][]netip.Prefix{}}
 	for _, iface := range interfaces {
-		addresses, err := iface.Addrs()
+		addresses, err := addressesOf(&iface)
 		if err != nil {
 			return nil, err
 		}
 		state.Interface[iface.Name] = netmon.Interface{Interface: &iface}
 		for _, address := range addresses {
-			var ip net.IP
-			switch address := address.(type) {
-			case *net.IPNet:
-				ip = address.IP
-			case *net.IPAddr:
-				ip = address.IP
-			default:
-				return nil, errors.New("unsupported interface address type")
+			prefix, err := interfaceAddressPrefix(address)
+			if err != nil {
+				return nil, err
 			}
-			addr, ok := netip.AddrFromSlice(ip)
-			if !ok {
-				return nil, errors.New("invalid interface address")
-			}
-			addr = addr.Unmap()
-			state.InterfaceIPs[iface.Name] = append(state.InterfaceIPs[iface.Name], netip.PrefixFrom(addr, addr.BitLen()))
+			state.InterfaceIPs[iface.Name] = append(state.InterfaceIPs[iface.Name], prefix)
 		}
 	}
 	return state, nil
+}
+
+// interfaceAddressPrefix turns one interface address into a prefix. An address
+// with a subnet mask keeps the mask and its host bits, so a fresh state shows
+// the same /24 or /64 as the network monitor. An address without a mask is a
+// host prefix.
+func interfaceAddressPrefix(address net.Addr) (netip.Prefix, error) {
+	var ip net.IP
+	var mask net.IPMask
+	switch address := address.(type) {
+	case *net.IPNet:
+		ip, mask = address.IP, address.Mask
+	case *net.IPAddr:
+		ip = address.IP
+	default:
+		return netip.Prefix{}, errors.New("unsupported interface address type")
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return netip.Prefix{}, errors.New("invalid interface address")
+	}
+	addr = addr.Unmap()
+	return netip.PrefixFrom(addr, prefixBits(addr, mask)), nil
+}
+
+// prefixBits reads the length of a mask for an unmapped address. The mask of
+// an IPv4 address is 4 or 16 bytes long, and a 16-byte mask counts the 96
+// bits of the IPv6 mapping too. A missing or irregular mask means a host
+// prefix.
+func prefixBits(addr netip.Addr, mask net.IPMask) int {
+	bits, total := mask.Size()
+	if total == 0 {
+		return addr.BitLen()
+	}
+	if addr.Is4() && total == 128 {
+		bits -= 96
+	}
+	if bits < 0 || bits > addr.BitLen() {
+		return addr.BitLen()
+	}
+	return bits
 }
 
 // netmon v1.74.0 caches only major snapshots. Minor and time-jump events
@@ -154,6 +191,13 @@ type recoveryDiagnostic struct {
 	started      time.Time
 	firstFailure sync.Once
 	failed       atomic.Bool
+
+	// The flow fills these while it runs. The end event reports them, so one
+	// journal line tells what the recovery found and what it changed.
+	recoveredUpstream     string
+	dhcpServers           []string
+	interceptTargetAction string
+	bypassActive          bool
 }
 
 func recoveryReasonName(reason RecoveryReason) string {
@@ -192,12 +236,36 @@ func (d *recoveryDiagnostic) failure(err error) {
 	})
 }
 
+// The outcomes that one recovery pass ends with.
+const (
+	recoveryOutcomeCompleted  = "completed"
+	recoveryOutcomeCanceled   = "canceled"
+	recoveryOutcomeSuperseded = "superseded"
+	recoveryOutcomeFailed     = "failed"
+)
+
+// journalRecoveredUpstream bounds the upstream name of the end event. An empty
+// name means that no upstream recovered, so it stays empty.
+func journalRecoveredUpstream(upstream string) string {
+	if upstream == "" {
+		return ""
+	}
+	return journalUpstreamName(upstream)
+}
+
 func (d *recoveryDiagnostic) end(outcome string) {
-	e := d.log().Debug()
-	if outcome == "canceled" || d.failed.Load() {
+	e := d.log().Info()
+	if outcome == recoveryOutcomeCanceled || outcome == recoveryOutcomeFailed || d.failed.Load() {
 		e = d.log().Warn()
 	}
-	d.event(e).Str("outcome", outcome).Bool("had_failure", d.failed.Load()).Int64("duration_ms", time.Since(d.started).Milliseconds()).Msg("Recovery end")
+	journal(d.event(e)).Str("outcome", outcome).Bool("had_failure", d.failed.Load()).
+		Int64("duration_ms", time.Since(d.started).Milliseconds()).
+		Str("recovered_upstream", journalRecoveredUpstream(d.recoveredUpstream)).
+		Strs("dhcp_servers", d.dhcpServers).
+		Int("dhcp_server_count", len(d.dhcpServers)).
+		Str("intercept_target_action", d.interceptTargetAction).
+		Bool("bypass_active", d.bypassActive).
+		Msg("Recovery end")
 }
 
 func (d *recoveryDiagnostic) log() *ctrld.Logger {

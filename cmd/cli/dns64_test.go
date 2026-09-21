@@ -364,3 +364,61 @@ func TestMaybeDNS64DropsStaleInFlightPrefix(t *testing.T) {
 		t.Fatal("in-flight synthesis used a prefix invalidated by a network change")
 	}
 }
+
+// TestDNS64PrefixSnapshotReadsTheStoredStateOnly covers the read that a report
+// of the network uses. The active read reclassifies the network and can start
+// a discovery query, and a report must change nothing.
+func TestDNS64PrefixSnapshotReadsTheStoredStateOnly(t *testing.T) {
+	classReads := 0
+	old := dns64NetworkClassFn
+	dns64NetworkClassFn = func() (bool, bool, error) {
+		classReads++
+		return false, false, nil
+	}
+	t.Cleanup(func() { dns64NetworkClassFn = old })
+
+	p := &prog{}
+	p.dns64.prefix = netip.MustParsePrefix("64:ff9b::/96")
+	p.dns64.active = true
+
+	prefix, active := p.dns64PrefixSnapshot()
+
+	if !active || prefix != p.dns64.prefix {
+		t.Fatalf("snapshot = %v, %v, want %v, true", prefix, active, p.dns64.prefix)
+	}
+	if classReads != 0 {
+		t.Fatalf("the snapshot classified the network %d times, want 0", classReads)
+	}
+	if p.dns64.discovering {
+		t.Fatal("the snapshot started a NAT64 prefix discovery")
+	}
+}
+
+// TestDNS64ResultLinesReachTheJournalAtInfo covers the level of the two NAT64
+// result lines. Both report a change, and a debug line never leaves a host
+// that runs at the normal level, so the journal lost the result of a network
+// that has no prefix.
+func TestDNS64ResultLinesReachTheJournalAtInfo(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	p := &prog{}
+
+	// The first result of a run reports nothing when the network has no
+	// prefix, so the prefix has to arrive before it goes away.
+	p.logNAT64Result("64:ff9b::/96")
+	p.logNAT64Result("64:ff9b::/96")
+	p.logNAT64Result("")
+
+	absent := jsonLogEvents(t, logs, "dns64: no NAT64 prefix present (not a DNS64 network)")
+	if len(absent) != 1 {
+		t.Fatalf("got %d no-prefix lines, want 1", len(absent))
+	}
+	wantField(t, absent[0], "level", "info")
+	wantField(t, absent[0], "journal", true)
+
+	found := jsonLogEvents(t, logs, "dns64: discovered NAT64 prefix 64:ff9b::/96; enabling AAAA synthesis for IPv6-only network without CLAT")
+	if len(found) != 1 {
+		t.Fatalf("got %d discovered lines for two identical results, want 1", len(found))
+	}
+	wantField(t, found[0], "level", "info")
+	wantField(t, found[0], "journal", true)
+}

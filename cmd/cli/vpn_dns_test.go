@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -295,4 +296,56 @@ func TestVPNDNSFullAndRouteOnlyDiscoveryAreSerialized(t *testing.T) {
 	if len(exemptionUpdates) != 2 || exemptionUpdates[0] != "10.0.0.1" || exemptionUpdates[1] != "10.0.0.2" {
 		t.Fatalf("serialized exemption updates = %v, want old then new", exemptionUpdates)
 	}
+}
+
+// eventsWithPrefix returns the captured events whose message starts with the
+// prefix. Several lines of this module carry a value in the message, so no
+// constant matches the whole of it.
+func eventsWithPrefix(t *testing.T, logs *syncBuffer, prefix string) []map[string]any {
+	t.Helper()
+	var matched []map[string]any
+	for _, event := range jsonLogEvents(t, logs, "") {
+		message, _ := event["message"].(string)
+		if strings.HasPrefix(message, prefix) {
+			matched = append(matched, event)
+		}
+	}
+	return matched
+}
+
+// TestVPNDNSRefreshSummaryLogsOnChangeOnly covers the refresh summary. A network
+// change storm runs the refresh every few seconds, and the same summary in every
+// one of those lines buries the refresh that changed something.
+func TestVPNDNSRefreshSummaryLogsOnChangeOnly(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	m := newVPNDNSManager(&mainLog, nil)
+	configs := []ctrld.VPNDNSConfig{{
+		InterfaceName: "utun4",
+		Servers:       []string{"10.0.0.1"},
+		Domains:       []string{"corp.internal"},
+	}}
+	m.discoverVPNDNS = func(context.Context) []ctrld.VPNDNSConfig { return configs }
+
+	// Refresh logs through the logger of its context.
+	ctx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+	m.Refresh(ctx, true)
+	m.Refresh(ctx, true)
+
+	summaries := eventsWithPrefix(t, logs, "VPN DNS refresh completed")
+	if len(summaries) != 1 {
+		t.Fatalf("got %d refresh summaries for two identical results, want 1", len(summaries))
+	}
+	wantField(t, summaries[0], "repeats", float64(0))
+
+	configs = append(configs, ctrld.VPNDNSConfig{
+		InterfaceName: "utun6",
+		Servers:       []string{"10.0.0.2"},
+	})
+	m.Refresh(ctx, true)
+
+	summaries = eventsWithPrefix(t, logs, "VPN DNS refresh completed")
+	if len(summaries) != 2 {
+		t.Fatalf("got %d refresh summaries after the result changed, want 2", len(summaries))
+	}
+	wantField(t, summaries[1], "repeats", float64(1))
 }
