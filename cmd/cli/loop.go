@@ -86,10 +86,9 @@ func (p *prog) detectLoop(msg *dns.Msg) {
 func (p *prog) checkDnsLoop() {
 	mainLog.Load().Debug().Msg("start checking DNS loop")
 	upstream := make(map[string]*ctrld.UpstreamConfig)
-	// Generated Internal Domain resolvers are local addresses, so they pass
-	// canBeLocalUpstream and are probed every minute. Record which ones they
-	// are while the config key is still in hand.
-	generated := make(map[string]bool)
+	// The probe loop below runs on the upstream UID, and the failure report
+	// needs the config key. Record the reference while the key is in hand.
+	reference := make(map[string]string)
 	p.loopMu.Lock()
 	for n, uc := range p.cfg.Upstream {
 		if p.um.isDown("upstream." + n) {
@@ -103,7 +102,7 @@ func (p *prog) checkDnsLoop() {
 		uid := uc.UID()
 		p.loop[uid] = false
 		upstream[uid] = uc
-		generated[uid] = isGeneratedInternalDomainUpstream(n, uc)
+		reference[uid] = upstreamPrefix + n
 	}
 	p.loopMu.Unlock()
 
@@ -116,11 +115,11 @@ func (p *prog) checkDnsLoop() {
 		}
 		resolver, err := ctrld.NewResolver(uc)
 		if err != nil {
-			logUpstreamProbeFailure(generated[uid], uc, err, mainLog.Load().Warn, "could not perform loop check")
+			logUpstreamProbeFailure(reference[uid], uc, err, mainLog.Load().Warn, "could not perform loop check")
 			continue
 		}
 		if _, err := resolver.Resolve(context.Background(), msg); err != nil {
-			logUpstreamProbeFailure(generated[uid], uc, err, mainLog.Load().Warn, "could not send DNS loop check query")
+			logUpstreamProbeFailure(reference[uid], uc, err, mainLog.Load().Warn, "could not send DNS loop check query")
 		}
 	}
 	mainLog.Load().Debug().Msg("end checking DNS loop")

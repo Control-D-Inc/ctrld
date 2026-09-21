@@ -68,7 +68,9 @@ The two routes and the two gateways come from the route table of macOS, one rout
 Windows and Linux read no route table in this release. They fill `default_route_v4` from the network monitor and leave `default_route_v6`, `gateway_v4`, and `gateway_v6` empty.
 
 `link_type` is one of `wifi`, `ethernet`, `usb_tether`, `tunnel`, and `unknown`.
-macOS reads it from the name of the hardware port. Linux reads `wifi`, `ethernet`, `usb_tether`, and `tunnel` from the kernel. Windows names a tunnel and leaves the other links unknown.
+macOS reads it from the name of the hardware port. Linux reads `wifi`, `ethernet`, `usb_tether`, and `tunnel` from the kernel.
+Windows reads the description of the adapter in place of a port name. The words Ethernet, LAN, and Thunderbolt win over the tunnel class on every platform, so a VPN adapter with a description such as `SSL VPN Virtual Ethernet Adapter` reads as `ethernet`.
+Windows gives `tunnel` to the other VPN adapters. The other links are `unknown`.
 The field `service` names a macOS network service. It stays empty on Windows and on Linux.
 `tethered` is true on every platform when the interface of the default route holds an address of the range 172.20.10.0/28.
 It is also true when the default gateway is in that range, and when the hardware port of the default route is `iPhone USB`.
@@ -85,7 +87,7 @@ The trigger `start` always writes.
 
 A noise delta changes interfaces of the noise class only, and it does not move the default route.
 The noise class holds `awdl*` and `llw*` on macOS.
-On Linux it holds the names `docker*`, `veth*`, `virbr*`, and `br-*`, plus the devices of the tun and tap types.
+On Linux it holds the names `docker*`, `veth*`, `virbr*`, and `br-*`. A device of the tun or tap type is a tunnel, not a noise interface.
 On Windows it holds the virtual adapters without a connector. A Windows adapter whose description names TAP, Wintun, WireGuard, or VPN is a tunnel, not a noise interface.
 On Linux and on Windows, an interface that holds a global address on either side of the delta is never noise.
 A delta is also not noise when it flips `have_v4` or `have_v6`, or when it carries a time jump.

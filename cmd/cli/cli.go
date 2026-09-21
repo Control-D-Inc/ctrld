@@ -355,6 +355,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	oldLogPath := cfg.Service.LogPath
 	if uid := cdUIDFromProvToken(); uid != "" {
 		cdUID = uid
+		p.initLoggingAfterProvisioning()
 	}
 	if cdUID != "" {
 		if !validateCdUpstreamProtocol(p.notifyExitToLogServer) {
@@ -420,17 +421,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
-		// After processCDFlags, log config may change, so reset mainLog and re-init logging.
-		l := zerolog.New(io.Discard)
-		mainLog.Store(&l)
-
-		// Copy logs written so far to new log file if possible.
-		if buf, err := os.ReadFile(oldLogPath); err == nil {
-			if err := os.WriteFile(newLogPath, buf, os.FileMode(0o600)); err != nil {
-				mainLog.Load().Warn().Err(err).Msg("could not copy old log file")
-			}
-		}
-		initLoggingWithBackup(false)
+		p.switchLogPath(oldLogPath, newLogPath)
 	}
 
 	if err := validateConfig(&cfg); err != nil {
@@ -839,7 +830,9 @@ func apiRejectionSummary(statusCode int) string {
 
 // provisionSecrets lists every secret-bearing value to strip from provisioning
 // artifacts, including both parts of a composite "<uid>/<clientID>" --cd
-// value, which the API may echo back separately.
+// value, which the API may echo back separately. redactSecrets drops the
+// values that are too short to redact, so a client ID such as "os" leaves the
+// words of the message alone.
 func provisionSecrets() []string {
 	uid, clientID := controld.ParseRawUID(cdUID)
 	return []string{cdUID, cdOrg, uid, clientID}
@@ -1309,11 +1302,7 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 	}
 	mainLog.Load().Debug().Msgf("self-check against %q failed", domain)
 	// Ping all upstreams to provide better error message to users.
-	for name, uc := range cfg.Upstream {
-		if err := uc.ErrorPing(); err != nil {
-			mainLog.Load().Err(err).Msgf("failed to connect to upstream.%s, endpoint: %s", name, uc.Endpoint)
-		}
-	}
+	logUpstreamPingFailures(cfg.Upstream)
 	marker := strings.Repeat("=", 32)
 	mainLog.Load().Debug().Msg(marker)
 	mainLog.Load().Debug().Msgf("listener address       : %s", addr)
@@ -1326,6 +1315,24 @@ func selfCheckResolveDomain(ctx context.Context, addr, scope string, domain stri
 		}
 	}
 	return errSelfCheckNoAnswer
+}
+
+// upstreamPingFn is a var so tests can drive the self-check report without a
+// network probe.
+var upstreamPingFn = (*ctrld.UpstreamConfig).ErrorPing
+
+// logUpstreamPingFailures names the upstreams that do not answer after a
+// failed self-check, so the user learns which one is unreachable. The config
+// key and the endpoint are operator text that can hold a token, so both stay
+// at debug and the retained line names the upstream by its bounded name.
+func logUpstreamPingFailures(upstreams map[string]*ctrld.UpstreamConfig) {
+	for name, uc := range upstreams {
+		err := upstreamPingFn(uc)
+		if err == nil {
+			continue
+		}
+		logUpstreamProbeFailure(upstreamPrefix+name, uc, err, mainLog.Load().Error, "failed to connect to the upstream")
+	}
 }
 
 // unixServiceHomeDir is where a ctrld service with root rights keeps its

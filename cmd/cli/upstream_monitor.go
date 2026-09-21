@@ -182,12 +182,23 @@ func (um *upstreamMonitor) markUp(upstream, reason string) {
 // journalUpstreamName bounds the upstream name that a journal event carries.
 // ctrld generates upstream.os, upstream.<n>, and upstream.internal_<n>; every
 // other key is operator text that can hold a token, so it reads as
-// upstream.custom.
+// upstream.custom. An empty name holds no operator text and stays empty,
+// because a line that names no upstream must not read as a custom one.
 func journalUpstreamName(upstream string) string {
-	if upstream == upstreamOS || generatedUpstreamKey(strings.TrimPrefix(upstream, upstreamPrefix)) {
+	if upstream == "" || upstream == upstreamOS || generatedUpstreamKey(strings.TrimPrefix(upstream, upstreamPrefix)) {
 		return upstream
 	}
 	return upstreamPrefix + "custom"
+}
+
+// journalUpstreamNames bounds every name of a list, for a line that names
+// several upstreams.
+func journalUpstreamNames(upstreams []string) []string {
+	names := make([]string, 0, len(upstreams))
+	for _, upstream := range upstreams {
+		names = append(names, journalUpstreamName(upstream))
+	}
+	return names
 }
 
 // generatedUpstreamKey reports whether key is a number, or internal_ and a

@@ -989,7 +989,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		res.upstream = upstreamConfig.Endpoint
 		return res
 	}
-	ctrld.Log(ctx, p.querySampler.event(sampleClassAllEndpointsFailed, ""), "all %v endpoints failed", upstreams)
+	ctrld.Log(ctx, p.querySampler.event(sampleClassAllEndpointsFailed, ""), "all %v endpoints failed", journalUpstreamNames(upstreams))
 
 	// An Internal Domain with explicit resolvers is served only by the
 	// configured resolvers. When all of them are unreachable the query fails
@@ -2193,8 +2193,7 @@ func (l *upstreamFailureLog) report(upstream string, uc *ctrld.UpstreamConfig, e
 		level = mainLog.Load().Debug
 	}
 	l.reported = true
-	logUpstreamProbeFailure(isGeneratedInternalDomainUpstreamRef(upstream, uc), uc, err, level,
-		"Upstream %s check failed after %v", upstream, duration)
+	logUpstreamProbeFailure(upstream, uc, err, level, "Upstream check failed after %v", duration)
 }
 
 // checkUpstreamOnce sends a test query to the specified upstream.
@@ -2204,8 +2203,7 @@ func (p *prog) checkUpstreamOnce(upstream string, uc *ctrld.UpstreamConfig, fail
 
 	resolver, err := ctrld.NewResolver(uc)
 	if err != nil {
-		logUpstreamProbeFailure(isGeneratedInternalDomainUpstreamRef(upstream, uc), uc, err,
-			mainLog.Load().Error, "Failed to create resolver for upstream %s", upstream)
+		logUpstreamProbeFailure(upstream, uc, err, mainLog.Load().Error, "Failed to create resolver")
 		return err
 	}
 

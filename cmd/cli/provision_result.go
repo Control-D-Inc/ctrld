@@ -192,10 +192,17 @@ func newProvisionResult(code provisionFailureCode, message string, attempts []pr
 	return r
 }
 
-// redactSecrets removes every non-empty secret from s.
+// redactSecretMinLen is the length below which a value is too short to
+// redact. Two or three letters also match the keys of a JSON line and the
+// words of a message, so a redaction of them corrupts the output. Corrupt
+// output costs support more than a short value that the API rejects at the
+// next step. It is the shortest token that the API parses.
+const redactSecretMinLen = provisionTokenMinLen
+
+// redactSecrets removes every secret from s that is long enough to redact.
 func redactSecrets(s string, secrets ...string) string {
 	for _, secret := range secrets {
-		if secret == "" {
+		if len(secret) < redactSecretMinLen {
 			continue
 		}
 		s = strings.ReplaceAll(s, secret, "[redacted]")

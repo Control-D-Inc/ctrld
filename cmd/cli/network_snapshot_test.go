@@ -128,6 +128,9 @@ func Test_linkTypeFor(t *testing.T) {
 		{"thunderbolt_bridge", "Thunderbolt Bridge", "hardware", "ethernet"},
 		{"iphone_usb_port", "iPhone USB", "hardware", "usb_tether"},
 		{"tunnel_class", "", "tunnel", "tunnel"},
+		// The Windows adapter description reaches linkTypeFor as the port
+		// name, and a wired word in it wins over the tunnel class.
+		{"ethernet_word_wins_over_tunnel_class", "SSL VPN Virtual Ethernet Adapter", "tunnel", "ethernet"},
 		{"no_port_no_class", "", "", "unknown"},
 		{"unknown_port", "Bluetooth PAN", "hardware", "unknown"},
 	} {

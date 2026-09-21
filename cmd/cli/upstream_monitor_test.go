@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -227,6 +228,21 @@ func Test_upstreamMonitorKeepsACustomNameOutOfTheJournal(t *testing.T) {
 		if got := journalUpstreamName(generated); got != generated {
 			t.Fatalf("journalUpstreamName(%q) = %q, want the name itself", generated, got)
 		}
+	}
+}
+
+// Test_journalUpstreamNamesBoundsEveryName covers the line that names several
+// upstreams at once. One operator key in the list must not reach the journal.
+func Test_journalUpstreamNamesBoundsEveryName(t *testing.T) {
+	got := journalUpstreamNames([]string{
+		upstreamPrefix + "0",
+		upstreamPrefix + "dns.controld.com/org-v1-SECRET0123",
+		upstreamOS,
+	})
+
+	want := []string{upstreamPrefix + "0", upstreamPrefix + "custom", upstreamOS}
+	if !slices.Equal(got, want) {
+		t.Fatalf("journalUpstreamNames = %v, want %v", got, want)
 	}
 }
 

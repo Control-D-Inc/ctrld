@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -289,10 +290,18 @@ func SendLogs(ctx context.Context, lr *LogsRequest, cdDev bool) error {
 	if cdDev {
 		apiUrl = logURLDev
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", apiUrl, lr.Data)
+	body, size, getBody, cleanup, err := spoolLogBody(lr.Data)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiUrl, body)
 	if err != nil {
 		return fmt.Errorf("http.NewRequest: %w", err)
 	}
+	req.ContentLength = size
+	req.GetBody = getBody
 	q := req.URL.Query()
 	q.Set("uid", lr.UID)
 	req.URL.RawQuery = q.Encode()
@@ -418,11 +427,48 @@ func doWithFallback(client *http.Client, req *http.Request, apiIp string) (*http
 	ipReq := req.Clone(req.Context())
 	ipReq.Host = apiIp
 	ipReq.URL.Host = apiIp
+	// The first attempt consumed the body. A request that can give its body
+	// again sends the whole body a second time.
+	if req.GetBody != nil {
+		body, bodyErr := req.GetBody()
+		if bodyErr != nil {
+			return nil, fmt.Errorf("request failed: %w; fallback to direct ip %s failed: %w", err, apiIp, bodyErr)
+		}
+		ipReq.Body = body
+	}
 	resp, fallbackErr := client.Do(ipReq)
 	if fallbackErr != nil {
 		return nil, fmt.Errorf("request failed: %w; fallback to direct ip %s failed: %w", err, apiIp, fallbackErr)
 	}
 	return resp, nil
+}
+
+// spoolLogBody copies an upload to a temporary file, so the request can go
+// out a second time to the direct IP of the API. A log reader yields its
+// bytes once, and the first attempt consumes them. The caller runs cleanup
+// after the response arrived.
+func spoolLogBody(data io.Reader) (body *os.File, size int64, getBody func() (io.ReadCloser, error), cleanup func(), err error) {
+	f, err := os.CreateTemp("", "ctrld-log-upload-*")
+	if err != nil {
+		return nil, 0, nil, nil, fmt.Errorf("creating the upload spool: %w", err)
+	}
+	cleanup = func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}
+	size, err = io.Copy(f, data)
+	if err != nil {
+		cleanup()
+		return nil, 0, nil, nil, fmt.Errorf("writing the upload spool: %w", err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, 0, nil, nil, fmt.Errorf("rewinding the upload spool: %w", err)
+	}
+	// The transport closes the body of a failed attempt, so the second body
+	// is a new handle on the same file.
+	getBody = func() (io.ReadCloser, error) { return os.Open(f.Name()) }
+	return f, size, getBody, cleanup, nil
 }
 
 // apiServerIP returns the direct IP to connect to API server.

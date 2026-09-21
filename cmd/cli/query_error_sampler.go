@@ -145,7 +145,7 @@ func (s *errorSampler) logSummaries(summaries []sampleSummary) {
 	for _, summary := range summaries {
 		mainLog.Load().Error().
 			Str("class", summary.key.class).
-			Str("upstream", summary.key.upstream).
+			Str("upstream", journalUpstreamName(summary.key.upstream)).
 			Int("count", summary.count).
 			Int("suppressed", summary.suppressed).
 			Int("window_s", int(querySampleWindow/time.Second)).

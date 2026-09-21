@@ -155,6 +155,26 @@ func Test_errorSamplerLimitsWindowAndSummarizes(t *testing.T) {
 	wantField(t, last, "level", "error")
 }
 
+// Test_errorSamplerKeepsACustomNameOutOfTheSummary drives a window on an
+// operator-chosen upstream key. The key can hold a token, so the summary names
+// the upstream by a bounded name.
+func Test_errorSamplerKeepsACustomNameOutOfTheSummary(t *testing.T) {
+	const upstream = upstreamPrefix + "dns.controld.com/org-v1-SECRET0123"
+	h := newSamplerHarness(t)
+
+	for i := 0; i < querySampleLimit+1; i++ {
+		h.emit(sampleClassResolveFailed, upstream)
+	}
+	h.advance(querySampleWindow)
+	h.sampler.closeExpired(h.now)
+
+	summaries := samplerSummaries(h.events(t))
+	if len(summaries) != 1 {
+		t.Fatalf("summaries after the window closed: got %d, want 1", len(summaries))
+	}
+	wantField(t, summaries[0], "upstream", upstreamPrefix+"custom")
+}
+
 func Test_errorSamplerKeepsBudgetPerUpstream(t *testing.T) {
 	h := newSamplerHarness(t)
 
@@ -257,4 +277,23 @@ func Test_errorSamplerZeroValueWorks(t *testing.T) {
 	if !strings.Contains(buf.String(), `"level":"error"`) {
 		t.Fatalf("first line of a window is not at error level: %s", buf.String())
 	}
+}
+
+// Test_errorSamplerKeepsAnEmptyUpstreamEmpty drives a window of a class that
+// names no upstream. The summary must not report the window as a custom
+// upstream.
+func Test_errorSamplerKeepsAnEmptyUpstreamEmpty(t *testing.T) {
+	h := newSamplerHarness(t)
+
+	for i := 0; i < querySampleLimit+1; i++ {
+		h.emit(sampleClassAllEndpointsFailed, "")
+	}
+	h.advance(querySampleWindow)
+	h.sampler.closeExpired(h.now)
+
+	summaries := samplerSummaries(h.events(t))
+	if len(summaries) != 1 {
+		t.Fatalf("summaries after the window closed: got %d, want 1", len(summaries))
+	}
+	wantField(t, summaries[0], "upstream", "")
 }

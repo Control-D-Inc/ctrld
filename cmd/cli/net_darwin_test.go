@@ -313,3 +313,26 @@ func Test_platformInterfaceMeta(t *testing.T) {
 		t.Error("platformVirtualInterfaces is not nil on darwin")
 	}
 }
+
+// Test_serviceNamesByDevice_namesNoDisabledService drives output that holds no
+// blank line between the blocks. The device of a disabled service must keep no
+// name, and the name of the service before it is the wrong answer.
+func Test_serviceNamesByDevice_namesNoDisabledService(t *testing.T) {
+	const fixture = `An asterisk (*) denotes that a network service is disabled.
+(1) Wi-Fi
+(Hardware Port: Wi-Fi, Device: en0)
+(2) Thunderbolt Bridge
+(Hardware Port: Thunderbolt Bridge, Device: bridge0)
+(*) Ethernet Adapter (en6)
+(Hardware Port: Ethernet Adapter (en6), Device: en6)
+`
+
+	names := serviceNamesByDevice(strings.NewReader(fixture))
+
+	if got := names["en6"]; got != "" {
+		t.Errorf("service of the disabled en6 = %q, want no name", got)
+	}
+	if got := names["bridge0"]; got != "Thunderbolt Bridge" {
+		t.Errorf("service of bridge0 = %q, want %q", got, "Thunderbolt Bridge")
+	}
+}

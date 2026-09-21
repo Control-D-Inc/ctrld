@@ -122,3 +122,51 @@ func Test_querySamplingOnTheQueryPath(t *testing.T) {
 	wantField(t, events[1], "upstream", upstreamOS)
 	wantField(t, events[1], "state", "up")
 }
+
+// Test_allEndpointsFailedBoundsTheUpstreamName drives the query path with an
+// operator-chosen upstream key. The line that reports the loss of every
+// endpoint reaches the journal, so it must name the upstream by its bounded
+// name.
+func Test_allEndpointsFailedBoundsTheUpstreamName(t *testing.T) {
+	logs := captureDebugMainLog(t)
+	uc := &ctrld.UpstreamConfig{
+		Name:     probeSecret,
+		Type:     ctrld.ResolverTypeLegacy,
+		Endpoint: deadUpstreamEndpoint,
+		Timeout:  200,
+	}
+	uc.Init()
+	cfg := &ctrld.Config{Upstream: map[string]*ctrld.UpstreamConfig{probeSecret: uc}}
+	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(false)
+	p := &prog{cfg: cfg, um: newUpstreamMonitor(cfg)}
+	// The zero value sampler arms a real timer. Close its window after the
+	// assertions, so no late summary line reaches another test.
+	t.Cleanup(func() { p.querySampler.closeExpired(time.Now().Add(querySampleWindow)) })
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("private.test.", dns.TypeA)
+	res := p.proxy(context.Background(), &proxyRequest{
+		msg: msg,
+		ufr: &upstreamForResult{
+			srcAddr:   "192.168.0.1:1234",
+			upstreams: []string{upstreamPrefix + probeSecret},
+		},
+	})
+	if res == nil || res.answer == nil || res.answer.Rcode != dns.RcodeServerFailure {
+		t.Fatal("the proxy answered although every endpoint failed")
+	}
+
+	var reported string
+	for _, event := range jsonLogEvents(t, logs, "") {
+		text, _ := event["message"].(string)
+		if strings.Contains(text, "endpoints failed") {
+			reported = text
+		}
+	}
+	if !strings.Contains(reported, upstreamPrefix+"custom") {
+		t.Fatalf("the all-endpoints line does not name the bounded upstream: %q", reported)
+	}
+	if strings.Contains(reported, probeSecret) {
+		t.Fatalf("the all-endpoints line holds the operator key: %q", reported)
+	}
+}

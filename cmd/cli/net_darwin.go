@@ -74,7 +74,9 @@ func serviceNamesByDevice(r io.Reader) map[string]string {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.Contains(line, "*") {
-			// Network services is disabled.
+			// A disabled service names no device. Without the reset, the device
+			// line that follows takes the name of the service before it.
+			prevLine = ""
 			continue
 		}
 		device := serviceOrderDevice(line)

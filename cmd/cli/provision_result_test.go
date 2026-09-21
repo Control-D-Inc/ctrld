@@ -292,3 +292,22 @@ func TestFailProvisionWritesLogsNotifiesAndExits(t *testing.T) {
 		t.Errorf("persisted code = %q", out.Code)
 	}
 }
+
+// Test_redactSecretsKeepsAShortClientID puts a two-letter client ID in the
+// resolver UID. The provisioning messages hold the same letters in ordinary
+// words, and a redaction of the client ID would mangle them.
+func Test_redactSecretsKeepsAShortClientID(t *testing.T) {
+	origCdUID, origCdOrg := cdUID, cdOrg
+	t.Cleanup(func() { cdUID, cdOrg = origCdUID, origCdOrg })
+	cdUID, cdOrg = "uid12345678/os", ""
+
+	const in = "failed to reach the host uid12345678/os"
+	got := redactSecrets(in, provisionSecrets()...)
+
+	if !strings.Contains(got, "failed to reach the host ") {
+		t.Fatalf("the redaction mangled the words of the message: %s", got)
+	}
+	if strings.Contains(got, "uid12345678") {
+		t.Fatalf("the redaction kept the resolver uid: %s", got)
+	}
+}

@@ -6,7 +6,9 @@ import (
 	"regexp"
 
 	"github.com/rs/zerolog"
+
 	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
 
 // journalField marks an event for the retained journal stream. Both packages
@@ -17,16 +19,31 @@ const journalField = ctrld.JournalField
 // writer keeps a line below warn level only when the line contains it.
 var journalMarker = []byte(`"` + journalField + `":true`)
 
-// retainedURLPath matches the part of a URL that follows the host. The class
-// stops the match at the characters that end a value inside a JSON line.
-var retainedURLPath = regexp.MustCompile(`(https?://[^/?"\\\s]+)[/?][^"\\\s]*`)
+// retainedURLPath matches the part of a URL that follows the host, for every
+// scheme: a DoH, DoH3, or DoQ endpoint carries its token in the path. The
+// class stops the match at the characters that end a value inside a JSON line.
+var retainedURLPath = regexp.MustCompile(`([a-z][a-z0-9+.-]*://[^/?"\\\s]+)[/?][^"\\\s]*`)
+
+// retainedControlDHost matches a Control D resolver host. The first label of
+// the host is the resolver ID, which a DoT or DoQ endpoint carries in place of
+// a path.
+var retainedControlDHost = regexp.MustCompile(`([A-Za-z0-9-]+)(\.dns\.controld\.(?:com|dev))`)
 
 // redactRetainedLine strips the secrets of one line that the journal keeps.
 // Support downloads the journal whole, and any error text can carry a DoH URL
 // with the resolver path and the packed query of the user.
 func redactRetainedLine(p []byte) []byte {
 	stripped := retainedURLPath.ReplaceAll(p, []byte(`${1}/[redacted]`))
-	return []byte(redactSecrets(string(stripped), provisionSecrets()...))
+	stripped = retainedControlDHost.ReplaceAll(stripped, []byte(`[redacted]${2}`))
+	return []byte(redactSecrets(string(stripped), journalSecrets()...))
+}
+
+// journalSecrets names the values that no retained line may hold. The client
+// ID stays out: it is a device label, not a secret. redactSecrets drops the
+// values that are too short to redact.
+func journalSecrets() []string {
+	uid, _ := controld.ParseRawUID(cdUID)
+	return []string{cdUID, cdOrg, uid}
 }
 
 // journal marks an event for the retained journal stream. The event keeps

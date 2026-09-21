@@ -254,3 +254,52 @@ func Test_stopClosesTheInternalLogFiles(t *testing.T) {
 		}
 	}
 }
+
+// Test_redactRetainedLineKeepsAShortClientID puts a two-letter client ID in
+// the resolver UID. The keys of a JSON line hold the same letters, and a
+// redaction of the client ID would break the line.
+func Test_redactRetainedLineKeepsAShortClientID(t *testing.T) {
+	origCdUID := cdUID
+	t.Cleanup(func() { cdUID = origCdUID })
+	cdUID = "uid12345678/os"
+
+	line := string(redactRetainedLine([]byte(`{"level":"info","os":"darwin","resolver":"uid12345678/os"}`)))
+
+	if !strings.Contains(line, `"os":"darwin"`) {
+		t.Fatalf("the redaction changed the os key: %s", line)
+	}
+	if strings.Contains(line, "uid12345678") {
+		t.Fatalf("the redaction kept the resolver uid: %s", line)
+	}
+}
+
+// Test_redactRetainedLineStripsEverySchemePath covers the endpoints that carry
+// a token in their path with a scheme other than https.
+func Test_redactRetainedLineStripsEverySchemePath(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`Get "quic://dns.example/org-v1-SECRET0123?dns=pOgBAAAB": timeout`, `Get "quic://dns.example/[redacted]": timeout`},
+		{`h3://dns.example/SECRET0123 failed`, `h3://dns.example/[redacted] failed`},
+		{`tls://dns.example:853 failed`, `tls://dns.example:853 failed`},
+		{`tls://abcdef12.dns.controld.com:853 failed`, `tls://[redacted].dns.controld.com:853 failed`},
+		{`quic://abcdef12.dns.controld.dev failed`, `quic://[redacted].dns.controld.dev failed`},
+		{`https://freedns.controld.com/p1 failed`, `https://freedns.controld.com/[redacted] failed`},
+	} {
+		if got := string(redactRetainedLine([]byte(tc.in))); got != tc.want {
+			t.Errorf("redactRetainedLine(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Test_redactRetainedLineKeepsAShortResolverUID puts a two-letter resolver UID
+// in place. The keys of a JSON line hold the same letters, and a redaction of
+// the UID would break every retained line and the header.
+func Test_redactRetainedLineKeepsAShortResolverUID(t *testing.T) {
+	origCdUID := cdUID
+	t.Cleanup(func() { cdUID = origCdUID })
+	cdUID = "os"
+
+	const in = `{"level":"info","os":"darwin","message":"loss of service"}`
+	if got := string(redactRetainedLine([]byte(in))); got != in {
+		t.Fatalf("redactRetainedLine(%q) = %q, want the line unchanged", in, got)
+	}
+}

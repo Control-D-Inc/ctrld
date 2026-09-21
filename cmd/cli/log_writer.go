@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -255,9 +257,93 @@ func (p *prog) initLogging(backup bool) {
 	}
 }
 
+// initLoggingAfterProvisioning opens the internal streams of a run whose
+// resolver UID came from the provisioning token. The first logging setup ran
+// before that UID was known, so it opened no debug file and no journal.
+func (p *prog) initLoggingAfterProvisioning() {
+	if !p.needInternalLogging() {
+		return
+	}
+	if lw, _ := p.internalWriters(); lw != nil {
+		return
+	}
+	p.initLogging(false)
+}
+
+// switchLogPath moves the logging of this run to the log_path that the API
+// config set. The header of the new file leads it, the lines of an earlier
+// local log_path file follow that header, and the internal streams close,
+// because a run with a log_path keeps no internal files. A run without a local
+// log_path carries no lines: its history stays in the internal debug stream,
+// which this call closes.
+func (p *prog) switchLogPath(oldLogPath, newLogPath string) {
+	// After processCDFlags, log config may change, so reset mainLog and re-init logging.
+	discard := zerolog.New(io.Discard)
+	mainLog.Store(&discard)
+
+	carried := carriedLogLines(oldLogPath, newLogPath)
+	p.initLogging(false)
+	p.carryLogLines(carried)
+}
+
+// carriedLogLines reads the lines of the old log_path file and empties the new
+// file, so the header of the new file leads it. It drops the header lines of
+// the old file, because each of them names the old file.
+func carriedLogLines(oldLogPath, newLogPath string) []byte {
+	buf, err := os.ReadFile(oldLogPath)
+	if err != nil {
+		return nil
+	}
+	if err := os.Remove(newLogPath); err != nil && !os.IsNotExist(err) {
+		mainLog.Load().Warn().Err(err).Msg("could not clear the new log file")
+		return nil
+	}
+	return withoutLogHeaderLines(buf)
+}
+
+// carryLogLines appends the lines of the old log_path file below the header of
+// the new one.
+func (p *prog) carryLogLines(lines []byte) {
+	if len(lines) == 0 {
+		return
+	}
+	rf := logPathFile.Load()
+	if rf == nil {
+		return
+	}
+	if _, err := rf.Write(lines); err != nil {
+		mainLog.Load().Warn().Err(err).Msg("could not copy old log file")
+	}
+}
+
+// withoutLogHeaderLines removes every header line of a log file.
+func withoutLogHeaderLines(buf []byte) []byte {
+	var kept bytes.Buffer
+	for _, line := range bytes.SplitAfter(buf, []byte("\n")) {
+		if isLogHeaderLine(line) {
+			continue
+		}
+		kept.Write(line)
+	}
+	return kept.Bytes()
+}
+
+// isLogHeaderLine reports whether one line of a log file is a header line.
+func isLogHeaderLine(line []byte) bool {
+	var parsed struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(line), &parsed); err != nil {
+		return false
+	}
+	return parsed.Message == logHeaderMessage
+}
+
 // initInternalLogging performs internal logging if there's no log enabled.
 func (p *prog) initInternalLogging(writers []io.Writer) {
 	if !p.needInternalLogging() {
+		// A log_path that the API set takes over from the internal files.
+		p.closeInternalLogs()
 		return
 	}
 	headersWritten := false
