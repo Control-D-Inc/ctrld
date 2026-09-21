@@ -36,7 +36,7 @@ func TestFinishRunClosesInternalFilesWithoutServiceStop(t *testing.T) {
 	close(p.runDone)
 	p.finishRun()
 	for i, f := range files {
-		if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+		if _, err := f.Write([]byte("unexpected write\n")); !errors.Is(err, os.ErrClosed) {
 			t.Errorf("file %d is not closed: %v", i, err)
 		}
 		b, err := os.ReadFile(paths[i])
