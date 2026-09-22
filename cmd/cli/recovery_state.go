@@ -13,6 +13,12 @@ func (p *prog) beginRecovery(reason RecoveryReason) (ctx context.Context, gen ui
 	p.recoveryCancelMu.Lock()
 	defer p.recoveryCancelMu.Unlock()
 
+	// Close publishes the gate before taking recoveryCancelMu to cancel the
+	// current owner. Thus an admitted worker either publishes its cancel first
+	// or observes shutdown here; it cannot create an uncancellable late owner.
+	if p.networkActivityClosed() {
+		return nil, 0, false, false
+	}
 	if reason != RecoveryReasonNetworkChange && p.recoveryCancel != nil {
 		return nil, 0, false, false
 	}
@@ -32,7 +38,7 @@ func (p *prog) beginRecovery(reason RecoveryReason) (ctx context.Context, gen ui
 func (p *prog) recoveryOwnsState(gen uint64) bool {
 	p.recoveryCancelMu.Lock()
 	defer p.recoveryCancelMu.Unlock()
-	return p.recoveryGen.Load() == gen && p.recoveryCancel != nil
+	return !p.networkActivityClosed() && p.recoveryGen.Load() == gen && p.recoveryCancel != nil
 }
 
 func (p *prog) systemNameserversForInterceptRetry() []string {

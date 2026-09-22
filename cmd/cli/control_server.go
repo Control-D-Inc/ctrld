@@ -79,7 +79,6 @@ func (s *controlServer) start() error {
 }
 
 func (s *controlServer) stop() error {
-	_ = os.Remove(s.addr)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
 	defer cancel()
 	return s.server.Shutdown(ctx)

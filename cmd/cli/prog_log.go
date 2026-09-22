@@ -36,7 +36,15 @@ func (p *prog) Notice() *ctrld.LogEvent {
 // so a waiting "ctrld start" is not left waiting on it after this process
 // exits. A nil connection (log server never started) is a no-op.
 func (p *prog) notifyExitToLogServer() {
-	if p.logConn != nil {
-		_ = p.logConn.Close()
+	p.closeLogConn()
+}
+
+func (p *prog) closeLogConn() {
+	p.logConnMu.Lock()
+	conn := p.logConn
+	p.logConn = nil
+	p.logConnMu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
 	}
 }

@@ -121,6 +121,7 @@ type prog struct {
 	apiForceReloadCh     chan struct{}
 	apiForceReloadGroup  singleflight.Group
 	logConn              io.WriteCloser
+	logConnMu            sync.Mutex
 	cs                   *controlServer
 	logger               atomic.Pointer[ctrld.Logger]
 	csSetDnsDone         chan struct{}
@@ -361,6 +362,111 @@ type prog struct {
 	onStartedDone chan struct{}
 	onStarted     []func()
 	onStopped     []func()
+
+	netMonitorMu     sync.Mutex
+	netMonitor       networkChangeMonitor
+	netMonitorClosed bool
+	netMonitorStopCh chan struct{}
+	restoreOnce      sync.Once
+	restoreErr       error
+	releaseOnce      sync.Once
+	runDone          chan struct{}
+	runAbortCh       chan struct{}
+	listenerWg       sync.WaitGroup
+	apiReloadWg      sync.WaitGroup
+	osStateMu        sync.Mutex
+	osStateRestored  bool
+
+	// netMonitorWG tracks admitted callbacks and their recovery work. Admission
+	// is serialized with shutdown under netMonitorMu; no Add races with Wait.
+	netMonitorWG        sync.WaitGroup
+	netMonitorCloseOnce sync.Once
+	// Published by the joined initializer; read only after runDone.
+	waitNetworkJournal func()
+}
+
+// setNetMonitor publishes mon as the active network monitor, closing any
+// predecessor. It reports false if shutdown already ran, in which case the
+// caller owns mon and must not start it.
+func (p *prog) setNetMonitor(mon networkChangeMonitor) bool {
+	p.netMonitorMu.Lock()
+	defer p.netMonitorMu.Unlock()
+	if p.netMonitorClosed {
+		return false
+	}
+	old := p.netMonitor
+	p.netMonitor = mon
+	if old != nil {
+		_ = old.Close()
+	}
+	return true
+}
+
+// beginNetworkActivity admits a callback or recovery before shutdown. Every
+// successful admission must be paired with netMonitorWG.Done.
+func (p *prog) beginNetworkActivity() bool {
+	p.netMonitorMu.Lock()
+	defer p.netMonitorMu.Unlock()
+	if p.netMonitorClosed {
+		return false
+	}
+	p.netMonitorWG.Add(1)
+	return true
+}
+
+func (p *prog) networkActivityClosed() bool {
+	p.netMonitorMu.Lock()
+	defer p.netMonitorMu.Unlock()
+	return p.netMonitorClosed
+}
+
+// networkActivityDone cancels admitted work before service Stop closes stopCh.
+func (p *prog) networkActivityDone() <-chan struct{} {
+	p.netMonitorMu.Lock()
+	defer p.netMonitorMu.Unlock()
+	if p.netMonitorStopCh == nil {
+		p.netMonitorStopCh = make(chan struct{})
+		if p.netMonitorClosed {
+			close(p.netMonitorStopCh)
+		}
+	}
+	return p.netMonitorStopCh
+}
+
+// closeNetMonitor fences publications and callbacks, cancels recovery, and
+// drains admitted work before OS state restoration. netmon.Close alone does
+// not join change callbacks. Never hold an admission/state mutex while waiting:
+// callbacks and canceled recoveries need those mutexes to finish.
+func (p *prog) closeNetMonitor() {
+	p.netMonitorCloseOnce.Do(func() {
+		p.netMonitorMu.Lock()
+		mon := p.netMonitor
+		p.netMonitor = nil
+		p.netMonitorClosed = true
+		if p.netMonitorStopCh != nil {
+			close(p.netMonitorStopCh)
+		}
+		p.netMonitorMu.Unlock()
+
+		p.recoveryDebounceMu.Lock()
+		if p.recoveryDebounceTimer != nil {
+			p.recoveryDebounceTimer.Stop()
+			p.recoveryDebounceTimer = nil
+		}
+		p.recoveryDebounceMu.Unlock()
+
+		p.recoveryCancelMu.Lock()
+		if p.recoveryCancel != nil {
+			p.recoveryCancel()
+		}
+		p.recoveryCancelMu.Unlock()
+
+		if mon != nil {
+			_ = mon.Close()
+			p.Debug().Msg("network monitor stopped")
+		}
+		p.netMonitorWG.Wait()
+	})
 }
 
 func (p *prog) Start(_ service.Service) error {
@@ -370,10 +476,11 @@ func (p *prog) Start(_ service.Service) error {
 
 // runWait runs ctrld components, waiting for signal to reload.
 func (p *prog) runWait() {
-	p.mu.Lock()
-	p.cfg = &cfg
-	p.mu.Unlock()
+	if p.runDone != nil {
+		defer close(p.runDone)
+	}
 	reloadSigCh := make(chan os.Signal, 1)
+	defer stopNotifyReloadSigCh(reloadSigCh)
 	notifyReloadSigCh(reloadSigCh)
 
 	reload := false
@@ -396,6 +503,11 @@ func (p *prog) runWait() {
 			newCfg = apiCfg
 		case <-p.stopCh:
 			close(reloadCh)
+			<-done
+			return
+		case <-p.runAbortCh:
+			close(reloadCh)
+			<-done
 			return
 		}
 
@@ -475,6 +587,7 @@ func (p *prog) runWait() {
 		p.setupUpstream(newCfg)
 
 		p.mu.Lock()
+		oldUpstreams := p.cfg.Upstream
 		*p.cfg = *newCfg
 		// In DNS-intercept mode on macOS, the DNS listener is bound once at startup and is
 		// NOT re-bound on reload (see prog.run: serveDNS is started only when !reload). When
@@ -490,6 +603,7 @@ func (p *prog) runWait() {
 		}
 		p.mu.Unlock()
 
+		closeReplacedUpstreams(oldUpstreams, newCfg.Upstream)
 		// The header names the mode, the listeners, and the upstreams, so the
 		// open files take the values of the config that now runs.
 		p.refreshLogHeader()
@@ -572,13 +686,41 @@ func (p *prog) postRun() {
 // calls.
 var fetchResolverConfigFn = controld.FetchResolverConfig
 
+// startAPIConfigReload starts one program-lifetime worker, not one per reload.
+func (p *prog) startAPIConfigReload() {
+	p.apiReloadWg.Add(1)
+	go func() {
+		defer p.apiReloadWg.Done()
+		p.apiConfigReload()
+	}()
+}
+
 // apiConfigReload calls API to check for latest config update then reload ctrld if necessary.
 func (p *prog) apiConfigReload() {
 	if cdUID == "" {
 		return
 	}
 
-	ticker := time.NewTicker(timeDurationOrDefault(p.cfg.Service.RefetchTime, 3600) * time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	watcherDone := make(chan struct{})
+	defer func() {
+		cancel()
+		<-watcherDone
+	}()
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-p.stopCh:
+		case <-p.runAbortCh:
+		case <-ctx.Done():
+		}
+		cancel()
+	}()
+
+	p.mu.Lock()
+	refetchInterval := timeDurationOrDefault(p.cfg.Service.RefetchTime, 3600) * time.Second
+	p.mu.Unlock()
+	ticker := time.NewTicker(refetchInterval)
 	defer ticker.Stop()
 
 	logger := p.logger.Load().With().Str("mode", "api-reload")
@@ -596,13 +738,19 @@ func (p *prog) apiConfigReload() {
 	}
 
 	doReloadApiConfig := func(forced bool, logger *ctrld.Logger) {
-		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
+		if ctx.Err() != nil {
+			return
+		}
+		loggerCtx := ctrld.LoggerCtx(ctx, p.logger.Load())
 		req := &controld.ResolverConfigRequest{
 			RawUID:   cdUID,
 			Version:  appVersion,
 			Metadata: ctrld.SystemMetadata(loggerCtx),
 		}
 		resolverConfig, err := fetchResolverConfigFn(loggerCtx, req, cdDev)
+		if ctx.Err() != nil {
+			return
+		}
 		selfUninstallCheck(err, p, logger)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Could not fetch resolver config")
@@ -622,7 +770,7 @@ func (p *prog) apiConfigReload() {
 			doReloadApiConfig(true, logger.With().Bool("forced", true))
 		case <-ticker.C:
 			doReloadApiConfig(false, logger)
-		case <-p.stopCh:
+		case <-ctx.Done():
 			return
 		}
 	}
@@ -646,6 +794,9 @@ func (p *prog) applyFetchedResolverConfig(
 	forced bool,
 	lastUpdated int64,
 ) int64 {
+	if loggerCtx.Err() != nil {
+		return lastUpdated
+	}
 	if resolverConfig.DeactivationPin != nil {
 		newDeactivationPin := *resolverConfig.DeactivationPin
 		curDeactivationPin := cdDeactivationPin.Load()
@@ -693,7 +844,10 @@ func (p *prog) applyFetchedResolverConfig(
 			logger.Info().Msg("Internal domain changes detected, reloading...")
 		}
 		p.firewallOnConfigReload()
-		p.apiReloadCh <- nil
+		select {
+		case p.apiReloadCh <- nil:
+		case <-loggerCtx.Done():
+		}
 		return lastUpdated
 	}
 
@@ -717,7 +871,10 @@ func (p *prog) applyFetchedResolverConfig(
 		// Firewall mode: flush allowlist so DNS queries against the new
 		// config repopulate it with IPs allowed under the updated policy.
 		p.firewallOnConfigReload()
-		p.apiReloadCh <- cfg
+		select {
+		case p.apiReloadCh <- cfg:
+		case <-loggerCtx.Done():
+		}
 	} else {
 		logger.Debug().Msg("Custom config does not change")
 	}
@@ -795,7 +952,16 @@ func (p *prog) reportServeDNSFailure(listenerNum string, err error) {
 // so all listeners could be terminated and re-spawned again.
 func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	// Wait the caller to signal that we can do our logic.
-	<-p.waitCh
+	select {
+	case <-p.waitCh:
+	case <-p.stopCh:
+		return
+	case <-p.runAbortCh:
+		return
+	}
+	if stopRequested(p.stopCh) || stopRequested(p.runAbortCh) {
+		return
+	}
 	if !reload {
 		p.preRun()
 	}
@@ -821,7 +987,19 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	// context for managing spawned goroutines. Firewall mode needs it before
 	// listeners start so its TTL reaper can run from the first DNS response.
 	ctx, cancelFunc := context.WithCancel(context.Background())
-	defer cancelFunc()
+	var wg sync.WaitGroup
+	defer func() { cancelFunc(); wg.Wait() }()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-p.stopCh:
+		case <-p.runAbortCh:
+		case <-reloadCh:
+		case <-ctx.Done():
+		}
+		cancelFunc()
+	}()
 
 	if p.cfg.Service.CacheEnable {
 		cacher, err := dnscache.NewLRUCache(p.cfg.Service.CacheSize)
@@ -838,9 +1016,6 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	// Synchronize firewall mode before listeners process DNS responses.
 	p.syncFirewallMode(ctx)
-
-	var wg sync.WaitGroup
-	wg.Add(len(p.cfg.Listener))
 
 	for _, nc := range p.cfg.Network {
 		for _, cidr := range nc.Cidrs {
@@ -880,13 +1055,19 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	if !reload {
 		p.newNetworkJournal()
-		go p.startNetworkMonitorAndJournal(ctx)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.waitNetworkJournal = p.startNetworkMonitorAndJournal(ctx)
+		}()
 	}
 
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()
 		if !reload {
+			p.listenerWg.Add(1)
 			go func(listenerNum string) {
+				defer p.listenerWg.Done()
 				listenerConfig := p.cfg.Listener[listenerNum]
 				upstreamConfig := p.cfg.Upstream[listenerNum]
 				if upstreamConfig == nil {
@@ -897,31 +1078,30 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 				// serveCtx uses Background() context so listeners survive between reloads.
 				// Changes to listeners config require a service restart, not just reload.
 				serveCtx := context.Background()
-				if err := p.serveDNS(serveCtx, listenerNum); err != nil {
+				if err := serveDNSFn(p, serveCtx, listenerNum); err != nil {
 					p.reportServeDNSFailure(listenerNum, err)
 				}
 				p.Debug().Msgf("End of serveDNS listener.%s: %s", listenerNum, addr)
 			}(listenerNum)
 		}
-		go func() {
-			defer func() {
-				cancelFunc()
-				wg.Done()
-			}()
-			select {
-			case <-p.stopCh:
-			case <-ctx.Done():
-			case <-reloadCh:
-			}
-		}()
 	}
 
 	if !reload {
 		for i := 0; i < numListeners; i++ {
-			<-p.started
+			select {
+			case <-p.started:
+			case <-p.stopCh:
+				return
+			case <-p.runAbortCh:
+				return
+			}
 		}
-		for _, f := range p.onStarted {
-			f()
+		if !p.startOSState(func() {
+			for _, f := range p.onStarted {
+				f()
+			}
+		}) {
+			return
 		}
 	}
 
@@ -947,11 +1127,9 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		// Stop writing log to unix socket.
 		consoleWriter = newHumanReadableZapCore(os.Stdout, consoleWriterLevel)
 		p.initLogging(false)
-		if p.logConn != nil {
-			_ = p.logConn.Close()
-		}
-		go p.apiConfigReload()
-		p.postRun()
+		p.closeLogConn()
+		p.startAPIConfigReload()
+		p.startOSState(func() { postRunFn(p) })
 	}
 	wg.Wait()
 }
@@ -999,7 +1177,7 @@ func (p *prog) newNetworkJournal() {
 // journal. The trackers do not depend on the monitor, so a monitor that cannot
 // start leaves them running. It passes on the wait function of the journal.
 func (p *prog) startNetworkMonitorAndJournal(ctx context.Context) func() {
-	if err := p.monitorNetworkChanges(ctx); err != nil {
+	if err := monitorNetworkChangesFn(p, ctx); err != nil {
 		p.Error().Err(err).Msg("Failed to start network monitoring")
 	}
 	return p.startNetworkJournal()
@@ -1010,12 +1188,21 @@ func (p *prog) startNetworkMonitorAndJournal(ctx context.Context) func() {
 // table of each moment after an incident. It returns a function that waits for
 // both loops, so a caller that closed the stop channel knows when they ended.
 func (p *prog) startNetworkJournal() func() {
-	healthDone := p.health.startLoop(p.stopCh, func() (int, bool) {
+	// Journal trackers persist across reloads, but not a stop or startup abort.
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-p.stopCh:
+		case <-p.runAbortCh:
+		}
+		close(stop)
+	}()
+	healthDone := p.health.startLoop(stop, func() (int, bool) {
 		return p.upstreamMonitorNow().countDownExcept(isInternalDomainUpstream), p.recoveryBypass.Load()
 	})
 	var configDone <-chan struct{}
 	if p.dnsConfig != nil {
-		configDone = p.dnsConfig.startLoop(p.stopCh, p.logDNSConfigChanges)
+		configDone = p.dnsConfig.startLoop(stop, p.logDNSConfigChanges)
 	}
 	p.logNetworkSnapshot("start")
 	return func() {
@@ -1068,22 +1255,123 @@ func (p *prog) metricsEnabled() bool {
 	return p.cfg.Service.MetricsQueryStats || p.cfg.Service.MetricsListener != ""
 }
 
-func (p *prog) Stop(_ service.Service) error {
-	p.stopDnsWatchers()
-	p.Debug().Msg("Dns watchers stopped")
-	for _, f := range p.onStopped {
-		f()
+// finishRun also cancels workers waiting for startup when preflight returns early.
+// The caller's stop channel belongs to the mobile controller, not to this cleanup.
+func (p *prog) finishRun() {
+	// Keep the files open through final diagnostics, including mobile exits
+	// that never invoke the service Stop callback.
+	defer p.closeInternalLogs()
+	close(p.runAbortCh)
+	select {
+	case <-p.runDone:
+	case <-time.After(shutdownTimeout):
+		p.Warn().Msg("timeout waiting for ctrld components to stop")
+		// A timeout is not proof that workers stopped. Never release resources
+		// still owned by the run, or allow a mobile restart to overlap it.
+		<-p.runDone
 	}
-	p.Debug().Msg("Finish running onStopped functions")
+	// Listeners live across config reloads, so they belong to prog rather
+	// than the per-run wait group. runDone closes after their final Add.
+	p.apiReloadWg.Wait()
+	p.listenerWg.Wait()
+	if p.waitNetworkJournal != nil {
+		p.waitNetworkJournal()
+	}
+	if err := p.shutdown(); err != nil {
+		p.Warn().Err(err).Msg("error during shutdown")
+	}
+}
+
+// startOSState serializes startup's OS mutations with restoration. A stop
+// either restores an already-completed action or prevents it from starting.
+func (p *prog) startOSState(f func()) bool {
+	p.osStateMu.Lock()
+	defer p.osStateMu.Unlock()
+	if p.osStateRestored || stopRequested(p.stopCh) || stopRequested(p.runAbortCh) {
+		return false
+	}
+	f()
+	return true
+}
+
+// restoreOSState puts back what ctrld changed outside the process: the DNS
+// settings, interception state and allocated listener IPs. It runs
+// while the listeners are still serving, so the OS is never left pointing at a
+// resolver that is already gone. Safe to call multiple times.
+func (p *prog) restoreOSState() error {
+	p.restoreOnce.Do(func() {
+		p.osStateMu.Lock()
+		p.osStateRestored = true
+		p.osStateMu.Unlock()
+		p.closeNetMonitor()
+		p.stopDnsWatchers()
+		p.Debug().Msg("dns watchers stopped")
+		for _, f := range p.onStopped {
+			f()
+		}
+		p.Debug().Msg("finish running onStopped functions")
+		if derr := p.deAllocateIP(); derr != nil {
+			p.Error().Err(derr).Msg("de-allocate ip failed")
+			p.restoreErr = derr
+		}
+	})
+	return p.restoreErr
+}
+
+// releaseResources releases the control server and upstream transports. It must run after
+// the listeners stopped, since retiring an upstream a listener still answers
+// queries on would fail those queries. Safe to call multiple times.
+func (p *prog) releaseResources() {
+	p.releaseOnce.Do(func() {
+		if p.cs != nil {
+			if cerr := p.cs.stop(); cerr != nil {
+				p.Warn().Err(cerr).Msg("could not stop control server")
+			}
+		}
+		p.closeLogConn()
+		p.mu.Lock()
+		upstreams := p.cfg.Upstream
+		p.mu.Unlock()
+		closeReplacedUpstreams(upstreams, nil)
+	})
+}
+
+// shutdown runs the full teardown, in the order both halves require. It is
+// called once the listeners stopped, on every stop path including the mobile
+// one where the OS never terminates the process.
+func (p *prog) shutdown() error {
+	err := p.restoreOSState()
+	p.releaseResources()
+	return err
+}
+
+// closeReplacedUpstreams releases the transports of upstreams that cur no longer
+// refers to, or all of them when cur is nil. Requests in flight on them fail
+// fast and are retried, the same way a re-bootstrap treats connections it
+// replaces.
+func closeReplacedUpstreams(old, cur map[string]*ctrld.UpstreamConfig) {
+	inUse := make(map[*ctrld.UpstreamConfig]struct{}, len(cur))
+	for _, uc := range cur {
+		inUse[uc] = struct{}{}
+	}
+	for _, uc := range old {
+		if uc == nil {
+			continue
+		}
+		if _, ok := inUse[uc]; !ok {
+			uc.CloseTransports()
+		}
+	}
+}
+
+func (p *prog) Stop(_ service.Service) error {
 	defer func() {
 		p.Info().Msg("Service stopped")
 		// The files take the last line of this run before they close.
 		p.closeInternalLogs()
 	}()
-	if err := p.deAllocateIP(); err != nil {
-		p.Error().Err(err).Msg("De-allocate ip failed")
-		return err
-	}
+	// Restore OS state while listeners still serve; retire resources after their drain.
+	err := p.restoreOSState()
 	if deactivationPinSet() {
 		select {
 		case <-p.pinCodeValidCh:
@@ -1108,7 +1396,7 @@ func (p *prog) Stop(_ service.Service) error {
 		}
 	}
 	close(p.stopCh)
-	return nil
+	return err
 }
 
 func (p *prog) stopDnsWatchers() {
@@ -1136,7 +1424,7 @@ func (p *prog) deAllocateIP() error {
 		return nil
 	}
 	for _, lc := range p.cfg.Listener {
-		if err := deAllocateIP(lc.IP); err != nil {
+		if err := deAllocateIPFn(lc.IP); err != nil {
 			return err
 		}
 	}
@@ -1151,6 +1439,10 @@ func (p *prog) deAllocateIP() error {
 // NRPT rule, so a test of what happens *after* it fails must not be the thing that
 // runs it.
 var (
+	deAllocateIPFn                              = deAllocateIP
+	serveDNSFn                                  = (*prog).serveDNS
+	monitorNetworkChangesFn                     = (*prog).monitorNetworkChanges
+	postRunFn                                   = (*prog).postRun
 	startDNSInterceptFn                         = (*prog).startDNSIntercept
 	ensureInterceptDNSTargetFn                  = (*prog).ensureInterceptDNSTarget
 	removeInterceptDNSTargetFn                  = (*prog).removeInterceptDNSTarget

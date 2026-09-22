@@ -48,6 +48,7 @@ const (
 	windowsForwardersFilename = ".forwarders.txt"
 	oldBinSuffix              = "_previous"
 	msgExit                   = "$$EXIT$$"
+	shutdownTimeout           = 10 * time.Second
 )
 
 var (
@@ -179,9 +180,14 @@ func initCLI() *cobra.Command {
 }
 
 // isMobile reports whether the current OS is a mobile platform.
-func isMobile() bool {
+var isMobile = func() bool {
 	return runtime.GOOS == "android" || runtime.GOOS == "ios"
 }
+
+var (
+	networkUp                       = ctrldnet.Up
+	cleanupStaleDNSInterceptStateFn = cleanupStaleDNSInterceptState
+)
 
 func updateConfigInterceptMode(cfg *ctrld.Config, mode string) bool {
 	desired := ""
@@ -277,6 +283,8 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		dnsWatcherStopCh: make(chan struct{}),
 		apiReloadCh:      make(chan *ctrld.Config),
 		apiForceReloadCh: make(chan struct{}),
+		runDone:          make(chan struct{}),
+		runAbortCh:       make(chan struct{}),
 		cfg:              &cfg,
 		appCallback:      appCallback,
 	}
@@ -309,7 +317,15 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		return
 	}
 
-	if !daemon {
+	switch {
+	case isMobile():
+		defer p.finishRun()
+		// There is no OS service manager here, and s.Run parks a goroutine on a
+		// signal that never arrives, leaking one per start/stop cycle.
+		if err := p.Start(nil); err != nil {
+			mainLog.Load().Fatal().Err(err).Msg("failed to start ctrld")
+		}
+	case !daemon:
 		// We need to call s.Run() as soon as possible to response to the OS manager, so it
 		// can see ctrld is running and don't mark ctrld as failed service.
 		go func() {
@@ -359,10 +375,10 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// outbound traffic), which would deny this process's own API bootstrap below and
 	// leave it retrying forever - never reaching the cleanup that lives inside
 	// intercept startup. No-op when no stale state exists.
-	cleanupStaleDNSInterceptState()
+	cleanupStaleDNSInterceptStateFn()
 
 	// Wait for network up.
-	if !ctrldnet.Up() {
+	if !networkUp() {
 		failRunUnclassified(p.Error(), "network is not up yet", p.notifyExitToLogServer)
 		return
 	}
@@ -520,6 +536,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 
 	close(waitCh)
 	<-stopCh
+	if !isMobile() {
+		p.finishRun()
+	}
 }
 
 // writeConfigFile writes the configuration to a file
@@ -2286,8 +2305,9 @@ func newSocketControlClientMobile(dir string, stopCh chan struct{}) *controlClie
 		case <-stopCh:
 			return nil
 		default:
-			_, err := cc.post("/", nil)
+			resp, err := cc.post("/", nil)
 			if err == nil {
+				resp.Body.Close()
 				return cc
 			} else {
 				bo.BackOff(ctx, err)
@@ -2426,6 +2446,7 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	resp, err := cc.post(deactivationPath, bytes.NewReader(data))
 	mainLog.Load().Debug().Msg("Posting deactivation request done")
 	if resp != nil {
+		defer resp.Body.Close()
 		switch resp.StatusCode {
 		case http.StatusBadRequest:
 			mainLog.Load().Error().Msg(errRequiredDeactivationPin.Error())

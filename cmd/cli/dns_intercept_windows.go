@@ -3069,6 +3069,10 @@ func (p *prog) healBlockedLoopbackDNS(state *wfpState, reason string) bool {
 func (p *prog) scheduleDelayedRechecks() {
 	for _, delay := range []time.Duration{pfAnchorRecheckDelay, pfAnchorRecheckDelayLong} {
 		time.AfterFunc(delay, func() {
+			if !p.beginNetworkActivity() {
+				return
+			}
+			defer p.netMonitorWG.Done()
 			if p.dnsInterceptState == nil {
 				return
 			}

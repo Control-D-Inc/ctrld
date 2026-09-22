@@ -15,6 +15,8 @@ type sourceTestMonitor struct {
 	started  bool
 }
 
+func (*sourceTestMonitor) Close() error { return nil }
+
 func (m *sourceTestMonitor) RegisterChangeCallback(fn netmon.ChangeFunc) func() {
 	m.callback = fn
 	return func() {}
