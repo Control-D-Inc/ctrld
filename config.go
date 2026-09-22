@@ -78,6 +78,12 @@ const (
 	controlDNetDomain = "controld.net"
 	controlDDevDomain = "controld.dev"
 
+	// nextDNSDomain is the parent domain of the NextDNS DoH endpoints. Beside
+	// dns.nextdns.io, NextDNS serves alternative endpoints under it, such as
+	// ultralow.dns.nextdns.io and anycast.dns2.nextdns.io, which are the same
+	// service and take the same client info headers.
+	nextDNSDomain = "nextdns.io"
+
 	endpointPrefixHTTPS = "https://"
 	endpointPrefixQUIC  = "quic://"
 	endpointPrefixH3    = "h3://"
@@ -761,6 +767,7 @@ func (uc *UpstreamConfig) IsControlD() bool {
 	return false
 }
 
+// isNextDNS reports whether this is a NextDNS upstream.
 func (uc *UpstreamConfig) isNextDNS() bool {
 	domain := uc.Domain
 	if domain == "" {
@@ -768,7 +775,7 @@ func (uc *UpstreamConfig) isNextDNS() bool {
 			domain = u.Hostname()
 		}
 	}
-	return domain == "dns.nextdns.io"
+	return dns.IsSubDomain(nextDNSDomain, domain)
 }
 
 func (uc *UpstreamConfig) dohTransport(ctx context.Context, dnsType uint16) http.RoundTripper {
