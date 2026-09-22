@@ -1530,6 +1530,32 @@ func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 	}
 }
 
+// The OS boundaries of the DNS reset path, as variables so tests can exercise
+// its failure handling without changing the host's DNS or NetworkManager state.
+var (
+	netInterfaceFn           = netInterface
+	restoreNetworkManagerFn  = (*prog).restoreNetworkManager
+	setIfaceDNSFn            = setDNS
+	resetIfaceDNSFn          = resetDNS
+	savedStaticNameserversFn = ctrld.SavedStaticNameservers
+)
+
+// logIfaceLookupFailure reports a failed lookup of the interface the caller was
+// about to work on, naming that work in skipping, e.g. "DNS restoration". An
+// interface that no longer exists has nothing left to act on — an unplugged
+// adapter or a torn down tether is gone along with the settings ctrld changed —
+// so the skip is a debug diagnostic rather than a user-facing error: it
+// otherwise makes a successful upgrade look broken. Every other lookup failure
+// still says something went wrong and stays at error level, as does a failure
+// on an interface that does exist.
+func logIfaceLookupFailure(logger *ctrld.Logger, skipping string, err error) {
+	if errors.Is(err, errInterfaceNotFound) {
+		logger.Debug().Msgf("Skipping %s: previous interface is no longer present", skipping)
+		return
+	}
+	logger.Error().Err(err).Msg("Could not get interface")
+}
+
 // resetDNSForRunningIface performs a DNS reset on the running interface.
 // The parameter isStart indicates whether this is being called as part of a start (or restart)
 // command. When true, we check if the current static DNS configuration already differs from the
@@ -1542,13 +1568,13 @@ func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runnin
 		return
 	}
 	logger := p.logger.Load().With().Str("iface", p.runningIface)
-	netIface, err := netInterface(p.runningIface)
+	netIface, err := netInterfaceFn(p.runningIface)
 	if err != nil {
-		logger.Error().Err(err).Msg("Could not get interface")
+		logIfaceLookupFailure(logger, "DNS restoration", err)
 		return
 	}
 	runningIface = netIface
-	if err := p.restoreNetworkManager(); err != nil {
+	if err := restoreNetworkManagerFn(p); err != nil {
 		logger.Error().Err(err).Msg("Could not restore NetworkManager")
 		return
 	}
@@ -1575,16 +1601,16 @@ func (p *prog) resetDNSForRunningIface(isStart bool, restoreStatic bool) (runnin
 	}
 
 	// Default logic: if there is a saved static DNS configuration, restore it.
-	saved := ctrld.SavedStaticNameservers(netIface)
+	saved := savedStaticNameserversFn(netIface)
 	if len(saved) > 0 && restoreStatic {
 		logger.Debug().Msgf("Restoring interface %q from saved static config: %v", netIface.Name, saved)
-		if err := setDNS(netIface, saved); err != nil {
+		if err := setIfaceDNSFn(netIface, saved); err != nil {
 			logger.Error().Err(err).Msgf("Failed to restore static DNS config on interface %q", netIface.Name)
 			return
 		}
 	} else {
 		logger.Debug().Msgf("No saved static DNS config for interface %q; resetting to DHCP", netIface.Name)
-		if err := resetDNS(netIface); err != nil {
+		if err := resetIfaceDNSFn(netIface); err != nil {
 			logger.Error().Err(err).Msgf("Failed to reset DNS to DHCP on interface %q", netIface.Name)
 			return
 		}

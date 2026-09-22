@@ -1216,24 +1216,39 @@ func processLogAndCacheFlags(v *viper.Viper, cfg *ctrld.Config) {
 	mainLog.Load().Debug().Msg("Log and cache flags processed successfully")
 }
 
+// errInterfaceNotFound reports that the named interface does not exist on the
+// host. Callers use errors.Is to tell this apart from a lookup that failed for
+// another reason, because an interface that is simply gone (an unplugged
+// adapter, a torn down tether) is an expected outcome rather than a failure.
+var errInterfaceNotFound = errors.New("interface not found")
+
+// foreachInterface enumerates the host network interfaces. It is a variable so
+// tests can make enumeration fail without depending on the host.
+var foreachInterface = netmon.ForeachInterface
+
 // netInterface returns the network interface by name
 func netInterface(ifaceName string) (*net.Interface, error) {
 	if ifaceName == autoIface {
 		ifaceName = defaultIfaceName()
 	}
 	var iface *net.Interface
-	err := netmon.ForeachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
+	err := foreachInterface(func(i netmon.Interface, prefixes []netip.Prefix) {
 		if i.Name == ifaceName {
 			iface = i.Interface
 		}
 	})
+	if err != nil {
+		// Enumeration itself failed, so the interface cannot be reported as
+		// missing: nothing was positively established about it.
+		return nil, err
+	}
 	if iface == nil {
-		return nil, errors.New("interface not found")
+		return nil, errInterfaceNotFound
 	}
 	if _, err := patchNetIfaceName(iface); err != nil {
 		return nil, err
 	}
-	return iface, err
+	return iface, nil
 }
 
 // defaultIfaceName returns the default interface name
