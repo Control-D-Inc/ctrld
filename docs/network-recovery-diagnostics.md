@@ -254,6 +254,44 @@ A probe-triggered reload does not count as a missing-anchor repair.
 
 See [PF DNS interception](pf-dns-intercept.md) and [DNS intercept mode](dns-intercept-mode.md) for the rule lifecycle.
 
+## IPv6-only target fallback and PF diagnostics
+
+On macOS, a failed DHCPv4 read remains unknown unless configd positively publishes
+CLAT for the current primary service/interface and the live interface addresses
+agree. A CLAT-looking address alone is insufficient. Unknown or unsupported native
+state leaves DNS unchanged. The fallback reuses the existing listener-aware target
+and cleanup paths; it does not change PF enforcement or treat every command error
+as empty DNS. Native output compatibility and the real hotspot scenario require
+[owned-Mac validation](ipv6-only-dns-target-qa.md).
+
+`DNS intercept IPv6 block diagnostic` is a change-only debug event after unsuccessful
+probes and their first restored receipt. It reads only the ctrld anchor using
+`pfctl -a com.controld.ctrld -vvsr`, at most once per minute. The command has a
+500 ms deadline and a 64 KiB output cap. A restored receipt inside the interval can
+refer to the cached capture; `capture_cached`, `capture_age_ms` and
+`capture_generation` make this explicit. Collection is synchronous before the
+caller can repair: the 500 ms bound covers the command, not its pipe-cleanup grace
+or the subsequent kernel route/interface reads.
+
+`pf_read_status` distinguishes unavailable/failed/unrecognized data from recognized
+rules and counters. `ipv6_dns_udp_rule_observed` and its TCP equivalent mean the
+exact generated rule was observed, not that it received the probe. A missing rule
+match does not prove that no other IPv6 blocking exists. Packet fields are emitted
+only when their counters are known. Delta status is `unknown`, `reset` or
+`shared_traffic`; decreases are never reported as negative packet counts.
+
+Counters include all matching traffic, not just the probe, and unobserved reloads
+can reset them between captures. A counter increase does not establish that CLAT
+translated or PF blocked a particular packet. The event names the probe transport,
+resolver target/family, recovery generation and default-route interfaces.
+`clat_address_present` is an address hint, not the positive native evidence used to
+authorize DNS changes. Raw rules, customer query names and interface-address lists
+are not included.
+
+These debug events do not guarantee journal retention. !1020 separately handles
+retained DNS-target decision failures. Reload completion, a configured block rule,
+and successful local probe receipt remain distinct observations.
+
 ## Reproduction boundaries
 
 Compare the affected release with the exact candidate artifact on an owned host.

@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"os/exec"
@@ -88,21 +87,17 @@ func getDNSFromScutil(ctx context.Context) []string {
 }
 
 func getDHCPNameservers(iface string) ([]string, error) {
-	// getoption returns the selected interface's DHCP option directly and does
-	// not expose unrelated packet addresses to the parser.
-	output, err := exec.Command("ipconfig", "getoption", iface, "domain_name_server").Output()
-	if err == nil {
-		return parseDHCPOptionNameservers(output), nil
-	}
+	return dhcpNameserversFromCommands(context.Background(), iface, func(_ context.Context, args ...string) ([]byte, error) {
+		return exec.Command("ipconfig", args...).Output()
+	})
+}
 
-	// Older macOS releases can fail getoption while still exposing the packet.
-	// Parse the real macOS field shape, for example:
-	//     domain_name_server (ip_mult): {192.168.1.1, 8.8.8.8}
-	output, packetErr := exec.Command("ipconfig", "getpacket", iface).Output()
-	if packetErr != nil {
-		return nil, fmt.Errorf("error reading DHCP DNS option: getoption: %w; getpacket: %w", err, packetErr)
-	}
-	return parseDHCPPacketNameservers(output), nil
+// DHCPNameserversForInterfaceContext bounds both commands with the caller's
+// context. Other system-discovery callers retain their existing behavior.
+func DHCPNameserversForInterfaceContext(ctx context.Context, iface string) ([]string, error) {
+	return dhcpNameserversFromCommands(ctx, iface, func(ctx context.Context, args ...string) ([]byte, error) {
+		return dhcpCommandOutput(ctx, "/usr/sbin/ipconfig", args...)
+	})
 }
 
 // DHCPNameserversForInterface returns DHCP option 6 for exactly iface.

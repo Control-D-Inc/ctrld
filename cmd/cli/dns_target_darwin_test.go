@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -20,6 +21,9 @@ type interceptTargetHarness struct {
 	serviceByDev map[string]string
 	dhcp         []string
 	dhcpErr      error
+	nativeCLAT   bool
+	nativeErr    error
+	saveErr      error
 	readErr      error
 	setErr       error
 	resetErr     error
@@ -47,6 +51,9 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 	origSaved := interceptSavedStaticNameserversFn
 	origReset := interceptResetDNSIgnoreUnusableIfaceFn
 	origDHCP := interceptDHCPNameserversForInterfaceFn
+	origNative := interceptNativeCLATDefaultServiceFn
+	origNativeStatic := interceptNativeStaticDNSFn
+	origSnapshot := interceptSaveStaticDNSSnapshotFn
 	origIntercept := dnsIntercept
 	t.Cleanup(func() {
 		interceptDNSTargetStatePathFn = origPath
@@ -59,9 +66,30 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 		interceptSavedStaticNameserversFn = origSaved
 		interceptResetDNSIgnoreUnusableIfaceFn = origReset
 		interceptDHCPNameserversForInterfaceFn = origDHCP
+		interceptNativeCLATDefaultServiceFn = origNative
+		interceptNativeStaticDNSFn = origNativeStatic
+		interceptSaveStaticDNSSnapshotFn = origSnapshot
 		dnsIntercept = origIntercept
 	})
 
+	interceptNativeCLATDefaultServiceFn = func(_ context.Context, device string) (nativeTargetService, error) {
+		if !h.nativeCLAT || h.nativeErr != nil {
+			return nativeTargetService{}, h.nativeErr
+		}
+		return nativeTargetService{ID: nativeTargetTestServiceID, Name: h.serviceByDev[device], Device: device}, nil
+	}
+	interceptNativeStaticDNSFn = func(_ context.Context, iface *net.Interface) ([]string, error) {
+		return interceptCurrentStaticDNSFn(iface)
+	}
+	interceptSaveStaticDNSSnapshotFn = func(iface *net.Interface, snapshot []string, owned string) error {
+		if h.saveErr != nil {
+			return h.saveErr
+		}
+		if !isInterceptDNSTargetOnly(snapshot, owned) {
+			h.saved[iface.Name] = slices.Clone(filterOwnTarget(snapshot, owned))
+		}
+		return nil
+	}
 	dnsIntercept = true
 	interceptDNSTargetStatePathFn = func() string { return h.statePath }
 	interceptDefaultRouteInterfaceFn = func() (string, error) { return "en1", nil }
@@ -81,6 +109,9 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 		return slices.Clone(h.dns[iface.Name]), nil
 	}
 	interceptSaveCurrentStaticDNSFn = func(iface *net.Interface) error {
+		if h.saveErr != nil {
+			return h.saveErr
+		}
 		h.saved[iface.Name] = slices.Clone(h.dns[iface.Name])
 		return nil
 	}

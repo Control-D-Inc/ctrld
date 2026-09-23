@@ -119,6 +119,7 @@ func TestPFProbeRepairCorrelation(t *testing.T) {
 
 func TestPFProbeMissingTargetLogTransitions(t *testing.T) {
 	logs := captureTransitionLogs(t)
+	stubPFDiagnosticCapture(t)
 	old := pfProbeNameservers
 	t.Cleanup(func() { pfProbeNameservers = old; pfProbeLogs = pfProbeLogState{} })
 	pfProbeLogs = pfProbeLogState{}
@@ -147,6 +148,7 @@ func TestPFProbeMissingTargetLogTransitions(t *testing.T) {
 
 func TestPFProbeUnsentDoesNotReload(t *testing.T) {
 	logs := captureTransitionLogs(t)
+	stubPFDiagnosticCapture(t)
 	oldServers, oldCommand, oldReload := pfProbeNameservers, newPFProbeCommand, forceReloadPFInterceptFn
 	t.Cleanup(func() {
 		pfProbeNameservers, newPFProbeCommand, forceReloadPFInterceptFn = oldServers, oldCommand, oldReload
@@ -203,6 +205,7 @@ func TestPFProbeWatchdogSkipsIndeterminateAnchor(t *testing.T) {
 }
 
 func TestPFProbeNoIPv4TargetIsIndeterminate(t *testing.T) {
+	stubPFDiagnosticCapture(t)
 	old := pfProbeNameservers
 	t.Cleanup(func() { pfProbeNameservers = old })
 	pfProbeNameservers = func() []string { return []string{"[fe80::1%en0]:53", "76.76.2.0:53"} }

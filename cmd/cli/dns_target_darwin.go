@@ -3,10 +3,13 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"tailscale.com/net/netmon"
 
@@ -20,16 +23,21 @@ import (
 const interceptDNSTargetStateFile = ".intercept_dns_target"
 
 var (
-	interceptDNSTargetStatePathFn          = interceptDNSTargetStatePath
-	interceptDefaultRouteInterfaceFn       = netmon.DefaultRouteInterface
-	interceptInterfaceByNameFn             = net.InterfaceByName
-	interceptPatchNetIfaceNameFn           = patchNetIfaceName
-	interceptCurrentStaticDNSFn            = currentStaticDNS
+	interceptDNSTargetStatePathFn       = interceptDNSTargetStatePath
+	interceptDefaultRouteInterfaceFn    = netmon.DefaultRouteInterface
+	interceptInterfaceByNameFn          = net.InterfaceByName
+	interceptPatchNetIfaceNameFn        = patchNetIfaceName
+	interceptCurrentStaticDNSFn         = readTargetStaticDNS
+	interceptNativeCLATDefaultServiceFn = nativeCLATDefaultService
+	interceptNativeStaticDNSFn          = readNativeTargetStaticDNS
+	interceptSaveStaticDNSSnapshotFn    = func(iface *net.Interface, dns []string, owned string) error {
+		return saveTargetStaticDNSSnapshot(ctrld.SavedStaticDnsSettingsFilePath(iface), dns, owned)
+	}
 	interceptSaveCurrentStaticDNSFn        = saveCurrentStaticDNS
 	interceptSetDNSFn                      = setDNS
 	interceptSavedStaticNameserversFn      = ctrld.SavedStaticNameservers
 	interceptResetDNSIgnoreUnusableIfaceFn = resetDnsIgnoreUnusableInterface
-	interceptDHCPNameserversForInterfaceFn = ctrld.DHCPNameserversForInterface
+	interceptDHCPNameserversForInterfaceFn = readTargetDHCPNameservers
 )
 
 func interceptDNSTargetStatePath() string {
@@ -148,24 +156,52 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 		diagnostic.failed(decision, "interface_lookup", err)
 		return
 	}
-	// Resolve the network service name (e.g. en5 -> "iPhone USB") so
-	// networksetup operates on the right service.
-	if _, err := interceptPatchNetIfaceNameFn(iface); err != nil {
+	routeDHCPDNS, dhcpErr := interceptDHCPNameserversForInterfaceFn(drIfaceName)
+	nativeFallback := false
+	ctx, cancel := context.WithTimeout(context.Background(), nativeTargetReadBudget)
+	defer cancel()
+	var nativeService nativeTargetService
+	readStatic := interceptCurrentStaticDNSFn
+	if dhcpErr != nil {
+		// Resolve the exact primary UUID before any expanded mutation. A
+		// device can have multiple services; the first listed is not proof.
+		var nativeErr error
+		nativeService, nativeErr = interceptNativeCLATDefaultServiceFn(ctx, drIfaceName)
+		nativeFallback = nativeErr == nil && nativeService.ID != "" && nativeService.Name != "" && nativeService.Device == drIfaceName && !hasIPv4DNS(routeDHCPDNS)
+		mainLog.Load().Debug().Err(nativeErr).Bool("native_clat_verified", nativeFallback).
+			Str("interface", drIfaceName).Msg("intercept DNS target: native fallback evidence")
+	}
+	if nativeFallback {
+		iface.Name = nativeService.Name
+		readStatic = func(iface *net.Interface) ([]string, error) { return interceptNativeStaticDNSFn(ctx, iface) }
+	} else if _, err := interceptPatchNetIfaceNameFn(iface); err != nil {
 		diagnostic.failed(decision, "service_lookup", err)
 		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not resolve network service for %s", drIfaceName)
 		return
 	}
 	decision.service = iface.Name
 
-	staticDNS, err := interceptCurrentStaticDNSFn(iface)
+	staticDNS, err := readStatic(iface)
 	if err != nil {
-		// Interfaces without a network service (utun/VPN tunnels) land here:
-		// networksetup cannot address them, ctrld never writes to them, and
-		// any target set on the underlying physical service stays in place —
-		// still correct while ctrld runs.
 		diagnostic.failed(decision, "static_dns", err)
 		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not read static DNS for %q", iface.Name)
 		return
+	}
+	// Retain the exact validated snapshot for backup and equality checks,
+	// including an owned non-loopback value that must never be snapshotted.
+	snapshot := staticDNS
+	if nativeFallback {
+		device, routeErr := interceptDefaultRouteInterfaceFn()
+		check, serviceErr := interceptNativeCLATDefaultServiceFn(ctx, drIfaceName)
+		if routeErr != nil || serviceErr != nil || device != drIfaceName || check != nativeService {
+			diagnostic.failed(decision, "native_recheck", errors.Join(routeErr, serviceErr))
+			return
+		}
+		current, readErr := readStatic(iface)
+		if readErr != nil || ctx.Err() != nil || !slices.Equal(current, snapshot) {
+			diagnostic.failed(decision, "static_recheck", errors.Join(readErr, ctx.Err()))
+			return
+		}
 	}
 	// Never count ctrld's own previously-set entry as network-provided DNS,
 	// or the next recovery on the same DNS-less network would remove it and
@@ -178,11 +214,19 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 		p.removeInterceptDNSTargetLocked("network has usable static IPv4 DNS")
 		return
 	}
+	if nativeFallback && slices.ContainsFunc(staticDNS, func(s string) bool {
+		ip := net.ParseIP(s)
+		return ip != nil && ip.To4() == nil && ip.IsLoopback()
+	}) {
+		// lo0 can serve another local resolver. The static backup reader
+		// discards loopback, so expanded admission cannot safely replace it.
+		resolvedReason = "static_loopback_dns"
+		return
+	}
 
-	routeDHCPDNS, err := interceptDHCPNameserversForInterfaceFn(drIfaceName)
-	if err != nil {
-		diagnostic.failed(decision, "dhcp_dns", err)
-		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not read DHCP DNS for default-route service %q", iface.Name)
+	if dhcpErr != nil && !nativeFallback {
+		diagnostic.failed(decision, "dhcp_dns", dhcpErr)
+		mainLog.Load().Debug().Err(dhcpErr).Msgf("intercept DNS target: could not read DHCP DNS for default-route service %q", iface.Name)
 		return
 	}
 	if hasIPv4DNS(routeDHCPDNS) {
@@ -198,16 +242,30 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 	if p.interceptDNSTargetService == iface.Name && p.interceptDNSTargetSetValue == target {
 		return // already set on this service
 	}
+	if nativeFallback {
+		owned := ""
+		if p.interceptDNSTargetService == iface.Name {
+			owned = p.interceptDNSTargetSetValue
+		}
+		if err := interceptSaveStaticDNSSnapshotFn(iface, snapshot, owned); err != nil {
+			return // no expanded mutation without a restorable backup
+		}
+	}
 	// Default route moved to a different DNS-less service (or the listener
 	// config changed): clear the stale entry first.
 	p.removeInterceptDNSTargetLocked("default route service changed")
+	if p.interceptDNSTargetService != "" {
+		return // cleanup failed; never overwrite ownership of the old service
+	}
 
 	// Preserve any existing (IPv6-only) static entries for later restore.
 	// saveCurrentStaticDNS filters loopback on write, and
 	// savedStaticNameservers filters loopback on read, so ctrld's own
 	// loopback target can never be recorded or restored as user DNS.
-	if err := interceptSaveCurrentStaticDNSFn(iface); err != nil {
-		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not save static DNS for %q", iface.Name)
+	if !nativeFallback {
+		if err := interceptSaveCurrentStaticDNSFn(iface); err != nil {
+			mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not save static DNS for %q", iface.Name)
+		}
 	}
 	if err := interceptSetDNSFn(iface, []string{target}); err != nil {
 		mainLog.Load().Warn().Err(err).Msgf("intercept DNS target: could not set %s on %q", target, iface.Name)
@@ -216,6 +274,7 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 	p.setInterceptDNSTargetLocked(iface.Name, target)
 	p.persistInterceptDNSTargetStateLocked()
 	journal(mainLog.Load().Warn()).Str("service", iface.Name).Str("target", target).
+		Bool("native_clat_fallback", nativeFallback).
 		Str("reason", "dns_less_network").
 		Msgf("intercept DNS target: service %q provides no usable IPv4 DNS; set %s so macOS can emit DNS queries (removed automatically when the network provides IPv4 DNS)", iface.Name, target)
 }
