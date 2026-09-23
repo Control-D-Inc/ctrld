@@ -14,6 +14,11 @@ import (
 const (
 	loopTestDomain = ".test"
 	loopTestQtype  = dns.TypeTXT
+
+	// defaultLoopCheckTimeout bounds one loop probe when the upstream sets no
+	// timeout. It matches the DNS client's own default, so the unconfigured
+	// case keeps its previous behavior.
+	defaultLoopCheckTimeout = 2 * time.Second
 )
 
 // newLoopGuard returns new loopGuard.
@@ -119,11 +124,32 @@ func (p *prog) checkDnsLoop() {
 			p.logUpstreamProbeFailure(reference[uid], uc, err, p.Warn, "Could not perform loop check")
 			continue
 		}
-		if _, err := resolver.Resolve(context.Background(), msg); err != nil {
+		// Bound the probe, like checkUpstreamOnce does. Without a deadline the
+		// DNS client falls back to its own default, so one unreachable local
+		// upstream stalls this serial loop far past the configured timeout.
+		timeout := defaultLoopCheckTimeout
+		if uc.Timeout > 0 {
+			timeout = time.Millisecond * time.Duration(uc.Timeout)
+		}
+		if err := resolveLoopTestMsg(resolver, msg, timeout); err != nil {
 			p.logUpstreamProbeFailure(reference[uid], uc, err, p.Warn, "Could not send DNS loop check query")
 		}
 	}
 	p.Debug().Msg("End checking DNS loop")
+}
+
+// resolveLoopTestMsg sends one loop test query under its own deadline. The
+// cancel runs before the next upstream, so a long loop leaks no contexts.
+//
+// The context deliberately carries no logger. A resolver logs its own failure
+// at error level with the endpoint in the message, which would put an Internal
+// Domain resolver address in the retained journal; logUpstreamProbeFailure is
+// what reports this failure, and it bounds what the line may hold.
+func resolveLoopTestMsg(resolver ctrld.Resolver, msg *dns.Msg, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_, err := resolver.Resolve(ctx, msg)
+	return err
 }
 
 // checkDnsLoopTicker performs p.checkDnsLoop every minute.
