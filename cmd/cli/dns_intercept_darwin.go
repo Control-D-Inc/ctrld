@@ -108,6 +108,8 @@ const (
 type pfState struct {
 	anchorFile string
 	anchorName string
+	// Serialized by prog.interceptDNSTargetMu; bounded to one failed decision.
+	targetDiagnostic dnsTargetDecisionDiagnostic
 }
 
 // ensureCtrldGroup creates the _ctrld system group if it doesn't exist and returns its GID.

@@ -117,7 +117,7 @@ func newInterceptTargetProg() *prog {
 		cfg: &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{
 			"0": {IP: "127.0.0.1", Port: 5354},
 		}},
-		dnsInterceptState: &interceptStateStub{},
+		dnsInterceptState: &pfState{},
 	}
 }
 

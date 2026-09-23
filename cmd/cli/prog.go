@@ -175,6 +175,12 @@ type prog struct {
 	// only touches shared recovery state if it is still the newest (#597).
 	recoveryGen atomic.Uint64
 
+	// OS-only failures can refresh the resolver without owning global recovery.
+	osRecoveryRefreshMu    sync.Mutex
+	osRecoveryRefreshAt    time.Time
+	osRecoverySkipLogAt    time.Time
+	osRecoverySkipUpstream string
+
 	// All deltas get an ID. Only accepted deltas replace recovery ownership.
 	networkTransitionGen    atomic.Uint64
 	networkAcceptedGen      atomic.Uint64
