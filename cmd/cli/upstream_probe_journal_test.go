@@ -23,14 +23,30 @@ func customProbeUpstream() (string, *ctrld.UpstreamConfig) {
 	}
 }
 
-// retainedProbeLines returns the captured lines that the journal keeps.
-func retainedProbeLines(t *testing.T, logs *syncBuffer) []map[string]any {
+// retainedProbeLines returns the captured lines that the journal keeps. When
+// messages are given, only the lines that start with one of them come back.
+// captureDebugMainLog swaps the process-wide mainLog, so any goroutine of
+// another test can add a warn or error line to the same buffer; a caller that
+// asserts on field values names the lines its own probe wrote.
+func retainedProbeLines(t *testing.T, logs *syncBuffer, messages ...string) []map[string]any {
 	t.Helper()
 	var retained []map[string]any
 	for _, event := range jsonLogEvents(t, logs, "") {
 		switch event["level"] {
 		case "error", "warn":
+		default:
+			continue
+		}
+		if len(messages) == 0 {
 			retained = append(retained, event)
+			continue
+		}
+		message, _ := event["message"].(string)
+		for _, want := range messages {
+			if strings.HasPrefix(message, want) {
+				retained = append(retained, event)
+				break
+			}
 		}
 	}
 	return retained
@@ -58,7 +74,7 @@ func Test_upstreamFailureLogKeepsACustomKeyOutOfTheJournal(t *testing.T) {
 
 	(&upstreamFailureLog{}).report(probeTestProg(), upstream, uc, errors.New("probe failed"), time.Second)
 
-	retained := retainedProbeLines(t, logs)
+	retained := retainedProbeLines(t, logs, "Upstream check failed after ")
 	if len(retained) != 1 {
 		t.Fatalf("retained lines: got %d, want 1", len(retained))
 	}
@@ -84,7 +100,7 @@ func Test_checkUpstreamOnceKeepsACustomKeyOutOfTheJournal(t *testing.T) {
 		t.Fatal("expected the resolver creation to fail")
 	}
 
-	retained := retainedProbeLines(t, logs)
+	retained := retainedProbeLines(t, logs, "Failed to create resolver")
 	if len(retained) != 1 {
 		t.Fatalf("retained lines: got %d, want 1", len(retained))
 	}
@@ -110,7 +126,7 @@ func Test_checkDnsLoopKeepsACustomKeyOutOfTheJournal(t *testing.T) {
 
 	p.checkDnsLoop()
 
-	retained := retainedProbeLines(t, logs)
+	retained := retainedProbeLines(t, logs, "Could not perform loop check", "Could not send DNS loop check query")
 	if len(retained) == 0 {
 		t.Fatal("the loop check failure must stay visible above debug")
 	}
@@ -132,7 +148,7 @@ func Test_logUpstreamPingFailuresKeepsACustomKeyOutOfTheJournal(t *testing.T) {
 
 	logUpstreamPingFailures(context.Background(), map[string]*ctrld.UpstreamConfig{probeSecret: uc})
 
-	retained := retainedProbeLines(t, logs)
+	retained := retainedProbeLines(t, logs, "Failed to connect to the upstream")
 	if len(retained) != 1 {
 		t.Fatalf("retained lines: got %d, want 1", len(retained))
 	}
