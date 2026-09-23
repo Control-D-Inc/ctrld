@@ -106,6 +106,8 @@ const (
 
 // pfState holds the state of the pf DNS interception on macOS.
 type pfState struct {
+	ipv6Diagnostic pfDiagnosticState
+
 	anchorFile string
 	anchorName string
 	// Serialized by prog.interceptDNSTargetMu; bounded to one failed decision.
@@ -2426,6 +2428,7 @@ func (p *prog) probePFIntercept() pfProbeObservation {
 		Str("outcome", observed.result.String()).Uint64("repeated_results", repeats).
 		Bool("repair_eligible", observed.result == pfProbeNotIntercepted).
 		Dur("elapsed_ms", time.Since(started)).Msg("DNS intercept probe result")
+	p.logPFIPv6Diagnostic(observed, family)
 	return observed
 }
 
