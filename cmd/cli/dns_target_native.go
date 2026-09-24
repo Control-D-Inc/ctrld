@@ -134,7 +134,15 @@ func (r nativeTargetReader) defaultService(ctx context.Context, device string) (
 	if err != nil {
 		return unknown, err
 	}
-	name, err := parseNativeServiceName(string(out))
+	_, err = parseNativeServiceName(string(out))
+	if err != nil {
+		return unknown, err
+	}
+	out, err = r.run(ctx, "", "/usr/sbin/networksetup", "-listnetworkserviceorder")
+	if err != nil {
+		return unknown, err
+	}
+	name, err := targetNetworkServiceName(string(out), device)
 	if err != nil {
 		return unknown, err
 	}

@@ -177,8 +177,8 @@ func TestNativeCLATTargetTransitionAndReadFailure(t *testing.T) {
 	}
 }
 
-// Use the real evidence reader: en1 has two configured services, and the
-// second is primary. Legacy first-match mapping must not even be consulted.
+// Use the real evidence reader: the native primary UUID is still checked,
+// and the command-facing service is unambiguously mapped to its device.
 func TestNativeCLATTargetExactPrimaryService(t *testing.T) {
 	for _, static := range [][]string{{"9.9.9.9"}, {"2001:db8::53"}} {
 		t.Run(strings.Join(static, ","), func(t *testing.T) {
@@ -188,7 +188,9 @@ func TestNativeCLATTargetExactPrimaryService(t *testing.T) {
 			h.dns["First Wi-Fi"] = nil
 			h.dns["Primary Wi-Fi"] = slices.Clone(static)
 			var calls []string
-			outputs := append(nativeTargetTestOutputs(), nativeTargetTestOutputs()...)
+			out := nativeTargetTestOutputs()
+			out[3] = nativeTargetTestServiceOrder("First Wi-Fi", "en9") + "(2) Primary Wi-Fi\n(Hardware Port: Wi-Fi, Device: en1)\n"
+			outputs := append(out, out...)
 			r := nativeTargetTestReader(t, outputs, &calls)
 			interceptNativeCLATDefaultServiceFn = r.defaultService
 			interceptPatchNetIfaceNameFn = func(*net.Interface) (bool, error) {
@@ -203,7 +205,7 @@ func TestNativeCLATTargetExactPrimaryService(t *testing.T) {
 			}
 			p := newInterceptTargetProg()
 			p.ensureInterceptDNSTarget([]string{})
-			if !slices.Equal(reads, []string{"Primary Wi-Fi", "Primary Wi-Fi"}) || len(calls) != 8 {
+			if !slices.Equal(reads, []string{"Primary Wi-Fi", "Primary Wi-Fi"}) || len(calls) != 10 {
 				t.Fatalf("reads=%v calls=%v", reads, calls)
 			}
 			if len(h.dns["First Wi-Fi"]) != 0 {
