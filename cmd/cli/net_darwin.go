@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -32,9 +31,6 @@ const networksetupTimeout = 5 * time.Second
 // below it, so more than this is a broken command.
 const maxNetworksetupOutput = 1 << 20
 
-// maxNetworksetupLine bounds one line, so one token fills no memory.
-const maxNetworksetupLine = 64 * 1024
-
 var errNetworksetupOutputTooLarge = errors.New("networksetup output above the bound")
 
 var (
@@ -63,63 +59,6 @@ func patchNetIfaceName(iface *net.Interface) (bool, error) {
 
 func networkServiceName(ifaceName string, r io.Reader) string {
 	return serviceNamesByDevice(r)[ifaceName]
-}
-
-// serviceNamesByDevice maps each device of "networksetup
-// -listnetworkserviceorder" to the name of the service that owns it.
-func serviceNamesByDevice(r io.Reader) map[string]string {
-	names := make(map[string]string)
-	scanner := scanNetworksetup(r)
-	prevLine := ""
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.Contains(line, "*") {
-			// A disabled service names no device. Without the reset, the device
-			// line that follows takes the name of the service before it.
-			prevLine = ""
-			continue
-		}
-		device := serviceOrderDevice(line)
-		if device == "" {
-			prevLine = line
-			continue
-		}
-		if _, seen := names[device]; !seen {
-			names[device] = serviceOrderName(prevLine)
-		}
-		prevLine = line
-	}
-	if scanner.Err() != nil {
-		// A truncated read names fewer services than the host has.
-		return nil
-	}
-	return names
-}
-
-// scanNetworksetup reads the output line by line under a bounded buffer.
-func scanNetworksetup(r io.Reader) *bufio.Scanner {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(nil, maxNetworksetupLine)
-	return scanner
-}
-
-// serviceOrderDevice reads the device out of a line like
-// "(Hardware Port: Wi-Fi, Device: en0)".
-func serviceOrderDevice(line string) string {
-	_, after, found := strings.Cut(line, "Device:")
-	if !found {
-		return ""
-	}
-	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(after), ")"))
-}
-
-// serviceOrderName reads the service name out of a line like "(1) Wi-Fi".
-func serviceOrderName(line string) string {
-	parts := strings.SplitN(line, " ", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-	return strings.TrimSpace(parts[1])
 }
 
 // parseHardwarePorts maps each device of "networksetup -listallhardwareports"
