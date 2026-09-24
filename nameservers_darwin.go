@@ -100,10 +100,7 @@ func getDHCPNameservers(iface string) ([]string, error) {
 	//     domain_name_server (ip_mult): {192.168.1.1, 8.8.8.8}
 	output, packetErr := exec.Command("ipconfig", "getpacket", iface).Output()
 	if packetErr != nil {
-		if err != nil {
-			return nil, fmt.Errorf("error reading DHCP DNS option: getoption: %v; getpacket: %v", err, packetErr)
-		}
-		return nil, fmt.Errorf("error reading DHCP packet: %v", packetErr)
+		return nil, fmt.Errorf("error reading DHCP DNS option: getoption: %w; getpacket: %w", err, packetErr)
 	}
 	return parseDHCPPacketNameservers(output), nil
 }

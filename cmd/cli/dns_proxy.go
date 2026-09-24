@@ -999,7 +999,7 @@ func (p *prog) handleAllUpstreamsFailure(ctx context.Context, req *proxyRequest,
 	} else if p.leakOnUpstreamFailure() {
 		ctrld.Log(ctx, p.Debug(), "Leak on upstream failure enabled")
 		if p.um.countHealthy(upstreams) == 0 {
-			ctrld.Log(ctx, p.Debug(), "No healthy upstreams, triggering recovery")
+			ctrld.Log(ctx, p.Debug(), "Selected upstreams unavailable; requesting recovery")
 			p.triggerRecovery(upstreams[0] == upstreamOS)
 		} else {
 			ctrld.Log(ctx, p.Debug(), "One upstream is down but at least one is healthy; skipping recovery trigger")
@@ -1256,8 +1256,8 @@ func (p *prog) triggerRecovery(isOSFailure bool) {
 		} else {
 			reason = RecoveryReasonRegularFailure
 		}
-		p.Debug().Msgf("No healthy upstreams, triggering recovery with reason: %v", reason)
-		go p.handleRecovery(reason)
+		p.Debug().Msgf("Selected upstreams unavailable; requesting recovery with reason: %v", reason)
+		go queryRecoveryFn(p, reason)
 	} else {
 		p.Debug().Msg("Recovery already in progress; skipping duplicate trigger from down detection")
 	}
@@ -2560,6 +2560,26 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		p.logger.Load().Debug().Uint64("transition_id", transitionID).Msg("Recovery skipped: transition superseded")
 		return
 	}
+	// Admission and completion use the same pool. A failed OS-only policy
+	// is not evidence that configured general DNS is unavailable. Check here,
+	// rather than only at the query, because a queued trigger can arrive late.
+	upstreams := p.buildRecoveryUpstreams(reason)
+	upstreamNames := make([]string, 0, len(upstreams))
+	for name := range upstreams {
+		upstreamNames = append(upstreamNames, name)
+	}
+	slices.Sort(upstreamNames)
+	if reason == RecoveryReasonOSFailure {
+		if _, osOnly := upstreams[upstreamOS]; !osOnly {
+			for _, name := range upstreamNames {
+				if !p.um.isDown(name) {
+					p.networkSourceMu.Unlock()
+					p.refreshOSResolverAfterRecoverySkip(name)
+					return
+				}
+			}
+		}
+	}
 	recoveryCtx, gen, interceptRecovery, ok := p.beginRecovery(reason)
 	p.networkSourceMu.Unlock()
 	if !ok {
@@ -2569,7 +2589,8 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		return
 	}
 	diagnostic := recoveryDiagnostic{logger: p.logger.Load(), transitionID: transitionID, generation: gen, reason: reason, started: time.Now()}
-	journal(diagnostic.event(p.logger.Load().Info())).Bool("intercept", interceptRecovery).Msg("Recovery begin")
+	journal(diagnostic.event(p.logger.Load().Info())).Bool("intercept", interceptRecovery).
+		Strs("probe_upstreams", journalUpstreamNames(upstreamNames)).Msg("Recovery begin")
 	p.logNetworkSnapshot("recovery_begin")
 	targetBefore := p.interceptTargetSnapshot()
 	outcome := recoveryOutcomeSuperseded
@@ -2610,7 +2631,7 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		return
 	}
 
-	upstreams := p.buildRecoveryUpstreams(reason)
+	// Wait for the same upstream pool used to admit this recovery.
 	recovered, err := waitForUpstreamRecoveryFn(p, recoveryCtx, upstreams, &diagnostic)
 	if err != nil {
 		if p.recoveryGen.Load() == gen {
@@ -2761,9 +2782,37 @@ func (p *prog) completeRecoveryWork(reason RecoveryReason, recovered string, int
 	return nil
 }
 
+// refreshOSResolverAfterRecoverySkip repairs stale OS resolver discovery without
+// enabling bypass, changing host DNS, or clearing the monitor's failure state.
+// Only a successful query establishes that the OS resolver recovered.
+func (p *prog) refreshOSResolverAfterRecoverySkip(healthy string) {
+	if !p.osRecoveryRefreshMu.TryLock() {
+		return
+	}
+	defer p.osRecoveryRefreshMu.Unlock()
+
+	now := networkEventsNowFn()
+	if p.osRecoverySkipLogAt.IsZero() || healthy != p.osRecoverySkipUpstream || now.Sub(p.osRecoverySkipLogAt) >= 5*time.Minute {
+		journal(p.Info()).Str("recovery_reason", recoveryReasonName(RecoveryReasonOSFailure)).
+			Str("healthy_upstream", journalUpstreamName(healthy)).
+			Msg("Recovery skipped: configured upstream is not marked down")
+		p.osRecoverySkipLogAt = now
+		p.osRecoverySkipUpstream = healthy
+	}
+	// Failed policy queries can arrive concurrently and at high volume. Retry
+	// discovery on later traffic, but never run overlapping or per-query reads.
+	if !p.osRecoveryRefreshAt.IsZero() && now.Sub(p.osRecoveryRefreshAt) < upstreamDownDelay {
+		return
+	}
+	p.osRecoveryRefreshAt = now
+	initializeOsResolverWithSystemNameserversFn(ctrld.LoggerCtx(context.Background(), p.logger.Load()), true, recoveryResolverReason)
+}
+
 // waitForUpstreamRecoveryFn is the seam of the upstream probe. A test drives
 // the whole recovery flow without a query to a real upstream.
 var waitForUpstreamRecoveryFn = (*prog).waitForUpstreamRecovery
+
+var queryRecoveryFn = (*prog).handleRecovery
 
 // waitForUpstreamRecovery checks the provided upstreams concurrently until one recovers.
 // It returns the name of the recovered upstream or an error if the check times out.
@@ -2792,7 +2841,7 @@ func (p *prog) waitForUpstreamRecovery(ctx context.Context, upstreams map[string
 					return
 				default:
 					attempts++
-					// checkUpstreamOnce will reset any failure counters on success.
+					// The owning recovery resets the monitor after this probe succeeds.
 					err := p.checkUpstreamOnce(name, uc, &failures)
 					if err == nil || errors.Is(err, errOsHealthcheckSuppressed) {
 						p.Debug().Msgf("Upstream %s recovered successfully", name)
@@ -2870,17 +2919,26 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 }
 
 // buildRecoveryUpstreams constructs the map of upstream configurations to test.
-// For OS failures we supply the manual OS resolver upstream configuration.
-// For network change or regular failure we use the upstreams defined in p.cfg (ignoring OS).
+// OS failures use configured non-OS upstreams for both admission and recovery,
+// excluding generated Internal Domain resolvers. OS-only configurations retain
+// the OS recovery path. Other recovery reasons retain their configured pool.
 func (p *prog) buildRecoveryUpstreams(reason RecoveryReason) map[string]*ctrld.UpstreamConfig {
 	upstreams := make(map[string]*ctrld.UpstreamConfig)
 	switch reason {
 	case RecoveryReasonOSFailure:
-		upstreams[upstreamOS] = osUpstreamConfig
+		for k, uc := range p.cfg.Upstream {
+			name := upstreamPrefix + k
+			if uc != nil && uc.Type != ctrld.ResolverTypeOS && !isInternalDomainUpstream(name) {
+				upstreams[name] = uc
+			}
+		}
+		if len(upstreams) == 0 {
+			upstreams[upstreamOS] = osUpstreamConfig
+		}
 	case RecoveryReasonNetworkChange, RecoveryReasonRegularFailure:
 		// Use all configured upstreams except any OS type.
 		for k, uc := range p.cfg.Upstream {
-			if uc.Type != ctrld.ResolverTypeOS {
+			if uc != nil && uc.Type != ctrld.ResolverTypeOS {
 				upstreams[upstreamPrefix+k] = uc
 			}
 		}

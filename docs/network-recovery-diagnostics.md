@@ -24,7 +24,8 @@ The table gives the trigger, the level, and the fields of each event.
 | `OS resolver set changed` | A nameserver read that differs from the read before | info | `source` (`scutil`, `dhcp`, `resolv.conf`, `unknown`), `before`, `after`, `default_route`, `reason` (`start`, `recovery`, `delayed_recheck`, `wake_probe`, `vpn_settle`, `unspecified`) |
 | `Reinitialized OS resolver with nameservers: …` | ctrld read the nameservers of the system again and built the OS resolver again | info | none, the nameservers are part of the message |
 | `DNS configuration changed` | A `scutil --dns` poll that finds a changed resolver, one event per resolver (macOS) | info | `nameservers`, `if_index`, `interface`, `scoped`, `action` (`added`, `changed`, `removed`), `flags`, `search_domain_count`, `order`, `reachable` |
-| `Recovery begin` | The start of every recovery | info | `transition_id`, `recovery_generation`, `recovery_reason`, `intercept` |
+| `Recovery begin` | The start of every recovery | info | `transition_id`, `recovery_generation`, `recovery_reason`, `intercept`, `probe_upstreams` |
+| `Recovery skipped: configured upstream is not marked down` | An OS-only failure does not start global recovery because a configured candidate is not marked down. First/changed candidate, then at most once per 5 minutes for an unchanged candidate | info | `recovery_reason`, `healthy_upstream` |
 | `Recovery end` | The end of every recovery | info, warn for a canceled recovery and for a recovery with a failure | `transition_id`, `recovery_generation`, `recovery_reason`, `outcome`, `had_failure`, `duration_ms`, `recovered_upstream`, `dhcp_servers`, `dhcp_server_count`, `intercept_target_action`, `bypass_active` |
 | `Upstream … recovered …` | An upstream that was down answers again | info | `down_for_ms` |
 | `Recovery canceled with no successor …` | A recovery stops and no other recovery follows it | info | none |
@@ -168,6 +169,45 @@ Update support runbooks and log searches to use the structured event.
 The cancellation event alone does not prove that interface DNS remains removed.
 
 Note: On the 1.x (`v1.0`) line, the previous message was `Recovery canceled; DNS settings remain removed`.
+
+### OS-triggered recovery scope
+
+An OS-only policy failure does not establish that configured DNS is unavailable.
+Before starting OS-triggered recovery, ctrld checks its configured non-OS upstreams, excluding generated Internal Domain resolvers.
+If any candidate is not marked down, it leaves shared recovery state and DNS settings unchanged.
+The skipped trigger still refreshes in-memory OS-resolver discovery, at most once per 10 seconds while OS failures continue. Concurrent triggers do not queue duplicate discovery work.
+This read preserves the existing resolver when discovery yields no nameservers. It does not clear the OS failure state; a successful OS query does that.
+It does not remove interface DNS, reload interception rules, or enable bypass. A network change is not required for this refresh.
+`Recovery skipped: configured upstream is not marked down` enters the journal with `healthy_upstream`, the candidate that admitted the skip. Generated IDs are retained; operator-defined keys are redacted to `upstream.custom`.
+An unchanged candidate is journaled at most once per 5 minutes, rather than once per failed query. A changed candidate is journaled immediately when no refresh is in progress.
+If all candidates are down, it uses that same pool for recovery probes instead of waiting only for OS DNS. The recovery still refreshes OS discovery initially, but only configured candidates can end it; the OS-only periodic probe/reinitialization loop is not part of that pool.
+With no such configured candidates, it retains OS-only recovery.
+`Recovery begin` includes `probe_upstreams` so the exit condition is visible in the journal.
+
+This is a configured pool, not a reconstruction of every listener's effective default route.
+Custom configurations can include policy-only or unused upstreams, and an untested upstream is not marked down.
+Ordinary upstream-failure and network-change admission and candidate selection are unchanged.
+A success racing with admission can still cause brief bypass; probing the configured pool prevents the old OS-only wait from persisting.
+The original OS policy remains OS-routed.
+
+### DNS-target decision failures (macOS)
+
+`intercept DNS target: decision unavailable; DNS unchanged` retains the first discovery failure and changes to that condition.
+Identical consecutive failures are suppressed, even if recovery IDs change.
+A later `decision available again` event closes the episode and reports the cumulative `repeat_count`.
+Do not add repeat counts from separate events in the same episode.
+
+These events include the interface/service, discovery stage, bounded error class, target ownership before/after, and correlation IDs captured before discovery.
+`failure_recovery_generation` and `failure_transition_id` identify the episode's first failed decision.
+Raw error detail remains in the debug stream, not the journal fields.
+A stage can be `system_discovery`, `default_route`, `interface_lookup`, `service_lookup`, `static_dns`, or `dhcp_dns`.
+An error class can be `unavailable`, `timeout`, `canceled`, `permission_denied`, `command_failed`, or `read_failed`.
+
+A DHCP error is not an empty DNS result and never authorizes a DNS write.
+Resolution means discovery can make a decision again, not that a DNS write or client lookup succeeded.
+`action` describes the change in tracked target ownership; it is not independent proof of an OS write.
+The target's existing set/remove events still report those operations.
+The journal retains these decisions separately from the bounded debug upload.
 
 ## PF probes (macOS)
 

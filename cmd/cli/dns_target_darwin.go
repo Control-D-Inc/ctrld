@@ -110,29 +110,52 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 	if !dnsIntercept || p.dnsInterceptState == nil {
 		return
 	}
-	if systemDiscovery == nil {
-		mainLog.Load().Debug().Msg("intercept DNS target: system DNS discovery was not performed; not changing DNS")
-		return
-	}
 	p.interceptDNSTargetMu.Lock()
 	defer p.interceptDNSTargetMu.Unlock()
 	p.loadInterceptDNSTargetStateLocked()
+	var diagnostic *dnsTargetDecisionDiagnostic
+	if state, ok := p.dnsInterceptState.(*pfState); ok {
+		diagnostic = &state.targetDiagnostic
+	}
+	decision := dnsTargetDecisionContext{
+		ownership:    p.interceptDNSTargetOwnershipLocked(),
+		generation:   p.recoveryGen.Load(),
+		transitionID: p.networkAcceptedGen.Load(),
+	}
+	// Only completed discovery resolves an outstanding diagnostic. A resolution
+	// describes the decision and observed ownership, not successful DNS repair.
+	resolvedReason := ""
+	defer func() {
+		if resolvedReason != "" {
+			diagnostic.resolved(decision, p.interceptDNSTargetOwnershipLocked(), resolvedReason)
+		}
+	}()
+	if systemDiscovery == nil {
+		diagnostic.failed(decision, "system_discovery", nil)
+		mainLog.Load().Debug().Msg("intercept DNS target: system DNS discovery was not performed; not changing DNS")
+		return
+	}
 
 	drIfaceName, err := interceptDefaultRouteInterfaceFn()
+	decision.iface = drIfaceName
 	if err != nil || drIfaceName == "" {
 		// Mid-transition with no default route; the next recovery decides.
+		diagnostic.failed(decision, "default_route", err)
 		return
 	}
 	iface, err := interceptInterfaceByNameFn(drIfaceName)
 	if err != nil || iface == nil {
+		diagnostic.failed(decision, "interface_lookup", err)
 		return
 	}
 	// Resolve the network service name (e.g. en5 -> "iPhone USB") so
 	// networksetup operates on the right service.
 	if _, err := interceptPatchNetIfaceNameFn(iface); err != nil {
+		diagnostic.failed(decision, "service_lookup", err)
 		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not resolve network service for %s", drIfaceName)
 		return
 	}
+	decision.service = iface.Name
 
 	staticDNS, err := interceptCurrentStaticDNSFn(iface)
 	if err != nil {
@@ -140,6 +163,7 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 		// networksetup cannot address them, ctrld never writes to them, and
 		// any target set on the underlying physical service stays in place —
 		// still correct while ctrld runs.
+		diagnostic.failed(decision, "static_dns", err)
 		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not read static DNS for %q", iface.Name)
 		return
 	}
@@ -150,22 +174,26 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 		staticDNS = filterOwnTarget(staticDNS, p.interceptDNSTargetSetValue)
 	}
 	if hasIPv4DNS(staticDNS) {
+		resolvedReason = "static_ipv4_dns"
 		p.removeInterceptDNSTargetLocked("network has usable static IPv4 DNS")
 		return
 	}
 
 	routeDHCPDNS, err := interceptDHCPNameserversForInterfaceFn(drIfaceName)
 	if err != nil {
+		diagnostic.failed(decision, "dhcp_dns", err)
 		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not read DHCP DNS for default-route service %q", iface.Name)
 		return
 	}
 	if hasIPv4DNS(routeDHCPDNS) {
+		resolvedReason = "dhcp_ipv4_dns"
 		// The default-route service regained DHCP option 6. Remove a target
 		// previously set on this or another service.
 		p.removeInterceptDNSTargetLocked("network has usable DHCP IPv4 DNS")
 		return
 	}
 
+	resolvedReason = "dns_less_network"
 	target := p.interceptDNSTargetValue()
 	if p.interceptDNSTargetService == iface.Name && p.interceptDNSTargetSetValue == target {
 		return // already set on this service
@@ -239,6 +267,10 @@ func (p *prog) removeInterceptDNSTargetLocked(reason string) {
 	p.clearInterceptDNSTargetStateLocked()
 	journal(mainLog.Load().Info()).Str("service", svc).Str("target", val).Str("reason", reason).
 		Msgf("intercept DNS target: removed %s from %q (%s)", val, svc, reason)
+}
+
+func (p *prog) interceptDNSTargetOwnershipLocked() dnsTargetOwnership {
+	return dnsTargetOwnership{p.interceptDNSTargetService, p.interceptDNSTargetSetValue}
 }
 
 func (p *prog) clearInterceptDNSTargetStateLocked() {
