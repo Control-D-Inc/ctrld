@@ -522,8 +522,13 @@ func defaultLocalIPForServer(server string) net.IP {
 	if err != nil {
 		return nil
 	}
-	ip := net.ParseIP(host)
-	if ip != nil && ip.To4() == nil {
+	addr, err := netip.ParseAddr(host)
+	if err == nil && addr.Zone() != "" {
+		// Scoped resolvers select their interface via the destination zone.
+		// A cached default-interface source can have the wrong family or scope.
+		return nil
+	}
+	if err == nil && addr.Is6() && !addr.Is4In6() {
 		return GetDefaultLocalIPv6()
 	}
 	return GetDefaultLocalIPv4()

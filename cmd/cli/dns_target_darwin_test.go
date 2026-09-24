@@ -41,6 +41,9 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 		statePath:    filepath.Join(t.TempDir(), interceptDNSTargetStateFile),
 	}
 
+	origHome := homedir
+	homedir = t.TempDir()
+	t.Cleanup(func() { homedir = origHome })
 	origPath := interceptDNSTargetStatePathFn
 	origRoute := interceptDefaultRouteInterfaceFn
 	origIface := interceptInterfaceByNameFn

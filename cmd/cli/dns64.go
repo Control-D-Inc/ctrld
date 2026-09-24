@@ -175,6 +175,9 @@ func synthesizeAAAAFromA(req *dns.Msg, aAnswer *dns.Msg, prefix netip.Prefix) *d
 	out.SetReply(req)
 	out.Rcode = aAnswer.Rcode
 	out.Compress = true
+	// An authenticated A RRset alone cannot authenticate synthesized AAAA.
+	// maybeDNS64 also checks the original AAAA denial before setting AD.
+	out.AuthenticatedData = false
 	answers := make([]dns.RR, 0, len(aAnswer.Answer))
 	pb := prefix.Addr().As16()
 	for _, rr := range aAnswer.Answer {
@@ -228,16 +231,20 @@ func answerHasAAAA(answer *dns.Msg) bool {
 // rcodes are never synthesized (RFC 6147 §5.1.2: the name genuinely does
 // not exist or the query failed).
 func dns64Eligible(req, answer *dns.Msg) bool {
-	if req == nil || answer == nil || len(req.Question) == 0 || req.CheckingDisabled {
-		return false
-	}
-	if req.Question[0].Qtype != dns.TypeAAAA {
+	if !dns64RequestAllowed(req) || answer == nil {
 		return false
 	}
 	if answer.Rcode != dns.RcodeSuccess {
 		return false
 	}
 	return !answerHasAAAA(answer)
+}
+
+// Apply the same client gate to cold synthesis and fresh/stale variants.
+// In particular, RFC 6147 section 5.5 forbids synthesis for CD+DO clients.
+// Retain the existing conservative bypass for all CD requests.
+func dns64RequestAllowed(req *dns.Msg) bool {
+	return req != nil && len(req.Question) > 0 && req.Question[0].Qtype == dns.TypeAAAA && !req.CheckingDisabled
 }
 
 // dns64Active reports whether synthesis should currently run, re-evaluating
@@ -307,7 +314,13 @@ func dns64CacheVariant(prefix netip.Prefix) string {
 }
 
 func dns64CacheKey(msg *dns.Msg, upstream string, prefix netip.Prefix) dnscache.Key {
-	return dnscache.NewVariantKey(msg, upstream, dns64CacheVariant(prefix))
+	variant := dns64CacheVariant(prefix)
+	// DO changes the authentication and DNSSEC data in a synthesized reply.
+	// Do not reuse a non-DO result for a DO client (or the reverse).
+	if opt := msg.IsEdns0(); opt != nil && opt.Do() {
+		variant += ":do"
+	}
+	return dnscache.NewVariantKey(msg, upstream, variant)
 }
 
 func (p *prog) resetDNS64State() {
@@ -475,6 +488,12 @@ func (p *prog) maybeDNS64(ctx context.Context, req *dns.Msg, answer *dns.Msg, re
 		// answer is definitive for the current prefix and may be cached in the
 		// DNS64 variant to avoid repeating both upstream lookups.
 		return answer, prefix
+	}
+	// RFC 6147 section 5.5: AD may describe synthesis only when both the
+	// AAAA denial and the A response were authenticated by our upstream.
+	// Without DO, synthesized responses must not assert AD.
+	if opt := req.IsEdns0(); opt != nil && opt.Do() {
+		synth.AuthenticatedData = answer.AuthenticatedData && aAnswer.AuthenticatedData
 	}
 	ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: synthesized AAAA from A records via NAT64 prefix %s", prefix)
 	return synth, prefix

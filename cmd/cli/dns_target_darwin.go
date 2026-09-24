@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 
 	"tailscale.com/net/netmon"
@@ -30,12 +31,37 @@ var (
 	interceptSaveStaticDNSSnapshotFn    = func(iface *net.Interface, dns []string, owned string) error {
 		return saveTargetStaticDNSSnapshot(savedStaticDnsSettingsFilePath(iface), dns, owned)
 	}
-	interceptSaveCurrentStaticDNSFn        = saveCurrentStaticDNS
+	interceptSaveCurrentStaticDNSFn = saveCurrentStaticDNS
+	interceptRemoveSavedDNSFn       = func(iface *net.Interface) error {
+		err := os.Remove(savedStaticDnsSettingsFilePath(iface))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
 	interceptSetDNSFn                      = setDNS
 	interceptSavedStaticNameserversFn      = savedStaticNameservers
 	interceptResetDNSIgnoreUnusableIfaceFn = resetDnsIgnoreUnusableInterface
 	interceptDHCPNameserversForInterfaceFn = readTargetDHCPNameservers
 )
+
+// A retained target record means cleanup was not completed. The broad saved
+// static sweep must not bypass the target's ownership check or retry failures
+// through an unguarded restore. Unknown state is conservatively left alone.
+func interceptTargetAllowsStaticRestore(service string) bool {
+	data, err := os.ReadFile(interceptDNSTargetStatePathFn())
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	var st interceptDNSTargetState
+	if json.Unmarshal(data, &st) != nil || st.Service == "" {
+		return false
+	}
+	return st.Service != service
+}
 
 type interceptDNSTargetState struct {
 	Service string `json:"service"`
@@ -64,23 +90,34 @@ func (p *prog) loadInterceptDNSTargetStateLocked() {
 
 // persistInterceptDNSTargetStateLocked writes (or clears) the state file to
 // match in-memory tracking. Callers must hold interceptDNSTargetMu.
-func (p *prog) persistInterceptDNSTargetStateLocked() {
+func (p *prog) persistInterceptDNSTargetStateLocked() error {
 	file := interceptDNSTargetStatePathFn()
 	if p.interceptDNSTargetService == "" {
-		_ = os.Remove(file)
-		return
+		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
 	data, err := json.Marshal(interceptDNSTargetState{Service: p.interceptDNSTargetService, Value: p.interceptDNSTargetSetValue})
 	if err != nil {
-		return
+		return err
 	}
-	if err := os.WriteFile(file, data, 0600); err != nil {
-		mainLog.Load().Debug().Err(err).Msg("intercept DNS target: could not persist state file")
+	// Replace atomically; a failed write must not truncate prior ownership.
+	tmp, err := os.CreateTemp(filepath.Dir(file), ".intercept-target-*")
+	if err != nil {
+		return err
 	}
+	defer os.Remove(tmp.Name())
+	_, writeErr := tmp.Write(data)
+	err = errors.Join(writeErr, tmp.Close())
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), file)
 }
 
-// ensureInterceptDNSTarget guarantees macOS always has an emittable DNS
-// target while DNS intercept mode is active.
+// ensureInterceptDNSTarget provides an emittable DNS target when ownership
+// and discovery permit it; externally changed DNS is not permission to reinstall.
 //
 // Intercept mode deliberately never manages interface DNS: pf redirects DNS
 // packets in flight. But pf can only redirect packets macOS actually sends,
@@ -192,6 +229,14 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 			return
 		}
 	}
+	// Tracking is not proof that the target is still installed. An external
+	// edit (including clearing DNS) is not permission to reinstall it. Retain
+	// the cleanup record until shutdown, preventing periodic reconciliation
+	// from reinterpreting the same edit as a new DNS-less admission.
+	if p.interceptDNSTargetService == iface.Name && !isInterceptDNSTargetOnly(snapshot, p.interceptDNSTargetSetValue) && !hasIPv4DNS(filterOwnTarget(snapshot, p.interceptDNSTargetSetValue)) {
+		diagnostic.failed(decision, "owned_target_changed", nil)
+		return
+	}
 	// Never count ctrld's own previously-set entry as network-provided DNS,
 	// or the next recovery on the same DNS-less network would remove it and
 	// the one after re-add it.
@@ -256,12 +301,21 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 			mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not save static DNS for %q", iface.Name)
 		}
 	}
+	p.setInterceptDNSTargetLocked(iface.Name, target)
+	if err := p.persistInterceptDNSTargetStateLocked(); err != nil {
+		p.setInterceptDNSTargetLocked("", "")
+		resolvedReason = ""
+		diagnostic.failed(decision, "ownership_persistence", err)
+		mainLog.Load().Warn().Err(err).Msg("intercept DNS target: not changing DNS without persisted ownership")
+		return
+	}
 	if err := interceptSetDNSFn(iface, []string{target}); err != nil {
+		// A command error can follow a partial OS mutation. Keep the durable
+		// cleanup record; the next observation decides what still belongs to us.
+		resolvedReason = ""
 		mainLog.Load().Warn().Err(err).Msgf("intercept DNS target: could not set %s on %q", target, iface.Name)
 		return
 	}
-	p.setInterceptDNSTargetLocked(iface.Name, target)
-	p.persistInterceptDNSTargetStateLocked()
 	journal(mainLog.Load().Warn()).Str("service", iface.Name).Str("target", target).
 		Bool("native_clat_fallback", nativeFallback).
 		Str("reason", "dns_less_network").
@@ -295,7 +349,15 @@ func (p *prog) removeInterceptDNSTargetLocked(reason string) {
 		return
 	}
 	if !isInterceptDNSTargetOnly(cur, val) {
-		p.clearInterceptDNSTargetStateLocked()
+		// The generic stop/uninstall sweep must not replay a stale snapshot
+		// over the external edit. On failure keep ownership so its guard skips.
+		if err := interceptRemoveSavedDNSFn(iface); err != nil {
+			mainLog.Load().Warn().Err(err).Msg("intercept DNS target: could not discard stale backup; retaining cleanup state")
+			return
+		}
+		if !p.clearInterceptDNSTargetStateLocked() {
+			return
+		}
 		// ctrld owns the DNS of the service no longer, and a later outage
 		// report needs the moment that ownership ended.
 		journal(mainLog.Load().Info()).Str("service", svc).Str("target", val).
@@ -312,7 +374,9 @@ func (p *prog) removeInterceptDNSTargetLocked(reason string) {
 		mainLog.Load().Warn().Err(err).Msgf("intercept DNS target: could not reset DNS on %q; retaining cleanup state", svc)
 		return
 	}
-	p.clearInterceptDNSTargetStateLocked()
+	if !p.clearInterceptDNSTargetStateLocked() {
+		return
+	}
 	journal(mainLog.Load().Info()).Str("service", svc).Str("target", val).Str("reason", reason).
 		Msgf("intercept DNS target: removed %s from %q (%s)", val, svc, reason)
 }
@@ -321,9 +385,15 @@ func (p *prog) interceptDNSTargetOwnershipLocked() dnsTargetOwnership {
 	return dnsTargetOwnership{p.interceptDNSTargetService, p.interceptDNSTargetSetValue}
 }
 
-func (p *prog) clearInterceptDNSTargetStateLocked() {
+func (p *prog) clearInterceptDNSTargetStateLocked() bool {
+	service, value := p.interceptDNSTargetService, p.interceptDNSTargetSetValue
 	p.setInterceptDNSTargetLocked("", "")
-	p.persistInterceptDNSTargetStateLocked()
+	if err := p.persistInterceptDNSTargetStateLocked(); err != nil {
+		p.setInterceptDNSTargetLocked(service, value)
+		mainLog.Load().Warn().Err(err).Msg("intercept DNS target: could not clear ownership; retaining cleanup state")
+		return false
+	}
+	return true
 }
 
 // setInterceptDNSTargetLocked stores the service that ctrld owns and the value

@@ -240,14 +240,11 @@ func TestEnsureInterceptDNSTargetResolutionDoesNotClaimWriteSuccess(t *testing.T
 	h.dhcpErr = nil
 	h.setErr = errors.New("synthetic set failure")
 	p.ensureInterceptDNSTarget([]string{})
-	event := oneRecoveryEvent(t, logs, dnsTargetResolvedMessage)
-	wantField(t, event, "outcome", "decision_available")
-	wantField(t, event, "reason", "dns_less_network")
-	wantField(t, event, "action", "unchanged")
-	wantField(t, event, "ownership_before", false)
-	wantField(t, event, "ownership_after", false)
-	if len(h.setCalls) != 1 || p.interceptDNSTargetService != "" {
-		t.Fatal("failed target write was not exercised or acquired ownership")
+	if events := jsonLogEvents(t, logs, dnsTargetResolvedMessage); len(events) != 0 {
+		t.Fatal("failed target write reported a resolved decision")
+	}
+	if len(h.setCalls) != 1 || p.interceptDNSTargetService != "Wi-Fi" {
+		t.Fatal("failed target write did not retain cleanup state for possible partial mutation")
 	}
 }
 
