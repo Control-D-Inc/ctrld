@@ -47,6 +47,9 @@ func TestCapturedCLATNativeReader(t *testing.T) {
 	reader := nativeTargetReader{
 		run: func(_ context.Context, input, path string, args ...string) ([]byte, error) {
 			calls++
+			if path == "/usr/sbin/networksetup" && len(args) == 1 && args[0] == "-listnetworkserviceorder" && input == "" {
+				return []byte(nativeTargetTestServiceOrder("Wi-Fi", "en0")), nil
+			}
 			if path != "/usr/sbin/scutil" || len(args) != 0 {
 				t.Fatal("unexpected command")
 			}
@@ -77,7 +80,7 @@ func TestCapturedCLATNativeReader(t *testing.T) {
 	}
 	got, err := reader.defaultService(context.Background(), "en0")
 	want := nativeTargetService{ID: id, Name: "Wi-Fi", Device: "en0"}
-	if err != nil || got != want || calls != 4 {
+	if err != nil || got != want || calls != 5 {
 		t.Fatalf("got=%+v err=%v reads=%d", got, err, calls)
 	}
 	t.Log("Captured native dictionaries accepted; primary Wi-Fi service on en0 selected")

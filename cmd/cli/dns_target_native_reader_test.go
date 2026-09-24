@@ -44,7 +44,9 @@ func nativeTargetTestReader(t *testing.T, outputs []string, calls *[]string) nat
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if path != "/usr/sbin/scutil" || len(args) != 0 {
+			if path == "/usr/sbin/networksetup" && slices.Equal(args, []string{"-listnetworkserviceorder"}) && input == "" {
+				input = "networksetup -listnetworkserviceorder"
+			} else if path != "/usr/sbin/scutil" || len(args) != 0 {
 				t.Fatalf("unexpected command %q %v", path, args)
 			}
 			*calls = append(*calls, input)
@@ -62,7 +64,7 @@ func nativeTargetTestReader(t *testing.T, outputs []string, calls *[]string) nat
 
 func nativeTargetTestOutputs() []string {
 	global := nativeTargetTestGlobal(nativeTargetTestServiceID, "en1")
-	return []string{global, nativeTargetTestState(), "<dictionary> {\n  UserDefinedName : Primary Wi-Fi\n}", global}
+	return []string{global, nativeTargetTestState(), "<dictionary> {\n  UserDefinedName : Primary Wi-Fi\n}", nativeTargetTestServiceOrder("Primary Wi-Fi", "en1"), global}
 }
 
 func TestNativeTargetReaderIdentityAndEvidence(t *testing.T) {
@@ -72,6 +74,9 @@ func TestNativeTargetReaderIdentityAndEvidence(t *testing.T) {
 		want   bool
 	}{
 		{name: "primary UUID exact service", want: true},
+		{name: "matching native name does not disambiguate another service on same device", want: false, change: func(_ *nativeTargetReader, out []string) {
+			out[3] += "(2) Secondary Wi-Fi\n(Hardware Port: Wi-Fi, Device: en1)\n"
+		}},
 		{name: "ULA with native proof", want: true, change: func(r *nativeTargetReader, _ []string) {
 			r.interfaceAddrs = func(*net.Interface) ([]net.Addr, error) {
 				return nativeTargetTestAddrs("192.0.0.2/32", "fd12:3456::1/64"), nil
@@ -101,7 +106,7 @@ func TestNativeTargetReaderIdentityAndEvidence(t *testing.T) {
 		{name: "wrong service device", change: func(_ *nativeTargetReader, out []string) { out[1] = strings.Replace(out[1], "en1", "en9", 1) }},
 		{name: "invalid UUID", change: func(_ *nativeTargetReader, out []string) { out[0] = nativeTargetTestGlobal("untrusted", "en1") }},
 		{name: "primary changed", change: func(_ *nativeTargetReader, out []string) {
-			out[3] = nativeTargetTestGlobal(nativeTargetOtherServiceID, "en1")
+			out[4] = nativeTargetTestGlobal(nativeTargetOtherServiceID, "en1")
 		}},
 		{name: "missing name", change: func(_ *nativeTargetReader, out []string) { out[2] = "No such key" }},
 		{name: "DHCP embedded dictionary", change: func(_ *nativeTargetReader, out []string) { out[1] = "DHCPPacket : " + out[1] }},
@@ -125,7 +130,7 @@ func TestNativeTargetReaderIdentityAndEvidence(t *testing.T) {
 				if got != want {
 					t.Fatalf("got %+v want %+v", got, want)
 				}
-				wantCalls := []string{"show State:/Network/Global/IPv4\nquit\n", "show State:/Network/Service/" + nativeTargetTestServiceID + "/IPv4\nquit\n", "show Setup:/Network/Service/" + nativeTargetTestServiceID + "\nquit\n", "show State:/Network/Global/IPv4\nquit\n"}
+				wantCalls := []string{"show State:/Network/Global/IPv4\nquit\n", "show State:/Network/Service/" + nativeTargetTestServiceID + "/IPv4\nquit\n", "show Setup:/Network/Service/" + nativeTargetTestServiceID + "\nquit\n", "networksetup -listnetworkserviceorder", "show State:/Network/Global/IPv4\nquit\n"}
 				if !slices.Equal(calls, wantCalls) {
 					t.Fatalf("calls=%v", calls)
 				}
@@ -135,7 +140,7 @@ func TestNativeTargetReaderIdentityAndEvidence(t *testing.T) {
 }
 
 func TestNativeTargetReaderFailuresAndSharedBudget(t *testing.T) {
-	for failAt := 1; failAt <= 4; failAt++ {
+	for failAt := 1; failAt <= 5; failAt++ {
 		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
 			var calls []string
 			r := nativeTargetTestReader(t, nativeTargetTestOutputs(), &calls)
