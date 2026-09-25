@@ -236,7 +236,8 @@ func (p *prog) registerControlServerHandler() {
 			Version:  rootCmd.Version,
 			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 		}
-		if rc, err := controld.FetchResolverConfig(context.Background(), rcReq, cdDev); rc != nil {
+		if rc, err := fetchResolverConfig(context.Background(), rcReq, cdDev); rc != nil {
+			deactivationPinKnown.Store(true)
 			if rc.DeactivationPin != nil {
 				cdDeactivationPin.Store(*rc.DeactivationPin)
 			} else {
@@ -246,8 +247,17 @@ func (p *prog) registerControlServerHandler() {
 			mainLog.Load().Warn().Err(err).Msg("could not re-fetch deactivation pin code")
 		}
 
-		// If pin code not set, allowing deactivation.
+		// If pin code not set, allowing deactivation - but only when the API
+		// actually said so. A run that started on the configuration on disk
+		// during maintenance never asked, and the re-fetch above leaves the
+		// default untouched while the API stays away, so an unknown PIN would
+		// otherwise read as no PIN and authorize the deactivation it protects.
 		if !deactivationPinSet() {
+			if !deactivationPinKnown.Load() {
+				mainLog.Load().Warn().Msg("cannot verify deactivation pin: no answer from the Control D API this run")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}
