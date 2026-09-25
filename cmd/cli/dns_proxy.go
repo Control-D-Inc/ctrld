@@ -1645,12 +1645,12 @@ func (p *prog) doSelfUninstall(pr *proxyResponse) {
 			Version:  appVersion,
 			Metadata: ctrld.SystemMetadata(loggerCtx),
 		}
-		_, err := controld.FetchResolverConfig(loggerCtx, req, cdDev)
+		_, err := fetchResolverConfig(loggerCtx, req, cdDev)
 		logger.Debug().Msg("Maximum number of refused queries reached, checking device status")
 		selfUninstallCheck(err, p, logger)
 
 		if err != nil {
-			logger.Warn().Err(err).Msg("Could not fetch resolver config")
+			logResolverConfigFetchFailure(logger, err)
 		}
 		// Cool-of period to prevent abusing the API.
 		go p.selfUninstallCoolOfPeriod()

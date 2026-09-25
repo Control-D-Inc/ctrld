@@ -38,6 +38,7 @@ const (
 	provisionCodeAPIUnreachable          provisionFailureCode = "API_UNREACHABLE"
 	provisionCodeAPIRejected             provisionFailureCode = "API_REJECTED"
 	provisionCodeAPIDeviceInvalid        provisionFailureCode = "API_DEVICE_INVALID"
+	provisionCodeAPIMaintenance          provisionFailureCode = "API_MAINTENANCE"
 	provisionCodeTokenInvalid            provisionFailureCode = "TOKEN_INVALID"
 	provisionCodeTokenExpired            provisionFailureCode = "TOKEN_EXPIRED"
 	provisionCodeTokenLimitReached       provisionFailureCode = "TOKEN_LIMIT_REACHED"
@@ -58,6 +59,7 @@ var allProvisionFailureCodes = []provisionFailureCode{
 	provisionCodeAPIUnreachable,
 	provisionCodeAPIRejected,
 	provisionCodeAPIDeviceInvalid,
+	provisionCodeAPIMaintenance,
 	provisionCodeTokenInvalid,
 	provisionCodeTokenExpired,
 	provisionCodeTokenLimitReached,
@@ -78,6 +80,7 @@ var provisionStageForCode = map[provisionFailureCode]provisionStage{
 	provisionCodeAPIUnreachable:          provisionStageBootstrap,
 	provisionCodeAPIRejected:             provisionStageBootstrap,
 	provisionCodeAPIDeviceInvalid:        provisionStageBootstrap,
+	provisionCodeAPIMaintenance:          provisionStageBootstrap,
 	provisionCodeTokenInvalid:            provisionStageBootstrap,
 	provisionCodeTokenExpired:            provisionStageBootstrap,
 	provisionCodeTokenLimitReached:       provisionStageBootstrap,
@@ -102,6 +105,7 @@ var provisionExitCodeForCode = map[provisionFailureCode]int{
 	provisionCodeAPIUnreachable:          30,
 	provisionCodeAPIRejected:             31,
 	provisionCodeAPIDeviceInvalid:        32,
+	provisionCodeAPIMaintenance:          37,
 	provisionCodeTokenInvalid:            33,
 	provisionCodeTokenExpired:            34,
 	provisionCodeTokenLimitReached:       35,

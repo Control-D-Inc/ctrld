@@ -164,10 +164,17 @@ type prog struct {
 	lastNAT64Mu     sync.Mutex
 	lastNAT64Logged string
 
-	selfUninstallMu       sync.Mutex
-	refusedQueryCount     int
-	canSelfUninstall      atomic.Bool
-	checkingSelfUninstall bool
+	selfUninstallMu   sync.Mutex
+	refusedQueryCount int
+	canSelfUninstall  atomic.Bool
+
+	// startedInAPIMaintenance records that this run began on the configuration
+	// already on disk because the API was in maintenance, so it holds no answer
+	// from the API at all. The reload loop retries faster while it is set, and
+	// clears it once a recovered configuration has been applied - not when a
+	// fetch returns, because the reload receiver fetches again and can fail.
+	startedInAPIMaintenance atomic.Bool
+	checkingSelfUninstall   bool
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -585,14 +592,16 @@ func (p *prog) runWait() {
 		}
 
 		addExtraSplitDnsRule(newCfg)
-		if err := writeConfigFile(newCfg); err != nil {
-			p.Error().Err(err).Msg("Could not write new config")
-		}
+		persistManagedConfig(newCfg, p.logger.Load())
 
 		// This needs to be done here, otherwise, the DNS handler may observe an invalid
 		// upstream config because its initialization function have not been called yet.
 		p.Debug().Msg("Setup upstream with new config")
 		p.setupUpstream(newCfg)
+		// The configuration is in effect now. Every failure above continues the
+		// loop without applying anything, so a run that started in maintenance
+		// stays pending and keeps retrying until one gets this far.
+		p.maintenanceConfigApplied(p.logger.Load())
 
 		p.mu.Lock()
 		oldUpstreams := p.cfg.Upstream
@@ -762,7 +771,7 @@ func (p *prog) apiConfigReload() {
 		}
 		selfUninstallCheck(err, p, logger)
 		if err != nil {
-			logger.Warn().Err(err).Msg("Could not fetch resolver config")
+			logResolverConfigFetchFailure(logger, err)
 			return
 		}
 
@@ -773,12 +782,37 @@ func (p *prog) apiConfigReload() {
 
 		lastUpdated = p.applyFetchedResolverConfig(loggerCtx, logger, resolverConfig, forced, lastUpdated)
 	}
+	// A run that started in maintenance holds no answer from the API, so it
+	// waits out the whole refetch interval before it has one. Retry faster
+	// until it does, without touching refetch_time: that interval governs
+	// every endpoint, and shortening it fleet-wide would multiply load on an
+	// API that is by definition already struggling.
+	var maintenanceRetry *time.Timer
+	var maintenanceRetryC <-chan time.Time
+	if p.startedInAPIMaintenance.Load() {
+		maintenanceRetry = time.NewTimer(maintenanceReloadDelay())
+		defer maintenanceRetry.Stop()
+		maintenanceRetryC = maintenanceRetry.C
+		logger.Debug().Msg("Started on the configuration on disk, retrying the API faster until it answers")
+	}
 	for {
 		select {
 		case <-p.apiForceReloadCh:
 			doReloadApiConfig(true, logger.With().Bool("forced", true))
 		case <-ticker.C:
 			doReloadApiConfig(false, logger)
+		case <-maintenanceRetryC:
+			// The normal ticker or a forced reload may have recovered first.
+			if !p.startedInAPIMaintenance.Load() {
+				maintenanceRetryC = nil
+				continue
+			}
+			doReloadApiConfig(false, logger.With().Bool("maintenance_retry", true))
+			if p.startedInAPIMaintenance.Load() {
+				maintenanceRetry.Reset(maintenanceReloadDelay())
+				continue
+			}
+			maintenanceRetryC = nil
 		case <-ctx.Done():
 			return
 		}
@@ -806,6 +840,9 @@ func (p *prog) applyFetchedResolverConfig(
 	if loggerCtx.Err() != nil {
 		return lastUpdated
 	}
+	// The answer settles the PIN either way: a response without one means the
+	// API says there is none, which is not the same as never having asked.
+	deactivationPinKnown.Store(true)
 	if resolverConfig.DeactivationPin != nil {
 		newDeactivationPin := *resolverConfig.DeactivationPin
 		curDeactivationPin := cdDeactivationPin.Load()
@@ -835,11 +872,22 @@ func (p *prog) applyFetchedResolverConfig(
 	noExcludeListChanged := true
 	// Regenerate Internal Domains on add, removal, domain, mode or resolver change.
 	noInternalDomainsChanged := true
-	if rc != nil {
+	// A run that started on the configuration on disk has applied no answer
+	// from the API yet, so nothing here is known to be current and the
+	// response has to reach the apply path instead of being compared
+	// against a configuration that was never applied. This holds until the
+	// apply lands, not until a fetch returns: the receiver fetches again
+	// and can fail, and p.rc is already replaced above, so comparing would
+	// make every later response equal the stored one and leave the excludes
+	// and Internal Domains of the previous run in place for good.
+	pendingRecovery := p.startedInAPIMaintenance.Load()
+	if rc != nil && !pendingRecovery {
 		slices.Sort(rc.Exclude)
 		slices.Sort(resolverConfig.Exclude)
 		noExcludeListChanged = slices.Equal(rc.Exclude, resolverConfig.Exclude)
 		noInternalDomainsChanged = internalDomainsEqual(rc.SplitDNS, resolverConfig.SplitDNS)
+	} else {
+		noExcludeListChanged, noInternalDomainsChanged = false, false
 	}
 	if noCustomConfig && noExcludeListChanged && noInternalDomainsChanged {
 		return lastUpdated
@@ -860,7 +908,7 @@ func (p *prog) applyFetchedResolverConfig(
 		return lastUpdated
 	}
 
-	if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated || forced {
+	if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated || forced || pendingRecovery {
 		lastUpdated = time.Now().Unix()
 		cfg := &ctrld.Config{}
 		var cfgErr error
@@ -2389,13 +2437,26 @@ func (p *prog) dnsChanged(iface *net.Interface, nameservers []string) bool {
 }
 
 // selfUninstallCheck checks if the error dues to controld.InvalidConfigCode, perform self-uninstall then.
+// selfUninstallFn is the uninstall itself, indirected so a test can prove what
+// does and does not reach it. The real one ends in os.Exit, which a test cannot
+// survive to make an assertion about.
+var selfUninstallFn = selfUninstall
+
 func selfUninstallCheck(uninstallErr error, p *prog, logger *ctrld.Logger) {
+	// Maintenance is the API being away; it establishes nothing about whether
+	// this device still exists. Guarded here rather than at each caller because
+	// this is the one place that acts, and acting would uninstall a working
+	// install over a temporary outage.
+	if controld.IsMaintenance(uninstallErr) {
+		logger.Debug().Msg("API is in maintenance, skipping device status check")
+		return
+	}
 	var uer *controld.ErrorResponse
 	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		p.stopDnsWatchers()
 
 		// Perform self-uninstall now.
-		selfUninstall(p, logger)
+		selfUninstallFn(p, logger)
 	}
 }
 

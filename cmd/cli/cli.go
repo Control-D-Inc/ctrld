@@ -390,6 +390,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	p.cs = cs
 
 	oldLogPath := cfg.Service.LogPath
+	// Whether this run got its configuration from the API, which is what the
+	// managed-config marker may claim once the configuration is on disk.
+	managedConfigFetched := false
 	if uid := cdUIDFromProvToken(); uid != "" {
 		cdUID = uid
 		p.initLoggingAfterProvisioning()
@@ -422,16 +425,34 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				return
 			}
 
-			handleAPIPreflightFailure(p, pf.err, p.notifyExitToLogServer)
-			return
+			// Maintenance is temporary and says nothing about this host's
+			// configuration, so a start that already has a working one carries
+			// on with it rather than taking DNS down for the window.
+			if !useLastKnownConfigDuringMaintenance(pf.err, &cfg) {
+				handleAPIPreflightFailure(p, pf.err, p.notifyExitToLogServer)
+				return
+			}
+			// This run holds no answer from the API, so the reload loop asks
+			// again well before refetch_time would.
+			p.startedInAPIMaintenance.Store(true)
 		default:
 			p.mu.Lock()
 			p.rc = pf.rc
 			p.mu.Unlock()
+			managedConfigFetched = true
 		}
 	}
 
 	updated := updateListenerConfig(&cfg, p.notifyExitToLogServer)
+	// Whether the file on disk, before anything below rewrites it, is already
+	// one the API produced for this identity.
+	wasManagedConfig := managedConfigRecordedFor(cdUID)
+	// The marker must never vouch for a configuration that was not written.
+	// Without this, a first managed run whose listener needed no change would
+	// record the marker over the seeded default still on disk.
+	if managedConfigFetched && !wasManagedConfig {
+		updated = true
+	}
 
 	// Bootstrap and listener binding both succeeded, so an earlier run's
 	// recorded failure no longer describes this install.
@@ -475,6 +496,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		}
 		p.Info().Msg("Writing config file to: " + defaultConfigFile)
 	}
+	recordManagedConfigForStart(managedConfigFetched, wasManagedConfig)
 
 	if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
 		p.switchLogPath(oldLogPath, newLogPath)
@@ -587,6 +609,9 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 	// If err == nil, there's a config supplied via `--config`, no default config written.
 	err := v.ReadInConfig()
 	if err == nil {
+		// Only a file the host already had can stand in for the API answer
+		// during maintenance; the default written below cannot.
+		configReadFromDisk = true
 		if notice {
 			mainLog.Load().Notice().Msg("Reading config: " + v.ConfigFileUsed())
 		}
@@ -740,6 +765,15 @@ func processNoConfigFlags(noConfigStart bool) {
 // If cdDeactivationPin equals to this default, it means the pin code is not set from Control D API.
 const defaultDeactivationPin = -1
 
+// deactivationPinKnown reports whether this run ever had an answer from the API
+// about the deactivation PIN.
+//
+// cdDeactivationPin cannot carry this: its default means "the API said there is
+// no PIN", and a run that started on the configuration on disk during
+// maintenance never asked. Without the distinction such a run would present an
+// unknown PIN as no PIN and hand out deactivation to anyone who asked.
+var deactivationPinKnown atomic.Bool
+
 // cdDeactivationPin is used in cd mode to decide whether stop and uninstall commands can be run.
 var cdDeactivationPin atomic.Int64
 
@@ -813,6 +847,11 @@ func permanentAPIRejection(err error) (*controld.ErrorResponse, bool) {
 	if !errors.As(err, &uer) {
 		return nil, false
 	}
+	// Maintenance is the API being away, not the API refusing this request, so
+	// it stays retryable even when it arrives with a client-error status.
+	if controld.IsMaintenance(err) {
+		return nil, false
+	}
 	switch uer.StatusCode {
 	case http.StatusRequestTimeout, http.StatusTooManyRequests:
 		return nil, false
@@ -831,6 +870,11 @@ func permanentAPIRejection(err error) (*controld.ErrorResponse, bool) {
 func apiFailureCode(err error) (provisionFailureCode, bool) {
 	if err == nil {
 		return "", false
+	}
+	// Before the device check: maintenance must never reach the self-uninstall
+	// path, because it says nothing about whether this device still exists.
+	if controld.IsMaintenance(err) {
+		return provisionCodeAPIMaintenance, true
 	}
 	var uer *controld.ErrorResponse
 	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
@@ -924,6 +968,12 @@ func handleAPIPreflightFailure(p *prog, err error, notify func()) {
 	}
 	cdLogger := logger.With().Str("mode", "cd")
 	code, _ := apiFailureCode(err)
+	if code == provisionCodeAPIMaintenance {
+		// The caller already established there is nothing to fall back on.
+		cdLogger.Error().Err(err).Msg("Failed to fetch resolver config, the Control D API is in maintenance")
+		failProvision(newProvisionResult(code, maintenanceNoConfigDetail, nil, provisionSecrets()...), notify)
+		return
+	}
 	var uer *controld.ErrorResponse
 	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		r := newProvisionResult(code, apiRejectionSummary(uer.StatusCode), nil, provisionSecrets()...)
@@ -1046,10 +1096,21 @@ func processCDFlags(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverC
 		if isMobile() {
 			return nil, err
 		}
-		logger.Warn().Err(err).Msg("Could not fetch resolver config")
+		if controld.IsMaintenance(err) {
+			// The caller reports this: only it knows whether a fallback is
+			// available. Saying "Could not fetch resolver config" here puts a
+			// connectivity-shaped failure at the top of the bootstrap log,
+			// which is how the incident behind this was first mis-triaged.
+			logger.Debug().Err(err).Msg("Resolver config fetch answered with maintenance")
+		} else {
+			logger.Warn().Err(err).Msg("Could not fetch resolver config")
+		}
 		return nil, err
 	}
 
+	// The answer settles the PIN either way: a response without one means the
+	// API says there is none, which is not the same as never having asked.
+	deactivationPinKnown.Store(true)
 	if resolverConfig.DeactivationPin != nil {
 		logger.Debug().Msg("Saving deactivation pin")
 		cdDeactivationPin.Store(*resolverConfig.DeactivationPin)
@@ -2430,6 +2491,12 @@ var errRequiredDeactivationPin = errors.New("deactivation pin is required to sto
 // errTooManyDeactivationPin represents an error indicating excessive deactivation PIN request attempts.
 var errTooManyDeactivationPin = errors.New("too many request attempts")
 
+// errUnverifiableDeactivationPin reports that this run never had an answer from
+// the API about the PIN, so it can neither check one nor establish that none is
+// required. Refusing is the only safe answer: the alternative hands a
+// PIN-protected device to whoever asks for the duration of an API outage.
+var errUnverifiableDeactivationPin = errors.New("cannot verify the deactivation pin while the Control D API is unavailable, try again once it returns")
+
 // checkDeactivationPin validates if the deactivation pin matches one in ControlD config.
 func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	mainLog.Load().Debug().Msg("Checking deactivation pin")
@@ -2466,6 +2533,9 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 			return nil // valid pin
 		case http.StatusNotFound:
 			return nil // the server is running older version of ctrld
+		case http.StatusServiceUnavailable:
+			mainLog.Load().Error().Msg(errUnverifiableDeactivationPin.Error())
+			return errUnverifiableDeactivationPin
 		}
 	}
 	mainLog.Load().Error().Err(err).Msg(errInvalidDeactivationPin.Error())
@@ -2476,7 +2546,8 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 func isCheckDeactivationPinErr(err error) bool {
 	return errors.Is(err, errInvalidDeactivationPin) ||
 		errors.Is(err, errRequiredDeactivationPin) ||
-		errors.Is(err, errTooManyDeactivationPin)
+		errors.Is(err, errTooManyDeactivationPin) ||
+		errors.Is(err, errUnverifiableDeactivationPin)
 }
 
 // ensureUninstall ensures that s.Uninstall will remove ctrld service from system completely.
