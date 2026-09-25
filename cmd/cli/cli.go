@@ -1558,12 +1558,20 @@ func uninstall(p *prog, s service.Service) {
 	}
 }
 
+var restoreSavedStaticDNSInterfacesFn = withEachPhysicalInterfaces
+var restoreSavedStaticDNSRestoreFn = restoreDNS
+var savedStaticDNSPathFn = ctrld.SavedStaticDnsSettingsFilePath
+
 // restoreSavedStaticDNS restores DNS from saved static config files on physical interfaces.
 func restoreSavedStaticDNS(excludeIfaceName string, removeSaved bool) {
-	withEachPhysicalInterfaces(excludeIfaceName, "restore static DNS", func(i *net.Interface) error {
-		file := ctrld.SavedStaticDnsSettingsFilePath(i)
+	restoreSavedStaticDNSInterfacesFn(excludeIfaceName, "restore static DNS", func(i *net.Interface) error {
+		if !interceptTargetAllowsStaticRestore(i.Name) {
+			mainLog.Load().Debug().Msgf("Saved static DNS restore skipped on interface %s: intercept target cleanup is pending or ownership is unreadable", i.Name)
+			return nil
+		}
+		file := savedStaticDNSPathFn(i)
 		if _, err := os.Stat(file); err == nil {
-			if err := restoreDNS(i); err != nil {
+			if err := restoreSavedStaticDNSRestoreFn(i); err != nil {
 				mainLog.Load().Error().Err(err).Msgf("Could not restore static DNS on interface %s", i.Name)
 			} else {
 				mainLog.Load().Debug().Msgf("Restored static DNS on interface %s successfully", i.Name)

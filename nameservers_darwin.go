@@ -20,6 +20,8 @@ func dnsFns() []dnsFn {
 	return []dnsFn{dnsFromResolvConf, getDNSFromScutil, getAllDHCPNameservers}
 }
 
+var scutilLocalAddresses = netmon.LocalAddresses
+
 func getDNSFromScutil(ctx context.Context) []string {
 	logger := LoggerFromCtx(ctx)
 
@@ -28,7 +30,7 @@ func getDNSFromScutil(ctx context.Context) []string {
 		retryInterval = 100 * time.Millisecond
 	)
 
-	regularIPs, loopbackIPs, _ := netmon.LocalAddresses()
+	regularIPs, loopbackIPs, _ := scutilLocalAddresses()
 
 	var nameservers []string
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -43,36 +45,8 @@ func getDNSFromScutil(ctx context.Context) []string {
 			continue
 		}
 
-		var localDNS []string
-		seen := make(map[string]bool)
-
-		scanner := bufio.NewScanner(bytes.NewReader(output))
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if strings.HasPrefix(line, "nameserver[") {
-				parts := strings.Split(line, ":")
-				if len(parts) == 2 {
-					ns := strings.TrimSpace(parts[1])
-					if ip := net.ParseIP(ns); ip != nil {
-						// skip loopback IPs
-						isLocal := false
-						for _, v := range slices.Concat(regularIPs, loopbackIPs) {
-							ipStr := v.String()
-							if ip.String() == ipStr {
-								isLocal = true
-								break
-							}
-						}
-						if !isLocal && !seen[ip.String()] {
-							seen[ip.String()] = true
-							localDNS = append(localDNS, ip.String())
-						}
-					}
-				}
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
+		localDNS, err := parseScutilNameservers(output, slices.Concat(regularIPs, loopbackIPs))
+		if err != nil {
 			Log(context.Background(), logger.Error(), "Error scanning scutil output (attempt %d/%d): %v", attempt+1, maxRetries, err)
 			continue
 		}

@@ -41,6 +41,14 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 		statePath:    filepath.Join(t.TempDir(), interceptDNSTargetStateFile),
 	}
 
+	// Master's saved DNS path belongs to ctrld, not the CLI homedir.
+	// Isolate the production remove/sweep paths without touching host backups.
+	savedDir := t.TempDir()
+	origSavedPath := savedStaticDNSPathFn
+	savedStaticDNSPathFn = func(iface *net.Interface) string {
+		return filepath.Join(savedDir, ".dns_"+iface.Name)
+	}
+	t.Cleanup(func() { savedStaticDNSPathFn = origSavedPath })
 	origPath := interceptDNSTargetStatePathFn
 	origRoute := interceptDefaultRouteInterfaceFn
 	origIface := interceptInterfaceByNameFn
@@ -144,12 +152,14 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 }
 
 func newInterceptTargetProg() *prog {
-	return &prog{
+	p := &prog{
 		cfg: &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{
 			"0": {IP: "127.0.0.1", Port: 5354},
 		}},
 		dnsInterceptState: &pfState{},
 	}
+	p.logger.Store(mainLog.Load())
+	return p
 }
 
 func persistInterceptTargetForTest(t *testing.T, p *prog, service, value string) {
@@ -158,7 +168,9 @@ func persistInterceptTargetForTest(t *testing.T, p *prog, service, value string)
 	defer p.interceptDNSTargetMu.Unlock()
 	p.interceptDNSTargetLoaded = true
 	p.setInterceptDNSTargetLocked(service, value)
-	p.persistInterceptDNSTargetStateLocked()
+	if err := p.persistInterceptDNSTargetStateLocked(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestEnsureInterceptDNSTargetRequiresCompletedDiscovery(t *testing.T) {

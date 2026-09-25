@@ -184,11 +184,7 @@ func (m *vpnDNSManager) refreshOnce(ctx context.Context, guardAgainstNoNameserve
 			config.InterfaceName, len(config.Domains), len(config.Servers))
 
 		for _, domain := range config.Domains {
-			// Normalize domain: remove leading dot, Linux routing domain prefix (~),
-			// and convert to lowercase.
-			domain = strings.TrimPrefix(domain, "~") // Linux resolvectl routing domain prefix
-			domain = strings.TrimPrefix(domain, ".")
-			domain = strings.ToLower(domain)
+			domain = normalizeVPNDomain(domain)
 
 			if domain != "" {
 				m.routes[domain] = append([]string{}, config.Servers...)
@@ -302,9 +298,7 @@ func (m *vpnDNSManager) RefreshRoutesOnly() (routes, domainlessServers, exemptio
 
 	for _, config := range configs {
 		for _, domain := range config.Domains {
-			domain = strings.TrimPrefix(domain, "~")
-			domain = strings.TrimPrefix(domain, ".")
-			domain = strings.ToLower(domain)
+			domain = normalizeVPNDomain(domain)
 			if domain != "" {
 				m.routes[domain] = append([]string{}, config.Servers...)
 			}
@@ -409,6 +403,14 @@ func (m *vpnDNSManager) VPNDNSReachable() {
 	m.retainedAfterEmptyDiscovery = false
 }
 
+// normalizeVPNDomain accepts OS suffix and Linux routing-domain spellings.
+// The root alone is not a split-DNS route (including the Linux ~. catch-all).
+func normalizeVPNDomain(domain string) string {
+	domain = strings.TrimPrefix(domain, "~")
+	domain = strings.TrimPrefix(domain, ".")
+	return strings.ToLower(strings.TrimSuffix(domain, "."))
+}
+
 // UpstreamForDomain checks if the domain matches any VPN search domain.
 // Returns VPN DNS servers if matched, nil otherwise.
 // Uses suffix matching: "foo.provisur.local" matches "provisur.local"
@@ -424,16 +426,17 @@ func (m *vpnDNSManager) UpstreamForDomain(domain string) []string {
 	domain = strings.TrimSuffix(domain, ".")
 	domain = strings.ToLower(domain)
 
-	// First try exact match
-	if servers, ok := m.routes[domain]; ok {
-		return append([]string{}, servers...) // Return copy to avoid race conditions
-	}
-
-	// Try suffix matching - check if domain ends with any of our VPN domains
-	for vpnDomain, servers := range m.routes {
-		if strings.HasSuffix(domain, "."+vpnDomain) {
-			return append([]string{}, servers...) // Return copy
+	// Walk label boundaries from most to least specific. Map iteration order
+	// must never choose a parent VPN's resolver over a matching child zone.
+	for domain != "" {
+		if servers, ok := m.routes[domain]; ok {
+			return append([]string{}, servers...)
 		}
+		i := strings.IndexByte(domain, '.')
+		if i < 0 {
+			break
+		}
+		domain = domain[i+1:]
 	}
 
 	return nil

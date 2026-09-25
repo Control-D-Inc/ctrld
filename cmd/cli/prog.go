@@ -320,6 +320,8 @@ type prog struct {
 
 	// VPN DNS manager for split DNS routing when intercept mode is active.
 	vpnDNS *vpnDNSManager
+	// Serializes journal reads with publication after an intercept startup retry.
+	vpnDNSJournalMu sync.Mutex
 
 	// rejectedDestinationsKey is the signature of the organization allowed
 	// destination entries that were last reported as unusable, so re-parsing an
@@ -1224,6 +1226,27 @@ func (p *prog) startNetworkJournal() func() {
 // drop. The search suffixes name the organization of the endpoint, so the
 // journal holds their number only.
 func (p *prog) logDNSConfigChanges(entries []dnsResolverEntry) {
+	// The poller emits one batch per changed snapshot (at most once per poll),
+	// not one discovery per resolver. Late DNS publication on an unchanged
+	// tunnel otherwise has no network event to refresh split routing.
+	// Join the existing shutdown fence before touching the manager or PF/WFP:
+	// closeNetMonitor drains this callback before restoring the host's DNS.
+	if len(entries) > 0 && p.beginNetworkActivity() {
+		defer p.netMonitorWG.Done()
+		// setDNS publishes the manager before signalling completion. The journal
+		// starts earlier; never race initial manager publication or initialize a
+		// manager in traditional/hard intercept mode.
+		select {
+		case <-p.csSetDnsDone:
+			p.vpnDNSJournalMu.Lock()
+			manager := p.vpnDNS
+			p.vpnDNSJournalMu.Unlock()
+			if manager != nil {
+				manager.Refresh(ctrld.LoggerCtx(context.Background(), p.logger.Load()), true)
+			}
+		default:
+		}
+	}
 	for _, entry := range entries {
 		journal(mainLog.Load().Info()).
 			Strs("nameservers", entry.Nameservers).
@@ -1564,8 +1587,10 @@ func (p *prog) setDNS(systemNameservers []string) {
 				// Discovers search domains from virtual/VPN interfaces and forwards
 				// matching queries to the DNS server on that interface.
 				// Skipped in --intercept-mode hard where all DNS goes through ctrld.
+				p.vpnDNSJournalMu.Lock()
 				p.vpnDNS = newVPNDNSManager(&p.logger, p.exemptVPNDNSServers)
 				p.vpnDNS.Refresh(ctrld.LoggerCtx(context.Background(), p.logger.Load()))
+				p.vpnDNSJournalMu.Unlock()
 			}
 
 			setDnsOK = true
@@ -1814,7 +1839,9 @@ func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 		}
 
 		// Clean up VPN DNS manager
+		p.vpnDNSJournalMu.Lock()
 		p.vpnDNS = nil
+		p.vpnDNSJournalMu.Unlock()
 
 		return
 	}

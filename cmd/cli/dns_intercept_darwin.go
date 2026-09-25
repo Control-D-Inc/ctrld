@@ -735,6 +735,21 @@ func flushPFStates() {
 	}
 }
 
+// pfNameserverAddress keeps socket zones out of group-scoped PF addresses.
+// ctrld already has a blanket group exemption in the same anchor.
+func pfNameserverAddress(server string) (string, string, bool) {
+	host, _, err := net.SplitHostPort(server)
+	if err != nil {
+		host = server
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return "", "", false
+	}
+	host = addr.WithZone("").Unmap().String()
+	return host, pfAddressFamily(host), true
+}
+
 func pfAddressFamily(ip string) string {
 	if addr := net.ParseIP(ip); addr != nil && addr.To4() == nil {
 		return "inet6"
@@ -937,11 +952,10 @@ func (p *prog) buildPFAnchorRulesForState(vpnExemptions []vpnDNSExemption, tunne
 		rules.WriteString("# Scoped to group " + pfGroupName + " so only ctrld's own queries are exempted,\n")
 		rules.WriteString("# preventing other processes from bypassing the redirect by querying these IPs.\n")
 		for _, ns := range osNS {
-			host, _, _ := net.SplitHostPort(ns)
-			if host == "" {
-				host = ns
+			host, af, ok := pfNameserverAddress(ns)
+			if !ok {
+				continue
 			}
-			af := pfAddressFamily(host)
 			rules.WriteString(fmt.Sprintf("pass out quick on ! lo0 %s proto { udp, tcp } from any to %s port 53 group %s\n", af, host, pfGroupName))
 		}
 		rules.WriteString("\n")
@@ -973,10 +987,10 @@ func (p *prog) buildPFAnchorRulesForState(vpnExemptions []vpnDNSExemption, tunne
 		rules.WriteString("# Exempt VPN DNS servers: ctrld's own queries (group-scoped).\n")
 		seen := make(map[string]bool)
 		for _, ex := range vpnExemptions {
-			if !seen[ex.Server] {
-				seen[ex.Server] = true
-				af := pfAddressFamily(ex.Server)
-				rules.WriteString(fmt.Sprintf("pass out quick on ! lo0 %s proto { udp, tcp } from any to %s port 53 group %s\n", af, ex.Server, pfGroupName))
+			host, af, ok := pfNameserverAddress(ex.Server)
+			if ok && !seen[host] {
+				seen[host] = true
+				rules.WriteString(fmt.Sprintf("pass out quick on ! lo0 %s proto { udp, tcp } from any to %s port 53 group %s\n", af, host, pfGroupName))
 			}
 		}
 		rules.WriteString("\n")

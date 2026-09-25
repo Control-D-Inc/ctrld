@@ -136,7 +136,7 @@ func (p *prog) addCachedResponse(key dnscache.Key, answer *dns.Msg) {
 }
 
 func (p *prog) cachedResponse(req *dns.Msg, upstream string, dns64Prefix netip.Prefix, dns64Active bool, now time.Time) (answer, stale *dns.Msg, hit, dns64Hit, dns64Bypass bool) {
-	if dns64Active {
+	if dns64Active && dns64RequestAllowed(req) {
 		if cachedValue := p.cache.Get(dns64CacheKey(req, upstream, dns64Prefix)); cachedValue != nil {
 			answer = cachedValue.Msg.Copy()
 			ctrld.SetCacheReply(answer, req, answer.Rcode)
@@ -2941,6 +2941,11 @@ func (p *prog) buildRecoveryUpstreams(reason RecoveryReason) map[string]*ctrld.U
 			if uc != nil && uc.Type != ctrld.ResolverTypeOS {
 				upstreams[upstreamPrefix+k] = uc
 			}
+		}
+		// An OS-only configuration still needs a recovery worker. Do not add
+		// OS to mixed pools: their existing recovery boundaries stay intact.
+		if len(upstreams) == 0 {
+			upstreams[upstreamOS] = osUpstreamConfig
 		}
 	}
 	return upstreams
