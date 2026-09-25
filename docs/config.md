@@ -18,16 +18,12 @@ The config file allows for advanced configuration of the `ctrld` utility to cove
 
  - `/etc/controld` on *nix.
  - User's home directory on Windows.
- - Same directory with `ctrld` binary on these routers:
-   - `ddwrt`
-   - `merlin`
-   - `freshtomato`
  - Current directory.
 
 The user can choose to override default value using command line `--config` or `-c`:
 
 ```shell
-ctrld run --config /path/to/myconfig.toml
+ctrld-client run --config /path/to/myconfig.toml
 ```
 
 If no configuration files found, a default `ctrld.toml` file will be created in the current directory.
@@ -121,9 +117,27 @@ Logging level you wish to enable.
 ### log_path
 Relative or absolute path of the log file. 
 
+Point `log_path` at a file that no other program rotates. ctrld renames `<log_path>.1` to `<log_path>.N` and uploads these files. A lower `log_max_backups` leaves the older numbered `log_path` files in place, but ctrld removes the extra numbered files of its internal logs.
+
 - Type: string
 - Required: no
 - Default: ""
+
+### log_max_size_mb
+Maximum size of the debug log file in MB. When the file reaches this size, ctrld rotates it. This limit also applies to the `log_path` file.
+
+- Type: integer
+- Required: no
+- Valid values: 1 to 1024
+- Default: 10
+
+### log_max_backups
+Number of rotated debug log files that ctrld keeps. If the value is 0, ctrld keeps no rotated file. This number also applies to the `log_path` file.
+
+- Type: integer
+- Required: no
+- Valid values: 0 to 64
+- Default: 4
 
 ### cache_enable
 When `cache_enable = true`, all resolved DNS query responses will be cached for duration of the upstream record TTLs.
@@ -293,7 +307,23 @@ If a remote upstream fails to resolve a query or is unreachable, `ctrld` will fo
 
 - Type: boolean
 - Required: no
-- Default: true on Windows, MacOS and non-router Linux.
+- Default: true on Windows, MacOS and Linux.
+
+### nrpt_recovery_max_attempts
+Windows DNS intercept mode uses NRPT health probes and recovery when Windows stops routing queries to the local `ctrld` listener. This limits how many consecutive recovery flows can run before `ctrld` enters a cooldown and stops making policy/Dnscache changes.
+
+Set to `0` to disable this circuit breaker and keep retrying indefinitely.
+
+- Type: integer
+- Required: no
+- Default: 0 (unlimited, current behavior)
+
+### nrpt_recovery_cooldown
+Cooldown duration after `nrpt_recovery_max_attempts` consecutive Windows NRPT recovery flows. During cooldown, `ctrld` logs the suppressed recovery and avoids additional `RefreshPolicyEx`, Dnscache `paramchange`, and DNS cache flush calls.
+
+- Type: time duration string
+- Required: no
+- Default: 30m
 
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.

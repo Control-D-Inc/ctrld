@@ -11,7 +11,8 @@ func TestCACertPool(t *testing.T) {
 	c := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				RootCAs: CACertPool(),
+				RootCAs:    CACertPool(),
+				MinVersion: tls.VersionTLS12,
 			},
 		},
 		Timeout: 2 * time.Second,

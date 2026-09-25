@@ -2,71 +2,97 @@ package cli
 
 import (
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sync/atomic"
-	"time"
 
 	"github.com/kardianos/service"
-	"github.com/rs/zerolog"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/Control-D-Inc/ctrld"
 )
 
+// Global variables for CLI configuration and state management
+// These are used across multiple commands and need to persist throughout the application lifecycle
 var (
-	configPath        string
-	configBase64      string
-	daemon            bool
-	listenAddress     string
-	primaryUpstream   string
-	secondaryUpstream string
-	domains           []string
-	logPath           string
-	homedir           string
-	cacheSize         int
-	cfg               ctrld.Config
-	verbose           int
-	silent            bool
-	cdUID             string
-	cdOrg             string
-	customHostname    string
-	cdDev             bool
-	iface             string
-	ifaceStartStop    string
-	nextdns           string
-	cdUpstreamProto   string
-	deactivationPin   int64
-	skipSelfChecks    bool
-	cleanup           bool
-	startOnly         bool
-	rfc1918           bool
+	configPath              string
+	configBase64            string
+	daemon                  bool
+	listenAddress           string
+	primaryUpstream         string
+	secondaryUpstream       string
+	domains                 []string
+	logPath                 string
+	homedir                 string
+	cacheSize               int
+	cfg                     ctrld.Config
+	verbose                 int
+	silent                  bool
+	cdUID                   string
+	cdOrg                   string
+	customHostname          string
+	cdDev                   bool
+	iface                   string
+	ifaceStartStop          string
+	nextdns                 string
+	cdUpstreamProto         string
+	deactivationPin         int64
+	skipSelfChecks          bool
+	cleanup                 bool
+	startOnly               bool
+	rfc1918                 bool
+	interceptMode           string // "", "off", "dns", or "hard" — set via --intercept-mode flag or config
+	dnsIntercept            bool   // derived: interceptMode == "dns" || interceptMode == "hard"
+	hardIntercept           bool   // derived: interceptMode == "hard"
+	firewallMode            string // "off" or "on" — set via --firewall-mode flag or config
+	firewallModeFlagChanged bool   // true when --firewall-mode was explicitly provided
 
-	mainLog       atomic.Pointer[zerolog.Logger]
-	consoleWriter zerolog.ConsoleWriter
-	noConfigStart bool
+	mainLog            atomic.Pointer[ctrld.Logger]
+	consoleWriter      zapcore.Core
+	consoleWriterLevel zapcore.Level
+	noConfigStart      bool
 )
 
+// Flag name constants for consistent reference across the codebase
+// Using constants prevents typos and makes refactoring easier
 const (
 	cdUidFlagName          = "cd"
 	cdOrgFlagName          = "cd-org"
 	customHostnameFlagName = "custom-hostname"
 	nextdnsFlagName        = "nextdns"
+
+	// autoIface is the sentinel --iface value meaning "use the default gateway interface".
+	autoIface = "auto"
 )
 
+// init initializes the default logger before any CLI commands are executed
+// This ensures logging is available even during early initialization phases
 func init() {
-	l := zerolog.New(io.Discard)
-	mainLog.Store(&l)
+	l := zap.NewNop()
+	mainLog.Store(&ctrld.Logger{Logger: l})
 }
 
+// Main is the entry point for the CLI application
+// It initializes configuration, sets up the CLI structure, and executes the root command
 func Main() {
+	// Fast path for pf interception probe subprocess.
+	if len(os.Args) >= 4 && os.Args[1] == "pf-probe-send" {
+		pfProbeSend(os.Args[2], os.Args[3])
+		return
+	}
+
 	ctrld.InitConfig(v, "ctrld")
-	initCLI()
+	rootCmd := initCLI()
 	if err := rootCmd.Execute(); err != nil {
 		mainLog.Load().Error().Msg(err.Error())
 		os.Exit(1)
 	}
 }
 
+// normalizeLogFilePath converts relative log file paths to absolute paths
+// This ensures log files are created in predictable locations regardless of working directory
 func normalizeLogFilePath(logFilePath string) string {
 	if logFilePath == "" || filepath.IsAbs(logFilePath) || service.Interactive() {
 		return logFilePath
@@ -82,40 +108,36 @@ func normalizeLogFilePath(logFilePath string) string {
 }
 
 // initConsoleLogging initializes console logging, then storing to mainLog.
+// This sets up human-readable logging output for interactive use
 func initConsoleLogging() {
-	consoleWriter = zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
-		w.TimeFormat = time.StampMilli
-	})
-	multi := zerolog.MultiLevelWriter(consoleWriter)
-	l := mainLog.Load().Output(multi).With().Timestamp().Logger()
-	mainLog.Store(&l)
-
+	consoleWriterLevel = ctrld.NoticeLevel
 	switch {
 	case silent:
-		zerolog.SetGlobalLevel(zerolog.NoLevel)
+		// For silent mode, use a no-op logger to suppress all output
+		l := zap.NewNop()
+		mainLog.Store(&ctrld.Logger{Logger: l})
 	case verbose == 1:
-		ctrld.ProxyLogger.Store(&l)
-		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		// Info level provides basic operational information
+		consoleWriterLevel = zapcore.InfoLevel
 	case verbose > 1:
-		ctrld.ProxyLogger.Store(&l)
-		zerolog.SetGlobalLevel(zerolog.DebugLevel)
-	default:
-		zerolog.SetGlobalLevel(zerolog.NoticeLevel)
+		// Debug level provides detailed diagnostic information
+		consoleWriterLevel = zapcore.DebugLevel
 	}
+	consoleWriter = newHumanReadableZapCore(os.Stdout, consoleWriterLevel)
+	l := zap.New(consoleWriter)
+	mainLog.Store(&ctrld.Logger{Logger: l})
 }
 
 // initInteractiveLogging is like initLogging, but the ProxyLogger is discarded
 // to be used for all interactive commands.
 //
 // Current log file config will also be ignored.
+// This prevents log file conflicts during interactive command execution
 func initInteractiveLogging() {
 	old := cfg.Service.LogPath
 	cfg.Service.LogPath = ""
-	zerolog.TimeFieldFormat = time.RFC3339 + ".000"
 	initLoggingWithBackup(false)
 	cfg.Service.LogPath = old
-	l := zerolog.New(io.Discard)
-	ctrld.ProxyLogger.Store(&l)
 }
 
 // initLoggingWithBackup initializes log setup base on current config.
@@ -124,68 +146,83 @@ func initInteractiveLogging() {
 // This is only used in runCmd for special handling in case of logging config
 // change in cd mode. Without special reason, the caller should use initLogging
 // wrapper instead of calling this function directly.
-func initLoggingWithBackup(doBackup bool) []io.Writer {
+func initLoggingWithBackup(doBackup bool) []zapcore.Core {
 	var writers []io.Writer
-	if logFilePath := normalizeLogFilePath(cfg.Service.LogPath); logFilePath != "" {
-		// Create parent directory if necessary.
-		if err := os.MkdirAll(filepath.Dir(logFilePath), 0750); err != nil {
-			mainLog.Load().Error().Msgf("failed to create log path: %v", err)
-			os.Exit(1)
-		}
-
-		// Default open log file in append mode.
-		flags := os.O_CREATE | os.O_RDWR | os.O_APPEND
-		if doBackup {
-			// Backup old log file with .1 suffix.
-			if err := os.Rename(logFilePath, logFilePath+oldLogSuffix); err != nil && !os.IsNotExist(err) {
-				mainLog.Load().Error().Msgf("could not backup old log file: %v", err)
-			} else {
-				// Backup was created, set flags for truncating old log file.
-				flags = os.O_CREATE | os.O_RDWR
-			}
-		}
-		logFile, err := openLogFile(logFilePath, flags)
-		if err != nil {
-			mainLog.Load().Error().Msgf("failed to create log file: %v", err)
-			os.Exit(1)
-		}
-		writers = append(writers, logFile)
+	if rf := openLogPathWriter(doBackup); rf != nil {
+		writers = append(writers, rf)
 	}
-	writers = append(writers, consoleWriter)
-	multi := zerolog.MultiLevelWriter(writers...)
-	l := mainLog.Load().Output(multi).With().Logger()
-	mainLog.Store(&l)
-	// TODO: find a better way.
-	ctrld.ProxyLogger.Store(&l)
 
-	zerolog.SetGlobalLevel(zerolog.NoticeLevel)
+	// Create zap cores for different writers
+	// Multiple cores allow logging to both console and file simultaneously
+	var cores []zapcore.Core
+	cores = append(cores, consoleWriter)
+
+	// Determine log level based on verbosity and configuration
+	// This provides flexible logging control for different use cases
 	logLevel := cfg.Service.LogLevel
 	switch {
 	case silent:
-		zerolog.SetGlobalLevel(zerolog.NoLevel)
-		return writers
+		// For silent mode, use a no-op logger to suppress all output
+		l := zap.NewNop()
+		mainLog.Store(&ctrld.Logger{Logger: l})
+		return cores
 	case verbose == 1:
 		logLevel = "info"
 	case verbose > 1:
 		logLevel = "debug"
 	}
-	if logLevel == "" {
-		return writers
+
+	// Parse log level string to zapcore.Level
+	// This provides human-readable log level configuration
+	var level zapcore.Level
+	switch logLevel {
+	case "debug":
+		level = zapcore.DebugLevel
+	case "info":
+		level = zapcore.InfoLevel
+	case "notice":
+		level = ctrld.NoticeLevel
+	case "warn":
+		level = zapcore.WarnLevel
+	case "error":
+		level = zapcore.ErrorLevel
+	default:
+		level = zapcore.InfoLevel // default level
 	}
-	level, err := zerolog.ParseLevel(logLevel)
-	if err != nil {
-		mainLog.Load().Warn().Err(err).Msg("could not set log level")
-		return writers
+
+	consoleWriter.Enabled(level)
+	// Add cores for all writers
+	// This enables multi-destination logging (console + file)
+	for _, writer := range writers {
+		core := newMachineFriendlyZapCore(writer, level)
+		cores = append(cores, core)
 	}
-	zerolog.SetGlobalLevel(level)
-	return writers
+
+	// Create a multi-core logger
+	// This allows simultaneous logging to multiple destinations
+	multiCore := zapcore.NewTee(cores...)
+	logger := zap.New(multiCore)
+	mainLog.Store(&ctrld.Logger{Logger: logger})
+
+	return cores
 }
 
+// initCache initializes DNS cache configuration
+// This improves performance by caching frequently requested DNS responses
 func initCache() {
 	if !cfg.Service.CacheEnable {
 		return
 	}
 	if cfg.Service.CacheSize == 0 {
+		// Default cache size provides good balance between memory usage and performance
 		cfg.Service.CacheSize = 4096
+	}
+}
+
+// pfProbeSend is a minimal subprocess that sends a pre-built DNS query packet
+// to the specified host on port 53.
+func pfProbeSend(host, hexPacket string) {
+	if err := sendPFProbe(host, hexPacket, net.DialTimeout, os.Stdout); err != nil {
+		os.Exit(1)
 	}
 }

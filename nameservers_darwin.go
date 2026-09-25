@@ -6,11 +6,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"os/exec"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -22,8 +20,8 @@ func dnsFns() []dnsFn {
 	return []dnsFn{dnsFromResolvConf, getDNSFromScutil, getAllDHCPNameservers}
 }
 
-func getDNSFromScutil() []string {
-	logger := *ProxyLogger.Load()
+func getDNSFromScutil(ctx context.Context) []string {
+	logger := LoggerFromCtx(ctx)
 
 	const (
 		maxRetries    = 10
@@ -41,7 +39,7 @@ func getDNSFromScutil() []string {
 		cmd := exec.Command("scutil", "--dns")
 		output, err := cmd.Output()
 		if err != nil {
-			Log(context.Background(), logger.Error(), "failed to execute scutil --dns (attempt %d/%d): %v", attempt+1, maxRetries, err)
+			Log(context.Background(), logger.Error(), "Failed to execute scutil --dns (attempt %d/%d): %v", attempt+1, maxRetries, err)
 			continue
 		}
 
@@ -75,7 +73,7 @@ func getDNSFromScutil() []string {
 		}
 
 		if err := scanner.Err(); err != nil {
-			Log(context.Background(), logger.Error(), "error scanning scutil output (attempt %d/%d): %v", attempt+1, maxRetries, err)
+			Log(context.Background(), logger.Error(), "Error scanning scutil output (attempt %d/%d): %v", attempt+1, maxRetries, err)
 			continue
 		}
 
@@ -89,28 +87,26 @@ func getDNSFromScutil() []string {
 }
 
 func getDHCPNameservers(iface string) ([]string, error) {
-	// Run the ipconfig command for the given interface.
-	cmd := exec.Command("ipconfig", "getpacket", iface)
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("error running ipconfig: %v", err)
-	}
-
-	// Look for a line like:
-	//     domain_name_servers = 192.168.1.1 8.8.8.8;
-	re := regexp.MustCompile(`domain_name_servers\s*=\s*(.*);`)
-	matches := re.FindStringSubmatch(string(output))
-	if len(matches) < 2 {
-		return nil, fmt.Errorf("no DHCP nameservers found")
-	}
-
-	// Split the nameservers by whitespace.
-	nameservers := strings.Fields(matches[1])
-	return nameservers, nil
+	return dhcpNameserversFromCommands(context.Background(), iface, func(_ context.Context, args ...string) ([]byte, error) {
+		return exec.Command("ipconfig", args...).Output()
+	})
 }
 
-func getAllDHCPNameservers() []string {
-	logger := *ProxyLogger.Load()
+// DHCPNameserversForInterfaceContext bounds both commands with the caller's
+// context. Other system-discovery callers retain their existing behavior.
+func DHCPNameserversForInterfaceContext(ctx context.Context, iface string) ([]string, error) {
+	return dhcpNameserversFromCommands(ctx, iface, func(ctx context.Context, args ...string) ([]byte, error) {
+		return dhcpCommandOutput(ctx, "/usr/sbin/ipconfig", args...)
+	})
+}
+
+// DHCPNameserversForInterface returns DHCP option 6 for exactly iface.
+func DHCPNameserversForInterface(iface string) ([]string, error) {
+	return getDHCPNameservers(iface)
+}
+
+func getAllDHCPNameservers(ctx context.Context) []string {
+	logger := LoggerFromCtx(ctx)
 
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -172,7 +168,7 @@ func getAllDHCPNameservers() []string {
 
 	// if we have static DNS servers saved for the current default route, we should add them to the list
 	drIfaceName, err := netmon.DefaultRouteInterface()
-	Log(context.Background(), logger.Debug(), "checking for static DNS servers for default route interface: %s", drIfaceName)
+	Log(context.Background(), logger.Debug(), "Checking for static DNS servers for default route interface: %s", drIfaceName)
 	if err != nil {
 		Log(context.Background(), logger.Debug(),
 			"Failed to get default route interface: %v", err)
@@ -186,7 +182,7 @@ func getAllDHCPNameservers() []string {
 				Log(context.Background(), logger.Debug(),
 					"Failed to patch interface name %s: %v", drIfaceName, err)
 			}
-			staticNs, file := SavedStaticNameservers(drIface)
+			staticNs, file := SavedStaticNameserversAndPath(drIface)
 			Log(context.Background(), logger.Debug(),
 				"static dns servers from %s: %v", file, staticNs)
 			if len(staticNs) > 0 {

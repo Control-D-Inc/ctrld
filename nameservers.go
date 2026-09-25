@@ -1,9 +1,15 @@
 package ctrld
 
-type dnsFn func() []string
+import (
+	"context"
+
+	"github.com/Control-D-Inc/ctrld/internal/resolvconffile"
+)
+
+type dnsFn func(ctx context.Context) []string
 
 // nameservers returns DNS nameservers from system settings.
-func nameservers() []string {
+func nameservers(ctx context.Context) []string {
 	var dns []string
 	seen := make(map[string]bool)
 	ch := make(chan []string)
@@ -11,7 +17,7 @@ func nameservers() []string {
 
 	for _, fn := range fns {
 		go func(fn dnsFn) {
-			ch <- fn()
+			ch <- fn(ctx)
 		}(fn)
 	}
 	for range fns {
@@ -25,4 +31,9 @@ func nameservers() []string {
 	}
 
 	return dns
+}
+
+// CurrentNameserversFromResolvconf returns the current nameservers set from /etc/resolv.conf file.
+func CurrentNameserversFromResolvconf() []string {
+	return resolvconffile.NameServers()
 }

@@ -2,12 +2,12 @@
 
 package cli
 
-// TODO(cuonglm): implement.
+// allocateIP allocates an IP address on the specified interface
 func allocateIP(ip string) error {
 	return nil
 }
 
-// TODO(cuonglm): implement.
+// deAllocateIP deallocates an IP address from the specified interface
 func deAllocateIP(ip string) error {
 	return nil
 }

@@ -169,6 +169,72 @@ discover_ptr = false
 	require.False(t, *cfg.Service.DiscoverPtr)
 }
 
+func TestLogMaxKeys(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceKeys string
+		wantSize    int
+		wantBackups *int
+	}{
+		{"size and backups set", "log_max_size_mb = 20\nlog_max_backups = 1", 20, intPtr(1)},
+		{"size zero, backups absent", "log_max_size_mb = 0", 0, nil},
+		{"backups zero", "log_max_backups = 0", 0, intPtr(0)},
+		{"the largest values the keys take", "log_max_size_mb = 1024\nlog_max_backups = 64", 1024, intPtr(64)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := configWithServiceKeys(t, tc.serviceKeys)
+			validate := validator.New()
+			require.NoError(t, ctrld.ValidateConfig(validate, cfg))
+			require.Equal(t, tc.wantSize, cfg.Service.LogMaxSizeMB)
+			if tc.wantBackups == nil {
+				require.Nil(t, cfg.Service.LogMaxBackups)
+				return
+			}
+			require.NotNil(t, cfg.Service.LogMaxBackups)
+			require.Equal(t, *tc.wantBackups, *cfg.Service.LogMaxBackups)
+		})
+	}
+}
+
+func TestLogMaxKeysOutOfRange(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceKeys string
+		wantField   string
+	}{
+		{"negative size", "log_max_size_mb = -1", "LogMaxSizeMB"},
+		{"negative backups", "log_max_backups = -1", "LogMaxBackups"},
+		{"size above the limit", "log_max_size_mb = 1025", "LogMaxSizeMB"},
+		{"backups above the limit", "log_max_backups = 65", "LogMaxBackups"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := configWithServiceKeys(t, tc.serviceKeys)
+			validate := validator.New()
+			err := ctrld.ValidateConfig(validate, cfg)
+			require.ErrorContains(t, err, tc.wantField)
+		})
+	}
+}
+
+func configWithServiceKeys(t *testing.T, serviceKeys string) *ctrld.Config {
+	t.Helper()
+	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
+	ctrld.InitConfig(v, "test_log_max_keys")
+	v.SetConfigType("toml")
+	require.NoError(t, v.ReadConfig(strings.NewReader("[service]\n"+serviceKeys+"\n")))
+	var cfg ctrld.Config
+	require.NoError(t, v.Unmarshal(&cfg))
+	return &cfg
+}
+
+func intPtr(n int) *int {
+	return &n
+}
+
 func defaultConfig(t *testing.T) *ctrld.Config {
 	v := viper.New()
 	ctrld.InitConfig(v, "test_load_default_config")
