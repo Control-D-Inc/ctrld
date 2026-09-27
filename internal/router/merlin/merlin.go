@@ -7,9 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/kardianos/service"
 
@@ -125,12 +125,7 @@ func (m *Merlin) Cleanup() error {
 		return err
 	}
 
-	buf, err := os.ReadFile(dnsmasq.MerlinPostConfPath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	// Restore dnsmasq post conf file.
-	if err := os.WriteFile(dnsmasq.MerlinPostConfPath, merlinParsePostConf(buf), 0750); err != nil {
+	if err := cleanupDnsmasqPostconf(dnsmasq.MerlinPostConfPath); err != nil {
 		return err
 	}
 
@@ -193,30 +188,152 @@ func (m *Merlin) cleanupDnsmasqJffs(cfg *dnsmasqConfig) error {
 	return nil
 }
 
-// writeDnsmasqPostconf writes the requireddnsmasqConfigs post-configuration for dnsmasq to enable custom DNS settings with ctrld.
-func (m *Merlin) writeDnsmasqPostconf() error {
-	buf, err := os.ReadFile(dnsmasq.MerlinPostConfPath)
-	// Already setup.
-	if bytes.Contains(buf, []byte(dnsmasq.MerlinPostConfMarker)) {
-		return nil
-	}
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
+type merlinHookUpdate struct {
+	path          string
+	data          []byte
+	original      []byte
+	existed       bool
+	pathType      os.FileMode
+	symlinkTarget string
+}
 
+// writeDnsmasqPostconf manages only ctrld's marked block in the shared main
+// dnsmasq.postconf hook. Merlin 3006 SDN support is intentionally handled in a
+// separate change so this patch does not alter router lifecycle semantics.
+func (m *Merlin) writeDnsmasqPostconf() error {
 	data, err := dnsmasq.ConfTmpl(dnsmasq.MerlinPostConfTmpl, m.cfg)
 	if err != nil {
 		return err
 	}
-	data = strings.Join([]string{
-		data,
-		"\n",
-		dnsmasq.MerlinPostConfMarker,
-		"\n",
-		string(buf),
-	}, "\n")
-	// Write dnsmasq post conf file.
-	return os.WriteFile(dnsmasq.MerlinPostConfPath, []byte(data), 0750)
+	block := []byte(strings.Join([]string{
+		dnsmasq.MerlinPostConfBeginMarker,
+		strings.TrimSpace(data),
+		dnsmasq.MerlinPostConfEndMarker,
+	}, "\n"))
+
+	update, err := prepareMerlinHookUpdate(dnsmasq.MerlinPostConfPath, block)
+	if err != nil {
+		return err
+	}
+	if err := revalidateMerlinHookUpdate(update); err != nil {
+		return fmt.Errorf("revalidate Merlin hook %s: %w", update.path, err)
+	}
+	if err := atomicWriteFile(update.path, update.data, 0750); err != nil {
+		return fmt.Errorf("write Merlin hook %s: %w", update.path, err)
+	}
+	return nil
+}
+
+func prepareMerlinHookUpdate(path string, block []byte) (merlinHookUpdate, error) {
+	return prepareMerlinHookReplacement(path, func(buf []byte) []byte {
+		return merlinUpsertPostConf(buf, block)
+	})
+}
+
+func prepareMerlinHookCleanup(path string) (*merlinHookUpdate, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = info
+
+	update, err := prepareMerlinHookReplacement(path, merlinParsePostConf)
+	if err != nil {
+		return nil, err
+	}
+	return &update, nil
+}
+
+func prepareMerlinHookReplacement(path string, transform func([]byte) []byte) (merlinHookUpdate, error) {
+	info, statErr := os.Lstat(path)
+	pathMissing := os.IsNotExist(statErr)
+	if statErr != nil && !pathMissing {
+		return merlinHookUpdate{}, statErr
+	}
+
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		if !pathMissing || !os.IsNotExist(err) {
+			return merlinHookUpdate{}, err
+		}
+		buf = nil
+	}
+
+	update := merlinHookUpdate{
+		path:     path,
+		data:     transform(buf),
+		original: append([]byte(nil), buf...),
+		existed:  !pathMissing,
+	}
+	if !pathMissing {
+		update.pathType = info.Mode().Type()
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return merlinHookUpdate{}, err
+			}
+			update.symlinkTarget = target
+		}
+	}
+	return update, nil
+}
+
+func revalidateMerlinHookUpdate(update merlinHookUpdate) error {
+	info, err := os.Lstat(update.path)
+	if !update.existed {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("shared hook appeared after preflight")
+	}
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("shared hook disappeared after preflight")
+		}
+		return err
+	}
+	if info.Mode().Type() != update.pathType {
+		return fmt.Errorf("shared hook type changed after preflight")
+	}
+	if update.pathType&os.ModeSymlink != 0 {
+		target, err := os.Readlink(update.path)
+		if err != nil {
+			return err
+		}
+		if target != update.symlinkTarget {
+			return fmt.Errorf("shared hook symlink target changed after preflight")
+		}
+	}
+	current, err := os.ReadFile(update.path)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(current, update.original) {
+		return fmt.Errorf("shared hook content changed after preflight")
+	}
+	return nil
+}
+
+func cleanupDnsmasqPostconf(path string) error {
+	update, err := prepareMerlinHookCleanup(path)
+	if err != nil || update == nil {
+		return err
+	}
+	if bytes.Equal(update.original, update.data) {
+		return nil
+	}
+	if err := revalidateMerlinHookUpdate(*update); err != nil {
+		return fmt.Errorf("revalidate Merlin hook cleanup %s: %w", path, err)
+	}
+	// Never delete a shared Merlin hook outright. Cleanup removes only ctrld's
+	// owned bytes and preserves the path, content and mode belonging to others.
+	return atomicWriteFile(path, update.data, 0750)
 }
 
 // restartDNSMasq restarts the dnsmasq service by executing the appropriate system command using "service".
@@ -241,18 +358,321 @@ func getDnsmasqConfigs() []*dnsmasqConfig {
 	return cfgs
 }
 
-// merlinParsePostConf parses the dnsmasq post configuration by removing content after the MerlinPostConfMarker, if present.
-// If no marker is found, the original buffer is returned unmodified.
-// Returns nil if the input buffer is empty.
+// merlinExactLineBounds finds marker only when it occupies a complete line.
+// The returned end excludes the line ending so callers can decide whether to
+// preserve or consume that separator.
+func merlinExactLineBounds(buf, marker []byte, from int) (start, end int, ok bool) {
+	if from < 0 {
+		from = 0
+	}
+	for pos := from; pos <= len(buf); {
+		lineStart := pos
+		relNL := bytes.IndexByte(buf[pos:], '\n')
+		lineEnd := len(buf)
+		next := len(buf) + 1
+		if relNL >= 0 {
+			lineEnd = pos + relNL
+			next = lineEnd + 1
+		}
+
+		contentEnd := lineEnd
+		if contentEnd > lineStart && buf[contentEnd-1] == '\r' {
+			contentEnd--
+		}
+		if bytes.Equal(buf[lineStart:contentEnd], marker) {
+			return lineStart, lineEnd, true
+		}
+
+		if relNL < 0 {
+			break
+		}
+		pos = next
+	}
+	return 0, 0, false
+}
+
+// merlinLastExactLineBefore returns the last complete marker line starting
+// before limit.
+func merlinLastExactLineBefore(buf, marker []byte, limit int) (start, end int, ok bool) {
+	from := 0
+	for {
+		s, e, found := merlinExactLineBounds(buf, marker, from)
+		if !found || s >= limit {
+			break
+		}
+		start, end, ok = s, e, true
+		if e >= len(buf) {
+			break
+		}
+		from = e + 1
+	}
+	return start, end, ok
+}
+
+type merlinPostConfBlockKind uint8
+
+const (
+	merlinPostConfBlockNone merlinPostConfBlockKind = iota
+	merlinPostConfBlockCurrent
+	merlinPostConfBlockLegacy
+)
+
+// merlinPostConfBlock returns the ctrld-owned block bounds and format.
+// It understands both the current BEGIN/END format and the legacy <= 1.5.7
+// GENERATED/EOF format. Markers must occupy complete lines so shell variables,
+// comments or unrelated strings containing the marker text are never claimed.
+func merlinPostConfBlock(buf []byte) (start, end int, kind merlinPostConfBlockKind, ok bool) {
+	begin := []byte(dnsmasq.MerlinPostConfBeginMarker)
+	endMarker := []byte(dnsmasq.MerlinPostConfEndMarker)
+	if blockStart, beginEnd, found := merlinExactLineBounds(buf, begin, 0); found {
+		from := beginEnd
+		if from < len(buf) && buf[from] == '\n' {
+			from++
+		}
+		if _, blockEnd, foundEnd := merlinExactLineBounds(buf, endMarker, from); foundEnd {
+			return blockStart, blockEnd, merlinPostConfBlockCurrent, true
+		}
+	}
+
+	legacyEnd := []byte(dnsmasq.MerlinPostConfMarker)
+	if legacyEndStart, legacyEndEnd, found := merlinExactLineBounds(buf, legacyEnd, 0); found {
+		legacyBegin := []byte(dnsmasq.CtrldMarker)
+		if legacyBeginStart, _, foundBegin := merlinLastExactLineBefore(buf, legacyBegin, legacyEndStart); foundBegin {
+			return legacyBeginStart, legacyEndEnd, merlinPostConfBlockLegacy, true
+		}
+	}
+
+	return 0, 0, merlinPostConfBlockNone, false
+}
+
+func merlinConsumeLineEnding(buf []byte, pos int) int {
+	if pos >= len(buf) {
+		return pos
+	}
+	if buf[pos] == '\r' {
+		pos++
+		if pos < len(buf) && buf[pos] == '\n' {
+			pos++
+		}
+		return pos
+	}
+	if buf[pos] == '\n' {
+		return pos + 1
+	}
+	return pos
+}
+
+func merlinBlockHasSyntheticShebang(buf []byte, start, end int) bool {
+	if start < 0 || end < start || end > len(buf) {
+		return false
+	}
+	_, _, ok := merlinExactLineBounds(
+		buf[start:end],
+		[]byte(dnsmasq.MerlinSyntheticShebangMarker),
+		0,
+	)
+	return ok
+}
+
+func merlinBlockWithSyntheticShebang(block []byte) []byte {
+	prefix := []byte(dnsmasq.MerlinPostConfBeginMarker + "\n")
+	if !bytes.HasPrefix(block, prefix) {
+		return block
+	}
+	out := make([]byte, 0, len(block)+len(dnsmasq.MerlinSyntheticShebangMarker)+1)
+	out = append(out, prefix...)
+	out = append(out, dnsmasq.MerlinSyntheticShebangMarker...)
+	out = append(out, '\n')
+	out = append(out, block[len(prefix):]...)
+	return out
+}
+
+// merlinParsePostConf removes only ctrld-owned postconf content while preserving
+// unrelated hook logic before and after it. If ctrld had to synthesize the
+// leading shebang for a pre-existing hook without one, that shebang is marked
+// inside ctrld's block and removed together with the block.
 func merlinParsePostConf(buf []byte) []byte {
 	if len(buf) == 0 {
 		return nil
 	}
-	parts := bytes.Split(buf, []byte(dnsmasq.MerlinPostConfMarker))
-	if len(parts) != 1 {
-		return bytes.TrimLeftFunc(parts[1], unicode.IsSpace)
+	start, end, kind, ok := merlinPostConfBlock(buf)
+	if !ok {
+		return buf
 	}
-	return buf
+
+	syntheticShebang := kind == merlinPostConfBlockCurrent &&
+		merlinBlockHasSyntheticShebang(buf, start, end)
+
+	// Current blocks own the line ending following END. ctrld <= 1.5.7 wrote
+	// its legacy wrapper with strings.Join(..., "\n"), producing three line
+	// endings between the EOF marker and the previously existing hook.
+	separatorCount := 1
+	if kind == merlinPostConfBlockLegacy {
+		separatorCount = 3
+	}
+	after := end
+	for i := 0; i < separatorCount; i++ {
+		next := merlinConsumeLineEnding(buf, after)
+		if next == after {
+			break
+		}
+		after = next
+	}
+
+	if syntheticShebang {
+		const shebang = "#!/bin/sh\n"
+		if start == len(shebang) && bytes.Equal(buf[:start], []byte(shebang)) {
+			start = 0
+		}
+	}
+
+	out := make([]byte, 0, len(buf)-(after-start))
+	out = append(out, buf[:start]...)
+	out = append(out, buf[after:]...)
+	return out
+}
+
+// merlinUpsertPostConf replaces an existing ctrld block in place. New hooks,
+// and existing hooks that do not already start with a usable shebang, receive a
+// ctrld-owned synthetic shebang. The ownership marker lives inside the managed
+// block so cleanup can remove that wrapper and restore the original bytes.
+func merlinUpsertPostConf(buf, block []byte) []byte {
+	if start, end, kind, ok := merlinPostConfBlock(buf); ok {
+		if kind == merlinPostConfBlockCurrent {
+			if merlinBlockHasSyntheticShebang(buf, start, end) {
+				block = merlinBlockWithSyntheticShebang(block)
+			}
+			out := make([]byte, 0, len(buf)-(end-start)+len(block))
+			out = append(out, buf[:start]...)
+			out = append(out, block...)
+			out = append(out, buf[end:]...)
+			return out
+		}
+
+		// Legacy ctrld <= 1.5.7 wrote three separators after its EOF marker.
+		after := end
+		for i := 0; i < 3; i++ {
+			next := merlinConsumeLineEnding(buf, after)
+			if next == after {
+				break
+			}
+			after = next
+		}
+
+		if start == 0 {
+			marked := merlinBlockWithSyntheticShebang(block)
+			out := make([]byte, 0, len(marked)+len(buf[after:])+16)
+			out = append(out, "#!/bin/sh\n"...)
+			out = append(out, marked...)
+			out = append(out, '\n')
+			out = append(out, buf[after:]...)
+			return out
+		}
+
+		out := make([]byte, 0, len(buf)-(after-start)+len(block)+1)
+		out = append(out, buf[:start]...)
+		out = append(out, block...)
+		if after < len(buf) {
+			out = append(out, '\n')
+		}
+		out = append(out, buf[after:]...)
+		return out
+	}
+
+	// Preserve a valid existing shebang and inject directly after it.
+	if bytes.HasPrefix(buf, []byte("#!")) {
+		if nl := bytes.IndexByte(buf, '\n'); nl >= 0 {
+			out := make([]byte, 0, len(buf)+len(block)+1)
+			out = append(out, buf[:nl+1]...)
+			out = append(out, block...)
+			out = append(out, '\n')
+			out = append(out, buf[nl+1:]...)
+			return out
+		}
+	}
+
+	// Missing/empty/non-shebang hooks are still safe to extend: the synthetic
+	// wrapper is explicitly marked as ctrld-owned and cleanup removes it.
+	marked := merlinBlockWithSyntheticShebang(block)
+	out := make([]byte, 0, len(buf)+len(marked)+16)
+	out = append(out, "#!/bin/sh\n"...)
+	out = append(out, marked...)
+	out = append(out, '\n')
+	out = append(out, buf...)
+	return out
+}
+
+// atomicWriteFile replaces path only after a complete sibling temporary file
+// has been written, synced, closed and chmodded. This avoids truncating a shared
+// Merlin hook if JFFS fills up or a short write occurs.
+func atomicWriteFile(path string, data []byte, mode os.FileMode) (err error) {
+	target := path
+	if info, lstatErr := os.Lstat(path); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		target, err = filepath.EvalSymlinks(path)
+		if err != nil {
+			return err
+		}
+	} else if lstatErr != nil && !os.IsNotExist(lstatErr) {
+		return lstatErr
+	}
+
+	writeMode := mode
+	if info, statErr := os.Stat(target); statErr == nil {
+		writeMode = info.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+	} else if !os.IsNotExist(statErr) {
+		return statErr
+	}
+
+	dir := filepath.Dir(target)
+	base := filepath.Base(target)
+	tmp, err := os.CreateTemp(dir, "."+base+".ctrld-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		if err != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err = tmp.Chmod(writeMode); err != nil {
+		return err
+	}
+	if _, err = tmp.Write(data); err != nil {
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmpName, target); err != nil {
+		return err
+	}
+	if err = syncParentDir(dir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func syncParentDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		// Directory fsync is not supported by the Windows CI filesystem. Merlin
+		// itself is Unix-only, where this is required for rename durability.
+		if runtime.GOOS == "windows" {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // waitDirExists waits until the specified directory exists, polling its existence every second.
