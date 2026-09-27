@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"text/template"
@@ -118,15 +117,7 @@ func syncMerlinServiceDir(dir string) error {
 		return err
 	}
 	defer f.Close()
-	if err := f.Sync(); err != nil {
-		// Directory fsync is required on Merlin/Unix for rename/link durability.
-		// The Windows CI filesystem does not support syncing directory handles.
-		if runtime.GOOS == "windows" {
-			return nil
-		}
-		return err
-	}
-	return nil
+	return f.Sync()
 }
 
 func (s *merlinSvc) Install() error {
@@ -520,8 +511,12 @@ mode=$3
 
 . /usr/sbin/helper.sh
 
-pc_delete "$line" "$file"
-[ "$mode" = "remove" ] || pc_append "$line" "$file"
+if [ "$mode" = "remove" ]; then
+  pattern=$(_quote "$line")
+  sed -i "/^$pattern$/d" "$file"
+else
+  grep -qxF "$line" "$file" || pc_append "$line" "$file"
+fi
 `
 
 const merlinRemoveLineFromScript = `#!/bin/sh
@@ -531,5 +526,6 @@ file=$2
 
 . /usr/sbin/helper.sh
 
-pc_delete "$line" "$file" 
+pattern=$(_quote "$line")
+sed -i "/^$pattern$/d" "$file"
 `
