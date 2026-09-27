@@ -32,6 +32,7 @@ const (
 	MerlinJffsConfDir     = "/jffs/configs"
 	MerlinJffsConfPath    = "/jffs/configs/dnsmasq.conf"
 	MerlinPostConfPath    = "/jffs/scripts/dnsmasq.postconf"
+	MerlinSdnPostConfPath = "/jffs/scripts/dnsmasq-sdn.postconf"
 )
 
 const (
@@ -47,7 +48,24 @@ config_file="$1"
 . /usr/sbin/helper.sh
 
 pid=$(cat /tmp/ctrld.pid 2>/dev/null)
-if [ -n "$pid" ] && [ -f "/proc/${pid}/cmdline" ]; then
+ctrld_cmd=""
+case "$pid" in
+  ''|*[!0-9]*) ;;
+  *)
+    if [ -r "/proc/${pid}/cmdline" ]; then
+      ctrld_cmd=$(tr '\000' '\n' < "/proc/${pid}/cmdline" 2>/dev/null | sed -n '1p')
+    fi
+    ;;
+esac
+case "$ctrld_cmd" in
+  ctrld|*/ctrld)
+    ctrld_running=1
+    ;;
+  *)
+    ctrld_running=0
+    ;;
+esac
+if [ "$ctrld_running" -eq 1 ]; then
   pc_delete "servers-file" "$config_file"           # no WAN DNS settings
   pc_append "no-resolv" "$config_file"              # do not read /etc/resolv.conf
   # use ctrld as upstream
