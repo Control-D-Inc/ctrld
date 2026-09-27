@@ -33,13 +33,16 @@ func TestMerlinServiceRestartStopsBeforeStarting(t *testing.T) {
 }
 
 func TestMerlinServiceHookEditorIsIdempotent(t *testing.T) {
-	deleteAt := strings.Index(merlinAddLineToScript, `pc_delete "$line" "$file"`)
-	appendAt := strings.Index(merlinAddLineToScript, `pc_append "$line" "$file"`)
-	if deleteAt < 0 || appendAt < 0 || deleteAt > appendAt {
-		t.Fatal("hook editor must delete an existing ctrld line before appending it")
+	if !strings.Contains(merlinAddLineToScript, `grep -qxF "$line" "$file" || pc_append "$line" "$file"`) {
+		t.Fatal("hook editor must append ctrld's exact line only when it is absent")
 	}
-	if !strings.Contains(merlinAddLineToScript, `[ "$mode" = "remove" ] ||`) {
-		t.Fatal("hook editor must support remove-only rollback mode")
+	for _, script := range []string{merlinAddLineToScript, merlinRemoveLineFromScript} {
+		if !strings.Contains(script, `sed -i "/^$pattern$/d" "$file"`) {
+			t.Fatal("hook removal must match only ctrld's complete line")
+		}
+	}
+	if strings.Contains(merlinAddLineToScript, `pc_delete "$line" "$file"`) {
+		t.Fatal("install path must not destructively delete a working hook before append")
 	}
 }
 
