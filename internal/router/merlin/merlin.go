@@ -25,11 +25,12 @@ import (
 const Name = "merlin"
 
 const (
-	merlinManagedStatePath       = "/jffs/controld/.merlin-dnsmasq-hooks-v2"
+	merlinStateDir               = "/jffs/controld"
+	merlinManagedStatePath       = merlinStateDir + "/.merlin-dnsmasq-hooks-v2"
 	merlinSnapshotStatePath      = "/jffs/controld/.merlin-dnsmasq-snapshot"
 	merlinSnapshotAnchorPath     = "/jffs/configs/.dnsmasq.conf.ctrld-anchor"
 	merlinSnapshotQuarantinePath = "/jffs/configs/.dnsmasq.conf.ctrld-quarantine"
-	merlinCleanupPendingPath     = "/jffs/controld/.merlin-dnsmasq-cleanup-pending"
+	merlinCleanupPendingPath     = merlinStateDir + "/.merlin-dnsmasq-cleanup-pending"
 )
 
 // nvramKvMap is a map of NVRAM key-value pairs used to configure and manage Merlin-specific settings.
@@ -65,6 +66,9 @@ func (m *Merlin) Uninstall(_ *service.Config) error {
 
 // PreRun prepares the Merlin instance for operation by waiting for essential services and directories to become available.
 func (m *Merlin) PreRun() error {
+	if err := ensureMerlinStateDir(); err != nil {
+		return err
+	}
 	// Reconcile any previous Merlin integration before starting again. Router
 	// startup is a one-shot launch, so retry transient JFFS/NVRAM/dnsmasq errors
 	// here instead of abandoning DNS in a partially reconciled state.
@@ -100,8 +104,40 @@ func (m *Merlin) PreRun() error {
 	return nil
 }
 
+func ensureMerlinStateDir() error {
+	if info, err := os.Stat(merlinStateDir); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("Merlin state path is not a directory: %s", merlinStateDir)
+		}
+		// Always re-sync the parent before relying on state below this
+		// directory. This also closes the retry window where mkdir succeeded
+		// previously but the parent fsync reported a transient failure.
+		if err := syncParentDir(filepath.Dir(merlinStateDir)); err != nil {
+			return fmt.Errorf("sync parent of existing Merlin state directory %s: %w", merlinStateDir, err)
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat Merlin state directory %s: %w", merlinStateDir, err)
+	}
+
+	// A newly created JFFS directory entry is not crash-durable until its
+	// parent has been synced. State files below this directory are used to
+	// distinguish current hook-based installs from legacy snapshot ownership,
+	// so losing only the directory across power loss would be unsafe.
+	if err := os.MkdirAll(merlinStateDir, 0755); err != nil {
+		return fmt.Errorf("create Merlin state directory %s: %w", merlinStateDir, err)
+	}
+	if err := syncParentDir(filepath.Dir(merlinStateDir)); err != nil {
+		return fmt.Errorf("sync parent of Merlin state directory %s: %w", merlinStateDir, err)
+	}
+	return nil
+}
+
 // Setup initializes and configures the Merlin instance for use, including setting up dnsmasq and necessary nvram settings.
 func (m *Merlin) Setup() (retErr error) {
+	if err := ensureMerlinStateDir(); err != nil {
+		return err
+	}
 	if m.cfg.FirstListener().IsDirectDnsListener() {
 		return nil
 	}
@@ -206,6 +242,9 @@ type legacyCleanupJournal struct {
 
 // Cleanup restores the original dnsmasq and nvram configurations and restarts dnsmasq if necessary.
 func (m *Merlin) Cleanup() error {
+	if err := ensureMerlinStateDir(); err != nil {
+		return err
+	}
 	// Preserve the existing direct-listener lifecycle. A direct listener needs
 	// port 53 itself; restarting dnsmasq here would reclaim that port before
 	// ctrld binds. Transitioning between forwarding and direct-listener modes
@@ -285,7 +324,7 @@ func (m *Merlin) Cleanup() error {
 
 func legacySnapshotAnchorPath(path string) string {
 	return pathpkg.Join(
-		"/jffs/controld",
+		merlinStateDir,
 		"."+pathpkg.Base(path)+".ctrld-legacy-anchor",
 	)
 }
@@ -326,7 +365,7 @@ func buildLegacyCleanupJournal() (journal legacyCleanupJournal, retErr error) {
 	// With no durable journal present, any ctrld-private legacy anchors can only
 	// be leftovers from a crash before journal publication. Removing an anchor
 	// drops only ctrld's extra hard link; it never touches the public snapshot.
-	anchorOrphans, err := filepath.Glob("/jffs/controld/.dnsmasq*.ctrld-legacy-anchor")
+	anchorOrphans, err := filepath.Glob(filepath.Join(merlinStateDir, ".dnsmasq*.ctrld-legacy-anchor"))
 	if err != nil {
 		return legacyCleanupJournal{}, err
 	}
@@ -823,6 +862,9 @@ func (m *Merlin) dnsmasqConfigUsesCtrld(path string) (bool, error) {
 			}
 		case strings.HasPrefix(line, "servers-file="),
 			strings.HasPrefix(line, "resolv-file="),
+			strings.HasPrefix(line, "conf-file="),
+			strings.HasPrefix(line, "conf-dir="),
+			strings.HasPrefix(line, "conf-script="),
 			line == "dnssec",
 			strings.HasPrefix(line, "trust-anchor="):
 			return false, nil
