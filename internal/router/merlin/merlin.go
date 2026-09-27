@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -283,9 +284,9 @@ func (m *Merlin) Cleanup() error {
 }
 
 func legacySnapshotAnchorPath(path string) string {
-	return filepath.Join(
+	return pathpkg.Join(
 		"/jffs/controld",
-		"."+filepath.Base(path)+".ctrld-legacy-anchor",
+		"."+pathpkg.Base(path)+".ctrld-legacy-anchor",
 	)
 }
 
@@ -522,9 +523,9 @@ func parseLegacyCleanupJournal(buf []byte) (legacyCleanupJournal, error) {
 }
 
 func legacySnapshotQuarantinePath(path string) string {
-	return filepath.Join(
+	return pathpkg.Join(
 		dnsmasq.MerlinJffsConfDir,
-		"."+filepath.Base(path)+".ctrld-legacy-quarantine",
+		"."+pathpkg.Base(path)+".ctrld-legacy-quarantine",
 	)
 }
 
@@ -761,10 +762,10 @@ func isLegacySnapshotPath(path string) bool {
 	if path == dnsmasq.MerlinJffsConfPath {
 		return true
 	}
-	if filepath.Dir(path) != dnsmasq.MerlinJffsConfDir {
+	if pathpkg.Dir(path) != dnsmasq.MerlinJffsConfDir {
 		return false
 	}
-	base := filepath.Base(path)
+	base := pathpkg.Base(path)
 	if !strings.HasPrefix(base, "dnsmasq-") || !strings.HasSuffix(base, ".conf") {
 		return false
 	}
@@ -778,17 +779,6 @@ func isLegacySnapshotPath(path string) bool {
 		}
 	}
 	return true
-}
-
-func readMerlinState(path string) (string, error) {
-	buf, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(buf)), nil
 }
 
 // dnsmasqConfigUsesCtrld reports whether a generated dnsmasq config has the
