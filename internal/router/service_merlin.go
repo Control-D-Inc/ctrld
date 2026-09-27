@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/template"
@@ -117,7 +118,15 @@ func syncMerlinServiceDir(dir string) error {
 		return err
 	}
 	defer f.Close()
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		// Directory fsync is required on Merlin/Unix for rename/link durability.
+		// The Windows CI filesystem does not support syncing directory handles.
+		if runtime.GOOS == "windows" {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *merlinSvc) Install() error {
