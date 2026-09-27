@@ -408,14 +408,15 @@ func Test_atomicWriteFilePreservesExistingMode(t *testing.T) {
 	for _, mode := range []os.FileMode{0700, 0770} {
 		t.Run(mode.String(), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "dnsmasq.postconf")
-			if err := os.WriteFile(path, []byte("old"), mode); err != nil {
+			if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			before, err := os.Stat(path)
-			if err != nil {
+			// os.WriteFile is subject to the process umask; set the fixture mode
+			// explicitly so the assertion tests atomicWriteFile rather than the
+			// runner's umask.
+			if err := os.Chmod(path, mode); err != nil {
 				t.Fatal(err)
 			}
-			wantMode := before.Mode().Perm()
 			if err := atomicWriteFile(path, []byte("new"), 0750); err != nil {
 				t.Fatal(err)
 			}
@@ -423,8 +424,8 @@ func Test_atomicWriteFilePreservesExistingMode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := info.Mode().Perm(); got != wantMode {
-				t.Fatalf("mode = %v, want preserved %v", got, wantMode)
+			if got := info.Mode().Perm(); got != mode.Perm() {
+				t.Fatalf("mode = %v, want %v", got, mode.Perm())
 			}
 		})
 	}
@@ -492,6 +493,30 @@ func Test_dnsmasqConfigUsesCtrld(t *testing.T) {
 			port: 5354,
 			content: good("server=127.0.0.1#5354") +
 				"resolv-file=/tmp/resolv.conf\n",
+			want: false,
+		},
+		{
+			name: "conf file include is unresolved",
+			ip:   "0.0.0.0",
+			port: 5354,
+			content: good("server=127.0.0.1#5354") +
+				"conf-file=/jffs/configs/extra-dnsmasq.conf\n",
+			want: false,
+		},
+		{
+			name: "conf dir include is unresolved",
+			ip:   "0.0.0.0",
+			port: 5354,
+			content: good("server=127.0.0.1#5354") +
+				"conf-dir=/jffs/configs/dnsmasq.d\n",
+			want: false,
+		},
+		{
+			name: "conf script include is unresolved",
+			ip:   "0.0.0.0",
+			port: 5354,
+			content: good("server=127.0.0.1#5354") +
+				"conf-script=/jffs/scripts/dnsmasq-extra.sh\n",
 			want: false,
 		},
 		{
