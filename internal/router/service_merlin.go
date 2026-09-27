@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/template"
@@ -112,6 +113,13 @@ func writeMerlinStartupScript(path string, data []byte, mode os.FileMode) (publi
 }
 
 func syncMerlinServiceDir(dir string) error {
+	// Merlin runs on Unix/Linux where fsyncing the parent directory is the
+	// durability barrier for link/unlink publication. Windows does not permit
+	// syncing directory handles; skip this Unix-specific barrier there so the
+	// cross-platform package tests exercise the publication logic correctly.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	f, err := os.Open(dir)
 	if err != nil {
 		return err
