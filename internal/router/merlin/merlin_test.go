@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 )
 
@@ -95,6 +96,7 @@ func Test_merlinPostConfDoesNotExitHostHook(t *testing.T) {
 		t.Fatal("raw Merlin postconf template must contain a real newline, not a literal \\n escape")
 	}
 }
+
 
 func Test_merlinLegacyMigrationPreservesPrependedContent(t *testing.T) {
 	legacy := "echo addon-before\n" + legacyMerlinPostConf("echo addon-after")
@@ -287,6 +289,65 @@ func Test_merlinLegacyEmptyHookCanBeReinstalled(t *testing.T) {
 	}
 }
 
+func Test_writeMerlinHookUpdatesPreflightsAllPaths(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "dnsmasq.postconf")
+	second := filepath.Join(dir, "dnsmasq-sdn.postconf")
+	orig := []byte("#!/bin/sh\necho untouched\n")
+	if err := os.WriteFile(first, orig, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(second, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	block := []byte("# BEGIN ctrld\necho managed\n# END ctrld")
+	if err := writeMerlinHookUpdates([]string{first, second}, block); err == nil {
+		t.Fatal("expected second-path preflight error")
+	}
+	got, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, orig) {
+		t.Fatalf("first hook changed before second path passed preflight:\nwant: %q\ngot:  %q", orig, got)
+	}
+}
+
+func Test_writeMerlinHookUpdatesRollsBackPartialWrites(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "dnsmasq.postconf")
+	second := filepath.Join(dir, "dnsmasq-sdn.postconf")
+	orig := []byte("#!/bin/sh\necho original\n")
+	if err := os.WriteFile(first, orig, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("#!/bin/sh\necho second\n"), 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	writes := 0
+	writeFile := func(path string, data []byte, mode os.FileMode) error {
+		writes++
+		if writes == 2 {
+			return os.ErrPermission
+		}
+		return atomicWriteFile(path, data, mode)
+	}
+
+	block := []byte("# BEGIN ctrld\necho managed\n# END ctrld")
+	if err := writeMerlinHookUpdatesWith([]string{first, second}, block, writeFile); err == nil {
+		t.Fatal("expected second write failure")
+	}
+	got, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, orig) {
+		t.Fatalf("first hook was not rolled back:\nwant: %q\ngot:  %q", orig, got)
+	}
+}
+
 func Test_revalidateMerlinHookUpdateDetectsContentChange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dnsmasq.postconf")
 	orig := []byte("#!/bin/sh\necho original\n")
@@ -363,6 +424,170 @@ func Test_atomicWriteFilePreservesExistingMode(t *testing.T) {
 	}
 }
 
+func Test_dnsmasqConfigUsesCtrld(t *testing.T) {
+	good := func(server string) string {
+		return strings.Join([]string{
+			"no-resolv",
+			server,
+			"add-mac",
+			"add-subnet=32,128",
+			"cache-size=0",
+			"",
+		}, "\n")
+	}
+
+	tests := []struct {
+		name    string
+		ip      string
+		port    int
+		content string
+		want    bool
+	}{
+		{
+			name:    "wildcard listener maps to loopback",
+			ip:      "0.0.0.0",
+			port:    5354,
+			content: good("server=127.0.0.1#5354"),
+			want:    true,
+		},
+		{
+			name:    "explicit listener",
+			ip:      "127.0.0.2",
+			port:    5355,
+			content: good("server=127.0.0.2#5355"),
+			want:    true,
+		},
+		{
+			name:    "wrong upstream",
+			ip:      "0.0.0.0",
+			port:    5354,
+			content: good("server=1.1.1.1#53"),
+			want:    false,
+		},
+		{
+			name: "additional server bypass",
+			ip:   "0.0.0.0",
+			port: 5354,
+			content: good("server=127.0.0.1#5354") +
+				"server=1.1.1.1#53\n",
+			want: false,
+		},
+		{
+			name: "servers file bypass",
+			ip:   "0.0.0.0",
+			port: 5354,
+			content: good("server=127.0.0.1#5354") +
+				"servers-file=/tmp/resolv.dnsmasq\n",
+			want: false,
+		},
+		{
+			name: "resolv file bypass",
+			ip:   "0.0.0.0",
+			port: 5354,
+			content: good("server=127.0.0.1#5354") +
+				"resolv-file=/tmp/resolv.conf\n",
+			want: false,
+		},
+		{
+			name:    "missing metadata directives",
+			ip:      "0.0.0.0",
+			port:    5354,
+			content: "no-resolv\nserver=127.0.0.1#5354\ncache-size=0\n",
+			want:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "dnsmasq.conf")
+			if err := os.WriteFile(path, []byte(tc.content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			m := New(&ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{
+				"0": {IP: tc.ip, Port: tc.port},
+			}})
+			got, err := m.dnsmasqConfigUsesCtrld(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("dnsmasqConfigUsesCtrld() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func Test_legacyCleanupJournalRoundTrip(t *testing.T) {
+	entries := []legacySnapshotEntry{
+		{state: legacyEntryPending, path: dnsmasq.MerlinJffsConfPath, hash: merlinSnapshotHash([]byte("main"))},
+		{state: legacyEntryDelete, path: filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-1.conf"), hash: merlinSnapshotHash([]byte("sdn1"))},
+		{state: legacyEntryRestore, path: filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-3.conf"), hash: merlinSnapshotHash([]byte("sdn3"))},
+	}
+	want := legacyCleanupJournal{phase: legacyCleanupPhase, entries: entries}
+	buf, err := encodeLegacyCleanupJournal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseLegacyCleanupJournal(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.phase != want.phase || len(got.entries) != len(want.entries) {
+		t.Fatalf("journal mismatch: want %#v, got %#v", want, got)
+	}
+	for i := range want.entries {
+		if got.entries[i] != want.entries[i] {
+			t.Fatalf("entry %d mismatch: want %#v, got %#v", i, want.entries[i], got.entries[i])
+		}
+	}
+}
+
+func Test_parseLegacyCleanupJournalRejectsUnsafePath(t *testing.T) {
+	hash := merlinSnapshotHash([]byte("x"))
+	buf := []byte(legacyCleanupPhase + "\n" + legacyEntryPending + "\t/jffs/configs/profile.add\t" + hash + "\n")
+	if _, err := parseLegacyCleanupJournal(buf); err == nil {
+		t.Fatal("expected unsafe legacy snapshot path to be rejected")
+	}
+}
+
+func Test_parseLegacyCleanupJournalFinalizeHasNoEntries(t *testing.T) {
+	if _, err := parseLegacyCleanupJournal([]byte(legacyFinalizePhase + "\n")); err != nil {
+		t.Fatalf("valid finalize journal rejected: %v", err)
+	}
+	hash := merlinSnapshotHash([]byte("x"))
+	buf := []byte(legacyFinalizePhase + "\n" + legacyEntryPending + "\t" + dnsmasq.MerlinJffsConfPath + "\t" + hash + "\n")
+	if _, err := parseLegacyCleanupJournal(buf); err == nil {
+		t.Fatal("expected finalize journal with entries to be rejected")
+	}
+}
+
+func Test_parseLegacyCleanupJournalRejectsUnknownEntryState(t *testing.T) {
+	hash := merlinSnapshotHash([]byte("x"))
+	buf := []byte(legacyCleanupPhase + "\nsurprise\t" + dnsmasq.MerlinJffsConfPath + "\t" + hash + "\n")
+	if _, err := parseLegacyCleanupJournal(buf); err == nil {
+		t.Fatal("expected unknown legacy entry state to be rejected")
+	}
+}
+
+func Test_isLegacySnapshotPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{dnsmasq.MerlinJffsConfPath, true},
+		{filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-1.conf"), true},
+		{filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-123.conf"), true},
+		{filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq.conf.add"), false},
+		{filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-sdn.conf"), false},
+		{"/tmp/dnsmasq-1.conf", false},
+	}
+	for _, tc := range tests {
+		if got := isLegacySnapshotPath(tc.path); got != tc.want {
+			t.Fatalf("isLegacySnapshotPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
 func Test_cleanupPreparationRevalidatesBeforeWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dnsmasq.postconf")
 	managed := []byte("#!/bin/sh\n# BEGIN ctrld\necho managed\n# END ctrld\necho addon\n")
@@ -381,5 +606,154 @@ func Test_cleanupPreparationRevalidatesBeforeWrite(t *testing.T) {
 	}
 	if err := revalidateMerlinHookUpdate(*update); err == nil {
 		t.Fatal("expected cleanup revalidation failure after external modification")
+	}
+}
+
+
+
+func Test_mainSnapshotStateRoundTrip(t *testing.T) {
+	want := mainSnapshotState{
+		phase: snapshotPhaseQuarantine,
+		hash:  merlinSnapshotHash([]byte("owned snapshot")),
+	}
+	buf, err := encodeMainSnapshotState(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseMainSnapshotState(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("snapshot state mismatch: want %#v, got %#v", want, got)
+	}
+}
+
+func Test_parseMainSnapshotStateRejectsHashOnlyOwnership(t *testing.T) {
+	buf := []byte("sha256=" + merlinSnapshotHash([]byte("legacy")) + "\n")
+	if _, err := parseMainSnapshotState(buf); err == nil {
+		t.Fatal("expected hash-only ownership state to be rejected")
+	}
+}
+
+func Test_parseMainSnapshotStateRejectsUnknownPhase(t *testing.T) {
+	buf := []byte(
+		"snapshot-v2\nphase=surprise\nsha256=" +
+			merlinSnapshotHash([]byte("owned")) + "\n",
+	)
+	if _, err := parseMainSnapshotState(buf); err == nil {
+		t.Fatal("expected unknown snapshot phase to be rejected")
+	}
+}
+
+func Test_sameFilePathsDistinguishesHardLinkFromIdenticalCopy(t *testing.T) {
+	dir := t.TempDir()
+	original := filepath.Join(dir, "original")
+	hardLink := filepath.Join(dir, "hard-link")
+	copyPath := filepath.Join(dir, "copy")
+	content := []byte("same bytes\n")
+
+	if err := os.WriteFile(original, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(original, hardLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copyPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	same, err := sameFilePaths(original, hardLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !same {
+		t.Fatal("hard link to same inode was not recognized")
+	}
+	same, err = sameFilePaths(original, copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same {
+		t.Fatal("byte-identical copy must not be treated as the owned inode")
+	}
+}
+
+func Test_encodeMainSnapshotStateAcceptsEveryTransactionPhase(t *testing.T) {
+	hash := merlinSnapshotHash([]byte("owned"))
+	for _, phase := range []string{
+		snapshotPhasePending,
+		snapshotPhasePublished,
+		snapshotPhaseQuarantine,
+		snapshotPhaseDelete,
+		snapshotPhaseRestore,
+		snapshotPhaseRestored,
+	} {
+		if _, err := encodeMainSnapshotState(mainSnapshotState{phase: phase, hash: hash}); err != nil {
+			t.Fatalf("phase %q rejected: %v", phase, err)
+		}
+	}
+}
+
+
+func Test_snapshotFileStillOwnedDetectsLateInodeModification(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quarantine")
+	anchor := filepath.Join(dir, "anchor")
+	original := []byte("ctrld-owned\n")
+	if err := os.WriteFile(path, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, anchor); err != nil {
+		t.Fatal(err)
+	}
+	expected := merlinSnapshotHash(original)
+
+	owned, err := snapshotFileStillOwned(path, anchor, expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owned {
+		t.Fatal("unchanged hard-linked snapshot should be recognized as owned")
+	}
+
+	// Simulate a process which kept the inode open across quarantine and wrote
+	// new contents before final deletion.
+	if err := os.WriteFile(path, []byte("modified-through-same-inode\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	owned, err = snapshotFileStillOwned(path, anchor, expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned {
+		t.Fatal("late modification of the same inode must invalidate ownership for deletion")
+	}
+}
+
+func Test_removeFileDurableAllowsRetryAfterFileAlreadyGone(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "already-gone")
+	if err := removeFileDurable(path); err != nil {
+		t.Fatalf("durability retry for absent file failed: %v", err)
+	}
+}
+
+
+func Test_merlinPostConfValidatesCtrldPidOwnership(t *testing.T) {
+	for _, want := range []string{
+		`case "$pid" in`,
+		`[ -r "/proc/${pid}/cmdline" ]`,
+		`tr '\000' '\n'`,
+		`ctrld|*/ctrld)`,
+		`ctrld_running=1`,
+		`if [ "$ctrld_running" -eq 1 ]; then`,
+	} {
+		if !strings.Contains(dnsmasq.MerlinPostConfTmpl, want) {
+			t.Fatalf("Merlin postconf is missing ctrld PID ownership check %q", want)
+		}
+	}
+	if strings.Contains(dnsmasq.MerlinPostConfTmpl, `[ -f "/proc/${pid}/cmdline" ]; then`) {
+		t.Fatal("Merlin postconf must not treat PID existence alone as ctrld ownership")
 	}
 }
