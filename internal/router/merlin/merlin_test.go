@@ -3,6 +3,7 @@ package merlin
 import (
 	"bytes"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -525,8 +526,8 @@ func Test_dnsmasqConfigUsesCtrld(t *testing.T) {
 func Test_legacyCleanupJournalRoundTrip(t *testing.T) {
 	entries := []legacySnapshotEntry{
 		{state: legacyEntryPending, path: dnsmasq.MerlinJffsConfPath, hash: merlinSnapshotHash([]byte("main"))},
-		{state: legacyEntryDelete, path: filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-1.conf"), hash: merlinSnapshotHash([]byte("sdn1"))},
-		{state: legacyEntryRestore, path: filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-3.conf"), hash: merlinSnapshotHash([]byte("sdn3"))},
+		{state: legacyEntryDelete, path: pathpkg.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-1.conf"), hash: merlinSnapshotHash([]byte("sdn1"))},
+		{state: legacyEntryRestore, path: pathpkg.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-3.conf"), hash: merlinSnapshotHash([]byte("sdn3"))},
 	}
 	want := legacyCleanupJournal{phase: legacyCleanupPhase, entries: entries}
 	buf, err := encodeLegacyCleanupJournal(want)
@@ -580,10 +581,10 @@ func Test_isLegacySnapshotPath(t *testing.T) {
 		want bool
 	}{
 		{dnsmasq.MerlinJffsConfPath, true},
-		{filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-1.conf"), true},
-		{filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-123.conf"), true},
-		{filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq.conf.add"), false},
-		{filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-sdn.conf"), false},
+		{pathpkg.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-1.conf"), true},
+		{pathpkg.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-123.conf"), true},
+		{pathpkg.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq.conf.add"), false},
+		{pathpkg.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-sdn.conf"), false},
 		{"/tmp/dnsmasq-1.conf", false},
 	}
 	for _, tc := range tests {
@@ -822,7 +823,7 @@ func Test_snapshotFileStillOwnedAcceptsCapturedHardLink(t *testing.T) {
 }
 
 func Test_legacySnapshotAnchorPathUsesCtrldPrivateDir(t *testing.T) {
-	got := legacySnapshotAnchorPath(filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-2.conf"))
+	got := legacySnapshotAnchorPath(pathpkg.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-2.conf"))
 	want := "/jffs/controld/.dnsmasq-2.conf.ctrld-legacy-anchor"
 	if got != want {
 		t.Fatalf("anchor path = %q, want %q", got, want)
