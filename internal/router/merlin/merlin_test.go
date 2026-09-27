@@ -762,3 +762,69 @@ func Test_merlinPostConfValidatesCtrldPidOwnership(t *testing.T) {
 		t.Fatal("Merlin postconf must not treat PID existence alone as ctrld ownership")
 	}
 }
+
+
+func Test_snapshotFileStillOwnedRejectsByteIdenticalReplacement(t *testing.T) {
+	dir := t.TempDir()
+	public := filepath.Join(dir, "dnsmasq.conf")
+	anchor := filepath.Join(dir, "anchor")
+	original := []byte("same bytes\n")
+	if err := os.WriteFile(public, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(public, anchor); err != nil {
+		t.Fatal(err)
+	}
+	hash := merlinSnapshotHash(original)
+
+	// Replace the public pathname with a different inode containing identical
+	// bytes. Hash-only ownership would misclassify this as ctrld-owned.
+	replacement := filepath.Join(dir, "replacement")
+	if err := os.WriteFile(replacement, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, public); err != nil {
+		t.Fatal(err)
+	}
+
+	owned, err := snapshotFileStillOwned(public, anchor, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned {
+		t.Fatal("byte-identical replacement must not be treated as the captured inode")
+	}
+}
+
+func Test_snapshotFileStillOwnedAcceptsCapturedHardLink(t *testing.T) {
+	dir := t.TempDir()
+	public := filepath.Join(dir, "dnsmasq.conf")
+	anchor := filepath.Join(dir, "anchor")
+	quarantine := filepath.Join(dir, "quarantine")
+	content := []byte("legacy snapshot\n")
+	if err := os.WriteFile(public, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(public, anchor); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(public, quarantine); err != nil {
+		t.Fatal(err)
+	}
+
+	owned, err := snapshotFileStillOwned(quarantine, anchor, merlinSnapshotHash(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owned {
+		t.Fatal("quarantined hard link to captured inode should remain ctrld-owned")
+	}
+}
+
+func Test_legacySnapshotAnchorPathUsesCtrldPrivateDir(t *testing.T) {
+	got := legacySnapshotAnchorPath(filepath.Join(dnsmasq.MerlinJffsConfDir, "dnsmasq-2.conf"))
+	want := "/jffs/controld/.dnsmasq-2.conf.ctrld-legacy-anchor"
+	if got != want {
+		t.Fatalf("anchor path = %q, want %q", got, want)
+	}
+}
