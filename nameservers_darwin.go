@@ -22,6 +22,8 @@ func dnsFns() []dnsFn {
 	return []dnsFn{dnsFromResolvConf, getDNSFromScutil, getAllDHCPNameservers}
 }
 
+var scutilLocalAddresses = netmon.LocalAddresses
+
 func getDNSFromScutil() []string {
 	logger := *ProxyLogger.Load()
 
@@ -36,7 +38,7 @@ func getDNSFromScutil() []string {
 		retryInterval = 100 * time.Millisecond
 	)
 
-	regularIPs, loopbackIPs, _ := netmon.LocalAddresses()
+	regularIPs, loopbackIPs, _ := scutilLocalAddresses()
 
 	var nameservers []string
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -51,36 +53,8 @@ func getDNSFromScutil() []string {
 			continue
 		}
 
-		var localDNS []string
-		seen := make(map[string]bool)
-
-		scanner := bufio.NewScanner(bytes.NewReader(output))
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if strings.HasPrefix(line, "nameserver[") {
-				parts := strings.Split(line, ":")
-				if len(parts) == 2 {
-					ns := strings.TrimSpace(parts[1])
-					if ip := net.ParseIP(ns); ip != nil {
-						// skip loopback IPs
-						isLocal := false
-						for _, v := range slices.Concat(regularIPs, loopbackIPs) {
-							ipStr := v.String()
-							if ip.String() == ipStr {
-								isLocal = true
-								break
-							}
-						}
-						if !isLocal && !seen[ip.String()] {
-							seen[ip.String()] = true
-							localDNS = append(localDNS, ip.String())
-						}
-					}
-				}
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
+		localDNS, err := parseScutilNameservers(output, slices.Concat(regularIPs, loopbackIPs))
+		if err != nil {
 			Log(context.Background(), logger.Error(), "error scanning scutil output (attempt %d/%d): %v", attempt+1, maxRetries, err)
 			continue
 		}
@@ -100,24 +74,17 @@ func getDHCPNameservers(iface string) ([]string, error) {
 		return nil, fmt.Errorf("ipconfig not available on mobile")
 	}
 
-	// getoption returns the selected interface's DHCP option directly and does
-	// not expose unrelated packet addresses to the parser.
-	output, err := exec.Command("ipconfig", "getoption", iface, "domain_name_server").Output()
-	if err == nil {
-		return parseDHCPOptionNameservers(output), nil
-	}
+	return dhcpNameserversFromCommands(context.Background(), iface, func(_ context.Context, args ...string) ([]byte, error) {
+		return exec.Command("ipconfig", args...).Output()
+	})
+}
 
-	// Older macOS releases can fail getoption while still exposing the packet.
-	// Parse the real macOS field shape, for example:
-	//     domain_name_server (ip_mult): {192.168.1.1, 8.8.8.8}
-	output, packetErr := exec.Command("ipconfig", "getpacket", iface).Output()
-	if packetErr != nil {
-		if err != nil {
-			return nil, fmt.Errorf("error reading DHCP DNS option: getoption: %v; getpacket: %v", err, packetErr)
-		}
-		return nil, fmt.Errorf("error reading DHCP packet: %v", packetErr)
-	}
-	return parseDHCPPacketNameservers(output), nil
+// DHCPNameserversForInterfaceContext bounds both commands with the caller's
+// context. Other system-discovery callers retain their existing behavior.
+func DHCPNameserversForInterfaceContext(ctx context.Context, iface string) ([]string, error) {
+	return dhcpNameserversFromCommands(ctx, iface, func(ctx context.Context, args ...string) ([]byte, error) {
+		return dhcpCommandOutput(ctx, "/usr/sbin/ipconfig", args...)
+	})
 }
 
 // DHCPNameserversForInterface returns DHCP option 6 for exactly iface.

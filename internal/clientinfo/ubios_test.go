@@ -1,9 +1,31 @@
 package clientinfo
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func Test_ubiosDiscover_refreshDevices_skipsUnavailableMongo(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		ud := &ubiosDiscover{mongoPath: filepath.Join(t.TempDir(), "mongo")}
+		if err := ud.refreshDevices(); err != nil {
+			t.Fatalf("refreshDevices() error = %v", err)
+		}
+	})
+
+	t.Run("not executable", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "mongo")
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		ud := &ubiosDiscover{mongoPath: path}
+		if err := ud.refreshDevices(); err != nil {
+			t.Fatalf("refreshDevices() error = %v", err)
+		}
+	})
+}
 
 func Test_ubiosDiscover_storeDevices(t *testing.T) {
 	ud := &ubiosDiscover{}

@@ -36,14 +36,6 @@ printf 'launchctl %s\n' "$*" >>"$CALLS"
 exit 0
 EOF
 
-cat >"$bin/mktemp" <<'EOF'
-#!/bin/sh
-[ "${1:-}" = "-t" ] && [ -n "${2:-}" ] || exit 1
-path="$FAKE_TMPDIR/$2.capture"
-: >"$path"
-printf '%s\n' "$path"
-EOF
-
 cat >"$bin/ctrld" <<'EOF'
 #!/bin/sh
 printf 'ctrld %s\n' "$*" >>"$CALLS"
@@ -55,7 +47,7 @@ fi
 exit "${FAKE_CTRLD_EXIT:-0}"
 EOF
 
-chmod +x "$bin/defaults" "$bin/launchctl" "$bin/mktemp" "$bin/ctrld"
+chmod +x "$bin/defaults" "$bin/launchctl" "$bin/ctrld"
 
 assert_contains() {
     expected=$1
@@ -91,6 +83,8 @@ run_case() {
     calls="$case_dir/calls"
     output="$case_dir/output"
     postinstall="$case_dir/postinstall"
+    case_tmpdir="$case_dir/tmp"
+    mkdir -p "$case_tmpdir"
     : >"$calls"
     if [ "$existing" = "1" ]; then
         : >"$plist"
@@ -105,6 +99,7 @@ run_case() {
 
     status=0
     PATH="$bin:$PATH" \
+    TMPDIR="$case_tmpdir" \
     CALLS="$calls" \
     FAKE_TOKEN_PRESENT=1 \
     FAKE_TOKEN=test-token \
@@ -112,7 +107,6 @@ run_case() {
     FAKE_MODE="$mode" \
     FAKE_CTRLD_EXIT="$ctrld_exit" \
     FAKE_PLIST="$plist" \
-    FAKE_TMPDIR="$case_dir" \
     "$postinstall" >"$output" 2>&1 || status=$?
 
     if [ "$status" -ne "$expected_status" ]; then
@@ -149,9 +143,9 @@ case_dir=$(run_case upgrade-intercept 1 1 intercept-dns)
 assert_contains 'ctrld start --intercept-mode dns' "$case_dir/calls"
 assert_not_contains 'launchctl load' "$case_dir/calls"
 
-case_dir=$(run_case fresh-invalid 0 1 invalid)
-assert_contains 'WARNING: unsupported InterceptMode in managed preferences; using standard mode' "$case_dir/output"
-assert_not_contains '--intercept-mode' "$case_dir/calls"
+case_dir=$(run_case fresh-invalid 0 1 invalid 0 1)
+assert_contains 'ERROR: provisioning failed: stage=package code=INTERCEPT_MODE_INVALID (exit 1)' "$case_dir/output"
+assert_not_contains 'ctrld start' "$case_dir/calls"
 
 case_dir=$(run_case upgrade-invalid 1 1 invalid)
 assert_contains 'WARNING: unsupported InterceptMode in managed preferences; preserving existing service mode' "$case_dir/output"

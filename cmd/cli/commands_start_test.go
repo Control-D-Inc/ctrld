@@ -1,9 +1,161 @@
 package cli
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
+
+// startRunFuncSource extracts the source text of initStartCmd's "Run:"
+// closure body from commands.go. Driving the closure itself end-to-end for
+// every early-return branch is not practical in a unit test: within a few
+// lines of any check failing, it reaches into the real OS service manager.
+// Some invariants about its shape are cheaper and more reliable to pin by
+// reading the source than by executing it.
+func startRunFuncSource(t *testing.T) string {
+	t.Helper()
+	file := packageSourcePath(t, "commands.go")
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, file, nil, 0)
+	if err != nil {
+		t.Fatalf("could not parse %s: %v", file, err)
+	}
+	var runLit *ast.FuncLit
+	ast.Inspect(node, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "initStartCmd" {
+			return true
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			kv, ok := n.(*ast.KeyValueExpr)
+			if !ok {
+				return true
+			}
+			// initStartCmd defines a second, unrelated "Run:" field further down
+			// for a start command alias; take only the first match, which is the
+			// real start command's closure this test cares about.
+			if runLit == nil {
+				if ident, ok := kv.Key.(*ast.Ident); ok && ident.Name == "Run" {
+					if lit, ok := kv.Value.(*ast.FuncLit); ok {
+						runLit = lit
+					}
+				}
+			}
+			return true
+		})
+		return false
+	})
+	if runLit == nil {
+		t.Fatalf("Run: func literal not found in initStartCmd in %s", file)
+	}
+	src, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("could not read %s: %v", file, err)
+	}
+	start := fset.Position(runLit.Body.Lbrace).Offset
+	end := fset.Position(runLit.Body.Rbrace).Offset
+	return string(src[start:end])
+}
+
+// TestStartCommandClearsProvisionResultBeforeAnyCheck pins the ordering fix:
+// clearProvisionResult() must run before every check in the start command's
+// Run closure that can fail or return early, not just before doTasksE.
+// Without this, a check between the top of the closure and the old call
+// sites could return early (whether by writing its own classified failure
+// or, like the "service already running" and service-manager-init-error
+// paths, by writing nothing at all) while a previous attempt's result file
+// was still sitting there to mislead diag/postinstall on retry.
+func TestStartCommandClearsProvisionResultBeforeAnyCheck(t *testing.T) {
+	body := startRunFuncSource(t)
+
+	clearIdx := strings.Index(body, "clearProvisionResult()")
+	if clearIdx == -1 {
+		t.Fatal("start command no longer calls clearProvisionResult()")
+	}
+
+	// Every check or step that can return out of the closure before reaching
+	// doTasksE. Each must appear after the entry clear.
+	earlyChecks := []string{
+		"checkStrFlagEmpty(",
+		"validateCdAndNextDNSFlags(",
+		"validateInterceptModeFlag(",
+		"doTasksE(",
+	}
+	for _, check := range earlyChecks {
+		idx := strings.Index(body, check)
+		if idx == -1 {
+			t.Fatalf("expected the start command to still call %s", check)
+		}
+		if idx < clearIdx {
+			t.Errorf("%s appears before clearProvisionResult(): a failure there could leave a stale result file behind", check)
+		}
+	}
+}
+
+// TestStartCommandClassifiesServiceInitFailure pins the fix for a bare
+// return: when newService fails in the start command, the closure must fail
+// through failProvisionUnclassified, so a result file and the identifier
+// line exist, instead of a plain return that exits 0.
+func TestStartCommandClassifiesServiceInitFailure(t *testing.T) {
+	body := startRunFuncSource(t)
+	initIdx := strings.Index(body, "newService(p, sc)")
+	if initIdx == -1 {
+		t.Fatal("start command no longer calls newService(p, sc)")
+	}
+	branchEnd := strings.Index(body[initIdx:], "p.preRun()")
+	if branchEnd == -1 {
+		t.Fatal("could not find the end of the service init branch")
+	}
+	if !strings.Contains(body[initIdx:initIdx+branchEnd], "failProvisionUnclassified(") {
+		t.Error("service init failure does not fail through failProvisionUnclassified")
+	}
+}
+
+// TestStartCommandReplacesStaleResultOnEarlyClassifiedFailure is a
+// behavioral companion to the structural test above: it drives the real
+// start command through its earliest classified failure (an invalid
+// --intercept-mode) and checks the file left behind names the new attempt,
+// not a stale one seeded beforehand.
+func TestStartCommandReplacesStaleResultOnEarlyClassifiedFailure(t *testing.T) {
+	exitCode, _ := stubProvisionGlobals(t)
+	oldIntercept, oldCdUID, oldCdOrg, oldNextdns := interceptMode, cdUID, cdOrg, nextdns
+	t.Cleanup(func() {
+		interceptMode, cdUID, cdOrg, nextdns = oldIntercept, oldCdUID, oldCdOrg, oldNextdns
+	})
+
+	// initStartCmd binds these globals to flag defaults as it registers them
+	// (StringVarP writes the default straight into the pointer), so the
+	// command must exist before the test overrides the values it drives the
+	// closure with.
+	cmd := initStartCmd()
+	cdUID, cdOrg, nextdns = "", "", ""
+	interceptMode = "bogus" // fails validateInterceptModeFlag before any OS work
+
+	if err := writeProvisionResult(newProvisionResult(provisionCodeServiceStartFailed, "a previous failed attempt", nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd.Run(cmd, nil)
+
+	wantExit := provisionExitCodeForCode[provisionCodeInterceptModeInvalid]
+	if *exitCode != wantExit {
+		t.Fatalf("exit = %d, want %d (validateInterceptModeFlag should have run)", *exitCode, wantExit)
+	}
+	r, err := readProvisionResult()
+	if err != nil {
+		t.Fatalf("no provision result written: %v", err)
+	}
+	if r.Code == string(provisionCodeServiceStartFailed) {
+		t.Fatal("stale result from a previous attempt survived the new attempt")
+	}
+	if r.Code != string(provisionCodeInterceptModeInvalid) {
+		t.Errorf("code = %q, want %q", r.Code, provisionCodeInterceptModeInvalid)
+	}
+}
 
 func TestServiceStageFailureCode(t *testing.T) {
 	tests := []struct {

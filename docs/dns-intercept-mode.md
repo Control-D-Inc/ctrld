@@ -100,9 +100,14 @@ The **Name Resolution Policy Table** is a Windows feature (originally for Direct
 | `ConfigOptions` | REG_DWORD | `0x8` | Standard DNS resolution (no DirectAccess) |
 | `Version` | REG_DWORD | `0x2` | NRPT rule version 2 |
 
-**Registry path**: `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig\CtrldCatchAll`
+**Registry path**: the primary key is the local store, written on every start:
+`HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig\{B2E9A3C1-7F4D-4A8E-9D6B-5C1E0F3A2B8D}`.
+The GP-store key
+`HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig\CtrldCatchAll`
+is written only when foreign GP rules would otherwise hide the local store, and never when
+the foreign rule is an administrator catch-all for this listener.
 
-**Group Policy refresh**: The DNS Client service only reads NRPT from registry during Group Policy processing cycles (default: every 90 minutes). ctrld calls `RefreshPolicyEx(bMachine=TRUE, dwOptions=RP_FORCE)` when activating or repairing rules it owns. While Group Policy remains the owner, ctrld does not run NRPT activation/heal signaling; the one transition that removes a ctrld fallback is signaled after the external rule has been proven.
+**Group Policy refresh**: The DNS Client service only reads NRPT from registry during Group Policy processing cycles (default: every 90 minutes). ctrld calls `RefreshPolicyEx(bMachine=TRUE, dwOptions=RP_FORCE)` when activating or repairing rules it owns. While Group Policy remains the owner, ctrld does not run NRPT activation/heal signaling. For the transition that removes a ctrld fallback, ctrld signals once after removing its keys and then probes. If the proof finds no route, ctrld writes back only its local key and signals again.
 
 #### GP-managed NRPT ownership
 
@@ -120,7 +125,7 @@ The health monitor keeps using functional probes:
 - matching GP rule + failed probe: retry loopback WFP protection, then report the external policy as ineffective without running NRPT heal signals;
 - matching GP rule disappears: create the normal ctrld-owned fallback and verify it, unless another GP catch-all targets a different resolver;
 - GP catch-all targets another resolver: report the conflict and do not create a second ambiguous catch-all;
-- matching GP rule returns: prove it with a probe, remove only ctrld's deterministic fallback keys, and return ownership to Group Policy.
+- matching GP rule returns: prove it with a probe, remove only ctrld's deterministic fallback keys, and return ownership to Group Policy. If the proof finds no route while the same rule stays on disk, ctrld puts back only its local-store key, keeps ownership, and does not write its GP-store rule adjacent to the administrator's rule.
 
 Deploy the GPO **before** starting or restarting ctrld if adapter DNS must remain completely untouched. Remove or unlink the GP rule before intentionally removing the ctrld service. A GP catch-all that remains pointed at loopback while no listener is running causes DNS failure by design; ctrld cannot safely delete an administrator-owned policy during uninstall.
 
@@ -174,7 +179,7 @@ A dedicated background goroutine (`nrptHealthMonitor`) runs every 30 seconds and
 
 1. **Ownership check:** Distinguish a matching external GP child from ctrld's deterministic local/GP keys.
 2. **Active probe:** Verify Windows DNS Client still routes to the listener.
-3. **Transition:** If the external child disappears, activate ctrld's normal fallback. If it returns while the fallback is active, prove it before removing only ctrld's keys.
+3. **Transition:** If the external child disappears, activate ctrld's normal fallback. If it returns while the fallback is active, prove it before removing only ctrld's keys. If the proof finds no route while the same rule stays on disk, ctrld puts back only its local-store key, keeps ownership, and does not write its GP-store rule adjacent to the administrator's rule.
 4. **Owned recovery:** Restore/heal only when ctrld owns the NRPT rule.
 5. **(hard mode)** Verify the WFP sublayer exists and fully restart intercept state on loss.
 
@@ -230,12 +235,17 @@ DNS intercept: pf anchor "com.controld.ctrld" active with 3 rules
 DNS intercept: pf redirect active — all outbound DNS (port 53) redirected to 127.0.0.1:53
 ```
 
+DNS intercept mode on macOS also runs the wake detector. That detector reports a `Host woke` journal event with the source `detector` and the length of the sleep.
+Outside DNS intercept mode the netmon delta is the only wake source, and it reports no length of its own.
+The events of the journal are listed in [Network-recovery diagnostics](network-recovery-diagnostics.md#journal-events).
+
 ## Troubleshooting
 
 ### Windows
 
 ```powershell
-# Check NRPT rules (should show CtrldCatchAll with . → 127.0.0.1)
+# Check NRPT rules (should show ctrld's catch-all, . → 127.0.0.1; the primary key is the
+# local-store GUID rule, and CtrldCatchAll appears only when ctrld also wrote the GP store)
 Get-DnsClientNrptRule
 
 # Check NRPT registry directly
@@ -300,11 +310,13 @@ VPN apps commonly add rules like `pass out quick on ipsec0 inet all` that match 
 
 ### 3. Dynamic Tunnel Interface Detection
 
-The network change monitor (`validInterfacesMap()`) only tracks physical hardware ports (en0, bridge0, etc.) — it doesn't see tunnel interfaces (utun*, ipsec*, etc.) created by VPN software. When a VPN connects and creates a new interface (e.g., utun420 for WireGuard), ctrld detects this through a separate tunnel interface change check and rebuilds the pf anchor to include explicit intercept rules for the new interface. This runs on every network change event, even if no physical interface changed.
+The network change monitor (`validInterfacesMap()`) only tracks physical hardware ports (en0, bridge0, etc.) — it doesn't see tunnel interfaces (utun*, ipsec*, etc.) created by VPN software. When a VPN connects and creates a new interface (e.g., utun420 for WireGuard), ctrld detects this through a separate tunnel interface change check and rebuilds the pf anchor to include explicit intercept rules for the new interface. This runs on every network change event that is not noise, even if no physical interface changed. A delta that touches AirDrop or virtual adapters alone is noise, and ctrld skips the handler for it, so no tunnel discovery runs.
 
 ### 4. pf Watchdog + Network Change Hooks
 
 A background watchdog (30s interval) plus immediate checks on network change events detect when another program replaces the entire pf ruleset (e.g., Windscribe's `pfctl -f /etc/pf.conf`). When detected, ctrld rebuilds its anchor with up-to-date tunnel interface rules and re-injects the anchor reference at the top of the ruleset. A 2-second delayed re-check catches race conditions where the other program clears rules slightly after the network event.
+
+A noise delta starts no immediate check and no delayed re-check. The watchdog keeps its own 30 s cadence, so it still restores a missing anchor during a delta storm.
 
 ### 4a. Active Interception Probe (pf Translation State Corruption)
 
@@ -312,12 +324,14 @@ Programs like Parallels Desktop reload `/etc/pf.conf` when creating/destroying v
 
 ctrld detects interface appearance/disappearance and spawns an async probe monitor:
 
-1. **Probe mechanism:** A subprocess runs with GID=0 (wheel, not `_ctrld`) and sends a DNS query to the OS resolver. If pf interception is working, the query gets redirected to ctrld (127.0.0.1:53) and is detected in the DNS handler. If broken, it times out after 1s.
+1. **Probe mechanism:** A subprocess runs with GID=0 (wheel, not `_ctrld`) and sends a DNS query to the OS resolver. If pf interception is working, the query gets redirected to ctrld (127.0.0.1:53) and is detected in the DNS handler. A confirmed send without local receipt within 1s gives `not_intercepted`.
 2. **Backoff schedule:** Probes at 0, 0.5, 1, 2, 4 seconds (~8s window) to win the race against async pf reloads by the hypervisor. Only one monitor runs at a time (atomic singleton).
-3. **Auto-heal:** On probe failure, `forceReloadPFMainRuleset()` dumps the running ruleset and pipes it back through `pfctl -f -`, resetting pf's translation engine. VPN-safe because it reassembles from the current running state.
+3. **Auto-heal:** Only after `not_intercepted`, `forceReloadPFMainRuleset()` dumps the running ruleset and pipes it back through `pfctl -f -`, resetting pf's translation engine. VPN-safe because it reassembles from the current running state.
 4. **Watchdog integration:** The 30s watchdog also runs the probe when rule text checks pass, as a safety net for unknown corruption causes.
 
-This approach detects **actual broken DNS** rather than guessing from trigger events, making it robust against future unknown corruption scenarios.
+The probe uses IPv4 only. Missing targets and helper failures give `indeterminate`, which does not cause a reload.
+See [target selection and diagnostics](network-recovery-diagnostics.md#pf-probes-macos).
+A successful probe proves local interception delivery, not remote DNS health.
 
 ### 5. Proactive DoH Connection Pool Reset
 
@@ -483,6 +497,7 @@ exemption).
 | No VPN | None | ✅ All traffic | N/A |
 | Split DNS (Tailscale non-exit) | ✅ VPN interface | ✅ Non-VPN domains | ✅ Via MagicDNS |
 | Exit mode (Tailscale exit node) | ❌ None | ✅ All traffic | ✅ Via ctrld split routing |
+| Zscaler Private Access | None | ✅ All traffic except one health-check name | ✅ Via Client Connector |
 | Windscribe | None (different flow) | ✅ All traffic | N/A |
 | Hard intercept | None | ✅ All traffic | ❌ Not forwarded |
 
@@ -524,6 +539,71 @@ F5 BIG-IP APM VPN is a known source of DNS conflicts with ctrld (a known support
 - F5's relay proxy (`F5FltSrv`) performs similar functions to ctrld — they are in direct conflict when both active
 - The seemingly random failure pattern is caused by timing-dependent race conditions between ctrld's watchdog, F5's DNS enforcement, and (optionally) endpoint security inspection
 
+### Zscaler Private Access (macOS)
+
+Zscaler Client Connector will not synthesize addresses for Private Access
+applications until it has confirmed that DNS answers reach it on its own DNS
+path. It confirms this by resolving one fixed public name,
+`dnsechotest.zscaler.com`, and observing the answer.
+
+**How the conflict manifests:**
+
+1. `--intercept-mode dns` is active, so pf redirects port 53 to ctrld
+2. Client Connector's query for `dnsechotest.zscaler.com` is redirected into ctrld
+3. ctrld answers it from the Control D upstream, so Client Connector never sees the
+   answer arrive on its own DNS path
+4. Client Connector treats domain validation as failed and keeps Private Access
+   disabled — while ordinary Control D DNS stays perfectly healthy, which is why the
+   symptom looks like "ZPA is broken" rather than "DNS is broken"
+
+**How ctrld handles it:**
+
+On macOS in `dns` mode, ctrld routes that one exact name the same way a Control D
+"bypass" rule does: with an empty upstream list, which resolves through
+`upstream.os` — the system resolver set, which under Intercept Mode still includes
+Client Connector's own DNS servers. Because the decision is made on the name alone,
+it covers every record type.
+
+The answer is **not cached**. Client Connector enables Private Access only after it
+observes the echo answer arrive on its own DNS path, so an answer ctrld served from
+its cache reads as silence to Client Connector — the query has to reach the OS
+resolver on every poll. This matters most on reconnect: an answer cached while ZPA
+was disconnected would otherwise outlive `InitializeOsResolver()` and keep Private
+Access disabled for the rest of that entry's TTL (or `cache_ttl_override`).
+
+The scope is deliberately narrow — a single fixed public health-check name:
+
+- Private Access **application** domains are not special-cased. Once Client Connector
+  has validated its DNS path it answers them itself, so they never need a ctrld
+  routing exception; anything it does not claim stays on Control D.
+- No interface, resolver range, or pf rule is exempted. There is no ZPA interface
+  detection, no CGNAT probing, and no passthrough rule.
+- Everything else, including every other `zscaler.com` name, stays intercepted and
+  filtered by Control D.
+- `--intercept-mode hard` opts out, the same as it opts out of VPN DNS split
+  routing: all DNS goes through ctrld and ZPA is not accommodated.
+- The route does **not** authorize the query. A `Restricted` listener still answers
+  only sources that match its policy, so the built-in route is not a hole in
+  source authorization.
+- An explicit listener **domain rule** that routes this name to a specific upstream
+  outranks the built-in route, and is the supported way to opt out without leaving
+  Intercept Mode. Network- and MAC-policy targets do not: they route every name
+  from a source and so state nothing about this one.
+- A rule that itself selects the OS path — empty targets, which is how a Control D
+  profile's bypass list reaches ctrld — keeps its own routing and labels but is still
+  treated as the health check, so it gets the no-cache behavior too. A machine
+  upgraded while still carrying the bypass-folder workaround therefore gets the full
+  fix rather than just the routing half.
+
+Adding `dnsechotest.zscaler.com` to a Control D bypass folder produces the same
+routing and remains a valid workaround on releases without this fix. Disabling
+Intercept Mode entirely (`ctrld start --intercept-mode off`) also restores ZPA, at
+the cost of interface-based DNS handling.
+
+**Status:** the routing decision is confirmed by a customer running the bypass-folder
+equivalent. It has not yet been verified against a real ZPA tenant with a compiled
+build; see the implementation tracker for the outstanding smoke test.
+
 ### Cisco AnyConnect
 
 Cisco AnyConnect exhibits similar DNS override behavior. `--intercept-mode dns` mode prevents the conflict by operating at the packet filter level rather than competing for interface DNS settings.
@@ -564,6 +644,8 @@ Network change detected (netmon callback)
     └─ Delayed re-check at 4s:
         └─ (same as 2s — catches slower VPN teardowns)
 ```
+
+A noise delta skips this whole chain. ctrld runs no pf read, no tunnel discovery, no OS resolver read, and no VPN DNS refresh for it. The noise class holds the AirDrop interfaces (`awdl*`, `llw*`) and the virtual adapters. The pf watchdog keeps its own 30 s cadence, so it still tests the rules during a delta storm.
 
 ### VPN Connect Sequence
 

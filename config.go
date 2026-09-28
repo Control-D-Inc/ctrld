@@ -78,6 +78,12 @@ const (
 	controlDNetDomain = "controld.net"
 	controlDDevDomain = "controld.dev"
 
+	// nextDNSDomain is the parent domain of the NextDNS DoH endpoints. Beside
+	// dns.nextdns.io, NextDNS serves alternative endpoints under it, such as
+	// ultralow.dns.nextdns.io and anycast.dns2.nextdns.io, which are the same
+	// service and take the same client info headers.
+	nextDNSDomain = "nextdns.io"
+
 	endpointPrefixHTTPS = "https://"
 	endpointPrefixQUIC  = "quic://"
 	endpointPrefixH3    = "h3://"
@@ -218,6 +224,8 @@ func (c *Config) FirstUpstream() *UpstreamConfig {
 type ServiceConfig struct {
 	LogLevel                string         `mapstructure:"log_level" toml:"log_level,omitempty"`
 	LogPath                 string         `mapstructure:"log_path" toml:"log_path,omitempty"`
+	LogMaxSizeMB            int            `mapstructure:"log_max_size_mb" toml:"log_max_size_mb,omitempty" validate:"omitempty,gte=1,lte=1024"`
+	LogMaxBackups           *int           `mapstructure:"log_max_backups" toml:"log_max_backups,omitempty" validate:"omitempty,gte=0,lte=64"`
 	CacheEnable             bool           `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
 	CacheSize               int            `mapstructure:"cache_size" toml:"cache_size,omitempty"`
 	CacheTTLOverride        int            `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
@@ -532,11 +540,36 @@ func (uc *UpstreamConfig) ForceReBootstrap() {
 	uc.rebootstrap.Store(rebootstrapNotStarted)
 }
 
+// CloseTransports retires the upstream's transports, including active DoT and
+// HTTP/3 connections. Callers must stop publishing this upstream before calling
+// it and must not reuse it without calling SetupTransport.
+func (uc *UpstreamConfig) CloseTransports() {
+	uc.retireTransports()
+}
+
+// retireTransports permanently closes DoT pools and HTTP/3 transports before
+// their owner discards them. Like closeTransports, it does not acquire an
+// upstream lock: callers that serialize slot access must keep that serialization
+// across retirement and replacement.
+func (uc *UpstreamConfig) retireTransports() {
+	uc.closeTransports()
+	for _, p := range []*dotConnPool{uc.dotClientPool, uc.dotClientPool4, uc.dotClientPool6} {
+		if p != nil {
+			p.Close()
+		}
+	}
+	// Unlike CloseIdleConnections, Close also cancels pending dials and active
+	// HTTP/3 requests, and prevents late requests from reviving the transport.
+	for _, rt := range []http.RoundTripper{uc.http3RoundTripper, uc.http3RoundTripper4, uc.http3RoundTripper6} {
+		if c, ok := rt.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+	}
+}
+
 // closeTransports closes idle connections on all existing transports.
-// This is called before creating new transports during re-bootstrap to
-// force in-flight requests on stale connections to fail quickly, rather
-// than waiting for the full context deadline (e.g. 5s) after a firewall
-// state table flush kills the underlying TCP/QUIC connections.
+// It does not retire DoT pools or HTTP/3 transports: active work may continue
+// and the resources remain usable. Use retireTransports before replacing them.
 func (uc *UpstreamConfig) closeTransports() {
 	if t := uc.transport; t != nil {
 		t.CloseIdleConnections()
@@ -586,11 +619,10 @@ func (uc *UpstreamConfig) SetupTransport() {
 		return
 	}
 
-	// Close existing transport connections before creating new ones.
-	// This forces in-flight requests on stale connections (e.g. after a
-	// firewall state table flush) to fail fast instead of waiting for
-	// the full context deadline timeout.
-	uc.closeTransports()
+	// Retire old DoT/HTTP3 resources before replacing their slots. Idle-only
+	// cleanup would leave active queries and late work owning orphaned resources.
+	// DoH and DoQ retain their existing cleanup semantics.
+	uc.retireTransports()
 
 	ips := uc.bootstrapIPs
 	switch uc.IPStack {
@@ -764,6 +796,7 @@ func (uc *UpstreamConfig) IsControlD() bool {
 	return false
 }
 
+// isNextDNS reports whether this is a NextDNS upstream.
 func (uc *UpstreamConfig) isNextDNS() bool {
 	domain := uc.Domain
 	if domain == "" {
@@ -771,7 +804,7 @@ func (uc *UpstreamConfig) isNextDNS() bool {
 			domain = u.Hostname()
 		}
 	}
-	return domain == "dns.nextdns.io"
+	return dns.IsSubDomain(nextDNSDomain, domain)
 }
 
 func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
