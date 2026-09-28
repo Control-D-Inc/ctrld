@@ -3,11 +3,11 @@
 
 ## Launch arguments
 ```shell
-$ ctrld run --help
+$ ctrld-client run --help
 Run the DNS proxy server
 
 Usage:
-  ctrld run [flags]
+  ctrld-client run [flags]
 
 Flags:
       --base64_config string        base64 encoded config
@@ -29,7 +29,7 @@ Global Flags:
 For example:
 
 ```shell
-ctrld run --listen=127.0.0.1:53 --primary_upstream=https://freedns.controld.com/p2 --secondary_upstream=8.8.8.8:53 --domains=*.company.int,*.net --log /path/to/log.log
+ctrld-client run --listen=127.0.0.1:53 --primary_upstream=https://freedns.controld.com/p2 --secondary_upstream=8.8.8.8:53 --domains=*.company.int,*.net --log /path/to/log.log
 ```
 
 Above command will be translated roughly to this config:
@@ -70,5 +70,5 @@ Only `listen` and `primary_upstream` flags are required.
 `ctrld` can read a complete base64 encoded config via command line flag. This allows you to supply complex configurations. 
 
 ```shell
-ctrld run --base64_config="CltsaXN0ZW5lcl0KCiAgW2xpc3RlbmVyLjBdCiAgICBpcCA9ICIxMjcuMC4wLjEiCiAgICBwb3J0ID0gNTMKICAgIHJlc3RyaWN0ZWQgPSBmYWxzZQoKW25ldHdvcmtdCgogIFtuZXR3b3JrLjBdCiAgICBjaWRycyA9IFsiMC4wLjAuMC8wIl0KICAgIG5hbWUgPSAiTmV0d29yayAwIgoKW3Vwc3RyZWFtXQoKICBbdXBzdHJlYW0uMF0KICAgIGJvb3RzdHJhcF9pcCA9ICI3Ni43Ni4yLjExIgogICAgZW5kcG9pbnQgPSAiaHR0cHM6Ly9mcmVlZG5zLmNvbnRyb2xkLmNvbS9wMSIKICAgIG5hbWUgPSAiQ29udHJvbCBEIC0gQW50aS1NYWx3YXJlIgogICAgdGltZW91dCA9IDUwMDAKICAgIHR5cGUgPSAiZG9oIgoKICBbdXBzdHJlYW0uMV0KICAgIGJvb3RzdHJhcF9pcCA9ICI3Ni43Ni4yLjExIgogICAgZW5kcG9pbnQgPSAicDIuZnJlZWRucy5jb250cm9sZC5jb20iCiAgICBuYW1lID0gIkNvbnRyb2wgRCAtIE5vIEFkcyIKICAgIHRpbWVvdXQgPSAzMDAwCiAgICB0eXBlID0gImRvcSIK"
+ctrld-client run --base64_config="CltsaXN0ZW5lcl0KCiAgW2xpc3RlbmVyLjBdCiAgICBpcCA9ICIxMjcuMC4wLjEiCiAgICBwb3J0ID0gNTMKICAgIHJlc3RyaWN0ZWQgPSBmYWxzZQoKW25ldHdvcmtdCgogIFtuZXR3b3JrLjBdCiAgICBjaWRycyA9IFsiMC4wLjAuMC8wIl0KICAgIG5hbWUgPSAiTmV0d29yayAwIgoKW3Vwc3RyZWFtXQoKICBbdXBzdHJlYW0uMF0KICAgIGJvb3RzdHJhcF9pcCA9ICI3Ni43Ni4yLjExIgogICAgZW5kcG9pbnQgPSAiaHR0cHM6Ly9mcmVlZG5zLmNvbnRyb2xkLmNvbS9wMSIKICAgIG5hbWUgPSAiQ29udHJvbCBEIC0gQW50aS1NYWx3YXJlIgogICAgdGltZW91dCA9IDUwMDAKICAgIHR5cGUgPSAiZG9oIgoKICBbdXBzdHJlYW0uMV0KICAgIGJvb3RzdHJhcF9pcCA9ICI3Ni43Ni4yLjExIgogICAgZW5kcG9pbnQgPSAicDIuZnJlZWRucy5jb250cm9sZC5jb20iCiAgICBuYW1lID0gIkNvbnRyb2wgRCAtIE5vIEFkcyIKICAgIHRpbWVvdXQgPSAzMDAwCiAgICB0eXBlID0gImRvcSIK"
 ```

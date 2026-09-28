@@ -10,6 +10,8 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/kardianos/service"
@@ -29,20 +31,24 @@ const (
 	ifacePath        = "/iface"
 	viewLogsPath     = "/log/view"
 	sendLogsPath     = "/log/send"
+	tailLogsPath     = "/log/tail"
 )
 
 type ifaceResponse struct {
-	Name string `json:"name"`
-	All  bool   `json:"all"`
-	OK   bool   `json:"ok"`
+	Name          string `json:"name"`
+	All           bool   `json:"all"`
+	OK            bool   `json:"ok"`
+	InterceptMode string `json:"intercept_mode,omitempty"` // "dns", "hard", or "" (not intercepting)
 }
 
+// controlServer represents an HTTP server for handling control requests
 type controlServer struct {
 	server *http.Server
 	mux    *http.ServeMux
 	addr   string
 }
 
+// newControlServer creates a new control server instance
 func newControlServer(addr string) (*controlServer, error) {
 	mux := http.NewServeMux()
 	s := &controlServer{
@@ -56,18 +62,23 @@ func newControlServer(addr string) (*controlServer, error) {
 func (s *controlServer) start() error {
 	_ = os.Remove(s.addr)
 	unixListener, err := net.Listen("unix", s.addr)
-	if l, ok := unixListener.(*net.UnixListener); ok {
-		l.SetUnlinkOnClose(true)
-	}
 	if err != nil {
 		return err
+	}
+	// Restrict socket permissions to owner-only (0600) so that only the
+	// process owner (typically root) can connect. Defense-in-depth since
+	// the control server endpoints carry no authentication of their own.
+	if err := os.Chmod(s.addr, 0600); err != nil {
+		return err
+	}
+	if l, ok := unixListener.(*net.UnixListener); ok {
+		l.SetUnlinkOnClose(true)
 	}
 	go s.server.Serve(unixListener)
 	return nil
 }
 
 func (s *controlServer) stop() error {
-	_ = os.Remove(s.addr)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
 	defer cancel()
 	return s.server.Shutdown(ctx)
@@ -79,34 +90,34 @@ func (s *controlServer) register(pattern string, handler http.Handler) {
 
 func (p *prog) registerControlServerHandler() {
 	p.cs.register(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		mainLog.Load().Debug().Msg("handling list clients request")
+		p.Debug().Msg("Handling list clients request")
 
 		clients := p.ciTable.ListClients()
-		mainLog.Load().Debug().Int("client_count", len(clients)).Msg("retrieved clients list")
+		p.Debug().Int("client_count", len(clients)).Msg("Retrieved clients list")
 
 		sort.Slice(clients, func(i, j int) bool {
 			return clients[i].IP.Less(clients[j].IP)
 		})
-		mainLog.Load().Debug().Msg("sorted clients by IP address")
+		p.Debug().Msg("Sorted clients by IP address")
 
 		if p.metricsQueryStats.Load() {
-			mainLog.Load().Debug().Msg("metrics query stats enabled, collecting query counts")
+			p.Debug().Msg("Metrics query stats enabled, collecting query counts")
 
 			for idx, client := range clients {
-				mainLog.Load().Debug().
+				p.Debug().
 					Int("index", idx).
 					Str("ip", client.IP.String()).
 					Str("mac", client.Mac).
 					Str("hostname", client.Hostname).
-					Msg("processing client metrics")
+					Msg("Processing client metrics")
 
 				client.IncludeQueryCount = true
 				dm := &dto.Metric{}
 
 				if statsClientQueriesCount.MetricVec == nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Str("client_ip", client.IP.String()).
-						Msg("skipping metrics collection: MetricVec is nil")
+						Msg("Skipping metrics collection: MetricVec is nil")
 					continue
 				}
 
@@ -116,44 +127,44 @@ func (p *prog) registerControlServerHandler() {
 					client.Hostname,
 				)
 				if err != nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Err(err).
 						Str("client_ip", client.IP.String()).
 						Str("mac", client.Mac).
 						Str("hostname", client.Hostname).
-						Msg("failed to get metrics for client")
+						Msg("Failed to get metrics for client")
 					continue
 				}
 
 				if err := m.Write(dm); err == nil && dm.Counter != nil {
 					client.QueryCount = int64(dm.Counter.GetValue())
-					mainLog.Load().Debug().
+					p.Debug().
 						Str("client_ip", client.IP.String()).
 						Int64("query_count", client.QueryCount).
-						Msg("successfully collected query count")
+						Msg("Successfully collected query count")
 				} else if err != nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Err(err).
 						Str("client_ip", client.IP.String()).
-						Msg("failed to write metric")
+						Msg("Failed to write metric")
 				}
 			}
 		} else {
-			mainLog.Load().Debug().Msg("metrics query stats disabled, skipping query counts")
+			p.Debug().Msg("Metrics query stats disabled, skipping query counts")
 		}
 
 		if err := json.NewEncoder(w).Encode(&clients); err != nil {
-			mainLog.Load().Error().
+			p.Error().
 				Err(err).
 				Int("client_count", len(clients)).
-				Msg("failed to encode clients response")
+				Msg("Failed to encode clients response")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		mainLog.Load().Debug().
+		p.Debug().
 			Int("client_count", len(clients)).
-			Msg("successfully sent clients list response")
+			Msg("Successfully sent clients list response")
 	}))
 	p.cs.register(startedPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		select {
@@ -175,14 +186,14 @@ func (p *prog) registerControlServerHandler() {
 		oldSvc := p.cfg.Service
 		p.mu.Unlock()
 		if err := p.sendReloadSignal(); err != nil {
-			mainLog.Load().Err(err).Msg("could not send reload signal")
+			p.Error().Err(err).Msg("Could not send reload signal")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		select {
 		case <-p.reloadDoneCh:
 		case <-time.After(5 * time.Second):
-			http.Error(w, "timeout waiting for ctrld reload", http.StatusInternalServerError)
+			http.Error(w, "Timeout waiting for ctrld reload", http.StatusInternalServerError)
 			return
 		}
 
@@ -216,15 +227,38 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 
+		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
+
+		// Reject further attempts while locked out due to repeated wrong PINs.
+		if now := time.Now().Unix(); now < deactivationLockedUntil.Load() {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+
 		// Re-fetch pin code from API.
-		if rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev); rc != nil {
+		rcReq := &controld.ResolverConfigRequest{
+			RawUID:   cdUID,
+			Version:  appVersion,
+			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
+		}
+		if rc, err := controld.FetchResolverConfig(loggerCtx, rcReq, cdDev); rc != nil {
 			if rc.DeactivationPin != nil {
 				cdDeactivationPin.Store(*rc.DeactivationPin)
 			} else {
 				cdDeactivationPin.Store(defaultDeactivationPin)
 			}
+			// Every resolver-config response carries the organization's allowed
+			// destinations, including this one, so apply them rather than discarding
+			// a fresher list until the next scheduled refresh converges.
+			//
+			// Only the destinations: p.rc is deliberately left alone. The scheduled
+			// refresh decides whether to reload ctrld by comparing the response
+			// against p.rc, so storing this one here would let an exclude-list change
+			// be compared away and never reloaded. The destination set needs no
+			// reload - it is enforced directly and applying it is idempotent.
+			p.applyAllowedDestinations(p.firewallAllowList(), rc.DestinationIPs)
 		} else {
-			mainLog.Load().Warn().Err(err).Msg("could not re-fetch deactivation pin code")
+			p.Warn().Err(err).Msg("Could not re-fetch deactivation pin code")
 		}
 
 		// If pin code not set, allowing deactivation.
@@ -236,7 +270,7 @@ func (p *prog) registerControlServerHandler() {
 		var req deactivationRequest
 		if err := json.NewDecoder(request.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusPreconditionFailed)
-			mainLog.Load().Err(err).Msg("invalid deactivation request")
+			p.Error().Err(err).Msg("Invalid deactivation request")
 			return
 		}
 
@@ -244,6 +278,7 @@ func (p *prog) registerControlServerHandler() {
 		switch req.Pin {
 		case cdDeactivationPin.Load():
 			code = http.StatusOK
+			deactivationFailedAttempts.Store(0)
 			select {
 			case p.pinCodeValidCh <- struct{}{}:
 			default:
@@ -251,6 +286,11 @@ func (p *prog) registerControlServerHandler() {
 		case defaultDeactivationPin:
 			// If the pin code was set, but users do not provide --pin, return proper code to client.
 			code = http.StatusBadRequest
+		default:
+			if deactivationFailedAttempts.Add(1) >= deactivationMaxFailedAttempts {
+				deactivationLockedUntil.Store(time.Now().Unix() + deactivationLockoutSeconds)
+				deactivationFailedAttempts.Store(0)
+			}
 		}
 		w.WriteHeader(code)
 	}))
@@ -271,6 +311,10 @@ func (p *prog) registerControlServerHandler() {
 				res.Name = p.runningIface
 				res.All = p.requiredMultiNICsConfig
 				res.OK = true
+				// Report intercept mode to the start command for proper log output.
+				if interceptMode == "dns" || interceptMode == "hard" {
+					res.InterceptMode = interceptMode
+				}
 			}
 		}
 		if err := json.NewEncoder(w).Encode(res); err != nil {
@@ -279,63 +323,301 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 	}))
-	p.cs.register(viewLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		lr, err := p.logReader()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		defer lr.r.Close()
-		if lr.size == 0 {
-			w.WriteHeader(http.StatusMovedPermanently)
-			return
-		}
-		data, err := io.ReadAll(lr.r)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("could not read log: %v", err), http.StatusInternalServerError)
-			return
-		}
-		if err := json.NewEncoder(w).Encode(&logViewResponse{Data: string(data)}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			http.Error(w, fmt.Sprintf("could not marshal log data: %v", err), http.StatusInternalServerError)
-			return
-		}
-	}))
+	p.cs.register(viewLogsPath, http.HandlerFunc(p.handleLogView))
 	p.cs.register(sendLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if time.Since(p.internalLogSent) < logWriterSentInterval {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		r, err := p.logReader()
+		r, err := p.logReader(wantFullLogs(request), true)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		defer r.r.Close()
 		if r.size == 0 {
 			w.WriteHeader(http.StatusMovedPermanently)
 			return
 		}
+		// The upload loses its color codes on the way, so the answer reports
+		// the bytes that went out, not the bytes that the files hold.
+		upload := &countingReadCloser{rc: r.r}
 		req := &controld.LogsRequest{
 			UID:  cdUID,
-			Data: r.r,
+			Data: upload,
 		}
-		mainLog.Load().Debug().Msg("sending log file to ControlD server")
-		resp := logSentResponse{Size: r.size}
-		if err := controld.SendLogs(req, cdDev); err != nil {
-			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
+		p.Debug().Msg("Sending log file to ControlD server")
+		resp := logSentResponse{}
+		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
+		if err := controld.SendLogs(loggerCtx, req, cdDev); err != nil {
+			p.Error().Msgf("Could not send log file to ControlD server: %v", err)
 			resp.Error = err.Error()
 			w.WriteHeader(http.StatusInternalServerError)
 		} else {
-			mainLog.Load().Debug().Msg("sending log file successfully")
+			p.Debug().Msg("Sending log file successfully")
 			w.WriteHeader(http.StatusOK)
 		}
+		resp.Size = upload.count()
 		if err := json.NewEncoder(w).Encode(&resp); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 		p.internalLogSent = time.Now()
 	}))
+	p.cs.register(tailLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		// Determine logging mode and validate before starting the stream.
+		var lw *logWriter
+		useInternalLog := p.needInternalLogging()
+		if useInternalLog {
+			p.mu.Lock()
+			lw = p.internalLogWriter
+			p.mu.Unlock()
+			if lw == nil {
+				w.WriteHeader(http.StatusMovedPermanently)
+				return
+			}
+		} else if p.cfg.Service.LogPath == "" {
+			// No logging configured at all.
+			w.WriteHeader(http.StatusMovedPermanently)
+			return
+		}
+
+		// Parse optional "lines" query param for initial context.
+		numLines := 10
+		if v := request.URL.Query().Get("lines"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				numLines = n
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+
+		if useInternalLog {
+			// Internal logging mode: subscribe to the logWriter.
+
+			// Send last N lines as initial context.
+			if numLines > 0 {
+				if tail := lw.tailLastLines(numLines); len(tail) > 0 {
+					w.Write(tail)
+					flusher.Flush()
+				}
+			}
+
+			ch, unsub := lw.Subscribe()
+			defer unsub()
+			for {
+				select {
+				case data, ok := <-ch:
+					if !ok {
+						return
+					}
+					if _, err := w.Write(data); err != nil {
+						return
+					}
+					flusher.Flush()
+				case <-request.Context().Done():
+					return
+				}
+			}
+		} else {
+			// File-based logging mode: tail the log file.
+			followLogFile(request.Context(), w, flusher, normalizeLogFilePath(p.cfg.Service.LogPath), numLines)
+		}
+	}))
 }
 
+// jsonStringChunkSize bounds the memory that one log view answer needs. A log
+// of tens of megabytes must not get a second copy in the answer.
+const jsonStringChunkSize = 32 * 1024
+
+// wantFullLogs reports whether the request asks for every log file instead of
+// the newest debug bytes.
+func wantFullLogs(r *http.Request) bool {
+	return r.URL.Query().Get("full") == "1"
+}
+
+// handleLogView answers with the log bytes in the data field. It writes the
+// body while it reads the log, so the answer needs no copy of the whole log.
+func (p *prog) handleLogView(w http.ResponseWriter, r *http.Request) {
+	lr, err := p.logReader(wantFullLogs(r), false)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer lr.r.Close()
+	if lr.size == 0 {
+		w.WriteHeader(http.StatusMovedPermanently)
+		return
+	}
+	w.Header().Set("Content-Type", contentTypeJson)
+	if _, err := io.WriteString(w, `{"data":`); err != nil {
+		return
+	}
+	if err := writeJSONString(w, lr.r); err != nil {
+		// The answer is on its way, so it can only end short. This line tells
+		// the operator why.
+		p.Error().Err(err).Msg("Could not send log view answer")
+		return
+	}
+	_, _ = io.WriteString(w, `}`)
+}
+
+// writeJSONString writes what r yields as one JSON string, in chunks.
+func writeJSONString(w io.Writer, r io.Reader) error {
+	if _, err := io.WriteString(w, `"`); err != nil {
+		return err
+	}
+	chunk := make([]byte, jsonStringChunkSize)
+	for {
+		n, readErr := r.Read(chunk)
+		if n > 0 {
+			if err := writeJSONStringChunk(w, chunk[:n]); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	_, err := io.WriteString(w, `"`)
+	return err
+}
+
+// writeJSONStringChunk writes one chunk and escapes the bytes that a JSON
+// string cannot carry. It writes the bytes between two escapes in one call.
+func writeJSONStringChunk(w io.Writer, chunk []byte) error {
+	start := 0
+	for i, b := range chunk {
+		escaped := jsonStringEscape(b)
+		if escaped == "" {
+			continue
+		}
+		if _, err := w.Write(chunk[start:i]); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, escaped); err != nil {
+			return err
+		}
+		start = i + 1
+	}
+	_, err := w.Write(chunk[start:])
+	return err
+}
+
+// jsonStringEscape returns the escape of one byte, or an empty string for a
+// byte that a JSON string carries as it is. Every byte of a multi-byte
+// character is above 0x1f, so a chunk that ends inside a character still
+// writes the character whole.
+func jsonStringEscape(b byte) string {
+	switch b {
+	case '"':
+		return `\"`
+	case '\\':
+		return `\\`
+	case '\n':
+		return `\n`
+	case '\r':
+		return `\r`
+	case '\t':
+		return `\t`
+	}
+	if b < 0x20 {
+		return fmt.Sprintf(`\u%04x`, b)
+	}
+	return ""
+}
+
+// countingReadCloser counts the bytes that the HTTP client reads from an
+// upload. It closes the log files behind the upload, because the client only
+// closes the body it was given.
+type countingReadCloser struct {
+	rc io.ReadCloser
+	n  atomic.Int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error {
+	return c.rc.Close()
+}
+
+// count reports the bytes read so far.
+func (c *countingReadCloser) count() int64 {
+	return c.n.Load()
+}
+
+// tailFileLastLines reads the last n lines from a file and returns them.
+// The file position is left at the end of the file after this call.
+func tailFileLastLines(f *os.File, n int) []byte {
+	stat, err := f.Stat()
+	if err != nil || stat.Size() == 0 {
+		return nil
+	}
+
+	// Read from the end in chunks to find the last n lines.
+	const chunkSize = 4096
+	fileSize := stat.Size()
+	var lines []byte
+	offset := fileSize
+	count := 0
+
+	for offset > 0 && count <= n {
+		readSize := int64(chunkSize)
+		if readSize > offset {
+			readSize = offset
+		}
+		offset -= readSize
+		buf := make([]byte, readSize)
+		nRead, err := f.ReadAt(buf, offset)
+		if err != nil && err != io.EOF {
+			break
+		}
+		buf = buf[:nRead]
+		lines = append(buf, lines...)
+
+		// Count newlines in this chunk.
+		for _, b := range buf {
+			if b == '\n' {
+				count++
+			}
+		}
+	}
+
+	// Trim to last n lines.
+	idx := 0
+	nlCount := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i] == '\n' {
+			nlCount++
+			if nlCount == n+1 {
+				idx = i + 1
+				break
+			}
+		}
+	}
+	lines = lines[idx:]
+
+	// Seek to end of file for subsequent reads.
+	f.Seek(0, io.SeekEnd)
+	return lines
+}
+
+// jsonResponse wraps an HTTP handler to set JSON content type
 func jsonResponse(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
