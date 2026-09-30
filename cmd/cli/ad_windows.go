@@ -21,6 +21,7 @@ func addExtraSplitDnsRule(cfg *ctrld.Config) bool {
 	// Network rules are lowercase during toml config marshaling,
 	// lowercase the domain here too for consistency.
 	domain = strings.ToLower(domain)
+	setActiveDirectoryDomain(domain)
 	domainRuleAdded := addSplitDnsRule(cfg, domain)
 	wildcardDomainRuleRuleAdded := addSplitDnsRule(cfg, "*."+strings.TrimPrefix(domain, "."))
 	return domainRuleAdded || wildcardDomainRuleRuleAdded

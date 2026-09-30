@@ -709,6 +709,13 @@ func (p *prog) handleSpecialQueryTypes(ctx *context.Context, req *proxyRequest, 
 	if req.ufr.matched {
 		ctrld.Log(*ctx, p.Debug(), "%s, %s, %s -> %v",
 			req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, *upstreams)
+		// A rule sending an Active Directory name to the OS resolver (the
+		// auto-added AD split rule, or an operator's equivalent) is a LAN
+		// lookup: keep it off Control D's public resolver.
+		if osUpstreamOnly(*upstreams) && len(req.msg.Question) > 0 && inActiveDirectoryDomain(req.msg.Question[0].Name) {
+			*ctx = ctrld.LanQueryCtx(*ctx)
+			ctrld.Log(*ctx, p.Debug(), "Active Directory domain lookup, skipping public DNS")
+		}
 		return nil
 	}
 
