@@ -645,6 +645,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	isLanOrPtrQuery := false
 	if req.ufr.matched {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+		// A rule sending an Active Directory name to the OS resolver (the
+		// auto-added AD split rule, or an operator's equivalent) is a LAN
+		// lookup: keep it off Control D's public resolver, which osResolver
+		// otherwise races against the domain controller in plaintext.
+		if p.isAdOSResolverLookup(upstreams, req.msg) {
+			ctx = ctrld.LanQueryCtx(ctx)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "active directory domain lookup, skipping public DNS")
+		}
 	} else {
 		switch {
 		case req.ufr.zpaDNSEcho:
@@ -2787,4 +2795,11 @@ func (p *prog) buildRecoveryUpstreams(reason RecoveryReason) map[string]*ctrld.U
 // The network monitor uses transition-aware validation instead.
 func ValidateDefaultLocalIPsFromDelta(newState *netmon.State) {
 	validateDefaultLocalIPsFromDelta(newState, 0)
+}
+
+// isAdOSResolverLookup reports whether a rule-matched query is for the machine's
+// Active Directory domain and goes to the OS resolver alone. Such a query is a
+// LAN lookup; osResolver must not race it against Control D's public resolver.
+func (p *prog) isAdOSResolverLookup(upstreams []string, msg *dns.Msg) bool {
+	return len(msg.Question) > 0 && len(upstreams) == 1 && upstreams[0] == upstreamOS && p.isAdDomainQuery(msg)
 }
