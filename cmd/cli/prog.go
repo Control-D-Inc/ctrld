@@ -612,6 +612,7 @@ func (p *prog) runWait() {
 		p.mu.Unlock()
 
 		closeReplacedUpstreams(oldUpstreams, newCfg.Upstream)
+		p.applyDebugLogBudget(debugLogBudget(&newCfg.Service))
 		// The header names the mode, the listeners, and the upstreams, so the
 		// open files take the values of the config that now runs.
 		p.refreshLogHeader()

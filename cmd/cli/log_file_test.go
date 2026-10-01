@@ -551,3 +551,72 @@ func Test_zeroBackupRotationKeepsTheOpenReader(t *testing.T) {
 		t.Fatalf("the moved file is still on disk: %v", err)
 	}
 }
+
+// Test_rotatingFileHeaderStaysInTheBudget drives a restart that finds a file
+// close to its limit. The header of the new run must go to a new file, so no
+// file grows over its budget.
+func Test_rotatingFileHeaderStaysInTheBudget(t *testing.T) {
+	budget := logBudget{maxSize: 4096, backups: 1}
+	path := filepath.Join(t.TempDir(), "ctrld-journal.log")
+	oldRun := strings.Repeat("o", int(budget.maxSize)-10) + "\n"
+	if err := os.WriteFile(path, []byte(oldRun), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rf, err := newRotatingFile(path, budget, nil)
+	if err != nil {
+		t.Fatalf("newRotatingFile: %v", err)
+	}
+	t.Cleanup(func() { _ = rf.close() })
+	var rotations []logRotation
+	rf.onRotate = func(record logRotation) { rotations = append(rotations, record) }
+	header := []byte(`{"level":"info","journal":true,"message":"Log header"}` + "\n")
+	rf.setHeader(header)
+
+	if err := rf.writeHeader(); err != nil {
+		t.Fatalf("writeHeader: %v", err)
+	}
+
+	if backup := rotatingFileTestContent(t, path+".1"); backup != oldRun {
+		t.Fatalf("the backup holds %d bytes, want the %d bytes of the old run only", len(backup), len(oldRun))
+	}
+	if current := rotatingFileTestContent(t, path); current != string(header) {
+		t.Fatalf("the current file holds %q, want the header only", current)
+	}
+	if len(rotations) != 1 || rotations[0].bytesWritten != int64(len(oldRun)) {
+		t.Fatalf("rotations = %+v, want one event for the old file", rotations)
+	}
+}
+
+// Test_rotatingFileHeaderAfterAFailedRotation covers a restart whose rotation
+// cannot move the old file. The run continues in that file, and the header
+// must still mark the point where the run starts.
+func Test_rotatingFileHeaderAfterAFailedRotation(t *testing.T) {
+	renameErr := errors.New("rename refused")
+	budget := logBudget{maxSize: 4096, backups: 1}
+	path := filepath.Join(t.TempDir(), "ctrld-journal.log")
+	oldRun := strings.Repeat("o", int(budget.maxSize)-10) + "\n"
+	if err := os.WriteFile(path, []byte(oldRun), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rf, err := newRotatingFile(path, budget, nil)
+	if err != nil {
+		t.Fatalf("newRotatingFile: %v", err)
+	}
+	t.Cleanup(func() { _ = rf.close() })
+	rf.rename = func(string, string) error { return renameErr }
+	var rotations []logRotation
+	rf.onRotate = func(record logRotation) { rotations = append(rotations, record) }
+	header := []byte(`{"level":"info","journal":true,"message":"Log header"}` + "\n")
+	rf.setHeader(header)
+
+	if err := rf.writeHeader(); err != nil {
+		t.Fatalf("writeHeader: %v", err)
+	}
+
+	if current := rotatingFileTestContent(t, path); current != oldRun+string(header) {
+		t.Fatalf("the current file holds %d bytes, want the old run and one header", len(current))
+	}
+	if len(rotations) != 1 || !errors.Is(rotations[0].err, renameErr) {
+		t.Fatalf("rotations = %+v, want one failed rotation", rotations)
+	}
+}

@@ -67,8 +67,10 @@ The `Network snapshot` event and the header line of every log file render the sa
 The field `default_route_interface` is gone. Read `default_route_v4` and `default_route_v6` in its place.
 The two routes and the two gateways come from the route table of macOS, one route per address family. A tunnel that owns the default route has no next hop, so its route names the tunnel and its gateway stays empty.
 Windows and Linux read no route table in this release. They fill `default_route_v4` from the network monitor and leave `default_route_v6`, `gateway_v4`, and `gateway_v6` empty.
+On macOS, `default_route_v4` comes from the network monitor only when the route table gives no route for the two address families. When the route table gives an IPv6 route only, `default_route_v4` stays empty.
 
 `link_type` is one of `wifi`, `ethernet`, `usb_tether`, `tunnel`, and `unknown`.
+`link_type` and `tethered` describe the interface of the IPv4 default route. When no IPv4 route is present, they describe the interface of the IPv6 default route. When the route table gives no route, they describe the default interface of the network monitor. Thus the link fields and the route fields of one record describe the same interface.
 macOS reads it from the name of the hardware port. Linux reads `wifi`, `ethernet`, `usb_tether`, and `tunnel` from the kernel.
 Windows reads the description of the adapter in place of a port name. The words Ethernet, LAN, and Thunderbolt win over the tunnel class on every platform, so a VPN adapter with a description such as `SSL VPN Virtual Ethernet Adapter` reads as `ethernet`.
 Windows gives `tunnel` to the other VPN adapters. The other links are `unknown`.

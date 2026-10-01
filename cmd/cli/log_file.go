@@ -134,8 +134,14 @@ func (rf *rotatingFile) writeReporting(p []byte) (int, *logRotation, error) {
 // after the lock is free, so the rotation event can go back into this file.
 func (rf *rotatingFile) Write(p []byte) (int, error) {
 	n, rotated, err := rf.writeReporting(p)
+	rf.reportRotation(rotated)
+	return n, err
+}
+
+// reportRotation calls onRotate for a rotation. It must run with rf.mu free.
+func (rf *rotatingFile) reportRotation(rotated *logRotation) {
 	if rotated == nil || !rf.rotatedInFlight.CompareAndSwap(false, true) {
-		return n, err
+		return
 	}
 	defer rf.rotatedInFlight.Store(false)
 	rf.mu.Lock()
@@ -144,7 +150,6 @@ func (rf *rotatingFile) Write(p []byte) (int, error) {
 	if onRotate != nil {
 		onRotate(*rotated)
 	}
-	return n, err
 }
 
 // setHeader stores a copy of the header bytes for the next file.
@@ -158,14 +163,33 @@ func (rf *rotatingFile) setHeader(b []byte) {
 
 // writeHeader appends the stored header to the current file, once for each
 // file that the writer opens. A restart uses it to mark the point where the
-// new run continues an old file.
+// new run continues an old file. A header that makes the file cross its
+// budget goes to a new file, which the rotation starts with the header.
 func (rf *rotatingFile) writeHeader() error {
+	rotated, err := rf.writeHeaderReporting()
+	rf.reportRotation(rotated)
+	return err
+}
+
+// writeHeaderReporting writes the header and reports a rotation that the header
+// caused. It never calls onRotate, because the caller must log the rotation
+// outside of the lock, and at start the logger does not reach the files yet.
+func (rf *rotatingFile) writeHeaderReporting() (*logRotation, error) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.headerWritten {
-		return nil
+	if rf.headerWritten || len(rf.header) == 0 {
+		return nil, nil
 	}
-	return rf.writeHeaderLocked()
+	if !rf.needsRotation(len(rf.header)) {
+		return nil, rf.writeHeaderLocked()
+	}
+	rotated, err := rf.rotateLocked()
+	if err != nil || rf.headerWritten {
+		return rotated, err
+	}
+	// The file could not move, so the run continues in the old file, and the
+	// header must still mark the point where the run starts.
+	return rotated, rf.writeHeaderLocked()
 }
 
 // setBudget takes the disk space of a later config. The file stays open, so a

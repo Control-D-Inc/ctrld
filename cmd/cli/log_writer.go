@@ -405,6 +405,7 @@ func (p *prog) initInternalLogging(externalCores []zapcore.Core) {
 		return
 	}
 	headersWritten := false
+	var headerRotations []logRotation
 	p.initInternalLogWriterOnce.Do(func() {
 		// mainLog, not p.logger: a test drives this setup on a bare prog.
 		mainLog.Load().Notice().Msg("Internal logging enabled")
@@ -415,7 +416,7 @@ func (p *prog) initInternalLogging(externalCores []zapcore.Core) {
 		// A restart appends to the file it finds, so the header marks the
 		// point where this run starts.
 		p.refreshLogHeader()
-		p.writeLogHeaders()
+		headerRotations = p.writeLogHeaders()
 		headersWritten = true
 	})
 	lw, jlw := p.internalWriters()
@@ -431,12 +432,35 @@ func (p *prog) initInternalLogging(externalCores []zapcore.Core) {
 
 	// Create a multi-core logger
 	mainLog.Store(&ctrld.Logger{Logger: zap.New(zapcore.NewTee(cores...))})
+	// A header that crossed the budget rotated its file before the logger
+	// reached the files, so its event waits for this logger.
+	for _, rotated := range headerRotations {
+		emitLogRotated(rotated)
+	}
 	if headersWritten {
 		return
 	}
 	// A later call reaches a changed config, so the stored bytes need the new
 	// values. The files keep the header they already hold.
+	p.applyDebugLogBudget(debugLogBudget(&p.cfg.Service))
 	p.refreshLogHeader()
+}
+
+// applyDebugLogBudget gives the open debug files the limits of the config that
+// runs now. The files open before the API config arrives, and a managed config
+// refresh can change the limits with no restart. Only the internal file gets a
+// prune: ctrld owns its name, while log_path can name a file in a directory
+// that holds the files of other programs.
+func (p *prog) applyDebugLogBudget(budget logBudget) {
+	if debugWriter, _ := p.internalWriters(); debugWriter != nil {
+		if rf := debugWriter.rotating(); rf != nil {
+			rf.setBudget(budget)
+			pruneNumberedBackups(rf.currentPath(), budget.backups)
+		}
+	}
+	if rf := logPathFile.Load(); rf != nil {
+		rf.setBudget(budget)
+	}
 }
 
 // openInternalLogFiles persists both internal streams, so they survive a

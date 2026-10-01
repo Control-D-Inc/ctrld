@@ -155,13 +155,20 @@ func (p *prog) refreshLogHeader() {
 
 // writeLogHeaders puts the header at the append point of each open file. A
 // header that cannot land leaves the file usable, so the error only earns a
-// warning.
-func (p *prog) writeLogHeaders() {
+// warning. It returns the rotations that the headers caused, because the
+// logger does not reach the files yet and cannot report them.
+func (p *prog) writeLogHeaders() []logRotation {
+	var rotations []logRotation
 	for _, rf := range p.openLogFiles() {
-		if err := rf.writeHeader(); err != nil {
+		rotated, err := rf.writeHeaderReporting()
+		if rotated != nil {
+			rotations = append(rotations, *rotated)
+		}
+		if err != nil {
 			mainLog.Load().Warn().Err(err).Msg("Could not write log header")
 		}
 	}
+	return rotations
 }
 
 // logHeaderFromConfig fills the header fields that the config holds. It keeps
