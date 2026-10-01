@@ -570,3 +570,78 @@ func Test_boundedLogFilesFixTheSizeAtSelection(t *testing.T) {
 		t.Fatalf("upload = %q (%d bytes), want %q within the budget of 4", got, upload.size, "one\n")
 	}
 }
+
+// seedFullLogChain writes a full chain of files at the desktop budget: the
+// current file and every backup, each file at its size limit. Every line names
+// its file, so a reader can tell which file a part comes from.
+func seedFullLogChain(t *testing.T, name string, budget logBudget) {
+	t.Helper()
+	path := absHomeDir(name)
+	for index := budget.backups; index >= 0; index-- {
+		filePath := path
+		if index > 0 {
+			filePath = fmt.Sprintf("%s.%d", path, index)
+		}
+		line := fmt.Sprintf("%s file=%d ", name, index)
+		line += strings.Repeat("x", rotatingFileTestLineSize-len(line)-1) + "\n"
+		content := bytes.Repeat([]byte(line), int(budget.maxSize)/len(line))
+		if err := os.WriteFile(filePath, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Test_logReader_desktopBudgetUpload uses the desktop budgets, not the small
+// test budgets: 50 MB of debug files and a full journal chain. The normal
+// upload must stay under 17 MB, and the full upload must hold every file.
+func Test_logReader_desktopBudgetUpload(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes 56 MB of log files")
+	}
+	origSilent, origCdUID, origHomedir := silent, cdUID, homedir
+	t.Cleanup(func() { silent, cdUID, homedir = origSilent, origCdUID, origHomedir })
+	captureMainLog(t)
+	setLogHeaderTestGlobalLevel(t, zerolog.DebugLevel)
+	stubLogHeaderNetworkRead(t, "en9")
+	silent, cdUID, homedir = false, "test-uid", t.TempDir()
+	debugBudget, journalBudget := logBudgets(false)
+	seedFullLogChain(t, logFileName, debugBudget)
+	seedFullLogChain(t, journalLogFileName, journalBudget)
+
+	p := &prog{cfg: &ctrld.Config{}}
+	p.internalLogWriter = newLogWriterWithSize(logWriterSize)
+	p.internalJournalWriter = newLogWriterWithSize(logWriterSmallSize)
+	for _, stream := range []struct {
+		lw     *logWriter
+		name   string
+		budget logBudget
+	}{{p.internalLogWriter, logFileName, debugBudget}, {p.internalJournalWriter, journalLogFileName, journalBudget}} {
+		if err := stream.lw.setLogFile(absHomeDir(stream.name), stream.budget); err != nil {
+			t.Fatalf("setLogFile %s: %v", stream.name, err)
+		}
+		t.Cleanup(stream.lw.closeLogFile)
+	}
+	wholeDebug := logFilesContent(t, p.internalLogWriter.rotating().paths())
+	wholeJournal := logFilesContent(t, p.internalJournalWriter.rotating().paths())
+	if len(wholeDebug) < 50_000_000 {
+		t.Fatalf("the debug files hold %d bytes, want at least 50 MB", len(wholeDebug))
+	}
+
+	start := time.Now()
+	upload := readLogReader(t, p, false)
+	if len(upload) >= 17_000_000 {
+		t.Fatalf("normal upload = %d bytes, want less than 17 MB", len(upload))
+	}
+	debugPart, journalPart := splitUpload(t, upload, start)
+	if int64(len(debugPart)) > logSendDebugBudget || !bytes.HasSuffix(wholeDebug, debugPart) {
+		t.Fatalf("debug part = %d bytes, want the newest bytes within %d", len(debugPart), logSendDebugBudget)
+	}
+	if !bytes.Equal(journalPart, wholeJournal) {
+		t.Fatalf("journal part = %d bytes, want the %d bytes of the journal chain", len(journalPart), len(wholeJournal))
+	}
+
+	fullDebug, fullJournal := splitUpload(t, readLogReader(t, p, true), start)
+	if !bytes.Equal(fullDebug, wholeDebug) || !bytes.Equal(fullJournal, wholeJournal) {
+		t.Fatalf("full upload = %d debug and %d journal bytes, want %d and %d", len(fullDebug), len(fullJournal), len(wholeDebug), len(wholeJournal))
+	}
+}

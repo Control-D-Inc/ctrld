@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -260,11 +261,21 @@ func wantNoField(t *testing.T, event map[string]any, field string) {
 // noiseDeltaStates returns a delta that moves the AirDrop link-local address.
 func noiseDeltaStates(t *testing.T, step int) (before, after *netmon.State) {
 	t.Helper()
-	airdrop := func(address int) deltaTestInterface {
-		return deltaTestInterface{name: "awdl0", up: true, mtu: 1484, ips: []string{fmt.Sprintf("fe80::%d/64", address)}}
+	return noiseDeltaStatesFor(t, step, "awdl0")
+}
+
+// noiseDeltaStatesFor returns a delta that moves the link-local address of
+// each named noise interface.
+func noiseDeltaStatesFor(t *testing.T, step int, names ...string) (before, after *netmon.State) {
+	t.Helper()
+	noise := func(address int) []deltaTestInterface {
+		interfaces := []deltaTestInterface{networkEventsHardwareIface}
+		for _, name := range names {
+			interfaces = append(interfaces, deltaTestInterface{name: name, up: true, mtu: 1484, ips: []string{fmt.Sprintf("fe80::%d/64", address)}})
+		}
+		return interfaces
 	}
-	return deltaTestState(t, "en0", networkEventsHardwareIface, airdrop(step)),
-		deltaTestState(t, "en0", networkEventsHardwareIface, airdrop(step+1))
+	return deltaTestState(t, "en0", noise(step)...), deltaTestState(t, "en0", noise(step+1)...)
 }
 
 func wantStringsField(t *testing.T, event map[string]any, field string, want ...string) {
@@ -286,22 +297,29 @@ func wantStringsField(t *testing.T, event map[string]any, field string, want ...
 	}
 }
 
+// Test_networkEventsNoiseDeltaSkipsTheHandler covers the AirDrop link, the
+// low-latency Wi-Fi link, and both in one callback, as an AirDrop transfer
+// gives them.
 func Test_networkEventsNoiseDeltaSkipsTheHandler(t *testing.T) {
-	h := newNetworkEventsHarness(t, "en0")
+	for _, names := range [][]string{{"awdl0"}, {"llw0"}, {"awdl0", "llw0"}} {
+		t.Run(strings.Join(names, "+"), func(t *testing.T) {
+			h := newNetworkEventsHarness(t, "en0")
 
-	before, after := noiseDeltaStates(t, 1)
-	h.handle(before, after, false)
+			before, after := noiseDeltaStatesFor(t, 1, names...)
+			h.handle(before, after, false)
 
-	if h.reconciled != 0 || h.ignored != 0 {
-		t.Fatalf("noise delta ran the handler: reconciled=%d ignored=%d, want 0/0", h.reconciled, h.ignored)
-	}
-	debugLines := h.eventsAtLevel(t, noiseDeltaMessage, "debug")
-	if len(debugLines) != 1 {
-		t.Fatalf("got %d debug %q lines, want 1", len(debugLines), noiseDeltaMessage)
-	}
-	wantStringsField(t, debugLines[0], "interfaces", "awdl0")
-	if events := jsonLogEvents(t, h.logs, networkTransitionMessage); len(events) != 0 {
-		t.Fatalf("got %d %q events for a noise delta, want 0", len(events), networkTransitionMessage)
+			if h.reconciled != 0 || h.ignored != 0 {
+				t.Fatalf("noise delta ran the handler: reconciled=%d ignored=%d, want 0/0", h.reconciled, h.ignored)
+			}
+			debugLines := h.eventsAtLevel(t, noiseDeltaMessage, "debug")
+			if len(debugLines) != 1 {
+				t.Fatalf("got %d debug %q lines, want 1", len(debugLines), noiseDeltaMessage)
+			}
+			wantStringsField(t, debugLines[0], "interfaces", names...)
+			if events := jsonLogEvents(t, h.logs, networkTransitionMessage); len(events) != 0 {
+				t.Fatalf("got %d %q events for a noise delta, want 0", len(events), networkTransitionMessage)
+			}
+		})
 	}
 }
 

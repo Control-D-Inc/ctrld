@@ -170,3 +170,59 @@ func Test_allEndpointsFailedBoundsTheUpstreamName(t *testing.T) {
 		t.Fatalf("the all-endpoints line holds the operator key: %q", reported)
 	}
 }
+
+// Test_upstreamOutageOnTheQueryPathLogsOneStatePair drives 633 failed queries
+// through the real query path, the count of the customer upload that sized the
+// journal. The outage must give one down event, and the recovery one up event
+// with the length of the outage.
+func Test_upstreamOutageOnTheQueryPathLogsOneStatePair(t *testing.T) {
+	const failedQueries = 633
+	logs := captureDebugMainLog(t)
+	cfg := &ctrld.Config{}
+	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(false)
+	p := &prog{cfg: cfg, um: newUpstreamMonitor(cfg)}
+	// A new monitor holds back the failure counts for one second. The test
+	// clears the flag instead of waiting for that timer.
+	p.um.clearRecovered(upstreamOS)
+	p.um.after = func(time.Duration, func()) {}
+	t.Cleanup(func() { p.querySampler.closeExpired(time.Now().Add(querySampleWindow)) })
+
+	origOSUpstream := osUpstreamConfig
+	t.Cleanup(func() { osUpstreamConfig = origOSUpstream })
+	// Windows reports no port-unreachable error on a UDP socket, so each query
+	// waits for the full timeout there. A short timeout keeps 633 queries fast.
+	osUpstreamConfig = &ctrld.UpstreamConfig{
+		Name:     "dead resolver",
+		Type:     ctrld.ResolverTypeLegacy,
+		Endpoint: deadUpstreamEndpoint,
+		Timeout:  20,
+	}
+
+	ctx := context.Background()
+	for i := 0; i < failedQueries; i++ {
+		if rcode := askThroughProxy(t, p, ctx).Rcode; rcode != dns.RcodeServerFailure {
+			t.Fatalf("query %d: rcode %s, want SERVFAIL", i+1, dns.RcodeToString[rcode])
+		}
+	}
+	events := jsonLogEvents(t, logs, upstreamStateMessage)
+	if len(events) != 1 {
+		t.Fatalf("state events after %d failed queries: got %d, want 1", failedQueries, len(events))
+	}
+	wantField(t, events[0], "upstream", upstreamOS)
+	wantField(t, events[0], "state", "down")
+
+	startOSResolverStub(t)
+	if rcode := askThroughProxy(t, p, ctx).Rcode; rcode != dns.RcodeSuccess {
+		t.Fatalf("the answered query returned %s, want NOERROR", dns.RcodeToString[rcode])
+	}
+
+	events = jsonLogEvents(t, logs, upstreamStateMessage)
+	if len(events) != 2 {
+		t.Fatalf("state events after the recovery: got %d, want 2", len(events))
+	}
+	wantField(t, events[1], "upstream", upstreamOS)
+	wantField(t, events[1], "state", "up")
+	if _, carried := events[1]["down_for_ms"].(float64); !carried {
+		t.Fatalf("the up event carries no down_for_ms: %v", events[1])
+	}
+}

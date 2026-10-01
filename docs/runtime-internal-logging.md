@@ -32,7 +32,7 @@ Rotation is by size. A write that crosses the size limit rotates the file first.
 
 Each stream also keeps a memory buffer: 5 MB for the debug stream and 1 MB for the journal. These buffers serve `ctrld log tail` and the fallback path when a file cannot open. The files hold the history.
 
-A restart deletes the memory buffers and keeps the files. The new process appends a header line, which marks the restart point inside each file.
+A restart deletes the memory buffers and keeps the files. The new process appends a header line, which marks the restart point inside each file. When the header would make a file larger than its size limit, ctrld rotates the file first, and the header starts the new file. If the file cannot move, the header goes to the end of the current file. After an open error, ctrld opens the file again and appends the header with no rotation, so that file can pass its limit by one header.
 
 ## Header and rotation events
 
@@ -82,6 +82,8 @@ Two keys in the `[service]` section size the debug stream:
 - The key `log_max_backups` sets the number of backup files. The default is 4 on a desktop and 1 on a router. The value 0 keeps no backup file.
 
 Both keys also apply to the `log_path` file, which rotates the same way. The journal budget is fixed per platform.
+
+A change to the keys takes effect with no restart. This includes the first start, when the keys come from the Control D API, and a managed configuration refresh. When the backup count decreases, ctrld deletes the extra backups of `ctrld.log`. ctrld does not delete backups of the `log_path` file, because that directory can hold files of other programs.
 
 ## Uploads
 

@@ -116,17 +116,34 @@ func buildNetworkSnapshot(in snapshotInputs) networkSnapshot {
 	var routeAddresses []netip.Prefix
 	if in.State != nil {
 		meta := interfaceMetaWithClass(in.Meta)
-		routeMeta = meta(in.State.DefaultRouteInterface)
-		routeAddresses = in.State.InterfaceIPs[in.State.DefaultRouteInterface]
 		snapshot.HaveV4, snapshot.HaveV6 = in.State.HaveV4, in.State.HaveV6
 		snapshot.Interfaces, snapshot.InterfacesOmitted = snapshotInterfaces(in.State, meta)
-		if snapshot.DefaultRouteV4 == "" {
+		// Only a platform that reads no route table takes the route of the
+		// network monitor. On macOS an empty v4 route is a fact, and the
+		// monitor can still hold the interface of the last network.
+		if in.RouteV4.Interface == "" && in.RouteV6.Interface == "" {
 			snapshot.DefaultRouteV4 = defaultRouteV4Interface(in.State)
 		}
+		linkInterface := snapshotLinkInterface(in)
+		routeMeta = meta(linkInterface)
+		routeAddresses = in.State.InterfaceIPs[linkInterface]
 	}
 	snapshot.LinkType = linkTypeFor(routeMeta.HardwarePort, routeMeta.Class)
 	snapshot.Tethered = tetheredNetwork(in.RouteV4.Gateway, routeMeta.HardwarePort, routeAddresses)
 	return snapshot
+}
+
+// snapshotLinkInterface names the interface that the link fields describe.
+// The route table wins over the network monitor: during a switch the monitor
+// can still hold the old interface, and one record must not mix the routes of
+// one moment with the link type of another. It must run with a state.
+func snapshotLinkInterface(in snapshotInputs) string {
+	for _, name := range []string{in.RouteV4.Interface, in.RouteV6.Interface} {
+		if name != "" {
+			return name
+		}
+	}
+	return in.State.DefaultRouteInterface
 }
 
 // interfaceMetaWithClass fills the class that the platform metadata leaves

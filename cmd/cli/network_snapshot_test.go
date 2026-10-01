@@ -558,3 +558,40 @@ func sortedKeys(object map[string]any) []string {
 	slices.Sort(keys)
 	return keys
 }
+
+// Test_buildNetworkSnapshot_linkFieldsFollowTheRouteTable covers a network
+// switch. The network monitor still holds the old Ethernet interface, while the
+// route table already selects Wi-Fi. The link fields must describe the
+// interface of the routes in the same record.
+func Test_buildNetworkSnapshot_linkFieldsFollowTheRouteTable(t *testing.T) {
+	meta := snapshotTestMeta(map[string]interfaceMeta{
+		"en0": {Class: "hardware", HardwarePort: "Ethernet"},
+		"en1": {Class: "hardware", HardwarePort: "Wi-Fi"},
+	})
+	for _, tt := range []struct {
+		name    string
+		routeV4 defaultRoute
+		routeV6 defaultRoute
+	}{
+		{name: "dual_stack", routeV4: defaultRoute{Interface: "en1"}, routeV6: defaultRoute{Interface: "en1"}},
+		{name: "v6_only", routeV6: defaultRoute{Interface: "en1"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := snapshotTestState("en0",
+				snapshotTestInterface{"en0", true, []string{"192.0.2.10/24"}},
+				snapshotTestInterface{"en1", true, []string{"172.20.10.2/28"}})
+
+			snapshot := buildNetworkSnapshot(snapshotInputs{State: state, RouteV4: tt.routeV4, RouteV6: tt.routeV6, Meta: meta})
+
+			if snapshot.LinkType != "wifi" {
+				t.Errorf("link_type = %q, want %q for the interface of the route table", snapshot.LinkType, "wifi")
+			}
+			if !snapshot.Tethered {
+				t.Error("tethered = false, want true for the hotspot address of the route interface")
+			}
+			if snapshot.DefaultRouteV4 != tt.routeV4.Interface {
+				t.Errorf("default_route_v4 = %q, want %q from the route table", snapshot.DefaultRouteV4, tt.routeV4.Interface)
+			}
+		})
+	}
+}
