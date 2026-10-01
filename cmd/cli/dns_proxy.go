@@ -585,9 +585,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// may use.
 	if dnsIntercept && p.recoveryBypass.Load() && !p.internalDomainExplicitUpstreams(req.ufr.upstreams) {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "Recovery bypass active: forwarding to OS resolver")
-		resolver, err := ctrld.NewResolver(osUpstreamConfig)
+		// The bypass runs before rule handling, so an Active Directory name
+		// needs its LAN mark here too, or it races the domain controller
+		// against Control D's public resolver in plaintext.
+		bypassCtx := ctx
+		if p.isAdDomainLookup(req.msg) {
+			bypassCtx = ctrld.LanQueryCtx(ctx)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "active directory domain lookup, skipping public DNS")
+		}
+		resolver, err := newResolverFn(osUpstreamConfig)
 		if err == nil {
-			resolveCtx, cancel := osUpstreamConfig.Context(ctx)
+			resolveCtx, cancel := osUpstreamConfig.Context(bypassCtx)
 			defer cancel()
 			answer, _ := resolver.Resolve(resolveCtx, req.msg)
 			if answer != nil {
@@ -855,7 +863,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 
 	resolve1 := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "sending query to %s: %s", upstream, upstreamConfig.Name)
-		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
+		dnsResolver, err := newResolverFn(upstreamConfig)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
 			return nil, err
@@ -1082,6 +1090,12 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		// we dont want this to happen if leakOnUpstreamFailure is false
 		if upstreams[0] != upstreamOS {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "attempting query to OS resolver as a retry catch all")
+			// An Active Directory name that falls back from its explicit
+			// upstream still must not reach Control D's public resolver.
+			if p.isAdDomainLookup(req.msg) {
+				ctx = ctrld.LanQueryCtx(ctx)
+				ctrld.Log(ctx, mainLog.Load().Debug(), "active directory domain lookup, skipping public DNS")
+			}
 			answer := resolve(upstreamOS, osUpstreamConfig, req.msg)
 			if answer != nil {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query successful")
@@ -2801,5 +2815,11 @@ func ValidateDefaultLocalIPsFromDelta(newState *netmon.State) {
 // Active Directory domain and goes to the OS resolver alone. Such a query is a
 // LAN lookup; osResolver must not race it against Control D's public resolver.
 func (p *prog) isAdOSResolverLookup(upstreams []string, msg *dns.Msg) bool {
-	return len(msg.Question) > 0 && len(upstreams) == 1 && upstreams[0] == upstreamOS && p.isAdDomainQuery(msg)
+	return len(upstreams) == 1 && upstreams[0] == upstreamOS && p.isAdDomainLookup(msg)
+}
+
+// isAdDomainLookup reports whether msg asks for a name under the machine's
+// Active Directory domain. A public answer for such a name is never correct.
+func (p *prog) isAdDomainLookup(msg *dns.Msg) bool {
+	return len(msg.Question) > 0 && p.isAdDomainQuery(msg)
 }

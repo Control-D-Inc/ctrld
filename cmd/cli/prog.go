@@ -1439,6 +1439,7 @@ var (
 	ensureInterceptDNSTargetFn                  = (*prog).ensureInterceptDNSTarget
 	removeInterceptDNSTargetFn                  = (*prog).removeInterceptDNSTarget
 	initializeOsResolverWithSystemNameserversFn = ctrld.InitializeOsResolverWithSystemNameserversReason
+	newResolverFn                               = ctrld.NewResolver
 	setDnsForRunningIfaceFn                     = (*prog).setDnsForRunningIface
 	resetDNSFn                                  = (*prog).resetDNS
 	// refuseFallbackFatal reports a startup failure the interface-DNS fallback
