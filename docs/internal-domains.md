@@ -102,7 +102,10 @@ exists for a source is never overwritten. From highest precedence to lowest:
    (DC hostnames, DC-locator SRV names that carry the machine name, WPAD) also
    went to 76.76.2.0 in plaintext; when both failed, the public NXDOMAIN could
    be the answer returned. An explicit-resolver rule for the AD domain is
-   unchanged.
+   unchanged. The same LAN mark applies wherever an AD name reaches the OS
+   resolver outside rule handling: the DNS-intercept recovery bypass, and the
+   OS-resolver retry after an explicit upstream fails with
+   `leak_on_upstream_failure` enabled.
 
 **VPN DNS auto-detection** is evaluated inside `proxy()` in DNS-intercept mode,
 after policy matching and independently of it, so it needs its own rule:

@@ -765,7 +765,15 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// general DNS failure does not authorize disclosing private names to DHCP DNS.
 	if dnsIntercept && p.recoveryBypass.Load() && !internalDomainExplicitUpstreams(req.ufr.upstreams) {
 		ctrld.Log(ctx, p.Debug(), "Recovery bypass active: forwarding to OS resolver")
-		answer := p.queryUpstream(ctx, req, upstreamOS, osUpstreamConfig)
+		// The bypass runs before rule handling, so an Active Directory name
+		// needs its LAN mark here too, or it races the domain controller
+		// against Control D's public resolver in plaintext.
+		bypassCtx := ctx
+		if len(req.msg.Question) > 0 && inActiveDirectoryDomain(req.msg.Question[0].Name) {
+			bypassCtx = ctrld.LanQueryCtx(ctx)
+			ctrld.Log(ctx, p.Debug(), "Active Directory domain lookup, skipping public DNS")
+		}
+		answer := p.queryUpstream(bypassCtx, req, upstreamOS, osUpstreamConfig)
 		if answer != nil {
 			return &proxyResponse{answer: answer, upstream: osUpstreamConfig.Endpoint}
 		}
@@ -1201,7 +1209,7 @@ func (p *prog) queryUpstream(ctx context.Context, req *proxyRequest, upstream st
 	}
 
 	ctrld.Log(ctx, p.Debug(), "Sending query to %s: %s", upstream, upstreamConfig.Name)
-	dnsResolver, err := ctrld.NewResolver(ctx, upstreamConfig)
+	dnsResolver, err := newResolverFn(ctx, upstreamConfig)
 	if err != nil {
 		ctrld.Log(ctx, p.Error().Err(err), "Failed to create resolver")
 		return nil
@@ -1274,6 +1282,12 @@ func (p *prog) triggerRecovery(isOSFailure bool) {
 // Logs success or failure of the query attempt and returns a proxyResponse or nil based on query result.
 func (p *prog) tryOSResolver(ctx context.Context, req *proxyRequest) *proxyResponse {
 	ctrld.Log(ctx, p.Debug(), "Attempting query to OS resolver as a retry catch all")
+	// An Active Directory name that falls back from its explicit
+	// upstream still must not reach Control D's public resolver.
+	if len(req.msg.Question) > 0 && inActiveDirectoryDomain(req.msg.Question[0].Name) {
+		ctx = ctrld.LanQueryCtx(ctx)
+		ctrld.Log(ctx, p.Debug(), "Active Directory domain lookup, skipping public DNS")
+	}
 	answer := p.queryUpstream(ctx, req, upstreamOS, osUpstreamConfig)
 	if answer != nil {
 		ctrld.Log(ctx, p.Debug(), "OS resolver retry query successful")
