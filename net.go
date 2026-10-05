@@ -15,6 +15,14 @@ var (
 )
 
 // HasIPv6 reports whether the current network stack has IPv6 available.
+//
+// Keep the first call cheap and bounded. It runs on the DNS path (upstream
+// transport setup) behind a sync.Once, so every query waits for it, and under
+// Windows NRPT it can run after DNS already points at ctrld. v1.5.7 started a
+// netmon monitor here; its first interface state runs WinHTTP proxy discovery,
+// which needs DNS through this same ctrld, and a --config start stalled for
+// about 100 s (docs/known-issues.md). Network monitoring belongs to the one
+// monitor that reports through SetIPv6Available.
 func HasIPv6(ctx context.Context) bool {
 	hasIPv6Once.Do(func() {
 		logger := LoggerFromCtx(ctx)
