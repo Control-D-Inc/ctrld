@@ -403,6 +403,11 @@ func TestInternalDomainsEqual(t *testing.T) {
 }
 
 func TestInternalDomainExplicitUpstreams(t *testing.T) {
+	p := internalDomainUpstreamsProg(map[string]string{
+		"internal_0": internalDomainUpstreamFallback,
+		"internal_1": internalDomainUpstreamOnly,
+		"0":          "",
+	})
 	for _, tc := range []struct {
 		in   []string
 		want bool
@@ -415,7 +420,7 @@ func TestInternalDomainExplicitUpstreams(t *testing.T) {
 		{nil, false},
 		{[]string{}, false},
 	} {
-		if got := internalDomainExplicitUpstreams(tc.in); got != tc.want {
+		if got := p.internalDomainExplicitUpstreams(tc.in); got != tc.want {
 			t.Errorf("internalDomainExplicitUpstreams(%v) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
@@ -448,13 +453,13 @@ func TestInternalDomainsSummaryLogsCountsOnly(t *testing.T) {
 
 // An explicit-resolver Internal Domain must not be handed to VPN DNS split
 // routing: the administrator named those resolvers, and VPN suffixes are
-// auto-detected. When the named resolvers are unreachable the query fails
-// instead of reaching the OS resolver.
+// auto-detected. In "explicit resolver only" mode, when the named resolvers
+// are unreachable the query fails instead of reaching the OS resolver.
 func TestInternalDomainsBeatVPNSplitRoutingAndDoNotLeak(t *testing.T) {
 	cfg := internalDomainsTestConfig()
 	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(true)
 	applyInternalDomains(cfg, []controld.SplitDNS{
-		{Domain: "aws.example.com", Resolvers: []string{"127.0.0.1:1"}},
+		{Domain: "aws.example.com", Mode: controld.SplitDNSModeResolversOnly, Resolvers: []string{"127.0.0.1:1"}},
 	})
 
 	p := &prog{cfg: cfg}
@@ -473,7 +478,7 @@ func TestInternalDomainsBeatVPNSplitRoutingAndDoNotLeak(t *testing.T) {
 	}
 	ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, requestID())
 	ufr := p.upstreamFor(ctx, "0", cfg.Listener["0"], addr, "", "host.aws.example.com")
-	if !internalDomainExplicitUpstreams(ufr.upstreams) {
+	if !p.internalDomainExplicitUpstreams(ufr.upstreams) {
 		t.Fatalf("upstreams = %v, want only internal resolvers", ufr.upstreams)
 	}
 
@@ -571,9 +576,18 @@ func TestApplyInternalDomainsModeIsAuthoritative(t *testing.T) {
 			wantUpstreams: 1,
 		},
 		{
-			// A mode ctrld does not know is not guessed at.
-			name:          "unknown mode is dropped",
+			// A wire value this build does not know fails closed to the
+			// resolvers the administrator chose, never to the Control D upstream.
+			name:          "unknown mode with resolvers fails closed",
 			entry:         controld.SplitDNS{Domain: "a.example.com", Mode: "forward-someday", Resolvers: []string{"10.0.0.53"}},
+			wantTargets:   []string{"upstream.internal_0"},
+			wantRule:      true,
+			wantUpstreams: 2,
+		},
+		{
+			// With no resolvers there is nothing to fail closed to.
+			name:          "unknown mode without resolvers is dropped",
+			entry:         controld.SplitDNS{Domain: "a.example.com", Mode: "forward-someday"},
 			wantRule:      false,
 			wantUpstreams: 1,
 		},

@@ -9,8 +9,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
+	"github.com/miekg/dns"
 	"github.com/rs/zerolog"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -19,15 +22,25 @@ import (
 )
 
 // internalDomainUpstreamPrefix names the upstreams generated for organization
-// Internal Domains that select explicit resolvers. The prefix is what tells
-// proxy() that a rule is served only by configured resolvers, so it
-// must not collide with the numeric keys used for the Control D upstream.
+// Internal Domains that select explicit resolvers. It must not collide with
+// the numeric key used for the Control D upstream. The key only names the
+// upstream: what identifies it as generated, and in which mode, is
+// UpstreamConfig.InternalDomain, which no configuration file can set.
 const internalDomainUpstreamPrefix = "internal_"
 
+// Values of UpstreamConfig.InternalDomain on a generated upstream.
+const (
+	// internalDomainUpstreamFallback serves an Internal Domain in explicit
+	// resolver with network fallback mode.
+	internalDomainUpstreamFallback = "fallback"
+	// internalDomainUpstreamOnly serves an Internal Domain in explicit
+	// resolver only mode: its answer or failure is final.
+	internalDomainUpstreamOnly = "only"
+)
+
 // internalDomainUpstreamName is the Name given to every generated Internal
-// Domain upstream. Together with the key prefix and the legacy type it is what
-// distinguishes an upstream ctrld generated from one an endpoint custom
-// configuration happens to name the same way.
+// Domain upstream. It is only a display label: what identifies an upstream as
+// generated is UpstreamConfig.InternalDomain, which no configuration can set.
 const internalDomainUpstreamName = "Internal Domain resolver"
 
 // internalDomainsSummary counts the outcome of applying Internal Domains. It
@@ -37,6 +50,7 @@ type internalDomainsSummary struct {
 	domains   int // domains that produced rules
 	osMode    int // domains routed to the OS/default resolver
 	explicit  int // domains routed to configured resolvers
+	only      int // explicit domains with no network fallback
 	resolvers int // explicit resolver upstreams generated
 	skipped   int // entries dropped: unusable domain, no usable resolver, or duplicate
 	preempted int // domains already covered by a higher precedence rule
@@ -129,43 +143,83 @@ func internalDomainEndpoint(resolver string) (string, bool) {
 	return net.JoinHostPort(addr.String(), port), true
 }
 
-// internalDomainMode reports whether entry selects explicit resolvers, and
-// whether ctrld understands its mode at all.
+// internalDomainResolution is how an Internal Domain is resolved.
+type internalDomainResolution int
+
+const (
+	// internalDomainViaOS is the "network default" mode: the endpoint's
+	// OS/default resolver.
+	internalDomainViaOS internalDomainResolution = iota
+	// internalDomainViaResolvers is the configured resolvers first, then the
+	// active network and VPN resolvers. The default explicit selection.
+	internalDomainViaResolvers
+	// internalDomainViaResolversOnly is the configured resolvers and nothing
+	// else.
+	internalDomainViaResolversOnly
+)
+
+// internalDomainMode reports how entry is resolved, and whether ctrld
+// understands its mode at all.
 //
 // Mode is authoritative when the API sends it. "os" ignores any resolver
 // addresses the entry still carries, so switching a domain back to the OS
 // resolver cannot be undone by addresses a previous selection left behind;
-// "resolvers" stays explicit even when the list it points at turns out to be
-// unusable, rather than silently becoming OS resolution. An empty mode is a
-// deployment that predates the field, where the list is the only signal.
+// the explicit modes stay explicit even when the list they point at turns out
+// to be unusable, rather than silently becoming OS resolution. An empty mode
+// is a deployment that predates the field, where the list is the only signal,
+// and an explicit list gets the default explicit mode.
 //
 // An unrecognized mode is not guessed at: routing a private domain by guess is
-// the disclosure this feature exists to prevent.
-func internalDomainMode(entry controld.SplitDNS) (explicit, known bool) {
+// the disclosure this feature exists to prevent. It fails closed instead. With
+// resolvers it is resolved as explicit resolver only, through the resolvers the
+// administrator chose and nothing else, so a wire value this build does not
+// know, such as a renamed strict mode, cannot send the domain to the Control D
+// upstream or the network. Without resolvers there is nothing to fail closed
+// to, so the entry is reported as unknown and dropped.
+func internalDomainMode(entry controld.SplitDNS) (resolution internalDomainResolution, known bool) {
 	switch strings.ToLower(strings.TrimSpace(entry.Mode)) {
 	case controld.SplitDNSModeOS:
-		return false, true
+		return internalDomainViaOS, true
 	case controld.SplitDNSModeResolvers:
-		return true, true
+		return internalDomainViaResolvers, true
+	case controld.SplitDNSModeResolversOnly:
+		return internalDomainViaResolversOnly, true
 	case "":
-		return len(entry.Resolvers) > 0, true
+		if len(entry.Resolvers) > 0 {
+			return internalDomainViaResolvers, true
+		}
+		return internalDomainViaOS, true
 	default:
-		return false, false
+		if len(entry.Resolvers) > 0 {
+			return internalDomainViaResolversOnly, true
+		}
+		return internalDomainViaOS, false
 	}
 }
 
-// internalDomainRouting returns the endpoints an entry routes to, or a reason
-// it cannot be used. No endpoints and no reason means OS resolution.
+// internalDomainModeRecognized reports whether mode is one this build knows,
+// as opposed to one internalDomainMode resolves by failing closed.
+func internalDomainModeRecognized(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", controld.SplitDNSModeOS, controld.SplitDNSModeResolvers, controld.SplitDNSModeResolversOnly:
+		return true
+	}
+	return false
+}
+
+// internalDomainRouting returns how an entry is resolved and the endpoints it
+// routes to, or a reason it cannot be used. No endpoints and no reason means
+// OS resolution.
 //
 // Generation and refresh comparison both go through here, so the two can never
 // disagree about what an entry means.
-func internalDomainRouting(entry controld.SplitDNS) (endpoints []string, reason string) {
-	explicit, known := internalDomainMode(entry)
+func internalDomainRouting(entry controld.SplitDNS) (resolution internalDomainResolution, endpoints []string, reason string) {
+	resolution, known := internalDomainMode(entry)
 	if !known {
-		return nil, "unknown_mode"
+		return resolution, nil, "unknown_mode"
 	}
-	if !explicit {
-		return nil, ""
+	if resolution == internalDomainViaOS {
+		return resolution, nil, ""
 	}
 	endpoints = make([]string, 0, len(entry.Resolvers))
 	for _, resolver := range entry.Resolvers {
@@ -178,9 +232,9 @@ func internalDomainRouting(entry controld.SplitDNS) (endpoints []string, reason 
 	// different one, so the entry is dropped and the domain keeps its normal
 	// path instead.
 	if len(endpoints) == 0 {
-		return nil, "no_usable_resolver"
+		return resolution, nil, "no_usable_resolver"
 	}
-	return endpoints, ""
+	return resolution, endpoints, ""
 }
 
 // internalDomainRuleExists reports whether the listener policy already routes
@@ -241,7 +295,8 @@ func orderInternalDomainsBySpecificity(entries []controld.SplitDNS) []controld.S
 // resolvers routes to the OS/default resolver by way of an empty upstream list,
 // the same representation Magic Folder excludes use. An entry with resolvers
 // gets one generated upstream per address, listed in configured order so the
-// later ones act as failover for the first.
+// later ones act as failover for the first. Those upstreams carry the mode in
+// UpstreamConfig.InternalDomain.
 //
 // cfg is rebuilt from the API response on every fetch, so this function is the
 // only writer of internal_* upstreams: a removed domain leaves nothing behind.
@@ -271,11 +326,14 @@ func applyInternalDomains(cfg *ctrld.Config, entries []controld.SplitDNS) intern
 		// written: an entry that cannot be used, or a domain already covered by
 		// a higher precedence rule, must not leave a generated upstream behind
 		// with no rule referring to it.
-		endpoints, reason := internalDomainRouting(entry)
+		resolution, endpoints, reason := internalDomainRouting(entry)
 		if reason != "" {
 			mainLog.Load().Debug().Msgf("internal domains: skipping %q: %s", domain, reason)
 			summary.skipped++
 			continue
+		}
+		if !internalDomainModeRecognized(entry.Mode) {
+			mainLog.Load().Debug().Msgf("internal domains: %q has unrecognized mode %q; using its resolvers only", domain, entry.Mode)
 		}
 		seen[domain] = struct{}{}
 
@@ -297,14 +355,19 @@ func applyInternalDomains(cfg *ctrld.Config, entries []controld.SplitDNS) intern
 			continue
 		}
 
+		marker := internalDomainUpstreamFallback
+		if resolution == internalDomainViaResolversOnly {
+			marker = internalDomainUpstreamOnly
+		}
 		targets := make([]string, 0, len(endpoints))
 		for _, endpoint := range endpoints {
 			key := internalDomainUpstreamPrefix + strconv.Itoa(summary.resolvers)
 			cfg.Upstream[key] = &ctrld.UpstreamConfig{
-				Name:     internalDomainUpstreamName,
-				Type:     ctrld.ResolverTypeLegacy,
-				Endpoint: endpoint,
-				Timeout:  5000,
+				Name:           internalDomainUpstreamName,
+				Type:           ctrld.ResolverTypeLegacy,
+				Endpoint:       endpoint,
+				Timeout:        5000,
+				InternalDomain: marker,
 			}
 			targets = append(targets, upstreamPrefix+key)
 			summary.resolvers++
@@ -323,63 +386,118 @@ func applyInternalDomains(cfg *ctrld.Config, entries []controld.SplitDNS) intern
 			mainLog.Load().Debug().Msgf("internal domains: %q routed to the OS resolver", domain)
 		} else {
 			summary.explicit++
+			if resolution == internalDomainViaResolversOnly {
+				summary.only++
+			}
 			mainLog.Load().Debug().Msgf("internal domains: %q routed to %v", domain, targets)
 		}
 	}
 	return summary
 }
 
-// isGeneratedInternalDomainUpstream reports whether a cfg.Upstream entry is one
+// isGeneratedInternalDomainUpstream reports whether uc is an upstream
 // applyInternalDomains created.
 //
 // Generated Internal Domain resolvers are part of the managed Control D
 // configuration, not upstreams the endpoint operator chose, so eligibility
 // checks that ask "is this a plain single-upstream Control D install" must not
-// count them. The key prefix alone is not proof of that, because an endpoint
-// custom configuration replaces the generated config outright and could name an
-// upstream anything; the shape this function checks is only produced here.
-func isGeneratedInternalDomainUpstream(name string, uc *ctrld.UpstreamConfig) bool {
-	return uc != nil &&
-		strings.HasPrefix(name, internalDomainUpstreamPrefix) &&
-		uc.Type == ctrld.ResolverTypeLegacy &&
-		uc.Name == internalDomainUpstreamName
+// count them. Neither the key nor any other configurable field is proof of
+// that: a local config or an endpoint custom configuration can name an upstream
+// anything and give it any type and name. Only the InternalDomain marker is,
+// because ctrld sets it and no configuration file can.
+func isGeneratedInternalDomainUpstream(uc *ctrld.UpstreamConfig) bool {
+	return uc != nil && uc.InternalDomain != ""
 }
 
-// isInternalDomainUpstream reports whether an upstream reference was generated
-// for an Internal Domain with explicit resolvers.
-func isInternalDomainUpstream(upstream string) bool {
-	return strings.HasPrefix(upstream, upstreamPrefix+internalDomainUpstreamPrefix)
+// internalDomainUpstream returns the generated Internal Domain upstream an
+// "upstream.<key>" reference names, or nil if it names any other upstream.
+func (p *prog) internalDomainUpstream(upstream string) *ctrld.UpstreamConfig {
+	if p.cfg == nil {
+		return nil
+	}
+	uc := p.cfg.Upstream[strings.TrimPrefix(upstream, upstreamPrefix)]
+	if !isGeneratedInternalDomainUpstream(uc) {
+		return nil
+	}
+	return uc
+}
+
+// isInternalDomainUpstream reports whether an upstream reference names a
+// generated Internal Domain resolver, in either explicit mode.
+func (p *prog) isInternalDomainUpstream(upstream string) bool {
+	return p.internalDomainUpstream(upstream) != nil
 }
 
 // internalDomainExplicitUpstreams reports whether every upstream serving a
-// query is an configured Internal Domain resolver.
+// query is a configured Internal Domain resolver, in either explicit mode.
 //
-// proxy() uses this to keep such a query off the OS-resolver catch-all when the
-// configured resolvers are unreachable: the administrator selected those
-// resolvers and no other, so a private name must fail rather than be sent
-// somewhere it was not meant to go. It also keeps an unreachable internal
-// resolver from triggering the endpoint-wide recovery flow, which exists for
-// the loss of general DNS, not for one unavailable internal server.
-func internalDomainExplicitUpstreams(upstreams []string) bool {
+// proxy() uses this to try the configured resolvers before anything else, and
+// to keep such a query off the OS-resolver catch-all when they fail: that
+// catch-all may reach public nameservers, and a private name must not be sent
+// somewhere it was not meant to go. In fallback mode proxy() tries the
+// network resolvers instead (see internalDomainFallbackUpstreams). It also
+// keeps an unreachable internal resolver from triggering the endpoint-wide
+// recovery flow, which exists for the loss of general DNS, not for one
+// unavailable internal server.
+func (p *prog) internalDomainExplicitUpstreams(upstreams []string) bool {
 	if len(upstreams) == 0 {
 		return false
 	}
 	for _, upstream := range upstreams {
-		if !isInternalDomainUpstream(upstream) {
+		if !p.isInternalDomainUpstream(upstream) {
 			return false
 		}
 	}
 	return true
 }
 
+// internalDomainFallbackUpstreams reports whether upstreams are the configured
+// resolvers of an Internal Domain in explicit-with-network-fallback mode, whose
+// failure, SERVFAIL or NXDOMAIN hands the query to the active network and VPN
+// resolvers.
+func (p *prog) internalDomainFallbackUpstreams(upstreams []string) bool {
+	if len(upstreams) == 0 {
+		return false
+	}
+	for _, upstream := range upstreams {
+		uc := p.internalDomainUpstream(upstream)
+		if uc == nil || uc.InternalDomain != internalDomainUpstreamFallback {
+			return false
+		}
+	}
+	return true
+}
+
+// internalDomainFallbackRcode reports whether a configured resolver's answer
+// sends a fallback-mode query on to the next resolver. SERVFAIL means the
+// resolver could not answer, and NXDOMAIN may only mean it does not know a
+// name the local network's resolver does. REFUSED and NOTIMP mean it will not
+// serve this endpoint, as an organization resolver with an access list answers
+// an endpoint off the organization network, which is closer to unreachable
+// than to an answer. Any other answer is final, including an empty NOERROR:
+// the name exists, it just has no record of that type.
+func internalDomainFallbackRcode(rcode int) bool {
+	switch rcode {
+	case dns.RcodeServerFailure, dns.RcodeNameError, dns.RcodeRefused, dns.RcodeNotImplemented:
+		return true
+	}
+	return false
+}
+
 // internalDomainsEqual reports whether two Internal Domains lists would produce
 // the same routing. Domains are compared in canonical form and independently of
 // the order the API returned them, so an unchanged list does not trigger a
 // reload on every refresh. Resolver order is significant: it is the order the
-// administrator chose, and it decides which resolver is tried first.
+// administrator chose, and it decides which resolver is tried first. The mode
+// is significant too, including a switch between the two explicit modes.
 func internalDomainsEqual(a, b []controld.SplitDNS) bool {
-	canonical := func(entries []controld.SplitDNS) []controld.SplitDNS {
-		out := make([]controld.SplitDNS, 0, len(entries))
+	type route struct {
+		domain     string
+		resolution internalDomainResolution
+		endpoints  []string
+	}
+	canonical := func(entries []controld.SplitDNS) []route {
+		out := make([]route, 0, len(entries))
 		for _, entry := range entries {
 			domain := normalizeInternalDomain(entry.Domain)
 			if domain == "" {
@@ -387,13 +505,13 @@ func internalDomainsEqual(a, b []controld.SplitDNS) bool {
 			}
 			// Entries that cannot be used route nothing, so they cannot make
 			// an otherwise unchanged list look changed.
-			endpoints, reason := internalDomainRouting(entry)
+			resolution, endpoints, reason := internalDomainRouting(entry)
 			if reason != "" {
 				continue
 			}
-			out = append(out, controld.SplitDNS{Domain: domain, Resolvers: endpoints})
+			out = append(out, route{domain: domain, resolution: resolution, endpoints: endpoints})
 		}
-		sort.Slice(out, func(i, j int) bool { return out[i].Domain < out[j].Domain })
+		sort.Slice(out, func(i, j int) bool { return out[i].domain < out[j].domain })
 		return out
 	}
 	x, y := canonical(a), canonical(b)
@@ -401,7 +519,7 @@ func internalDomainsEqual(a, b []controld.SplitDNS) bool {
 		return false
 	}
 	for i := range x {
-		if x[i].Domain != y[i].Domain || !slices.Equal(x[i].Resolvers, y[i].Resolvers) {
+		if x[i].domain != y[i].domain || x[i].resolution != y[i].resolution || !slices.Equal(x[i].endpoints, y[i].endpoints) {
 			return false
 		}
 	}
@@ -429,12 +547,6 @@ func internalDomainFailureReason(err error) string {
 	return "error"
 }
 
-// isGeneratedInternalDomainUpstreamRef is isGeneratedInternalDomainUpstream for
-// call sites that hold an "upstream.<key>" reference rather than the bare key.
-func isGeneratedInternalDomainUpstreamRef(upstream string, uc *ctrld.UpstreamConfig) bool {
-	return isGeneratedInternalDomainUpstream(strings.TrimPrefix(upstream, upstreamPrefix), uc)
-}
-
 // logUpstreamProbeFailure reports a background probe failure against the
 // upstream that the reference upstream names.
 //
@@ -450,10 +562,199 @@ func logUpstreamProbeFailure(upstream string, uc *ctrld.UpstreamConfig, err erro
 	detail := append([]any{}, args...)
 	mainLog.Load().Debug().Err(err).Msgf(format+" for upstream: %q, endpoint: %q", append(detail, uc.Name, uc.Endpoint)...)
 	event := level().Str("upstream", journalUpstreamName(upstream))
-	if !isGeneratedInternalDomainUpstreamRef(upstream, uc) {
+	if !isGeneratedInternalDomainUpstream(uc) {
 		event.Err(err).Msgf(format, detail...)
 		return
 	}
 	event.Str("failure", internalDomainFailureReason(err)).
 		Msgf(format+" for an Internal Domain resolver", detail...)
+}
+
+// betterInternalDomainNegative returns whichever of two negative answers a
+// fallback-mode query should end with: NXDOMAIN over SERVFAIL, since a
+// resolver that says the name does not exist has answered, and otherwise the
+// first one seen.
+func betterInternalDomainNegative(current, candidate *dns.Msg) *dns.Msg {
+	switch {
+	case candidate == nil:
+		return current
+	case current == nil:
+		return candidate
+	case candidate.Rcode == dns.RcodeNameError && current.Rcode != dns.RcodeNameError:
+		return candidate
+	}
+	return current
+}
+
+// internalDomainVPNUpstream returns the upstream the network fallback uses for
+// a VPN DNS server. A seam: VPN DNS servers are dialed on port 53, which a test
+// fixture cannot listen on.
+var internalDomainVPNUpstream = func(m *vpnDNSManager, server string) *ctrld.UpstreamConfig {
+	return m.upstreamConfigFor(server)
+}
+
+// internalDomainOSResolve resolves msg through the OS resolver for the network
+// fallback. A seam, so a test sees the context the fallback passes: that
+// context is what keeps the private name off public nameservers.
+var internalDomainOSResolve = func(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
+	resolver, err := ctrld.NewResolver(osUpstreamConfig)
+	if err != nil {
+		return nil, err
+	}
+	resolveCtx, cancel := osUpstreamConfig.Context(ctx)
+	defer cancel()
+	return resolver.Resolve(resolveCtx, msg)
+}
+
+// resolveInternalDomainOnNetwork is the network fallback of an Internal Domain
+// in explicit-with-network-fallback mode. proxy() runs it once the configured
+// resolvers have failed, or answered SERVFAIL or NXDOMAIN.
+//
+// It asks only resolvers that the endpoint's active network or VPN provides,
+// in this order: VPN DNS servers whose domains match the query, then VPN DNS
+// servers with no domains (both only in dns-intercept mode, where ctrld tracks
+// them), then the OS resolver's LAN nameservers. The OS resolver is asked as a
+// LAN-only query, so the private name never reaches a public nameserver, not
+// even one DHCP supplied, nor ctrld's own public fallback. With no LAN
+// nameserver the OS step sends nothing.
+//
+// The first NOERROR answer is returned as answer, including an empty one,
+// which is final. Otherwise negative is the best SERVFAIL or NXDOMAIN answer
+// seen. While Windows is serving retained VPN DNS state, a VPN transport
+// failure stops the fallback before the OS resolver, as it does for VPN split
+// routing.
+func (p *prog) resolveInternalDomainOnNetwork(ctx context.Context, msg *dns.Msg) (answer, negative *dns.Msg) {
+	domain := msg.Question[0].Name
+	resolve := func(ctx context.Context, uc *ctrld.UpstreamConfig) (*dns.Msg, error) {
+		resolver, err := ctrld.NewResolver(uc)
+		if err != nil {
+			return nil, err
+		}
+		resolveCtx, cancel := uc.Context(ctx)
+		defer cancel()
+		return resolver.Resolve(resolveCtx, msg)
+	}
+	// accept reports whether a network answer is final, and keeps a negative
+	// one for the end.
+	accept := func(source string, m *dns.Msg) bool {
+		if !sameQuestion(msg, m) {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain fallback: discarding answer from %s: question mismatch", source)
+			return false
+		}
+		if m.Rcode == dns.RcodeSuccess {
+			ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain fallback: %s answered %s", source, domain)
+			return true
+		}
+		ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain fallback: %s answered %s for %s",
+			source, dns.RcodeToString[m.Rcode], domain)
+		if internalDomainFallbackRcode(m.Rcode) {
+			negative = betterInternalDomainNegative(negative, m)
+		}
+		return false
+	}
+
+	if dnsIntercept && p.vpnDNS != nil {
+		var servers []string
+		for _, server := range slices.Concat(p.vpnDNS.UpstreamForDomain(domain), p.vpnDNS.DomainlessServers()) {
+			if !slices.Contains(servers, server) {
+				servers = append(servers, server)
+			}
+		}
+		var gotAnswer, gotTransportFailure bool
+		for _, server := range servers {
+			m, err := resolve(ctx, internalDomainVPNUpstream(p.vpnDNS, server))
+			if m == nil {
+				gotTransportFailure = true
+				ctrld.Log(ctx, mainLog.Load().Debug().Err(err), "internal domain fallback: VPN DNS server %s failed", server)
+				continue
+			}
+			gotAnswer = true
+			p.vpnDNS.VPNDNSReachable()
+			if accept("VPN DNS server "+server, m) {
+				return m, nil
+			}
+		}
+		if !gotAnswer && gotTransportFailure && p.vpnDNS.ShouldFailClosedAfterVPNDNSTransportFailure(domain, servers) {
+			return nil, negative
+		}
+	}
+
+	m, err := internalDomainOSResolve(ctrld.LanOnlyQueryCtx(ctx), msg)
+	if m == nil {
+		ctrld.Log(ctx, mainLog.Load().Debug().Err(err), "internal domain fallback: OS resolver LAN nameservers failed")
+		return nil, negative
+	}
+	if accept("OS resolver", m) {
+		return m, nil
+	}
+	return nil, negative
+}
+
+// internalDomainProbeInterval is how often, at most, a down fallback-mode
+// Internal Domain resolver is re-checked in the background.
+const internalDomainProbeInterval = 30 * time.Second
+
+// internalDomainProber re-checks down fallback-mode Internal Domain resolvers
+// in the background, and marks one up again when it answers.
+//
+// proxy() skips such a resolver while it is down, so that an endpoint away
+// from the organization network goes to the network fallback without waiting
+// on it. A generated resolver comes back up only by answering a query: it is
+// excluded from recovery, and the loop checker leaves down upstreams alone. So
+// without this re-check, a resolver that went down would stay skipped until
+// the next reload, even once the endpoint is back on the organization network.
+//
+// The zero value is ready to use.
+type internalDomainProber struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+
+	// now and start are seams, so a test controls the clock and runs the
+	// re-check itself. nil means time.Now and a new goroutine.
+	now   func() time.Time
+	start func(func())
+}
+
+// probe re-checks upstream in the background, at most once per
+// internalDomainProbeInterval, by sending it a copy of msg. The query goes to
+// the organization's own resolver, which it was meant for anyway. Any DNS
+// answer proves the resolver reachable, the same as on the query path, and
+// marks it up in um; a failure leaves it down until the next re-check.
+func (pr *internalDomainProber) probe(um *upstreamMonitor, upstream string, uc *ctrld.UpstreamConfig, msg *dns.Msg) {
+	now := time.Now
+	if pr.now != nil {
+		now = pr.now
+	}
+	pr.mu.Lock()
+	if last, ok := pr.last[upstream]; ok && now().Sub(last) < internalDomainProbeInterval {
+		pr.mu.Unlock()
+		return
+	}
+	if pr.last == nil {
+		pr.last = make(map[string]time.Time)
+	}
+	pr.last[upstream] = now()
+	pr.mu.Unlock()
+
+	query := msg.Copy()
+	run := func() {
+		var answer *dns.Msg
+		resolver, err := ctrld.NewResolver(uc)
+		if err == nil {
+			ctx, cancel := uc.Context(context.Background())
+			answer, err = resolver.Resolve(ctx, query)
+			cancel()
+		}
+		if answer == nil {
+			mainLog.Load().Debug().Err(err).Msgf("internal domains: %s is still down", upstream)
+			return
+		}
+		mainLog.Load().Debug().Msgf("internal domains: %s answered the re-check", upstream)
+		um.noteSuccess(upstream)
+	}
+	if pr.start != nil {
+		pr.start(run)
+		return
+	}
+	go run()
 }

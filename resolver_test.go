@@ -1092,3 +1092,77 @@ func TestInitializeOsResolverReportsTheUnspecifiedReason(t *testing.T) {
 	wantLogField(t, changes[0], "reason", "unspecified")
 	wantLogStrings(t, changes[0], "after", []string{"192.0.2.10"})
 }
+
+// A LAN-only query must reach the LAN nameservers and nothing else. A public
+// nameserver in the same pool, as DHCP hands out next to the router, is not
+// asked at all, so the name is never sent to it.
+func Test_osResolver_LanOnlyQuerySkipsPublicNameservers(t *testing.T) {
+	const lan, public = "10.0.0.53:53", "192.0.2.53:53"
+	resolver := newResolverWithNameserver([]string{lan, public, controldPublicDnsWithPort})
+
+	var mu sync.Mutex
+	var asked []string
+	resolver.exchangeDNS = func(_ context.Context, msg *dns.Msg, server string, _ net.IP) (*dns.Msg, time.Duration, error) {
+		mu.Lock()
+		asked = append(asked, server)
+		mu.Unlock()
+		answer := new(dns.Msg)
+		answer.SetRcode(msg, dns.RcodeNameError)
+		return answer, time.Millisecond, nil
+	}
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("host.corp.example.", dns.TypeA)
+	answer, err := resolver.Resolve(LanOnlyQueryCtx(context.Background()), msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer.Rcode != dns.RcodeNameError {
+		t.Errorf("rcode = %s, want the LAN nameserver's NXDOMAIN", dns.RcodeToString[answer.Rcode])
+	}
+	if len(asked) != 1 || asked[0] != lan {
+		t.Fatalf("nameservers asked = %v, want only %s", asked, lan)
+	}
+}
+
+// With no LAN nameserver at all, a LAN-only query fails without sending
+// anything, rather than falling through to the public ones.
+func Test_osResolver_LanOnlyQueryWithoutLanNameserverSendsNothing(t *testing.T) {
+	resolver := newResolverWithNameserver([]string{"192.0.2.53:53", controldPublicDnsWithPort})
+	calls := 0
+	resolver.exchangeDNS = func(_ context.Context, msg *dns.Msg, _ string, _ net.IP) (*dns.Msg, time.Duration, error) {
+		calls++
+		answer := new(dns.Msg)
+		answer.SetReply(msg)
+		return answer, time.Millisecond, nil
+	}
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("host.corp.example.", dns.TypeA)
+	if _, err := resolver.Resolve(LanOnlyQueryCtx(context.Background()), msg); err == nil {
+		t.Fatal("a LAN-only query with no LAN nameserver returned an answer")
+	}
+	if calls != 0 {
+		t.Fatalf("exchange calls = %d, want none", calls)
+	}
+}
+
+// The hot cache is keyed separately for LAN-only queries: an answer an
+// ordinary query got from a public nameserver must not serve a LAN-only one.
+func Test_osResolver_LanOnlyQueryDoesNotShareOrdinaryHotCache(t *testing.T) {
+	resolver := newResolverWithNameserver([]string{"192.0.2.53:53"})
+	resolver.exchangeDNS = func(_ context.Context, msg *dns.Msg, _ string, _ net.IP) (*dns.Msg, time.Duration, error) {
+		answer := new(dns.Msg)
+		answer.SetReply(msg)
+		return answer, time.Millisecond, nil
+	}
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("host.corp.example.", dns.TypeA)
+	if _, err := resolver.Resolve(context.Background(), msg); err != nil {
+		t.Fatalf("ordinary query: %v", err)
+	}
+	if _, err := resolver.Resolve(LanOnlyQueryCtx(context.Background()), msg); err == nil {
+		t.Fatal("a LAN-only query was served the ordinary query's public answer from the hot cache")
+	}
+}

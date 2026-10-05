@@ -107,10 +107,11 @@ func Test_queryHealthKeepsInternalDomainFailuresOutOfTheGrade(t *testing.T) {
 	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(false)
 	cfg.Upstream = map[string]*ctrld.UpstreamConfig{
 		internalDomainUpstreamPrefix + "1": {
-			Name:     "dead internal resolver",
-			Type:     ctrld.ResolverTypeLegacy,
-			Endpoint: deadUpstreamEndpoint,
-			Timeout:  500,
+			Name:           "dead internal resolver",
+			Type:           ctrld.ResolverTypeLegacy,
+			Endpoint:       deadUpstreamEndpoint,
+			Timeout:        500,
+			InternalDomain: internalDomainUpstreamOnly,
 		},
 	}
 	p := &prog{cfg: cfg, um: newUpstreamMonitor(cfg), health: newQueryHealth()}
@@ -140,7 +141,7 @@ func Test_queryHealthKeepsInternalDomainFailuresOutOfTheGrade(t *testing.T) {
 	p.um.markDown(internalUpstream, 3, "immediate")
 	p.um.mu.Unlock()
 
-	event, emit := p.health.evaluate(time.Now(), p.um.countDownExcept(isInternalDomainUpstream), false)
+	event, emit := p.health.evaluate(time.Now(), p.um.countDownExcept(p.isInternalDomainUpstream), false)
 	if !emit {
 		t.Fatal("the first evaluate did not emit")
 	}

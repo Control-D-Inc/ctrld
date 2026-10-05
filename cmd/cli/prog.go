@@ -140,6 +140,7 @@ type prog struct {
 	internalLogWriter         *logWriter
 	internalJournalWriter     *logWriter
 	querySampler              errorSampler
+	internalDomainProbes      internalDomainProber
 	lastNetworkState          atomic.Pointer[netmon.State]
 	internalLogSent           time.Time
 	runningIface              string
@@ -859,7 +860,7 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 	// gated on the API confirming the device is gone.
 	managedUpstreams := 0
 	for n := range cfg.Upstream {
-		if isGeneratedInternalDomainUpstream(n, cfg.Upstream[n]) {
+		if isGeneratedInternalDomainUpstream(cfg.Upstream[n]) {
 			continue
 		}
 		managedUpstreams++
@@ -1161,7 +1162,7 @@ func (p *prog) startNetworkJournal() func() {
 		close(stop)
 	}()
 	healthDone := p.health.startLoop(stop, func() (int, bool) {
-		return p.upstreamMonitorNow().countDownExcept(isInternalDomainUpstream), p.recoveryBypass.Load()
+		return p.upstreamMonitorNow().countDownExcept(p.isInternalDomainUpstream), p.recoveryBypass.Load()
 	})
 	var configDone <-chan struct{}
 	if p.dnsConfig != nil {

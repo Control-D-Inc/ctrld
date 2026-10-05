@@ -269,8 +269,13 @@ type UpstreamConfig struct {
 	Endpoint    string `mapstructure:"endpoint" toml:"endpoint,omitempty"`
 	BootstrapIP string `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
 	Domain      string `mapstructure:"-" toml:"-"`
-	IPStack     string `mapstructure:"ip_stack" toml:"ip_stack,omitempty" validate:"ipstack"`
-	Timeout     int    `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
+	// InternalDomain is set only by ctrld, on the upstreams it generates for
+	// organization Internal Domains, to the mode they serve. It is never read
+	// from or written to a configuration file, so an upstream a configuration
+	// defines is never mistaken for a generated one, whatever it is named.
+	InternalDomain string `mapstructure:"-" toml:"-"`
+	IPStack        string `mapstructure:"ip_stack" toml:"ip_stack,omitempty" validate:"ipstack"`
+	Timeout        int    `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
 	// The caller should not access this field directly.
 	// Use UpstreamSendClientInfo instead.
 	SendClientInfo *bool `mapstructure:"send_client_info" toml:"send_client_info,omitempty"`

@@ -112,6 +112,11 @@ func TestResolverConfigParsesSplitDNSMode(t *testing.T) {
           "domain": "office.example.com",
           "mode": "os",
           "resolvers": []
+        },
+        {
+          "domain": "vault.example.com",
+          "mode": "resolvers_only",
+          "resolvers": ["10.0.0.55"]
         }
       ]
     }
@@ -122,7 +127,7 @@ func TestResolverConfigParsesSplitDNSMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := resp.Body.Resolver.SplitDNS
-	if len(got) != 2 {
+	if len(got) != 3 {
 		t.Fatalf("split_dns = %+v", got)
 	}
 	if got[0].Domain != "corp.example.com" || got[0].Mode != SplitDNSModeResolvers {
@@ -136,6 +141,9 @@ func TestResolverConfigParsesSplitDNSMode(t *testing.T) {
 	}
 	if len(got[1].Resolvers) != 0 {
 		t.Errorf("[1].Resolvers = %v, want empty", got[1].Resolvers)
+	}
+	if got[2].Mode != SplitDNSModeResolversOnly || len(got[2].Resolvers) != 1 {
+		t.Errorf("[2] = %+v", got[2])
 	}
 }
 

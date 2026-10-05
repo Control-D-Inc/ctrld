@@ -139,9 +139,10 @@ func TestInternalDomainsExplicitResolverSurvivesRecoveryBypass(t *testing.T) {
 	}
 }
 
-// When the configured resolvers are unreachable the query must fail rather than
-// reach the OS resolver, and the failure must be observable on the wire as an
-// attempt against the configured address.
+// In "explicit resolver only" mode, when the configured resolvers are
+// unreachable the query must fail rather than reach the OS resolver, and the
+// failure must be observable on the wire as an attempt against the configured
+// address.
 func TestInternalDomainsUnreachableResolverDoesNotReachOSResolver(t *testing.T) {
 	osFixture := startDNSFixture(t)
 	useOSResolverFixture(t, osFixture)
@@ -157,7 +158,7 @@ func TestInternalDomainsUnreachableResolverDoesNotReachOSResolver(t *testing.T) 
 
 	cfg := internalDomainsTestConfig()
 	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(true)
-	applyInternalDomains(cfg, []controld.SplitDNS{{Domain: "corp.example", Resolvers: []string{dead}}})
+	applyInternalDomains(cfg, []controld.SplitDNS{{Domain: "corp.example", Mode: controld.SplitDNSModeResolversOnly, Resolvers: []string{dead}}})
 	p := newInternalDomainsProg(t, cfg)
 
 	addr, err := net.ResolveUDPAddr("udp", "192.168.0.1:0")
@@ -301,6 +302,10 @@ func TestInternalDomainsSetupKeepsResolverAddressesOutOfInfoLogs(t *testing.T) {
 // Domain upstream that endpoint is private, so only a classification may appear
 // at error level.
 func TestInternalDomainsResolverFailureLogsNoAddress(t *testing.T) {
+	// The default mode falls back to the network after the failure; keep that
+	// on loopback.
+	useOSResolverFixture(t, startDNSFixture(t))
+
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
