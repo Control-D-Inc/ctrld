@@ -27,6 +27,7 @@ var (
 	interceptPatchNetIfaceNameFn        = patchNetIfaceName
 	interceptCurrentStaticDNSFn         = readTargetStaticDNS
 	interceptNativeCLATDefaultServiceFn = nativeCLATDefaultService
+	interceptNativeIPv6OnlyServiceFn    = nativeIPv6OnlyDefaultService
 	interceptNativeStaticDNSFn          = readNativeTargetStaticDNS
 	interceptSaveStaticDNSSnapshotFn    = func(iface *net.Interface, dns []string, owned string) error {
 		return saveTargetStaticDNSSnapshot(savedStaticDnsSettingsFilePath(iface), dns, owned)
@@ -135,6 +136,13 @@ func (p *prog) persistInterceptDNSTargetStateLocked() error {
 // IPv4 DNS and on intercept shutdown. Networks that provide IPv4 DNS are
 // never modified.
 //
+// A failed DHCP option-6 read is not absence on its own. It admits a target
+// only with positive native evidence that the network has no IPv4: either
+// macOS's own CLAT on the primary service, or (before macOS has started a
+// CLAT) no IPv4 state at all with the device as the IPv6 primary. Without a
+// target there, macOS cannot emit the ipv4only.arpa lookup it needs to start
+// the CLAT, so the CLAT evidence alone can never arrive (issue #629).
+//
 // Callers pass a non-nil raw system discovery result to prove discovery ran;
 // an empty slice is a valid DNS-less result. The decision itself uses static
 // DNS plus DHCP option 6 from the default-route interface, so resolvers on a
@@ -187,6 +195,8 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), nativeTargetReadBudget)
 	defer cancel()
 	var nativeService nativeTargetService
+	nativeEvidence := ""
+	nativeServiceFn := interceptNativeCLATDefaultServiceFn
 	readStatic := interceptCurrentStaticDNSFn
 	if dhcpErr != nil {
 		// Resolve the exact primary UUID before any expanded mutation. A
@@ -196,6 +206,22 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 		nativeFallback = nativeErr == nil && nativeService.ID != "" && nativeService.Name != "" && nativeService.Device == drIfaceName && !hasIPv4DNS(routeDHCPDNS)
 		mainLog.Load().Debug().Err(nativeErr).Bool("native_clat_verified", nativeFallback).
 			Str("interface", drIfaceName).Msg("intercept DNS target: native fallback evidence")
+		if nativeFallback {
+			nativeEvidence = "clat"
+		} else {
+			// Before macOS starts its CLAT, an IPv6-only network without
+			// DHCPv4 has neither a lease to read nor a CLAT to prove. Its
+			// absence of IPv4 is the evidence instead (issue #629).
+			var v6Err error
+			nativeService, v6Err = interceptNativeIPv6OnlyServiceFn(ctx, drIfaceName)
+			nativeFallback = v6Err == nil && nativeService.ID != "" && nativeService.Name != "" && nativeService.Device == drIfaceName && !hasIPv4DNS(routeDHCPDNS)
+			mainLog.Load().Debug().Err(v6Err).Bool("native_ipv6_only_verified", nativeFallback).
+				Str("interface", drIfaceName).Msg("intercept DNS target: native fallback evidence")
+			if nativeFallback {
+				nativeEvidence = "ipv6_only"
+				nativeServiceFn = interceptNativeIPv6OnlyServiceFn
+			}
+		}
 	}
 	if nativeFallback {
 		iface.Name = nativeService.Name
@@ -218,7 +244,7 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 	snapshot := staticDNS
 	if nativeFallback {
 		device, routeErr := interceptDefaultRouteInterfaceFn()
-		check, serviceErr := interceptNativeCLATDefaultServiceFn(ctx, drIfaceName)
+		check, serviceErr := nativeServiceFn(ctx, drIfaceName)
 		if routeErr != nil || serviceErr != nil || device != drIfaceName || check != nativeService {
 			diagnostic.failed(decision, "native_recheck", errors.Join(routeErr, serviceErr))
 			return
@@ -318,6 +344,7 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 	}
 	journal(mainLog.Load().Warn()).Str("service", iface.Name).Str("target", target).
 		Bool("native_clat_fallback", nativeFallback).
+		Str("native_evidence", nativeEvidence).
 		Str("reason", "dns_less_network").
 		Msgf("intercept DNS target: service %q provides no usable IPv4 DNS; set %s so macOS can emit DNS queries (removed automatically when the network provides IPv4 DNS)", iface.Name, target)
 }

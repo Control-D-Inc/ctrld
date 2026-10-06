@@ -23,6 +23,9 @@ type interceptTargetHarness struct {
 	dhcpErr      error
 	nativeCLAT   bool
 	nativeErr    error
+	ipv6Only     bool
+	ipv6OnlyErr  error
+	ipv6Calls    int
 	saveErr      error
 	readErr      error
 	setErr       error
@@ -55,6 +58,7 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 	origReset := interceptResetDNSIgnoreUnusableIfaceFn
 	origDHCP := interceptDHCPNameserversForInterfaceFn
 	origNative := interceptNativeCLATDefaultServiceFn
+	origIPv6Only := interceptNativeIPv6OnlyServiceFn
 	origNativeStatic := interceptNativeStaticDNSFn
 	origSnapshot := interceptSaveStaticDNSSnapshotFn
 	origIntercept := dnsIntercept
@@ -70,6 +74,7 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 		interceptResetDNSIgnoreUnusableIfaceFn = origReset
 		interceptDHCPNameserversForInterfaceFn = origDHCP
 		interceptNativeCLATDefaultServiceFn = origNative
+		interceptNativeIPv6OnlyServiceFn = origIPv6Only
 		interceptNativeStaticDNSFn = origNativeStatic
 		interceptSaveStaticDNSSnapshotFn = origSnapshot
 		dnsIntercept = origIntercept
@@ -78,6 +83,13 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 	interceptNativeCLATDefaultServiceFn = func(_ context.Context, device string) (nativeTargetService, error) {
 		if !h.nativeCLAT || h.nativeErr != nil {
 			return nativeTargetService{}, h.nativeErr
+		}
+		return nativeTargetService{ID: nativeTargetTestServiceID, Name: h.serviceByDev[device], Device: device}, nil
+	}
+	interceptNativeIPv6OnlyServiceFn = func(_ context.Context, device string) (nativeTargetService, error) {
+		h.ipv6Calls++
+		if !h.ipv6Only || h.ipv6OnlyErr != nil {
+			return nativeTargetService{}, h.ipv6OnlyErr
 		}
 		return nativeTargetService{ID: nativeTargetTestServiceID, Name: h.serviceByDev[device], Device: device}, nil
 	}

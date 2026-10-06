@@ -323,3 +323,146 @@ func nativeCLATAddresses(addrs []net.Addr) bool {
 	}
 	return clat && ipv6
 }
+
+// nativeStoreAbsent reports whether scutil printed its exact missing-key
+// response. Absence is evidence only in that exact form; a dictionary means
+// present, and anything else is unknown.
+func nativeStoreAbsent(out string) (bool, error) {
+	s := strings.TrimSpace(out)
+	if s == "No such key" {
+		return true, nil
+	}
+	if strings.HasPrefix(s, "<dictionary> {") {
+		return false, nil
+	}
+	return false, errors.New("unknown native store response")
+}
+
+func (r nativeTargetReader) absent(ctx context.Context, key string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	out, err := r.run(ctx, "show "+key+"\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return false, err
+	}
+	return nativeStoreAbsent(string(out))
+}
+
+// parseNativeIPv6Global reads only State:/Network/Global/IPv6. Unknown,
+// nested or duplicate fields fail closed, like the IPv4 reader.
+func parseNativeIPv6Global(out string) (id, device string, err error) {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 || lines[0] != "<dictionary> {" || lines[len(lines)-1] != "}" {
+		return "", "", errors.New("invalid native IPv6 dictionary")
+	}
+	seen := make(map[string]bool)
+	for _, line := range lines[1 : len(lines)-1] {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), " : ")
+		if !ok || strings.HasSuffix(value, "{") {
+			return "", "", errors.New("invalid native IPv6 field")
+		}
+		if seen[key] {
+			return "", "", errors.New("duplicate native IPv6 field")
+		}
+		seen[key] = true
+		switch key {
+		case "PrimaryService":
+			if !nativeServiceID.MatchString(value) {
+				return "", "", errors.New("invalid service ID")
+			}
+			id = value
+		case "PrimaryInterface":
+			if value == "" || strings.ContainsAny(value, " 	\r\n{}") {
+				return "", "", errors.New("invalid interface")
+			}
+			device = value
+		case "Router":
+			if ip := net.ParseIP(value); ip == nil || ip.To4() != nil {
+				return "", "", errors.New("invalid IPv6 router")
+			}
+		default:
+			return "", "", errors.New("unknown native IPv6 field")
+		}
+	}
+	if id == "" || device == "" {
+		return "", "", errors.New("incomplete native IPv6 dictionary")
+	}
+	return id, device, nil
+}
+
+// nativeIPv6OnlyAddresses requires routable IPv6 and no IPv4 address at all.
+func nativeIPv6OnlyAddresses(addrs []net.Addr) bool {
+	ipv6 := false
+	for _, addr := range addrs {
+		ip, _, err := net.ParseCIDR(addr.String())
+		if err != nil || ip.To4() != nil {
+			return false
+		}
+		if ip.IsGlobalUnicast() {
+			ipv6 = true
+		}
+	}
+	return ipv6
+}
+
+// ipv6OnlyService returns the primary service of a network that gives the
+// device no IPv4 at all: configd publishes no global or per-service IPv4
+// state, the IPv6 primary is this device, and the interface holds only IPv6.
+// Before macOS starts its CLAT, such a network has no DHCPv4 lease to read
+// and no CLAT to prove, yet it is just as DNS-less (issue #629). Unknown or
+// changing state is never absence evidence; the caller rechecks the tuple.
+func (r nativeTargetReader) ipv6OnlyService(ctx context.Context, device string) (nativeTargetService, error) {
+	unknown := nativeTargetService{}
+	if gone, err := r.absent(ctx, "State:/Network/Global/IPv4"); err != nil || !gone {
+		return unknown, err
+	}
+	out, err := r.run(ctx, "show State:/Network/Global/IPv6\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return unknown, err
+	}
+	id, primary, err := parseNativeIPv6Global(string(out))
+	if err != nil || primary != device {
+		return unknown, err
+	}
+	if gone, err := r.absent(ctx, "State:/Network/Service/"+id+"/IPv4"); err != nil || !gone {
+		return unknown, err
+	}
+	iface, err := r.interfaceByName(device)
+	if err != nil {
+		return unknown, err
+	}
+	if iface == nil || iface.Name != device || iface.Flags&net.FlagUp == 0 {
+		return unknown, nil
+	}
+	addrs, err := r.interfaceAddrs(iface)
+	if err != nil || !nativeIPv6OnlyAddresses(addrs) {
+		return unknown, err
+	}
+	out, err = r.run(ctx, "show Setup:/Network/Service/"+id+"\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return unknown, err
+	}
+	if _, err = parseNativeServiceName(string(out)); err != nil {
+		return unknown, err
+	}
+	out, err = r.run(ctx, "", "/usr/sbin/networksetup", "-listnetworkserviceorder")
+	if err != nil {
+		return unknown, err
+	}
+	name, err := targetNetworkServiceName(string(out), device)
+	if err != nil {
+		return unknown, err
+	}
+	if gone, err := r.absent(ctx, "State:/Network/Global/IPv4"); err != nil || !gone {
+		return unknown, errors.Join(err, errors.New("IPv4 appeared during IPv6-only discovery"))
+	}
+	out, err = r.run(ctx, "show State:/Network/Global/IPv6\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return unknown, err
+	}
+	if afterID, afterDevice, err := parseNativeIPv6Global(string(out)); err != nil || afterID != id || afterDevice != device {
+		return unknown, errors.Join(err, errors.New("default service changed during IPv6-only discovery"))
+	}
+	return nativeTargetService{ID: id, Name: name, Device: device}, nil
+}
