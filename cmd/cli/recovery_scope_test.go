@@ -323,7 +323,9 @@ func TestScopeHarnessRestoresRecoveryWait(t *testing.T) {
 
 func TestOSRecoveryCandidates(t *testing.T) {
 	remote := &ctrld.UpstreamConfig{Type: ctrld.ResolverTypeDOH}
-	internal := &ctrld.UpstreamConfig{Type: ctrld.ResolverTypeLegacy}
+	internal := &ctrld.UpstreamConfig{Type: ctrld.ResolverTypeLegacy, InternalDomain: internalDomainUpstreamFallback}
+	// A user-defined upstream that copies a generated key carries no marker.
+	lookalike := &ctrld.UpstreamConfig{Type: ctrld.ResolverTypeLegacy}
 	osConfig := &ctrld.UpstreamConfig{Type: ctrld.ResolverTypeOS}
 	for _, tc := range []struct {
 		name       string
@@ -331,9 +333,10 @@ func TestOSRecoveryCandidates(t *testing.T) {
 		want       map[string]*ctrld.UpstreamConfig
 	}{
 		{"configured", map[string]*ctrld.UpstreamConfig{"0": remote, "internal_0": internal, "1": osConfig, "2": nil}, map[string]*ctrld.UpstreamConfig{"upstream.0": remote}},
-		{"custom_policy_or_unused", map[string]*ctrld.UpstreamConfig{"0": remote, "unused": internal}, map[string]*ctrld.UpstreamConfig{"upstream.0": remote, "upstream.unused": internal}},
+		{"custom_policy_or_unused", map[string]*ctrld.UpstreamConfig{"0": remote, "unused": lookalike}, map[string]*ctrld.UpstreamConfig{"upstream.0": remote, "upstream.unused": lookalike}},
 		{"only_os", map[string]*ctrld.UpstreamConfig{"0": osConfig}, map[string]*ctrld.UpstreamConfig{upstreamOS: osUpstreamConfig}},
 		{"only_internal", map[string]*ctrld.UpstreamConfig{"internal_0": internal}, map[string]*ctrld.UpstreamConfig{upstreamOS: osUpstreamConfig}},
+		{"internal_lookalike", map[string]*ctrld.UpstreamConfig{"internal_0": lookalike}, map[string]*ctrld.UpstreamConfig{"upstream.internal_0": lookalike}},
 		{"empty", nil, map[string]*ctrld.UpstreamConfig{upstreamOS: osUpstreamConfig}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

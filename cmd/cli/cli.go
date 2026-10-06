@@ -1207,6 +1207,7 @@ func logInternalDomainsSummary(logger *ctrld.Logger, summary internalDomainsSumm
 	event.Int("domains", summary.domains).
 		Int("os_resolver", summary.osMode).
 		Int("explicit_resolver", summary.explicit).
+		Int("explicit_resolver_only", summary.only).
 		Int("resolvers", summary.resolvers).
 		Int("skipped", summary.skipped).
 		Int("preempted", summary.preempted).

@@ -148,6 +148,7 @@ type prog struct {
 	internalLogWriter         *logWriter
 	internalJournalWriter     *logWriter
 	querySampler              errorSampler
+	internalDomainProbes      internalDomainProber
 	lastNetworkState          atomic.Pointer[netmon.State]
 	logUpload                 logUploadGate
 	logSendMu                 sync.Mutex
@@ -982,8 +983,8 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 	// not independent user upstreams. Recompute eligibility on every setup/reload;
 	// uninstall still requires API confirmation that the device is gone.
 	managedUpstreams := 0
-	for n, uc := range cfg.Upstream {
-		if !isGeneratedInternalDomainUpstream(n, uc) {
+	for _, uc := range cfg.Upstream {
+		if !isGeneratedInternalDomainUpstream(uc) {
 			managedUpstreams++
 		}
 	}
@@ -1259,7 +1260,7 @@ func (p *prog) startNetworkJournal() func() {
 		close(stop)
 	}()
 	healthDone := p.health.startLoop(stop, func() (int, bool) {
-		return p.upstreamMonitorNow().countDownExcept(isInternalDomainUpstream), p.recoveryBypass.Load()
+		return p.upstreamMonitorNow().countDownExcept(p.isInternalDomainUpstream), p.recoveryBypass.Load()
 	})
 	var configDone <-chan struct{}
 	if p.dnsConfig != nil {

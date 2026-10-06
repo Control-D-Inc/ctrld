@@ -139,7 +139,11 @@ func TestOSRecoverySkipSurvivesDebugTruncation(t *testing.T) {
 	for range 40 {
 		mainLog.Load().Debug().Msg(strings.Repeat("debug filler", 20))
 	}
-	debugPart, journalPart := splitUpload(t, readLogReader(t, p, false), time.Now())
+	// Taken before the read renders the upload header: as an argument after
+	// readLogReader it would be evaluated later, and fail whenever a second
+	// boundary falls between the two.
+	start := time.Now()
+	debugPart, journalPart := splitUpload(t, readLogReader(t, p, false), start)
 	if strings.Contains(string(debugPart), recoverySkipMessage) {
 		t.Fatal("fixture did not truncate the skip from debug")
 	}

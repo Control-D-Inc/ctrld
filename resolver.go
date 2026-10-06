@@ -126,6 +126,29 @@ func PrivateResolverCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, privateResolverCtxKey{}, true)
 }
 
+// LanOnlyQueryCtxKey is the context.Context key that limits an OS resolver
+// query to its LAN nameservers.
+type LanOnlyQueryCtxKey struct{}
+
+// LanOnlyQueryCtx returns a context.Context with LanOnlyQueryCtxKey set.
+//
+// An OS resolver query made with it goes only to LAN-classified nameservers:
+// private, loopback, link-local and CGNAT addresses. Every public nameserver
+// is left out, the ones DHCP or a VPN supplied as well as ctrld's own public
+// fallback, and with no LAN nameserver the query fails without being sent. It
+// is for names that must not reach public DNS, such as an organization's
+// Internal Domains. LanQueryCtx, by contrast, only drops ctrld's own public
+// fallback.
+func LanOnlyQueryCtx(ctx context.Context) context.Context {
+	return context.WithValue(ctx, LanOnlyQueryCtxKey{}, true)
+}
+
+// isLanOnlyQuery reports whether ctx was made by LanOnlyQueryCtx.
+func isLanOnlyQuery(ctx context.Context) bool {
+	lanOnly, _ := ctx.Value(LanOnlyQueryCtxKey{}).(bool)
+	return lanOnly
+}
+
 // defaultNameservers is like nameservers with each element formed "ip:53".
 func defaultNameservers(ctx context.Context) []string {
 	ns := nameservers(ctx)
@@ -580,6 +603,12 @@ func (o *osResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	// the key so subnet-specific answers are neither coalesced nor hot-cached
 	// across different subnets (RFC 7871 §7.3).
 	key := fmt.Sprintf("%s:%d:%s", domain, qtype, dnscache.CanonicalECS(msg))
+	// A LAN-only query must not join, or be answered from the hot cache of, an
+	// ordinary query for the same name: that answer may have come from a public
+	// nameserver.
+	if isLanOnlyQuery(ctx) {
+		key += ":lan-only"
+	}
 
 	logger := LoggerFromCtx(ctx)
 	Log(ctx, logger.Debug(), "OS resolver query started: %s - %s", domain, dns.TypeToString[qtype])
@@ -640,6 +669,10 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	var nss []string
 	if p := o.lanServers.Load(); p != nil {
 		nss = append(nss, (*p)...)
+	}
+	// A LAN-only query is never sent to a public nameserver.
+	if isLanOnlyQuery(ctx) {
+		publicServers = nil
 	}
 	numServers := len(nss) + len(publicServers)
 

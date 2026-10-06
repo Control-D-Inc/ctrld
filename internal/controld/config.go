@@ -109,17 +109,30 @@ type ResolverConfig struct {
 }
 
 // Internal Domain resolution modes. Mode is what the administrator selected;
-// Resolvers is only meaningful under SplitDNSModeResolvers.
+// Resolvers is only meaningful under SplitDNSModeResolvers and
+// SplitDNSModeResolversOnly.
 const (
 	// SplitDNSModeOS follows the endpoint's own OS/default resolver.
 	SplitDNSModeOS = "os"
-	// SplitDNSModeResolvers uses the configured addresses and nothing else.
+	// SplitDNSModeResolvers resolves the domain through the addresses in
+	// Resolvers first. When none of them answers, or they answer SERVFAIL or
+	// NXDOMAIN, the query falls back to the resolvers of the endpoint's active
+	// network and VPN. This is the default explicit selection.
 	SplitDNSModeResolvers = "resolvers"
+	// SplitDNSModeResolversOnly resolves the domain through the addresses in
+	// Resolvers and nothing else: their answer, or their failure, is final.
+	SplitDNSModeResolversOnly = "resolvers_only"
 )
 
-// SplitDNS is one organization Internal Domain. Mode decides the routing;
-// Resolvers is read only under SplitDNSModeResolvers. An empty Mode predates
-// the field, so the caller infers the mode from Resolvers in that case.
+// SplitDNS is one organization Internal Domain: a domain suffix, the resolution
+// mode the organization administrator selected for it, and the resolver
+// addresses that mode may need.
+//
+// Mode decides the routing. Resolvers is read only under the explicit modes,
+// so addresses left behind by an earlier selection cannot resurrect themselves
+// once the administrator switches back to the OS resolver. An empty Mode is a
+// deployment that predates the field; the caller infers the mode from
+// Resolvers in that case.
 type SplitDNS struct {
 	Domain    string   `json:"domain"`
 	Mode      string   `json:"mode"`

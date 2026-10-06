@@ -15,7 +15,8 @@ The managed resolver configuration carries the list in `resolver.split_dns`:
   "resolver": {
     "split_dns": [
       { "domain": "corp.example.com", "mode": "resolvers", "resolvers": ["10.0.0.53", "10.0.0.54"] },
-      { "domain": "office.example.com", "mode": "os", "resolvers": [] }
+      { "domain": "office.example.com", "mode": "os", "resolvers": [] },
+      { "domain": "vault.example.com", "mode": "resolvers_only", "resolvers": ["10.0.0.55"] }
     ]
   }
 }
@@ -25,13 +26,15 @@ The managed resolver configuration carries the list in `resolver.split_dns`:
 
 | `mode` | Behavior |
 |---|---|
-| `os` | The query goes to `upstream.os`, the endpoint's current system resolver, and follows DHCP and VPN resolver changes. Any addresses still present in `resolvers` are **not** read, so switching a domain back to the OS resolver cannot be undone by leftovers from a previous selection. |
-| `resolvers` | The query goes only to the addresses in `resolvers`, tried in the order given. An empty or entirely unusable list does not become OS resolution: the entry is dropped instead. |
-| absent | A deployment that predates the field. The mode is inferred from `resolvers`, which is what the field encodes. |
-| anything else | Dropped. Routing a private domain by guess is the disclosure this feature exists to prevent. |
+| `os` | **Network default.** The query goes to `upstream.os`, the endpoint's current system resolver, and follows DHCP and VPN resolver changes. Any addresses still present in `resolvers` are **not** read, so switching a domain back to the OS resolver cannot be undone by leftovers from a previous selection. |
+| `resolvers` | **Explicit resolver with network fallback** (the default explicit selection). The query goes to the addresses in `resolvers` first, tried in the order given; if none of them resolves it, it falls back to the network resolvers (see [Network fallback](#network-fallback)). |
+| `resolvers_only` | **Explicit resolver only.** The query goes only to the addresses in `resolvers`, and their answer or failure is final. Not offered by the dashboard yet. |
+| absent | A deployment that predates the field. Treated as **explicit resolver with network fallback**, the same as `resolvers`. If the entry has no resolvers there is nothing explicit to try, so it uses the network default (`os`). |
+| anything else | Fails closed. With resolvers, treated as `resolvers_only`: only the resolvers the administrator chose, so a wire value this build does not know (a renamed strict mode, a future mode) never sends the domain to the Control D upstream or the network. Without resolvers there is nothing to fail closed to, so the entry is dropped. |
 
-A dropped entry leaves its domain on its normal path and is reported in the
-`skipped` count.
+In both explicit modes an empty or entirely unusable list does not become OS
+resolution: the entry is dropped instead. A dropped entry leaves its domain on
+its normal path and is reported in the `skipped` count.
 
 Addresses may be IPv4 or IPv6, bare or with a port; a bare address uses port 53.
 An address that is not a valid IP is dropped from the list.
@@ -48,8 +51,15 @@ and routing a private domain to the wrong place is worse than not routing it.
 ## Generated configuration
 
 Each accepted domain contributes two policy rules, `<domain>` and `*.<domain>`,
-which is how ctrld matches a suffix and all of its subdomains. Explicit mode
-also generates one upstream per resolver address, named `internal_<n>`:
+which is how ctrld matches a suffix and all of its subdomains. The explicit
+modes also generate one upstream per resolver address, named `internal_<n>`.
+Each one carries an internal marker recording its mode, which is what tells
+`proxy()` that an upstream is a generated Internal Domain resolver and whether
+the network fallback may run. The marker is never read from or written to a
+configuration file, so the key name is only a name: an upstream a local
+`ctrld.toml` or a custom configuration defines as `internal_foo`, or even as an
+exact copy of a generated one, is an ordinary upstream. The generated
+configuration looks like this:
 
 ```toml
 [upstream.internal_0]
@@ -110,27 +120,75 @@ exists for a source is never overwritten. From highest precedence to lowest:
 **VPN DNS auto-detection** is evaluated inside `proxy()` in DNS-intercept mode,
 after policy matching and independently of it, so it needs its own rule:
 
-- An **explicit-resolver** Internal Domain skips VPN routing. The administrator
-  named the resolvers for that suffix; VPN suffixes are discovered from the OS,
-  and letting a discovered route override a named one is the leak this feature
-  exists to prevent.
+- An **explicit-resolver** Internal Domain skips VPN routing ahead of its
+  configured resolvers. The administrator named the resolvers for that suffix;
+  VPN suffixes are discovered from the OS, and a discovered route must not
+  override a named one. In `resolvers` mode the VPN DNS servers are asked
+  afterwards, as part of the [network fallback](#network-fallback).
 - An **OS-resolver** Internal Domain does not skip it, and behaves exactly like
   a Magic Folder exclude. It asks for the endpoint's default resolution, which
   under intercept mode includes the VPN's own resolver.
 
 Every domain that is not an Internal Domain keeps its current VPN routing.
 
+## Network fallback
+
+In `resolvers` mode the configured resolvers are always asked first, even while
+the DNS-intercept recovery bypass is active and ahead of VPN DNS split routing.
+A configured resolver that times out, is unreachable, or answers SERVFAIL,
+NXDOMAIN, REFUSED or NOTIMP hands the query to the next configured resolver,
+and once all of them have, to the network resolvers:
+
+1. VPN DNS servers whose domains match the query, then VPN DNS servers that
+   advertise no domains (DNS-intercept mode only, where ctrld tracks them).
+2. The OS resolver's **LAN** nameservers: private, loopback, link-local and
+   CGNAT addresses the active network provides.
+
+A configured resolver that the upstream monitor has marked down (after 10
+seconds of continuous failures, or 50 failures) is skipped rather than waited
+on, so an endpoint away from the organization network reaches the fallback
+without paying the resolver's timeout, about 2 seconds per resolver, on every
+query. Queries in the first seconds off-site, before the resolver is marked
+down, still pay it. A generated resolver comes back up only by answering, so
+skipping one also re-checks it in the background, at most once every 30
+seconds, with the query that was skipped. Once it answers it is used again.
+`resolvers_only` mode never skips: with no fallback to go to, skipping would
+only turn the resolver's answer into SERVFAIL.
+
+The first NOERROR answer wins. NXDOMAIN triggers the fallback because the
+configured resolver may be reachable but not know a name that the local
+network's resolver does, for example on another subnet. REFUSED and NOTIMP
+trigger it because they mean the resolver will not serve this endpoint, which
+is how an organization resolver with an access list answers an endpoint off
+the organization network. An empty NOERROR (the name exists but has no record
+of the requested type) is final, and so is any other rcode.
+
+The OS step never sends the name to public DNS. It is a LAN-only query: a
+public nameserver in the OS pool is not asked at all, whether DHCP supplied it
+(a router handing out `192.168.1.1` plus `8.8.8.8`, a Wi-Fi handing out only
+public resolvers) or it is ctrld's own public fallback (`76.76.2.0`). With no
+LAN nameserver the OS step sends nothing. The general OS-resolver catch-all,
+which does reach public nameservers, is never used either. The VPN step uses
+the servers the VPN pushes as they are, including a public address a VPN
+pushes as its DNS server.
+
+While Windows is serving retained VPN DNS state, a VPN transport failure stops
+the fallback before the OS resolver, as it does for VPN split routing.
+
+When no resolver resolves the name, the query ends with the best negative
+answer it got (NXDOMAIN before any other), or SERVFAIL if it got none.
+
 ## Unreachable explicit resolvers
 
-When every resolver for an explicit-mode domain fails, the query returns
-SERVFAIL. It is deliberately not retried against the OS resolver, and it does
-not trigger the endpoint recovery flow:
+In `resolvers_only` mode, when every configured resolver fails the query returns
+SERVFAIL, and an NXDOMAIN or SERVFAIL answer from them is returned as it is.
+Either way the query is not retried anywhere else. Administrators who need the
+configured resolvers' answer enforced select this mode.
 
-- Sending a private name to a resolver the administrator did not select is the
-  leak this feature exists to prevent.
-- The recovery flow exists for the loss of general DNS. One unavailable internal
-  server is not that, and letting it start recovery would reset endpoint DNS
-  settings for every other domain.
+In neither explicit mode does a failure trigger the endpoint recovery flow. That
+flow exists for the loss of general DNS. One unavailable internal server is not
+that, and letting it start recovery would reset endpoint DNS settings for every
+other domain.
 
 OS-resolver mode has no such restriction: it is the system resolver, so it
 follows DHCP and VPN changes and shares their failure handling.
@@ -146,9 +204,10 @@ second upstream. Eligibility is recomputed on every setup and reload, so adding
 or removing Internal Domains, or gaining a genuinely custom second upstream,
 is reflected instead of latching on the first value seen.
 
-Discounting is by upstream shape, not by key name alone: an endpoint custom
-configuration replaces the generated config outright and could name an upstream
-`internal_0`, which must not buy eligibility. The uninstall itself remains
+Discounting is by the internal marker, not by key name or any other
+configurable field: an endpoint custom configuration replaces the generated
+config outright and could define an upstream `internal_0` that copies a
+generated one, which must not buy eligibility. The uninstall itself remains
 gated on the API confirming the device is gone.
 
 ## Refresh
@@ -181,6 +240,7 @@ the count. That covers every consumer, not just query handling:
   of recovery started for another reason.
 
 Info and warning logs report counts only — domains applied, OS-resolver and
-explicit-resolver totals, generated resolvers, skipped and preempted entries.
+explicit-resolver totals (with `explicit_resolver_only` for `resolvers_only`),
+generated resolvers, skipped and preempted entries.
 Domain names and resolver addresses are organization-private and appear only at
 debug level.

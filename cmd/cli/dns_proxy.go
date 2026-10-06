@@ -99,6 +99,12 @@ type proxyRequest struct {
 	staleAnswer     *dns.Msg
 	isLanOrPtrQuery bool
 	upstreamConfigs []*ctrld.UpstreamConfig
+	// internalFallback is set when the upstreams are the configured resolvers
+	// of an Internal Domain in explicit-with-network-fallback mode.
+	// internalNegative keeps the best SERVFAIL or NXDOMAIN answer those
+	// resolvers gave, so a name nobody resolves gets a real negative answer.
+	internalFallback bool
+	internalNegative *dns.Msg
 }
 
 // proxyResponse contains data for proxying a DNS response from upstream.
@@ -761,9 +767,16 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// DNS intercept recovery bypass: forward all queries to OS/DHCP resolver.
 	// This runs when upstreams are unreachable (e.g., captive portal network)
 	// and allows the network's DNS to handle authentication pages.
-	// Explicit Internal Domain resolvers remain exclusive during recovery:
-	// general DNS failure does not authorize disclosing private names to DHCP DNS.
-	if dnsIntercept && p.recoveryBypass.Load() && !internalDomainExplicitUpstreams(req.ufr.upstreams) {
+	//
+	// An Internal Domain with explicit resolvers does not take part. The bypass
+	// exists because general DNS is broken, which says nothing about the
+	// administrator's own resolvers: they may well be reachable, and they are
+	// to be tried first. Such a query continues to the normal flow, where it
+	// reaches its configured resolvers first. In "explicit resolver only" mode
+	// it fails if none answer; otherwise it falls back to the VPN resolvers and
+	// the network's LAN nameservers, never to the public nameservers the bypass
+	// may use.
+	if dnsIntercept && p.recoveryBypass.Load() && !p.internalDomainExplicitUpstreams(req.ufr.upstreams) {
 		ctrld.Log(ctx, p.Debug(), "Recovery bypass active: forwarding to OS resolver")
 		// The bypass runs before rule handling, so an Active Directory name
 		// needs its LAN mark here too, or it races the domain controller
@@ -796,9 +809,12 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	}
 
 	// VPN DNS split routing (only in dns-intercept mode). Explicit Internal
-	// Domain resolvers take precedence over auto-detected VPN routes. OS-mode
+	// Domain resolvers take precedence over auto-detected VPN routes: handing
+	// the query to a VPN DNS server first would override an explicit selection
+	// with a discovered one. In fallback mode the VPN DNS servers are asked
+	// later, once the configured resolvers have not resolved the name. OS-mode
 	// Internal Domains still follow the endpoint's VPN resolver.
-	if dnsIntercept && p.vpnDNS != nil && len(req.msg.Question) > 0 && !internalDomainExplicitUpstreams(upstreams) {
+	if dnsIntercept && p.vpnDNS != nil && len(req.msg.Question) > 0 && !p.internalDomainExplicitUpstreams(upstreams) {
 		domain := req.msg.Question[0].Name
 		if vpnServers := p.vpnDNS.UpstreamForDomain(domain); len(vpnServers) > 0 {
 			ctrld.Log(ctx, p.Debug(), "VPN DNS route matched for domain %s, using servers: %v", domain, vpnServers)
@@ -1005,12 +1021,21 @@ func (p *prog) serveStaleResponse(ctx context.Context, staleAnswer *dns.Msg) *pr
 
 // handleAllUpstreamsFailure handles the failure scenario when all upstream resolvers fail to respond or process the request.
 func (p *prog) handleAllUpstreamsFailure(ctx context.Context, req *proxyRequest, upstreams []string) *proxyResponse {
+	if req.internalFallback {
+		if res := p.internalDomainNetworkFallback(ctx, req, upstreams); res != nil {
+			return res
+		}
+	}
 	ctrld.Log(ctx, p.querySampler.event(sampleClassAllEndpointsFailed, ""), "All %v endpoints failed", journalUpstreamNames(upstreams))
 
-	// An unavailable internal resolver must not trigger endpoint-wide recovery
-	// or send the private name through the OS-resolver catch-all.
-	if internalDomainExplicitUpstreams(upstreams) {
-		ctrld.Log(ctx, p.Debug(), "Internal domain resolvers unreachable; not falling back")
+	// An Internal Domain with explicit resolvers never takes the OS-resolver
+	// catch-all below: it can reach public nameservers, ctrld's own fallback
+	// included, which no mode selects for a private name. Fallback mode has
+	// already tried the VPN resolvers and the network's LAN nameservers above.
+	// The recovery flow exists for the loss of general DNS, not for one
+	// unavailable internal server, so it is not started either.
+	if p.internalDomainExplicitUpstreams(upstreams) {
+		ctrld.Log(ctx, p.Debug(), "Internal domain resolvers unreachable; not using the OS resolver catch all")
 	} else if p.leakOnUpstreamFailure() {
 		ctrld.Log(ctx, p.Debug(), "Leak on upstream failure enabled")
 		if p.um.countHealthy(upstreams) == 0 {
@@ -1036,12 +1061,39 @@ func (p *prog) handleAllUpstreamsFailure(ctx context.Context, req *proxyRequest,
 	return &proxyResponse{answer: answer}
 }
 
+// internalDomainNetworkFallback runs the network fallback of an Internal Domain
+// in explicit-with-network-fallback mode, once its configured resolvers have
+// failed, or answered SERVFAIL or NXDOMAIN. It returns nil when nothing on the
+// network resolved the name and no resolver gave a negative answer either.
+func (p *prog) internalDomainNetworkFallback(ctx context.Context, req *proxyRequest, upstreams []string) *proxyResponse {
+	ctrld.Log(ctx, p.Debug(), "Internal domain resolvers did not resolve the query; trying network resolvers")
+	answer, negative := p.resolveInternalDomainOnNetwork(ctx, req.msg)
+	if answer != nil {
+		answer.Compress = true
+		if p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR {
+			p.updateCache(ctx, req, answer, upstreams[0])
+		}
+		hostname := ""
+		if req.ci != nil {
+			hostname = req.ci.Hostname
+		}
+		ctrld.Log(ctx, p.Info(), "REPLY: internal domain network fallback -> %s (%s): %s", req.ufr.srcAddr, hostname, dns.RcodeToString[answer.Rcode])
+		return &proxyResponse{answer: answer}
+	}
+	if negative = betterInternalDomainNegative(req.internalNegative, negative); negative != nil {
+		ctrld.Log(ctx, p.Debug(), "No resolver resolved the internal domain; returning %s", dns.RcodeToString[negative.Rcode])
+		negative.Compress = true
+		return &proxyResponse{answer: negative}
+	}
+	return nil
+}
+
 // countFailedClientQuery grades one client query that ended without an answer.
 // A query that only Internal Domain resolvers serve stays out of the grade: an
 // endpoint away from the organization network never reaches them, and that is
 // not an outage of the query path.
 func (p *prog) countFailedClientQuery(upstreams []string) {
-	if internalDomainExplicitUpstreams(upstreams) {
+	if p.internalDomainExplicitUpstreams(upstreams) {
 		return
 	}
 	p.health.countFailedQuery()
@@ -1063,6 +1115,16 @@ func (p *prog) shouldContinueWithNextUpstream(ctx context.Context, req *proxyReq
 
 	if len(req.upstreamConfigs) > 1 && slices.Contains(req.failoverRcodes, answer.Rcode) {
 		ctrld.Log(ctx, p.Debug(), "Failover rcode matched, process to next upstream")
+		return true
+	}
+
+	// An Internal Domain in explicit-with-network-fallback mode moves on from a
+	// configured resolver that answers SERVFAIL or NXDOMAIN, as it does from
+	// one that does not answer.
+	if req.internalFallback && internalDomainFallbackRcode(answer.Rcode) {
+		ctrld.Log(ctx, p.Debug(), "Internal domain resolver %s answered %s, trying next resolver",
+			upstream, dns.RcodeToString[answer.Rcode])
+		req.internalNegative = betterInternalDomainNegative(req.internalNegative, answer)
 		return true
 	}
 
@@ -1133,11 +1195,22 @@ func (p *prog) prepareSuccessResponse(ctx context.Context, req *proxyRequest, an
 func (p *prog) tryUpstreams(ctx context.Context, req *proxyRequest, upstreams []string, upstreamConfigs []*ctrld.UpstreamConfig) *proxyResponse {
 	serveStaleCache := p.cache != nil && p.cfg.Service.CacheServeStale && !req.ufr.zpaDNSEcho
 	req.upstreamConfigs = upstreamConfigs
+	req.internalFallback = p.internalDomainFallbackUpstreams(upstreams)
 
 	ctrld.Log(ctx, p.Debug(), "Trying %d upstreams", len(upstreamConfigs))
 
 	for n, upstreamConfig := range upstreamConfigs {
 		last := n == len(upstreamConfigs)-1
+		// A fallback-mode Internal Domain resolver that the monitor reports as
+		// down is not waited on: off the organization network every query
+		// would otherwise pay its timeout before the network fallback runs.
+		// Nothing else marks a generated resolver up again, so skipping it
+		// starts a background re-check that does.
+		if req.internalFallback && upstreamConfig != nil && p.um.isDown(upstreams[n]) {
+			ctrld.Log(ctx, p.Debug(), "Internal domain resolver %s is down, skipping it", upstreams[n])
+			p.internalDomainProbes.probe(p.um, upstreams[n], upstreamConfig, req.msg)
+			continue
+		}
 		ctrld.Log(ctx, p.Debug(), "Processing upstream %d/%d: %s", n+1, len(upstreamConfigs), upstreams[n])
 
 		if res := p.processUpstream(ctx, req, upstreams[n], upstreamConfig, serveStaleCache, last); res != nil {
@@ -1200,7 +1273,7 @@ func (p *prog) processUpstream(ctx context.Context, req *proxyRequest, upstream 
 
 // queryUpstream sends a DNS query to a specified upstream using its configuration and handles errors and retries.
 func (p *prog) queryUpstream(ctx context.Context, req *proxyRequest, upstream string, upstreamConfig *ctrld.UpstreamConfig) *dns.Msg {
-	if isInternalDomainUpstream(upstream) {
+	if isGeneratedInternalDomainUpstream(upstreamConfig) {
 		ctx = ctrld.PrivateResolverCtx(ctx)
 	}
 	if upstreamConfig.UpstreamSendClientInfo() && req.ci != nil {
@@ -1232,7 +1305,7 @@ func (p *prog) queryUpstream(ctx context.Context, req *proxyRequest, upstream st
 	// so the sampler sets the level of these lines.
 	// Transport errors contain the organization's private resolver address.
 	// Keep that detail at debug while retaining a visible failure classification.
-	if isInternalDomainUpstream(upstream) {
+	if isGeneratedInternalDomainUpstream(upstreamConfig) {
 		ctrld.Log(ctx, p.Debug().Err(err), "Failed to resolve query")
 		ctrld.Log(ctx, p.querySampler.event(sampleClassInternalDomain, upstream).Str("failure", internalDomainFailureReason(err)),
 			"Failed to resolve query using an Internal Domain resolver")
@@ -2949,7 +3022,7 @@ func (p *prog) buildRecoveryUpstreams(reason RecoveryReason) map[string]*ctrld.U
 	case RecoveryReasonOSFailure:
 		for k, uc := range p.cfg.Upstream {
 			name := upstreamPrefix + k
-			if uc != nil && uc.Type != ctrld.ResolverTypeOS && !isInternalDomainUpstream(name) {
+			if uc != nil && uc.Type != ctrld.ResolverTypeOS && !isGeneratedInternalDomainUpstream(uc) {
 				upstreams[name] = uc
 			}
 		}

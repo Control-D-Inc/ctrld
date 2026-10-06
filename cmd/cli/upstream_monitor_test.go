@@ -277,7 +277,12 @@ func Test_upstreamMonitorCountDownExcept(t *testing.T) {
 	if got := um.countDown(); got != 3 {
 		t.Fatalf("countDown = %d, want 3", got)
 	}
-	if got := um.countDownExcept(isInternalDomainUpstream); got != 1 {
+	p := internalDomainUpstreamsProg(map[string]string{
+		"0":                                "",
+		internalDomainUpstreamPrefix + "1": internalDomainUpstreamFallback,
+		internalDomainUpstreamPrefix + "2": internalDomainUpstreamOnly,
+	})
+	if got := um.countDownExcept(p.isInternalDomainUpstream); got != 1 {
 		t.Fatalf("countDownExcept(isInternalDomainUpstream) = %d, want 1", got)
 	}
 	if got := um.countDownExcept(nil); got != 3 {

@@ -140,9 +140,10 @@ func TestInternalDomainsExplicitResolverSurvivesRecoveryBypass(t *testing.T) {
 	}
 }
 
-// When the configured resolvers are unreachable the query must fail rather than
-// reach the OS resolver, and the failure must be observable on the wire as an
-// attempt against the configured address.
+// In "explicit resolver only" mode, when the configured resolvers are
+// unreachable the query must fail rather than reach the OS resolver, and the
+// failure must be observable on the wire as an attempt against the configured
+// address.
 func TestInternalDomainsUnreachableResolverDoesNotReachOSResolver(t *testing.T) {
 	osFixture := startDNSFixture(t)
 	useOSResolverFixture(t, osFixture)
@@ -158,7 +159,7 @@ func TestInternalDomainsUnreachableResolverDoesNotReachOSResolver(t *testing.T) 
 
 	cfg := internalDomainsTestConfig()
 	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(true)
-	applyInternalDomains(cfg, []controld.SplitDNS{{Domain: "corp.example", Resolvers: []string{dead}}})
+	applyInternalDomains(cfg, []controld.SplitDNS{{Domain: "corp.example", Mode: controld.SplitDNSModeResolversOnly, Resolvers: []string{dead}}})
 	p := newInternalDomainsProg(t, cfg)
 
 	addr, err := net.ResolveUDPAddr("udp", "192.168.0.1:0")
@@ -304,6 +305,10 @@ func TestInternalDomainsSetupKeepsResolverAddressesOutOfInfoLogs(t *testing.T) {
 // at error level.
 func TestInternalDomainsResolverFailureLogsNoAddress(t *testing.T) {
 	buf := captureInternalDomainsLogs(t)
+	// The default mode falls back to the network after the failure; keep that
+	// on loopback.
+	useOSResolverFixture(t, startDNSFixture(t))
+
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -344,9 +349,13 @@ func TestInternalDomainsResolverFailureLogsNoAddress(t *testing.T) {
 
 	// Master's transport-level diagnostic must stay at error for ordinary
 	// legacy upstreams; only generated Internal Domain queries opt into privacy.
+	// Generated upstreams are identified by their InternalDomain marker, not
+	// by name, so the control is an ordinary upstream to the same endpoint.
+	ordinary := &ctrld.UpstreamConfig{Name: "ordinary", Type: ctrld.ResolverTypeLegacy, Endpoint: dead, Timeout: 5000}
+	ordinary.Init(ctx)
 	before = len(buf.String())
 	p.queryUpstream(ctx, &proxyRequest{msg: newDnsMsgWithHostname("public.example.", dns.TypeA)},
-		"upstream.0", cfg.Upstream["internal_0"])
+		"upstream.0", ordinary)
 	ordinaryError := false
 	for _, line := range strings.Split(buf.String()[before:], "\n") {
 		if strings.Contains(line, `"level":"error"`) && strings.Contains(line, "Legacy request failed") && strings.Contains(line, dead) {
