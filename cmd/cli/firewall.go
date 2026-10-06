@@ -218,6 +218,17 @@ func (p *prog) syncAllowedDestinations() {
 	var entries []string
 	if rc != nil {
 		entries = rc.DestinationIPs
+	} else if al != nil && p.startedInAPIMaintenance.Load() {
+		// A maintenance fallback start holds no resolver config, and the
+		// organization's list is not persisted with the configuration on disk,
+		// so the exception set below is empty: raw-IP destinations the
+		// organization allowed stay blocked until the API answers and the
+		// recovery refresh re-applies the list. Failing closed is deliberate -
+		// the list is the organization's network topology, which is kept out of
+		// persisted state - so say so in the retained journal rather than leave
+		// the blocked destinations unexplained.
+		journal(p.Warn()).Str("reason", "api_maintenance").
+			Msg("Firewall: organization allowed destinations are not enforced until the Control D API answers; started on the configuration on disk during maintenance")
 	}
 	p.applyAllowedDestinations(al, entries)
 }

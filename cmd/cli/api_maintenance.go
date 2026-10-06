@@ -224,7 +224,7 @@ func persistManagedConfig(cfg *ctrld.Config, logger *ctrld.Logger) {
 		return
 	}
 	if err := recordManagedConfig(cdUID); err != nil {
-		logger.Warn().Err(err).Msg("could not record that this configuration came from the API")
+		logger.Warn().Err(err).Msg("Could not record that this configuration came from the API")
 	}
 }
 
@@ -246,6 +246,6 @@ func recordManagedConfigForStart(fetchedThisRun, wasManagedBeforeWrite bool) {
 	if err := recordManagedConfig(cdUID); err != nil {
 		// Not fatal: this run is fine. It only costs the next start its
 		// fallback if the API is in maintenance then.
-		mainLog.Load().Warn().Err(err).Msg("could not record that this configuration came from the API")
+		mainLog.Load().Warn().Err(err).Msg("Could not record that this configuration came from the API")
 	}
 }
