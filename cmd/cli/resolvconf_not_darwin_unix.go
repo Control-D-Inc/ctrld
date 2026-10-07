@@ -13,6 +13,9 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/dns"
 )
 
+// noopLogf is like logf but discards formatted log messages and arguments without any processing.
+var noopLogf = func(format string, args ...any) {}
+
 // setResolvConf sets the content of the resolv.conf file using the given nameservers list.
 func setResolvConf(iface *net.Interface, ns []netip.Addr) error {
 	r, err := newLoopbackOSConfigurator()

@@ -78,11 +78,6 @@ var logf = func(format string, args ...any) {
 	mainLog.Load().Debug().Msgf(format, args...)
 }
 
-// noopLogf is like logf but discards formatted log messages and arguments without any processing.
-//
-//lint:ignore U1000 use in newLoopbackOSConfigurator
-var noopLogf = func(format string, args ...any) {}
-
 var svcConfig = &service.Config{
 	Name:        ctrldServiceName,
 	DisplayName: "Control-D Helper Service",
@@ -142,7 +137,10 @@ type prog struct {
 	querySampler              errorSampler
 	internalDomainProbes      internalDomainProber
 	lastNetworkState          atomic.Pointer[netmon.State]
-	internalLogSent           time.Time
+	logUpload                 logUploadGate
+	logSendMu                 sync.Mutex
+	logSendStopped            bool
+	logSend                   *logSendServer
 	runningIface              string
 	requiredMultiNICsConfig   bool
 	adDomain                  string
@@ -982,6 +980,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			}
 			mainLog.Load().Debug().Msgf("control server started: %s", p.cs.addr)
 		}
+		p.startLogSendServer()
 	}
 	p.onStartedDone = make(chan struct{})
 	p.loop = make(map[string]bool)
@@ -1336,6 +1335,7 @@ func (p *prog) startOSState(f func()) bool {
 // resolver that is already gone. Safe to call multiple times.
 func (p *prog) restoreOSState() error {
 	p.restoreOnce.Do(func() {
+		p.stopLogSendServer()
 		p.osStateMu.Lock()
 		p.osStateRestored = true
 		p.osStateMu.Unlock()
@@ -2138,16 +2138,6 @@ func runLogServer(sockPath string) net.Conn {
 	return server
 }
 
-func errAddrInUse(err error) bool {
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return errors.Is(opErr.Err, syscall.EADDRINUSE) || errors.Is(opErr.Err, windowsEADDRINUSE)
-	}
-	return false
-}
-
-var _ = errAddrInUse
-
 // The unreachable winsock errnos (ENETUNREACH/EHOSTUNREACH) are matched via
 // ctrldnet.IsUnreachable, which owns their definitions.
 //
@@ -2155,7 +2145,6 @@ var _ = errAddrInUse
 var (
 	windowsECONNREFUSED = syscall.Errno(10061)
 	windowsEINVAL       = syscall.Errno(10022)
-	windowsEADDRINUSE   = syscall.Errno(10048)
 )
 
 // errUrlNetworkError reports whether a failed HTTP attempt is worth retrying.
