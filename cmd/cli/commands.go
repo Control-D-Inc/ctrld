@@ -466,7 +466,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			osArgsEarly = filterEmptyStrings(osArgsEarly)
 			interceptOnly := onlyInterceptFlags(osArgsEarly)
 			svcExists := serviceConfigFileExists()
-			mainLog.Load().Debug().Msgf("intercept upgrade check: args=%s interceptOnly=%v svcConfigExists=%v interceptMode=%q", redactedArgs(osArgsEarly), interceptOnly, svcExists, interceptMode)
+			mainLog.Load().Debug().Msg(interceptUpgradeCheckLine(osArgsEarly, interceptOnly, svcExists, interceptMode))
 			if interceptOnly && svcExists {
 				// An explicit "off" argument must override a previously persisted config
 				// value while the service clears that value on startup.

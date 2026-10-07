@@ -890,6 +890,14 @@ func redactedArgs(args []string) string {
 	return redactSecrets(fmt.Sprint(args), provisionSecrets()...)
 }
 
+// interceptUpgradeCheckLine is the debug line "ctrld start" logs before its
+// intercept upgrade check. It is built here, not inline, so a test can hold the
+// line itself, not only redactedArgs, to never carrying a provision secret.
+func interceptUpgradeCheckLine(args []string, interceptOnly, svcConfigExists bool, mode string) string {
+	return fmt.Sprintf("intercept upgrade check: args=%s interceptOnly=%v svcConfigExists=%v interceptMode=%q",
+		redactedArgs(args), interceptOnly, svcConfigExists, mode)
+}
+
 // uninstallInvalidCdUIDFn is a var so tests can observe the self-uninstall
 // without driving the OS service manager.
 var uninstallInvalidCdUIDFn = uninstallInvalidCdUID
