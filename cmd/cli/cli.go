@@ -882,6 +882,14 @@ func provisionSecrets() []string {
 	return []string{cdUID, cdOrg, uid, clientID}
 }
 
+// redactedArgs formats command-line arguments for a log line with the
+// provision secrets removed. "ctrld start --cd-org <code>" carries the code
+// in its arguments, and a code enrolls endpoints into the organization until
+// it expires or runs out.
+func redactedArgs(args []string) string {
+	return redactSecrets(fmt.Sprint(args), provisionSecrets()...)
+}
+
 // uninstallInvalidCdUIDFn is a var so tests can observe the self-uninstall
 // without driving the OS service manager.
 var uninstallInvalidCdUIDFn = uninstallInvalidCdUID
