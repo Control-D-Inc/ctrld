@@ -226,11 +226,30 @@ func InitLogCmd(rootCmd *cobra.Command) *cobra.Command {
 	logSendCmd := &cobra.Command{
 		Use:   "send",
 		Short: "Send runtime debug logs to ControlD",
+		Long:  "Send runtime debug logs to ControlD. On macOS, an administrator can enable service.allow_unprivileged_log_send and restart ctrld to allow standard users to send bounded diagnostics. --full still requires elevation.",
 		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if delegatedLogSendCLI() {
+				if full, _ := cmd.Flags().GetBool("full"); full {
+					return errors.New("log send --full requires administrator privileges")
+				}
+				return nil
+			}
 			checkHasElevatedPrivilege()
+			return nil
 		},
-		RunE: lc.SendLogs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// The standard-user macOS route must precede service.Status and the
+			// administrative socket dial: both depend on the calling user's
+			// launchd context. socketDir already ran when InitLogCmd built the
+			// command; for a standard user it falls back to the home directory
+			// without error, so it is harmless here.
+			if delegatedLogSendCLI() {
+				full, _ := cmd.Flags().GetBool("full")
+				return runDelegatedLogSend(cmd.Context(), full)
+			}
+			return lc.SendLogs(cmd, args)
+		},
 	}
 	logSendCmd.Flags().Bool("full", false, "Send every log file, not only the newest 10 MB of debug")
 

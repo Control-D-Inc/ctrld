@@ -105,6 +105,40 @@ The `[service]` section controls general behaviors.
     log_path = "log.txt"
 ```
 
+### allow_unprivileged_log_send
+
+macOS only. Default: `false`. An administrator can opt in using the service's
+root-owned configuration file:
+
+```toml
+[service]
+    allow_unprivileged_log_send = true
+```
+
+Restart the service as administrator after enabling. Standard users can then run
+`ctrld log send` without `sudo`. **Every local-user process can trigger a
+machine-wide diagnostic upload to Control D**, not just the interactive user.
+This grants upload permission, not permission to read logs or administer ctrld.
+`--full`, `log view`, `log tail`, and other privileged commands remain restricted.
+Other platforms retain their existing behavior.
+
+This requires Control D mode, an on-disk TOML configuration, and file-backed logs.
+The config, log files, rotated logs, and every parent directory must be root-owned,
+not group/world writable, and free of extended ACLs. Symlinks and hard-linked log
+files are refused; only the standard macOS `/var`, `/etc`, and `/tmp` aliases are
+canonicalized. A user-owned home directory is not a safe service log location.
+Do not loosen log permissions or the administrative control socket to enable this
+feature. The service does not repair unsafe directories automatically.
+
+The setting and source paths are captured at startup. Reload does not activate a
+previously disabled socket or change its sources. Removing the setting or setting
+it to `false` in the protected config causes the next upload to be refused even
+before restart; an upload already in progress may finish. Restart after disabling
+to remove the socket. Service stop cancels and joins active delegated requests.
+
+See [Standard-user uploads on macOS](runtime-internal-logging.md#standard-user-uploads-on-macos)
+for bounds, refusal messages, and the native QA release gate.
+
 ### log_level
 Logging level you wish to enable.
 

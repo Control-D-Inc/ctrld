@@ -410,7 +410,6 @@ func (p *prog) initInternalLogging(externalCores []zapcore.Core) {
 		// mainLog, not p.logger: a test drives this setup on a bare prog.
 		mainLog.Load().Notice().Msg("Internal logging enabled")
 		p.internalLogWriter = newLogWriter()
-		p.internalLogSent = time.Now().Add(-logWriterSentInterval)
 		p.internalJournalWriter = newSmallLogWriter()
 		p.openInternalLogFiles()
 		// A restart appends to the file it finds, so the header marks the

@@ -149,7 +149,10 @@ type prog struct {
 	internalJournalWriter     *logWriter
 	querySampler              errorSampler
 	lastNetworkState          atomic.Pointer[netmon.State]
-	internalLogSent           time.Time
+	logUpload                 logUploadGate
+	logSendMu                 sync.Mutex
+	logSendStopped            bool
+	logSend                   *logSendServer
 	runningIface              string
 	requiredMultiNICsConfig   bool
 
@@ -1033,6 +1036,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			}
 			p.Debug().Msgf("Control server started: %s", p.cs.addr)
 		}
+		p.startLogSendServer()
 	}
 	p.onStartedDone = make(chan struct{})
 	p.loop = make(map[string]bool)
@@ -1378,6 +1382,7 @@ func (p *prog) startOSState(f func()) bool {
 // resolver that is already gone. Safe to call multiple times.
 func (p *prog) restoreOSState() error {
 	p.restoreOnce.Do(func() {
+		p.stopLogSendServer()
 		p.osStateMu.Lock()
 		p.osStateRestored = true
 		p.osStateMu.Unlock()

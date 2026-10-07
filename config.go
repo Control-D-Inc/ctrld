@@ -228,6 +228,9 @@ func (c *Config) FirstUpstream() *UpstreamConfig {
 
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
+	// AllowUnprivilegedLogSend is a macOS-only, administrator-controlled opt-in.
+	AllowUnprivilegedLogSend bool `mapstructure:"allow_unprivileged_log_send" toml:"allow_unprivileged_log_send,omitempty"`
+
 	LogLevel                string         `mapstructure:"log_level" toml:"log_level,omitempty"`
 	LogPath                 string         `mapstructure:"log_path" toml:"log_path,omitempty"`
 	LogMaxSizeMB            int            `mapstructure:"log_max_size_mb" toml:"log_max_size_mb,omitempty" validate:"omitempty,gte=1,lte=1024"`

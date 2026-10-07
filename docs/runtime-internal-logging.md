@@ -102,6 +102,67 @@ In `log_path` mode the body holds the send-time header, then the `log_path` file
 
 `ctrld log tail` follows the live debug stream and prints each new line, journal events included.
 
+## Standard-user uploads on macOS
+
+Administrator opt-in `service.allow_unprivileged_log_send` defaults to `false`.
+See the [configuration and activation requirements](config.md#allow_unprivileged_log_send).
+Enabling it allows **all local-user processes** to request machine-wide diagnostic
+uploads. Diagnostics can include other users' activity. It does not expose log
+contents to the requester and is not a general authorization framework.
+
+The CLI connects directly to `/private/var/ctrld-log-send/send.sock`, without
+checking the user's launchd service status or searching their home directory.
+Its root-owned protected parent and connected peer credentials are checked.
+The daemon creates the leaf directory without changing existing ancestor
+permissions. It does not use macOS's group-writable `/private/var/run`.
+The separate socket permits only a bodyless `POST /log/send`, with no query
+parameters. Its responses contain status codes only. It cannot select files,
+identity, upload destination, commands, or configuration. The administrative
+socket remains restricted to mode 0600; `--full` still requires elevation.
+
+Unlike privileged uploads described above, delegated uploads use only checked,
+file-backed source snapshots: up to 10 MiB of newest debug bytes and, in internal
+logging mode, up to 6 MiB of journal bytes separated by `=== LOG_END ===`.
+There is no fresh send-time header, network-command collection, memory fallback,
+or line-boundary scan. Existing file headers remain in the retained bytes.
+Source/config trust is checked again for every attempt. Unsafe sources fail closed
+instead of being skipped. The daemon fixes the device identity and destination.
+Trusted empty logs do not prevent socket startup, but an upload requires actual
+log bytes; the separator alone is not an upload.
+
+Both privileged and delegated sends share one single-flight gate. The gate is
+reserved before collection, and every admitted attempt, successful or failed,
+starts a one-minute cooldown on completion. Reloading logs does not reset it.
+Delegated requests have a five-minute operation deadline, short header/read
+timeouts, bounded headers, at most eight accepted connections, and no keep-alive.
+Admitted attempts record caller UID and outcome, without log contents or API error
+text. Rejected/malformed/cooldown requests do not produce a per-request audit log,
+so local callers cannot force diagnostic rotation by flooding rejections.
+
+Refusals and recovery:
+
+- `log send --full requires administrator privileges`: use the administrator path.
+- `log send unavailable: ask an administrator ...`: the opt-in socket may be
+  disabled, unavailable, unsafe, or absent on an older daemon. Have an administrator
+  check configuration and restart; the CLI never falls back to a user-owned socket.
+- `log send busy or cooling down; retry after one minute`: wait for the current
+  operation and its cooldown; parallel callers do not bypass the shared limit.
+- `administrator must check configuration and log permissions`: the opt-in was
+  removed or config/log trust checks failed. Correct the protected paths as admin.
+- Other failures return a generic message directing the administrator to the
+  daemon log, without returning upload payloads or upstream credentials.
+
+### Native macOS validation
+
+Before release, verify default-off, enable/restart, disable-before-restart,
+restart socket removal, shutdown during upload, standard-user success, `--full`
+refusal, privileged command compatibility, older/unavailable daemon behavior,
+forbidden direct IPC, and socket impersonation. Verify root-owned default service
+paths and actual Darwin peer-credential/ACL syscalls, including extended-ACL
+refusals. Linux tests and Darwin cross-compilation do not satisfy this gate.
+Automated boundary tests use only temporary synthetic files/sockets and upload
+stubs; they do not run service, DNS, or PF operations or upload real diagnostics.
+
 ## Notes
 
 - Internal logging is not a replacement for a configured `log_path` file in production.

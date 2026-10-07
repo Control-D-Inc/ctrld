@@ -335,17 +335,18 @@ func (p *prog) registerControlServerHandler() {
 	}))
 	p.cs.register(viewLogsPath, http.HandlerFunc(p.handleLogView))
 	p.cs.register(sendLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if time.Since(p.internalLogSent) < logWriterSentInterval {
+		if !p.logUpload.reserve() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		defer p.logUpload.release()
 		r, err := p.logReader(wantFullLogs(request), true)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		defer r.r.Close()
 		if r.size == 0 {
+			r.r.Close()
 			w.WriteHeader(http.StatusMovedPermanently)
 			return
 		}
@@ -371,7 +372,6 @@ func (p *prog) registerControlServerHandler() {
 		if err := json.NewEncoder(w).Encode(&resp); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
-		p.internalLogSent = time.Now()
 	}))
 	p.cs.register(tailLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		flusher, ok := w.(http.Flusher)

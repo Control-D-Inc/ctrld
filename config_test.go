@@ -67,6 +67,27 @@ func TestLoadDefaultConfig(t *testing.T) {
 	assert.Len(t, cfg.Upstream, 2)
 }
 
+func TestAllowUnprivilegedLogSendConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"absent", "[service]\n", false},
+		{"disabled", "[service]\nallow_unprivileged_log_send = false\n", false},
+		{"enabled", "[service]\nallow_unprivileged_log_send = true\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := viper.New()
+			v.SetConfigType("toml")
+			require.NoError(t, v.ReadConfig(strings.NewReader(tc.body)))
+			var cfg ctrld.Config
+			require.NoError(t, v.Unmarshal(&cfg))
+			assert.Equal(t, tc.want, cfg.Service.AllowUnprivilegedLogSend)
+		})
+	}
+}
+
 func TestConfigOverride(t *testing.T) {
 	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
 	ctrld.InitConfig(v, "test_load_config")
