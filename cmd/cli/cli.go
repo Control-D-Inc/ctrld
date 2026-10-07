@@ -452,6 +452,18 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		os.Exit(0)
 	}
 
+	// On Merlin, self-upgrade replaces the executable before the old process
+	// invokes Service.Start. The newly launched `ctrld run` process is therefore
+	// the first guaranteed execution point for new service-lifecycle code.
+	// Migrate an exact ctrld-owned legacy startup script here. Failure is
+	// deliberately non-fatal: the legacy script remains atomically intact and
+	// the next daemon start retries the migration.
+	if router.Name() == "merlin" {
+		if err := router.RefreshMerlinStartupScriptFromRunningBinary(); err != nil {
+			mainLog.Load().Warn().Err(err).Msg("could not refresh Merlin startup script")
+		}
+	}
+
 	p.onStarted = append(p.onStarted, func() {
 		for _, lc := range p.cfg.Listener {
 			if shouldAllocateLoopbackIP(lc.IP) {

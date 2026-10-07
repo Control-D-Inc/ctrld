@@ -993,6 +993,19 @@ func initStopCmd() *cobra.Command {
 	return stopCmd
 }
 
+
+type restartWithBetweenService interface {
+	RestartWith(func() error) error
+}
+
+func restartServiceTransaction(s service.Service, between func() error) (bool, error) {
+	tx, ok := s.(restartWithBetweenService)
+	if !ok {
+		return false, nil
+	}
+	return true, tx.RestartWith(between)
+}
+
 func initRestartCmd() *cobra.Command {
 	restartCmd := &cobra.Command{
 		PreRun: func(cmd *cobra.Command, args []string) {
@@ -1038,49 +1051,77 @@ func initRestartCmd() *cobra.Command {
 			}
 
 			doRestart := func() bool {
-				tasks := []task{
-					{s.Stop, true, "Stop"},
-					{func() error {
-						p.router.Cleanup()
-						// restore static DNS settings or DHCP
-						p.resetDNS(false, true)
-						return nil
-					}, false, "Cleanup"},
-					{func() error {
-						time.Sleep(time.Second * 1)
-						return nil
-					}, false, "Waiting for service to stop"},
-				}
-				if doTasks(tasks) {
+				between := func() error {
+					p.router.Cleanup()
+					// restore static DNS settings or DHCP
+					p.resetDNS(false, true)
+					time.Sleep(time.Second)
 
 					if router.WaitProcessExited() {
 						ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 						defer cancel()
 
-					loop:
 						for {
 							select {
 							case <-ctx.Done():
 								mainLog.Load().Error().Msg("timeout while waiting for service to stop")
-								break loop
+								return nil
 							default:
 							}
-							time.Sleep(time.Second)
 							if status, _ := s.Status(); status == service.StatusStopped {
 								break
 							}
+							time.Sleep(time.Second)
 						}
 					}
-				} else {
+					return nil
+				}
+
+				if _, ok := s.(restartWithBetweenService); ok {
+					return doTasks([]task{
+						{func() error {
+							_, err := restartServiceTransaction(s, between)
+							return err
+						}, true, "Restart"},
+					})
+				}
+
+				// Preserve the existing restart behavior for non-Merlin service
+				// backends. Only Merlin opts into RestartWith.
+				tasks := []task{
+					{s.Stop, true, "Stop"},
+					{func() error {
+						p.router.Cleanup()
+						p.resetDNS(false, true)
+						return nil
+					}, false, "Cleanup"},
+					{func() error {
+						time.Sleep(time.Second)
+						return nil
+					}, false, "Waiting for service to stop"},
+				}
+				if !doTasks(tasks) {
 					return false
 				}
+				if router.WaitProcessExited() {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+					defer cancel()
 
-				tasks = []task{
-					{s.Start, true, "Start"},
+				loop:
+					for {
+						select {
+						case <-ctx.Done():
+							mainLog.Load().Error().Msg("timeout while waiting for service to stop")
+							break loop
+						default:
+						}
+						time.Sleep(time.Second)
+						if status, _ := s.Status(); status == service.StatusStopped {
+							break
+						}
+					}
 				}
-
-				return doTasks(tasks)
-
+				return doTasks([]task{{s.Start, true, "Start"}})
 			}
 
 			if doRestart() {
@@ -1616,22 +1657,55 @@ func initUpgradeCmd() *cobra.Command {
 				if !svcInstalled {
 					return true
 				}
-				tasks := []task{
-					{s.Stop, true, "Stop"},
-					{func() error {
-						p.router.Cleanup()
-						// restore static DNS settings or DHCP
-						p.resetDNS(false, true)
-						return nil
-					}, false, "Cleanup"},
-					{func() error {
-						time.Sleep(time.Second * 1)
-						return nil
-					}, false, "Waiting for service to stop"},
-				}
-				if doTasks(tasks) {
+
+				between := func() error {
+					p.router.Cleanup()
+					// restore static DNS settings or DHCP
+					p.resetDNS(false, true)
+					time.Sleep(time.Second)
 
 					if router.WaitProcessExited() {
+						ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+						defer cancel()
+
+						for {
+							select {
+							case <-ctx.Done():
+								mainLog.Load().Error().Msg("timeout while waiting for service to stop")
+								return nil
+							default:
+							}
+							if status, _ := s.Status(); status == service.StatusStopped {
+								break
+							}
+							time.Sleep(time.Second)
+						}
+					}
+					return nil
+				}
+
+				if _, ok := s.(restartWithBetweenService); ok {
+					_, err := restartServiceTransaction(s, between)
+					if err != nil {
+						mainLog.Load().Error().Err(err).Msg("failed to restart ctrld service")
+						return false
+					}
+				} else {
+					// Keep the historical upgrade restart path for every non-Merlin
+					// backend; they do not participate in the new Merlin flock.
+					tasks := []task{
+						{s.Stop, true, "Stop"},
+						{func() error {
+							p.router.Cleanup()
+							p.resetDNS(false, true)
+							return nil
+						}, false, "Cleanup"},
+						{func() error {
+							time.Sleep(time.Second)
+							return nil
+						}, false, "Waiting for service to stop"},
+					}
+					if doTasks(tasks) && router.WaitProcessExited() {
 						ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 						defer cancel()
 
@@ -1649,17 +1723,15 @@ func initUpgradeCmd() *cobra.Command {
 							}
 						}
 					}
+					if !doTasks([]task{{s.Start, true, "Start"}}) {
+						return false
+					}
 				}
 
-				tasks = []task{
-					{s.Start, true, "Start"},
-				}
-				if doTasks(tasks) {
-					if dir, err := socketDir(); err == nil {
-						if cc := newSocketControlClient(context.TODO(), s, dir); cc != nil {
-							_, _ = cc.post(ifacePath, nil)
-							return true
-						}
+				if dir, err := socketDir(); err == nil {
+					if cc := newSocketControlClient(context.TODO(), s, dir); cc != nil {
+						_, _ = cc.post(ifacePath, nil)
+						return true
 					}
 				}
 				return false
