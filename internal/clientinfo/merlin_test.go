@@ -27,6 +27,13 @@ func TestParseMerlinCustomClientList(t *testing.T) {
 			nil,
 		},
 		{
+			"dotted friendly name",
+			"<Device 2.5Gbps>00:11:22:33:44:55>0>4>>",
+			[]string{"00:11:22:33:44:55"},
+			[]string{"Device 2.5Gbps"},
+			nil,
+		},
+		{
 			"empty hostname",
 			"<client1>00:00:00:00:00:01>0>4>><>00:00:00:00:00:02>0>24>>",
 			[]string{"00:00:00:00:00:01"},
