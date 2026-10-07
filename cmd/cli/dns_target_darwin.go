@@ -3,13 +3,15 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
+	"path/filepath"
+	"slices"
 
 	"tailscale.com/net/netmon"
-
-	"github.com/Control-D-Inc/ctrld"
 )
 
 // interceptDNSTargetStateFile persists which service/value ctrld set, so a
@@ -19,17 +21,47 @@ import (
 const interceptDNSTargetStateFile = ".intercept_dns_target"
 
 var (
-	interceptDNSTargetStatePathFn          = func() string { return absHomeDir(interceptDNSTargetStateFile) }
-	interceptDefaultRouteInterfaceFn       = netmon.DefaultRouteInterface
-	interceptInterfaceByNameFn             = net.InterfaceByName
-	interceptPatchNetIfaceNameFn           = patchNetIfaceName
-	interceptCurrentStaticDNSFn            = currentStaticDNS
-	interceptSaveCurrentStaticDNSFn        = saveCurrentStaticDNS
+	interceptDNSTargetStatePathFn       = func() string { return absHomeDir(interceptDNSTargetStateFile) }
+	interceptDefaultRouteInterfaceFn    = netmon.DefaultRouteInterface
+	interceptInterfaceByNameFn          = net.InterfaceByName
+	interceptPatchNetIfaceNameFn        = patchNetIfaceName
+	interceptCurrentStaticDNSFn         = readTargetStaticDNS
+	interceptNativeCLATDefaultServiceFn = nativeCLATDefaultService
+	interceptNativeStaticDNSFn          = readNativeTargetStaticDNS
+	interceptSaveStaticDNSSnapshotFn    = func(iface *net.Interface, dns []string, owned string) error {
+		return saveTargetStaticDNSSnapshot(savedStaticDnsSettingsFilePath(iface), dns, owned)
+	}
+	interceptSaveCurrentStaticDNSFn = saveCurrentStaticDNS
+	interceptRemoveSavedDNSFn       = func(iface *net.Interface) error {
+		err := os.Remove(savedStaticDnsSettingsFilePath(iface))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
 	interceptSetDNSFn                      = setDNS
 	interceptSavedStaticNameserversFn      = savedStaticNameservers
 	interceptResetDNSIgnoreUnusableIfaceFn = resetDnsIgnoreUnusableInterface
-	interceptDHCPNameserversForInterfaceFn = ctrld.DHCPNameserversForInterface
+	interceptDHCPNameserversForInterfaceFn = readTargetDHCPNameservers
 )
+
+// A retained target record means cleanup was not completed. The broad saved
+// static sweep must not bypass the target's ownership check or retry failures
+// through an unguarded restore. Unknown state is conservatively left alone.
+func interceptTargetAllowsStaticRestore(service string) bool {
+	data, err := os.ReadFile(interceptDNSTargetStatePathFn())
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	var st interceptDNSTargetState
+	if json.Unmarshal(data, &st) != nil || st.Service == "" {
+		return false
+	}
+	return st.Service != service
+}
 
 type interceptDNSTargetState struct {
 	Service string `json:"service"`
@@ -52,30 +84,40 @@ func (p *prog) loadInterceptDNSTargetStateLocked() {
 	if err := json.Unmarshal(data, &st); err != nil || st.Service == "" || st.Value == "" {
 		return
 	}
-	p.interceptDNSTargetService = st.Service
-	p.interceptDNSTargetSetValue = st.Value
+	p.setInterceptDNSTargetLocked(st.Service, st.Value)
 	mainLog.Load().Debug().Msgf("intercept DNS target: restored tracking of %s on %q from previous run", st.Value, st.Service)
 }
 
 // persistInterceptDNSTargetStateLocked writes (or clears) the state file to
 // match in-memory tracking. Callers must hold interceptDNSTargetMu.
-func (p *prog) persistInterceptDNSTargetStateLocked() {
+func (p *prog) persistInterceptDNSTargetStateLocked() error {
 	file := interceptDNSTargetStatePathFn()
 	if p.interceptDNSTargetService == "" {
-		_ = os.Remove(file)
-		return
+		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
 	data, err := json.Marshal(interceptDNSTargetState{Service: p.interceptDNSTargetService, Value: p.interceptDNSTargetSetValue})
 	if err != nil {
-		return
+		return err
 	}
-	if err := os.WriteFile(file, data, 0600); err != nil {
-		mainLog.Load().Debug().Err(err).Msg("intercept DNS target: could not persist state file")
+	// Replace atomically; a failed write must not truncate prior ownership.
+	tmp, err := os.CreateTemp(filepath.Dir(file), ".intercept-target-*")
+	if err != nil {
+		return err
 	}
+	defer os.Remove(tmp.Name())
+	_, writeErr := tmp.Write(data)
+	err = errors.Join(writeErr, tmp.Close())
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), file)
 }
 
-// ensureInterceptDNSTarget guarantees macOS always has an emittable DNS
-// target while DNS intercept mode is active.
+// ensureInterceptDNSTarget provides an emittable DNS target when ownership
+// and discovery permit it; externally changed DNS is not permission to reinstall.
 //
 // Intercept mode deliberately never manages interface DNS: pf redirects DNS
 // packets in flight. But pf can only redirect packets macOS actually sends,
@@ -102,37 +144,97 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 	if !dnsIntercept || p.dnsInterceptState == nil {
 		return
 	}
-	if systemDiscovery == nil {
-		mainLog.Load().Debug().Msg("intercept DNS target: system DNS discovery was not performed; not changing DNS")
-		return
-	}
 	p.interceptDNSTargetMu.Lock()
 	defer p.interceptDNSTargetMu.Unlock()
 	p.loadInterceptDNSTargetStateLocked()
+	var diagnostic *dnsTargetDecisionDiagnostic
+	if state, ok := p.dnsInterceptState.(*pfState); ok {
+		diagnostic = &state.targetDiagnostic
+	}
+	decision := dnsTargetDecisionContext{
+		ownership:    p.interceptDNSTargetOwnershipLocked(),
+		generation:   p.recoveryGen.Load(),
+		transitionID: p.networkAcceptedGen.Load(),
+	}
+	// Only completed discovery resolves an outstanding diagnostic. A resolution
+	// describes the decision and observed ownership, not successful DNS repair.
+	resolvedReason := ""
+	defer func() {
+		if resolvedReason != "" {
+			diagnostic.resolved(decision, p.interceptDNSTargetOwnershipLocked(), resolvedReason)
+		}
+	}()
+	if systemDiscovery == nil {
+		diagnostic.failed(decision, "system_discovery", nil)
+		mainLog.Load().Debug().Msg("intercept DNS target: system DNS discovery was not performed; not changing DNS")
+		return
+	}
 
 	drIfaceName, err := interceptDefaultRouteInterfaceFn()
+	decision.iface = drIfaceName
 	if err != nil || drIfaceName == "" {
 		// Mid-transition with no default route; the next recovery decides.
+		diagnostic.failed(decision, "default_route", err)
 		return
 	}
 	iface, err := interceptInterfaceByNameFn(drIfaceName)
 	if err != nil || iface == nil {
+		diagnostic.failed(decision, "interface_lookup", err)
 		return
 	}
-	// Resolve the network service name (e.g. en5 -> "iPhone USB") so
-	// networksetup operates on the right service.
-	if _, err := interceptPatchNetIfaceNameFn(iface); err != nil {
+	routeDHCPDNS, dhcpErr := interceptDHCPNameserversForInterfaceFn(drIfaceName)
+	nativeFallback := false
+	ctx, cancel := context.WithTimeout(context.Background(), nativeTargetReadBudget)
+	defer cancel()
+	var nativeService nativeTargetService
+	readStatic := interceptCurrentStaticDNSFn
+	if dhcpErr != nil {
+		// Resolve the exact primary UUID before any expanded mutation. A
+		// device can have multiple services; the first listed is not proof.
+		var nativeErr error
+		nativeService, nativeErr = interceptNativeCLATDefaultServiceFn(ctx, drIfaceName)
+		nativeFallback = nativeErr == nil && nativeService.ID != "" && nativeService.Name != "" && nativeService.Device == drIfaceName && !hasIPv4DNS(routeDHCPDNS)
+		mainLog.Load().Debug().Err(nativeErr).Bool("native_clat_verified", nativeFallback).
+			Str("interface", drIfaceName).Msg("intercept DNS target: native fallback evidence")
+	}
+	if nativeFallback {
+		iface.Name = nativeService.Name
+		readStatic = func(iface *net.Interface) ([]string, error) { return interceptNativeStaticDNSFn(ctx, iface) }
+	} else if _, err := interceptPatchNetIfaceNameFn(iface); err != nil {
+		diagnostic.failed(decision, "service_lookup", err)
 		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not resolve network service for %s", drIfaceName)
 		return
 	}
+	decision.service = iface.Name
 
-	staticDNS, err := interceptCurrentStaticDNSFn(iface)
+	staticDNS, err := readStatic(iface)
 	if err != nil {
-		// Interfaces without a network service (utun/VPN tunnels) land here:
-		// networksetup cannot address them, ctrld never writes to them, and
-		// any target set on the underlying physical service stays in place —
-		// still correct while ctrld runs.
+		diagnostic.failed(decision, "static_dns", err)
 		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not read static DNS for %q", iface.Name)
+		return
+	}
+	// Retain the exact validated snapshot for backup and equality checks,
+	// including an owned non-loopback value that must never be snapshotted.
+	snapshot := staticDNS
+	if nativeFallback {
+		device, routeErr := interceptDefaultRouteInterfaceFn()
+		check, serviceErr := interceptNativeCLATDefaultServiceFn(ctx, drIfaceName)
+		if routeErr != nil || serviceErr != nil || device != drIfaceName || check != nativeService {
+			diagnostic.failed(decision, "native_recheck", errors.Join(routeErr, serviceErr))
+			return
+		}
+		current, readErr := readStatic(iface)
+		if readErr != nil || ctx.Err() != nil || !slices.Equal(current, snapshot) {
+			diagnostic.failed(decision, "static_recheck", errors.Join(readErr, ctx.Err()))
+			return
+		}
+	}
+	// Tracking is not proof that the target is still installed. An external
+	// edit (including clearing DNS) is not permission to reinstall it. Retain
+	// the cleanup record until shutdown, preventing periodic reconciliation
+	// from reinterpreting the same edit as a new DNS-less admission.
+	if p.interceptDNSTargetService == iface.Name && !isInterceptDNSTargetOnly(snapshot, p.interceptDNSTargetSetValue) && !hasIPv4DNS(filterOwnTarget(snapshot, p.interceptDNSTargetSetValue)) {
+		diagnostic.failed(decision, "owned_target_changed", nil)
 		return
 	}
 	// Never count ctrld's own previously-set entry as network-provided DNS,
@@ -142,45 +244,82 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 		staticDNS = filterOwnTarget(staticDNS, p.interceptDNSTargetSetValue)
 	}
 	if hasIPv4DNS(staticDNS) {
+		resolvedReason = "static_ipv4_dns"
 		p.removeInterceptDNSTargetLocked("network has usable static IPv4 DNS")
 		return
 	}
+	if nativeFallback && slices.ContainsFunc(staticDNS, func(s string) bool {
+		ip := net.ParseIP(s)
+		return ip != nil && ip.To4() == nil && ip.IsLoopback()
+	}) {
+		// lo0 can serve another local resolver. The static backup reader
+		// discards loopback, so expanded admission cannot safely replace it.
+		resolvedReason = "static_loopback_dns"
+		return
+	}
 
-	routeDHCPDNS, err := interceptDHCPNameserversForInterfaceFn(drIfaceName)
-	if err != nil {
-		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not read DHCP DNS for default-route service %q", iface.Name)
+	if dhcpErr != nil && !nativeFallback {
+		diagnostic.failed(decision, "dhcp_dns", dhcpErr)
+		mainLog.Load().Debug().Err(dhcpErr).Msgf("intercept DNS target: could not read DHCP DNS for default-route service %q", iface.Name)
 		return
 	}
 	if hasIPv4DNS(routeDHCPDNS) {
+		resolvedReason = "dhcp_ipv4_dns"
 		// The default-route service regained DHCP option 6. Remove a target
 		// previously set on this or another service.
 		p.removeInterceptDNSTargetLocked("network has usable DHCP IPv4 DNS")
 		return
 	}
 
+	resolvedReason = "dns_less_network"
 	target := p.interceptDNSTargetValue()
 	if p.interceptDNSTargetService == iface.Name && p.interceptDNSTargetSetValue == target {
 		return // already set on this service
 	}
+	if nativeFallback {
+		owned := ""
+		if p.interceptDNSTargetService == iface.Name {
+			owned = p.interceptDNSTargetSetValue
+		}
+		if err := interceptSaveStaticDNSSnapshotFn(iface, snapshot, owned); err != nil {
+			return // no expanded mutation without a restorable backup
+		}
+	}
 	// Default route moved to a different DNS-less service (or the listener
 	// config changed): clear the stale entry first.
 	p.removeInterceptDNSTargetLocked("default route service changed")
+	if p.interceptDNSTargetService != "" {
+		return // cleanup failed; never overwrite ownership of the old service
+	}
 
 	// Preserve any existing (IPv6-only) static entries for later restore.
 	// saveCurrentStaticDNS filters loopback on write, and
 	// savedStaticNameservers filters loopback on read, so ctrld's own
 	// loopback target can never be recorded or restored as user DNS.
-	if err := interceptSaveCurrentStaticDNSFn(iface); err != nil {
-		mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not save static DNS for %q", iface.Name)
+	if !nativeFallback {
+		if err := interceptSaveCurrentStaticDNSFn(iface); err != nil {
+			mainLog.Load().Debug().Err(err).Msgf("intercept DNS target: could not save static DNS for %q", iface.Name)
+		}
+	}
+	p.setInterceptDNSTargetLocked(iface.Name, target)
+	if err := p.persistInterceptDNSTargetStateLocked(); err != nil {
+		p.setInterceptDNSTargetLocked("", "")
+		resolvedReason = ""
+		diagnostic.failed(decision, "ownership_persistence", err)
+		mainLog.Load().Warn().Err(err).Msg("intercept DNS target: not changing DNS without persisted ownership")
+		return
 	}
 	if err := interceptSetDNSFn(iface, []string{target}); err != nil {
+		// A command error can follow a partial OS mutation. Keep the durable
+		// cleanup record; the next observation decides what still belongs to us.
+		resolvedReason = ""
 		mainLog.Load().Warn().Err(err).Msgf("intercept DNS target: could not set %s on %q", target, iface.Name)
 		return
 	}
-	p.interceptDNSTargetService = iface.Name
-	p.interceptDNSTargetSetValue = target
-	p.persistInterceptDNSTargetStateLocked()
-	mainLog.Load().Warn().Msgf("intercept DNS target: service %q provides no usable IPv4 DNS; set %s so macOS can emit DNS queries (removed automatically when the network provides IPv4 DNS)", iface.Name, target)
+	journal(mainLog.Load().Warn()).Str("service", iface.Name).Str("target", target).
+		Bool("native_clat_fallback", nativeFallback).
+		Str("reason", "dns_less_network").
+		Msgf("intercept DNS target: service %q provides no usable IPv4 DNS; set %s so macOS can emit DNS queries (removed automatically when the network provides IPv4 DNS)", iface.Name, target)
 }
 
 // removeInterceptDNSTarget removes a previously set intercept DNS target,
@@ -210,8 +349,20 @@ func (p *prog) removeInterceptDNSTargetLocked(reason string) {
 		return
 	}
 	if !isInterceptDNSTargetOnly(cur, val) {
-		mainLog.Load().Debug().Msgf("intercept DNS target: %q DNS changed externally; not removing (%s)", svc, reason)
-		p.clearInterceptDNSTargetStateLocked()
+		// The generic stop/uninstall sweep must not replay a stale snapshot
+		// over the external edit. On failure keep ownership so its guard skips.
+		if err := interceptRemoveSavedDNSFn(iface); err != nil {
+			mainLog.Load().Warn().Err(err).Msg("intercept DNS target: could not discard stale backup; retaining cleanup state")
+			return
+		}
+		if !p.clearInterceptDNSTargetStateLocked() {
+			return
+		}
+		// ctrld owns the DNS of the service no longer, and a later outage
+		// report needs the moment that ownership ended.
+		journal(mainLog.Load().Info()).Str("service", svc).Str("target", val).
+			Str("reason", "external_change").
+			Msgf("intercept DNS target: %q DNS changed externally; not removing (%s)", svc, reason)
 		return
 	}
 	if saved := interceptSavedStaticNameserversFn(iface); len(saved) > 0 {
@@ -223,12 +374,33 @@ func (p *prog) removeInterceptDNSTargetLocked(reason string) {
 		mainLog.Load().Warn().Err(err).Msgf("intercept DNS target: could not reset DNS on %q; retaining cleanup state", svc)
 		return
 	}
-	p.clearInterceptDNSTargetStateLocked()
-	mainLog.Load().Info().Msgf("intercept DNS target: removed %s from %q (%s)", val, svc, reason)
+	if !p.clearInterceptDNSTargetStateLocked() {
+		return
+	}
+	journal(mainLog.Load().Info()).Str("service", svc).Str("target", val).Str("reason", reason).
+		Msgf("intercept DNS target: removed %s from %q (%s)", val, svc, reason)
 }
 
-func (p *prog) clearInterceptDNSTargetStateLocked() {
-	p.interceptDNSTargetService = ""
-	p.interceptDNSTargetSetValue = ""
-	p.persistInterceptDNSTargetStateLocked()
+func (p *prog) interceptDNSTargetOwnershipLocked() dnsTargetOwnership {
+	return dnsTargetOwnership{p.interceptDNSTargetService, p.interceptDNSTargetSetValue}
+}
+
+func (p *prog) clearInterceptDNSTargetStateLocked() bool {
+	service, value := p.interceptDNSTargetService, p.interceptDNSTargetSetValue
+	p.setInterceptDNSTargetLocked("", "")
+	if err := p.persistInterceptDNSTargetStateLocked(); err != nil {
+		p.setInterceptDNSTargetLocked(service, value)
+		mainLog.Load().Warn().Err(err).Msg("intercept DNS target: could not clear ownership; retaining cleanup state")
+		return false
+	}
+	return true
+}
+
+// setInterceptDNSTargetLocked stores the service that ctrld owns and the value
+// it wrote, and publishes the value for the readers that take no lock. Callers
+// must hold interceptDNSTargetMu.
+func (p *prog) setInterceptDNSTargetLocked(service, value string) {
+	p.interceptDNSTargetService = service
+	p.interceptDNSTargetSetValue = value
+	p.publishInterceptTarget(value)
 }

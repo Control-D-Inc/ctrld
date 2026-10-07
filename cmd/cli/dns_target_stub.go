@@ -2,6 +2,8 @@
 
 package cli
 
+func interceptTargetAllowsStaticRestore(_ string) bool { return true }
+
 // ensureInterceptDNSTarget is a no-op on non-Darwin platforms: the DNS-less
 // network problem it solves is specific to macOS pf interception blocking
 // IPv6 port 53 with no IPv4 fallback (issue #533). Windows intercept mode
