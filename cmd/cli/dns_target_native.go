@@ -21,6 +21,15 @@ const (
 	nativeTargetMaxOutput  = 64 * 1024
 )
 
+// ipv6OnlyObservation is the first sighting of IPv6-only evidence that an
+// admission must still match after ipv6OnlyConfirmDelay.
+type ipv6OnlyObservation struct {
+	//lint:ignore U1000 used in Darwin code.
+	service nativeTargetService
+	//lint:ignore U1000 used in Darwin code.
+	since time.Time
+}
+
 var errNativeTargetOutputLimit = errors.New("native DNS evidence output exceeds limit")
 
 type nativeTargetOutput struct{ buf bytes.Buffer }
@@ -85,6 +94,24 @@ func parseNativeServiceName(out string) (string, error) {
 	return name, nil
 }
 
+// serviceName validates the configured service root for id and returns the
+// unique enabled networksetup service mapped to device. Both native readers
+// share it, so a fix to either check applies to both.
+func (r nativeTargetReader) serviceName(ctx context.Context, id, device string) (string, error) {
+	out, err := r.run(ctx, "show Setup:/Network/Service/"+id+"\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return "", err
+	}
+	if _, err := parseNativeServiceName(string(out)); err != nil {
+		return "", err
+	}
+	out, err = r.run(ctx, "", "/usr/sbin/networksetup", "-listnetworkserviceorder")
+	if err != nil {
+		return "", err
+	}
+	return targetNetworkServiceName(string(out), device)
+}
+
 // defaultService returns the actual primary service, not the first service
 // networksetup happens to list for the device. Unknown or changing state is
 // never absence evidence. The caller must carry and recheck the whole tuple.
@@ -130,19 +157,7 @@ func (r nativeTargetReader) defaultService(ctx context.Context, device string) (
 	if !matched {
 		return unknown, nil
 	}
-	out, err := r.run(ctx, "show Setup:/Network/Service/"+id+"\nquit\n", "/usr/sbin/scutil")
-	if err != nil {
-		return unknown, err
-	}
-	_, err = parseNativeServiceName(string(out))
-	if err != nil {
-		return unknown, err
-	}
-	out, err = r.run(ctx, "", "/usr/sbin/networksetup", "-listnetworkserviceorder")
-	if err != nil {
-		return unknown, err
-	}
-	name, err := targetNetworkServiceName(string(out), device)
+	name, err := r.serviceName(ctx, id, device)
 	if err != nil {
 		return unknown, err
 	}
@@ -373,7 +388,7 @@ func parseNativeIPv6Global(out string) (id, device string, err error) {
 			}
 			id = value
 		case "PrimaryInterface":
-			if value == "" || strings.ContainsAny(value, " 	\r\n{}") {
+			if value == "" || strings.ContainsAny(value, " \t\r\n{}") {
 				return "", "", errors.New("invalid interface")
 			}
 			device = value
@@ -439,18 +454,7 @@ func (r nativeTargetReader) ipv6OnlyService(ctx context.Context, device string) 
 	if err != nil || !nativeIPv6OnlyAddresses(addrs) {
 		return unknown, err
 	}
-	out, err = r.run(ctx, "show Setup:/Network/Service/"+id+"\nquit\n", "/usr/sbin/scutil")
-	if err != nil {
-		return unknown, err
-	}
-	if _, err = parseNativeServiceName(string(out)); err != nil {
-		return unknown, err
-	}
-	out, err = r.run(ctx, "", "/usr/sbin/networksetup", "-listnetworkserviceorder")
-	if err != nil {
-		return unknown, err
-	}
-	name, err := targetNetworkServiceName(string(out), device)
+	name, err := r.serviceName(ctx, id, device)
 	if err != nil {
 		return unknown, err
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -128,7 +127,25 @@ func TestParseNativeIPv6GlobalRejectsUnsafe(t *testing.T) {
 			t.Fatalf("accepted %q", out)
 		}
 	}
-	if !slices.Equal([]bool{nativeIPv6OnlyAddresses(nativeTargetTestAddrs("2001:db8::1/64"))}, []bool{true}) {
-		t.Fatal("global IPv6 rejected")
+}
+
+func TestNativeIPv6OnlyAddresses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		addrs []string
+		want  bool
+	}{
+		{name: "global IPv6", addrs: []string{"2001:db8::1/64"}, want: true},
+		{name: "ULA with link-local", addrs: []string{"fd66:6:6::10/64", "fe80::1/64"}, want: true},
+		{name: "link-local only", addrs: []string{"fe80::1/64"}},
+		{name: "no addresses"},
+		{name: "IPv4 address beside global IPv6", addrs: []string{"2001:db8::1/64", "10.0.0.2/24"}},
+		{name: "CLAT address beside global IPv6", addrs: []string{"2001:db8::1/64", "192.0.0.2/32"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nativeIPv6OnlyAddresses(nativeTargetTestAddrs(tc.addrs...)); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

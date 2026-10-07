@@ -226,6 +226,13 @@ type prog struct {
 	interceptDNSTargetSetValue string
 	//lint:ignore U1000 used in Darwin code.
 	interceptDNSTargetLoaded bool
+	// interceptIPv6OnlySeen and interceptIPv6OnlyTimer track an IPv6-only
+	// observation that has not yet held long enough to admit a target
+	// (issue #629). Guarded by interceptDNSTargetMu.
+	//lint:ignore U1000 used in Darwin code.
+	interceptIPv6OnlySeen ipv6OnlyObservation
+	//lint:ignore U1000 used in Darwin code.
+	interceptIPv6OnlyTimer *time.Timer
 
 	// interceptTargetMirror holds the same value as interceptDNSTargetSetValue
 	// for readers that must not wait: the mutex above covers networksetup

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -26,6 +27,8 @@ type interceptTargetHarness struct {
 	ipv6Only     bool
 	ipv6OnlyErr  error
 	ipv6Calls    int
+	now          time.Time
+	confirms     []time.Duration
 	saveErr      error
 	readErr      error
 	setErr       error
@@ -62,6 +65,8 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 	origNativeStatic := interceptNativeStaticDNSFn
 	origSnapshot := interceptSaveStaticDNSSnapshotFn
 	origIntercept := dnsIntercept
+	origNow := interceptNowFn
+	origAfter := interceptIPv6OnlyAfterFn
 	t.Cleanup(func() {
 		interceptDNSTargetStatePathFn = origPath
 		interceptDefaultRouteInterfaceFn = origRoute
@@ -78,7 +83,15 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 		interceptNativeStaticDNSFn = origNativeStatic
 		interceptSaveStaticDNSSnapshotFn = origSnapshot
 		dnsIntercept = origIntercept
+		interceptNowFn = origNow
+		interceptIPv6OnlyAfterFn = origAfter
 	})
+	h.now = time.Unix(1_700_000_000, 0)
+	interceptNowFn = func() time.Time { return h.now }
+	interceptIPv6OnlyAfterFn = func(d time.Duration, _ func()) *time.Timer {
+		h.confirms = append(h.confirms, d)
+		return nil
+	}
 
 	interceptNativeCLATDefaultServiceFn = func(_ context.Context, device string) (nativeTargetService, error) {
 		if !h.nativeCLAT || h.nativeErr != nil {

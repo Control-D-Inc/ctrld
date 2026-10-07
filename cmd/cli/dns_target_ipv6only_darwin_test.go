@@ -7,7 +7,16 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 )
+
+// confirmIPv6Only runs the first observation and the confirming pass one
+// ipv6OnlyConfirmDelay later, as the scheduled follow-up would.
+func confirmIPv6Only(h *interceptTargetHarness, p *prog) {
+	p.ensureInterceptDNSTarget([]string{})
+	h.now = h.now.Add(ipv6OnlyConfirmDelay)
+	p.ensureInterceptDNSTarget([]string{})
+}
 
 // Issue #629: an IPv6-only network without DHCPv4 and before macOS starts
 // its CLAT has neither a lease to read nor a CLAT to prove.
@@ -34,7 +43,7 @@ func TestIPv6OnlyTargetAdmission(t *testing.T) {
 			h.ipv6Only, h.ipv6OnlyErr, h.nativeCLAT = tc.ipv6Only, tc.ipv6Err, tc.clat
 			h.dns["Wi-Fi"], h.dhcp, h.dhcpErr = slices.Clone(tc.static), tc.dhcp, tc.dhcpErr
 			p := newInterceptTargetProg()
-			p.ensureInterceptDNSTarget([]string{})
+			confirmIPv6Only(h, p)
 			if got := len(h.setCalls) > 0; got != tc.want || len(h.resetCalls) != 0 {
 				t.Fatalf("set=%v reset=%v, want set=%v", h.setCalls, h.resetCalls, tc.want)
 			}
@@ -48,6 +57,130 @@ func TestIPv6OnlyTargetAdmission(t *testing.T) {
 	}
 }
 
+// One IPv6-only observation is not enough: it also matches a dual-stack
+// network between its router advertisement and DHCPv4 ACK. The first pass
+// only starts the clock and schedules the confirming reconcile.
+func TestIPv6OnlyTargetWaitsForConfirmation(t *testing.T) {
+	h := newInterceptTargetHarness(t)
+	h.ipv6Only = true
+	h.dhcpErr = errors.New("no lease")
+	p := newInterceptTargetProg()
+
+	p.ensureInterceptDNSTarget([]string{})
+	if len(h.setCalls) != 0 || !slices.Equal(h.confirms, []time.Duration{ipv6OnlyConfirmDelay}) {
+		t.Fatalf("first observation: set=%v confirms=%v, want no set and one %s follow-up", h.setCalls, h.confirms, ipv6OnlyConfirmDelay)
+	}
+	h.now = h.now.Add(ipv6OnlyConfirmDelay - 1)
+	p.ensureInterceptDNSTarget([]string{})
+	if len(h.setCalls) != 0 || len(h.confirms) != 1 {
+		t.Fatalf("before the delay: set=%v confirms=%v", h.setCalls, h.confirms)
+	}
+	h.now = h.now.Add(1)
+	p.ensureInterceptDNSTarget([]string{})
+	if !slices.Equal(h.dns["Wi-Fi"], []string{"127.0.0.53"}) {
+		t.Fatalf("confirmed IPv6-only network not admitted: %v", h.dns["Wi-Fi"])
+	}
+	if p.interceptIPv6OnlySeen != (ipv6OnlyObservation{}) {
+		t.Fatal("confirmation state kept after admission")
+	}
+}
+
+// Dual-stack network, DHCPv4 late: the RA arrives first, so the first pass
+// sees the IPv6-only shape. The lease then arrives before the confirming
+// pass, and the service is never modified.
+func TestIPv6OnlyTargetDualStackDHCPv4Late(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		late func(*interceptTargetHarness)
+	}{
+		{name: "lease readable", late: func(h *interceptTargetHarness) {
+			h.dhcpErr, h.dhcp = nil, []string{"192.168.1.1"}
+		}},
+		{name: "IPv4 state published before the lease is readable", late: func(h *interceptTargetHarness) {
+			h.ipv6Only = false
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newInterceptTargetHarness(t)
+			h.ipv6Only = true
+			h.dhcpErr = errors.New("no lease")
+			h.dns["Wi-Fi"] = []string{"2001:db8::53"}
+			p := newInterceptTargetProg()
+
+			p.ensureInterceptDNSTarget([]string{})
+			tc.late(h)
+			h.now = h.now.Add(ipv6OnlyConfirmDelay)
+			p.ensureInterceptDNSTarget([]string{})
+			// Even a later return to the IPv6-only shape restarts the clock.
+			h.ipv6Only, h.dhcpErr, h.dhcp = true, errors.New("no lease"), nil
+			p.ensureInterceptDNSTarget([]string{})
+
+			if len(h.setCalls) != 0 || len(h.resetCalls) != 0 || !slices.Equal(h.dns["Wi-Fi"], []string{"2001:db8::53"}) {
+				t.Fatalf("dual-stack service modified: set=%v reset=%v dns=%v", h.setCalls, h.resetCalls, h.dns["Wi-Fi"])
+			}
+			if len(h.confirms) != 2 {
+				t.Fatalf("confirmation not restarted after IPv4 appeared: %v", h.confirms)
+			}
+		})
+	}
+}
+
+// Failing before the evidence is read (no default route mid-transition)
+// learns nothing new, so it neither admits nor restarts a confirmation.
+func TestIPv6OnlyTargetConfirmationSurvivesNoDecision(t *testing.T) {
+	h := newInterceptTargetHarness(t)
+	h.ipv6Only = true
+	h.dhcpErr = errors.New("no lease")
+	p := newInterceptTargetProg()
+
+	p.ensureInterceptDNSTarget([]string{})
+	route := interceptDefaultRouteInterfaceFn
+	interceptDefaultRouteInterfaceFn = func() (string, error) { return "", errors.New("no default route") }
+	p.ensureInterceptDNSTarget([]string{})
+	interceptDefaultRouteInterfaceFn = route
+	h.now = h.now.Add(ipv6OnlyConfirmDelay)
+	p.ensureInterceptDNSTarget([]string{})
+
+	if len(h.setCalls) != 1 || len(h.confirms) != 1 {
+		t.Fatalf("set=%v confirms=%v, want one admission from one confirmation", h.setCalls, h.confirms)
+	}
+}
+
+// A different service on the same evidence path starts a new confirmation.
+func TestIPv6OnlyTargetServiceChangeRestartsConfirmation(t *testing.T) {
+	h := newInterceptTargetHarness(t)
+	h.ipv6Only = true
+	h.dhcpErr = errors.New("no lease")
+	p := newInterceptTargetProg()
+
+	p.ensureInterceptDNSTarget([]string{})
+	read := interceptNativeIPv6OnlyServiceFn
+	interceptNativeIPv6OnlyServiceFn = func(ctx context.Context, device string) (nativeTargetService, error) {
+		svc, err := read(ctx, device)
+		svc.ID = nativeTargetOtherServiceID
+		return svc, err
+	}
+	h.now = h.now.Add(ipv6OnlyConfirmDelay)
+	p.ensureInterceptDNSTarget([]string{})
+	if len(h.setCalls) != 0 || len(h.confirms) != 2 {
+		t.Fatalf("service change admitted on the old clock: set=%v confirms=%v", h.setCalls, h.confirms)
+	}
+}
+
+// Shutdown drops a pending confirmation and its follow-up.
+func TestIPv6OnlyTargetShutdownDropsConfirmation(t *testing.T) {
+	h := newInterceptTargetHarness(t)
+	h.ipv6Only = true
+	h.dhcpErr = errors.New("no lease")
+	p := newInterceptTargetProg()
+
+	p.ensureInterceptDNSTarget([]string{})
+	p.removeInterceptDNSTarget("intercept shutdown")
+	if p.interceptIPv6OnlySeen != (ipv6OnlyObservation{}) || p.interceptIPv6OnlyTimer != nil {
+		t.Fatal("shutdown kept a pending IPv6-only confirmation")
+	}
+}
+
 // The admitted target is removed when the network gains IPv4, and the
 // original IPv6 static DNS comes back.
 func TestIPv6OnlyTargetLifecycle(t *testing.T) {
@@ -56,7 +189,7 @@ func TestIPv6OnlyTargetLifecycle(t *testing.T) {
 	h.dhcpErr = errors.New("no lease")
 	h.dns["Wi-Fi"] = []string{"2001:db8::53"}
 	p := newInterceptTargetProg()
-	p.ensureInterceptDNSTarget([]string{})
+	confirmIPv6Only(h, p)
 	if p.interceptDNSTargetService != "Wi-Fi" {
 		t.Fatal("no target on IPv6-only network")
 	}
@@ -90,14 +223,14 @@ func TestIPv6OnlyTargetRecheck(t *testing.T) {
 	interceptNativeIPv6OnlyServiceFn = func(ctx context.Context, device string) (nativeTargetService, error) {
 		calls++
 		svc, err := read(ctx, device)
-		if calls == 2 {
+		if calls == 4 {
 			svc.ID = nativeTargetOtherServiceID
 		}
 		return svc, err
 	}
 	p := newInterceptTargetProg()
-	p.ensureInterceptDNSTarget([]string{})
-	if calls != 2 || len(h.setCalls) != 0 || p.interceptDNSTargetService != "" {
+	confirmIPv6Only(h, p)
+	if calls != 4 || len(h.setCalls) != 0 || p.interceptDNSTargetService != "" {
 		t.Fatalf("changed IPv6-only tuple admitted a target: calls=%d set=%v", calls, h.setCalls)
 	}
 }

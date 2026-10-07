@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"tailscale.com/net/netmon"
 )
@@ -19,6 +20,12 @@ import (
 // without it a restarted daemon would not know the entry is ctrld's own and
 // could neither remove it on shutdown nor keep its bookkeeping consistent.
 const interceptDNSTargetStateFile = ".intercept_dns_target"
+
+// ipv6OnlyConfirmDelay is how long "no IPv4" must persist before it counts
+// as an IPv6-only network rather than DHCPv4 still in progress. A DHCPv4
+// client normally completes in a few seconds; issue #629 allows 45s from
+// joining to working DNS, which leaves room for recovery and RFC 7050.
+const ipv6OnlyConfirmDelay = 15 * time.Second
 
 var (
 	interceptDNSTargetStatePathFn       = func() string { return absHomeDir(interceptDNSTargetStateFile) }
@@ -44,6 +51,11 @@ var (
 	interceptSavedStaticNameserversFn      = savedStaticNameservers
 	interceptResetDNSIgnoreUnusableIfaceFn = resetDnsIgnoreUnusableInterface
 	interceptDHCPNameserversForInterfaceFn = readTargetDHCPNameservers
+	interceptNowFn                         = time.Now
+	// interceptIPv6OnlyAfterFn schedules the reconcile that can complete an
+	// IPv6-only confirmation. The pf watchdog would also get there, but only
+	// after up to pfWatchdogInterval more.
+	interceptIPv6OnlyAfterFn = time.AfterFunc
 )
 
 // A retained target record means cleanup was not completed. The broad saved
@@ -143,6 +155,13 @@ func (p *prog) persistInterceptDNSTargetStateLocked() error {
 // target there, macOS cannot emit the ipv4only.arpa lookup it needs to start
 // the CLAT, so the CLAT evidence alone can never arrive (issue #629).
 //
+// "No IPv4 yet" also describes a dual-stack network whose router
+// advertisement arrived before the DHCPv4 ACK. The IPv6-only evidence must
+// therefore hold for ipv6OnlyConfirmDelay on the same service and device
+// before it admits a target. A lease or IPv4 state arriving in that window
+// fails the evidence on the next pass (at the latest the scheduled one) and
+// ends the confirmation without a write.
+//
 // Callers pass a non-nil raw system discovery result to prove discovery ran;
 // an empty slice is a valid DNS-less result. The decision itself uses static
 // DNS plus DHCP option 6 from the default-route interface, so resolvers on a
@@ -155,6 +174,16 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 	p.interceptDNSTargetMu.Lock()
 	defer p.interceptDNSTargetMu.Unlock()
 	p.loadInterceptDNSTargetStateLocked()
+	// A pass that reads the native evidence and does not end waiting on
+	// IPv6-only confirmation restarts it: continuity means every observation
+	// in between agreed. Passes that fail before reading evidence know
+	// nothing new and leave a pending confirmation alone.
+	keepConfirm := true
+	defer func() {
+		if !keepConfirm {
+			p.resetIPv6OnlyConfirmLocked()
+		}
+	}()
 	var diagnostic *dnsTargetDecisionDiagnostic
 	if state, ok := p.dnsInterceptState.(*pfState); ok {
 		diagnostic = &state.targetDiagnostic
@@ -191,6 +220,7 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 		return
 	}
 	routeDHCPDNS, dhcpErr := interceptDHCPNameserversForInterfaceFn(drIfaceName)
+	keepConfirm = false
 	nativeFallback := false
 	ctx, cancel := context.WithTimeout(context.Background(), nativeTargetReadBudget)
 	defer cancel()
@@ -302,6 +332,11 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 	if p.interceptDNSTargetService == iface.Name && p.interceptDNSTargetSetValue == target {
 		return // already set on this service
 	}
+	if nativeEvidence == "ipv6_only" && !p.ipv6OnlyConfirmedLocked(nativeService) {
+		keepConfirm = true
+		resolvedReason = "ipv6_only_confirming"
+		return
+	}
 	if nativeFallback {
 		owned := ""
 		if p.interceptDNSTargetService == iface.Name {
@@ -349,6 +384,48 @@ func (p *prog) ensureInterceptDNSTarget(systemDiscovery []string) {
 		Msgf("intercept DNS target: service %q provides no usable IPv4 DNS; set %s so macOS can emit DNS queries (removed automatically when the network provides IPv4 DNS)", iface.Name, target)
 }
 
+// ipv6OnlyConfirmedLocked reports whether the same IPv6-only observation has
+// held for ipv6OnlyConfirmDelay. The first observation starts the clock and
+// schedules one follow-up reconcile; a different service or device starts it
+// again. Callers must hold interceptDNSTargetMu.
+func (p *prog) ipv6OnlyConfirmedLocked(svc nativeTargetService) bool {
+	now := interceptNowFn()
+	seen := &p.interceptIPv6OnlySeen
+	if seen.since.IsZero() || seen.service != svc {
+		p.resetIPv6OnlyConfirmLocked()
+		*seen = ipv6OnlyObservation{service: svc, since: now}
+		p.interceptIPv6OnlyTimer = interceptIPv6OnlyAfterFn(ipv6OnlyConfirmDelay, p.confirmIPv6OnlyTarget)
+		journal(mainLog.Load().Info()).Str("service", svc.Name).Str("interface", svc.Device).
+			Dur("confirm_after", ipv6OnlyConfirmDelay).
+			Msgf("intercept DNS target: service %q has no IPv4 yet; confirming no DHCPv4 arrives before setting a target", svc.Name)
+		return false
+	}
+	return now.Sub(seen.since) >= ipv6OnlyConfirmDelay
+}
+
+// confirmIPv6OnlyTarget is the scheduled confirming reconcile. It runs as
+// network activity so shutdown waits for or skips it.
+func (p *prog) confirmIPv6OnlyTarget() {
+	if !p.beginNetworkActivity() {
+		return
+	}
+	defer p.netMonitorWG.Done()
+	if p.dnsInterceptState == nil {
+		return
+	}
+	p.ensureInterceptDNSTarget([]string{})
+}
+
+// resetIPv6OnlyConfirmLocked drops a pending IPv6-only confirmation and its
+// follow-up. Callers must hold interceptDNSTargetMu.
+func (p *prog) resetIPv6OnlyConfirmLocked() {
+	if p.interceptIPv6OnlyTimer != nil {
+		p.interceptIPv6OnlyTimer.Stop()
+		p.interceptIPv6OnlyTimer = nil
+	}
+	p.interceptIPv6OnlySeen = ipv6OnlyObservation{}
+}
+
 // removeInterceptDNSTarget removes a previously set intercept DNS target,
 // restoring the service's saved static DNS (or empty). Safe no-op when no
 // target was set.
@@ -356,6 +433,7 @@ func (p *prog) removeInterceptDNSTarget(reason string) {
 	p.interceptDNSTargetMu.Lock()
 	defer p.interceptDNSTargetMu.Unlock()
 	p.loadInterceptDNSTargetStateLocked()
+	p.resetIPv6OnlyConfirmLocked()
 	p.removeInterceptDNSTargetLocked(reason)
 }
 
