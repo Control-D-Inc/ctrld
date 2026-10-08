@@ -221,9 +221,36 @@ type UtilityOrgRequest struct {
 
 // ResolverConfigRequest contains request data for fetching resolver config.
 type ResolverConfigRequest struct {
-	RawUID   string
-	Version  string
-	Metadata map[string]string
+	RawUID               string
+	Version              string
+	Metadata             map[string]string
+	IncludeHostnameHints bool
+}
+
+var hostnameHintsFn = hostnameHints
+
+func resolverConfigUtilityRequest(req *ResolverConfigRequest, uid, clientID string) utilityRequest {
+	var metadata map[string]string
+	if req.Metadata != nil {
+		metadata = make(map[string]string, len(req.Metadata))
+		for key, value := range req.Metadata {
+			metadata[key] = value
+		}
+	}
+	if req.IncludeHostnameHints {
+		if metadata == nil {
+			metadata = make(map[string]string)
+		}
+		for key, value := range hostnameHintsFn() {
+			metadata["hostname_"+key] = value
+		}
+	}
+
+	return utilityRequest{
+		UID:      uid,
+		ClientID: clientID,
+		Metadata: metadata,
+	}
 }
 
 // LogsRequest contains request data for sending runtime logs to API.
@@ -235,13 +262,7 @@ type LogsRequest struct {
 // FetchResolverConfig fetch Control D config for given uid.
 func FetchResolverConfig(ctx context.Context, req *ResolverConfigRequest, cdDev bool) (*ResolverConfig, error) {
 	uid, clientID := ParseRawUID(req.RawUID)
-	uReq := utilityRequest{
-		UID:      uid,
-		Metadata: req.Metadata,
-	}
-	if clientID != "" {
-		uReq.ClientID = clientID
-	}
+	uReq := resolverConfigUtilityRequest(req, uid, clientID)
 	body, _ := json.Marshal(uReq)
 	return postUtilityAPI(ctx, req.Version, cdDev, false, bytes.NewReader(body))
 }
