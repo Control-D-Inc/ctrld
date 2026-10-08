@@ -351,6 +351,7 @@ type prog struct {
 	restoreOnce      sync.Once
 	restoreErr       error
 	releaseOnce      sync.Once
+	csStopOnce       sync.Once
 	runDone          chan struct{}
 	runAbortCh       chan struct{}
 	listenerWg       sync.WaitGroup
@@ -1366,16 +1367,33 @@ func (p *prog) restoreOSState() error {
 // queries on would fail those queries. Safe to call multiple times.
 func (p *prog) releaseResources() {
 	p.releaseOnce.Do(func() {
-		if p.cs != nil {
-			if cerr := p.cs.stop(); cerr != nil {
-				mainLog.Load().Warn().Err(cerr).Msg("could not stop control server")
-			}
-		}
+		p.stopControlServer()
 		p.closeLogConn()
 		p.mu.Lock()
 		upstreams := p.cfg.Upstream
 		p.mu.Unlock()
 		closeReplacedUpstreams(upstreams, nil)
+	})
+}
+
+// stopControlServer closes the control socket. Stop calls it as soon as the stop
+// is accepted, and releaseResources again for the stop paths that never call
+// Stop. Safe to call multiple times.
+//
+// It must not wait for the run to finish. A stopping process that still answers
+// on the socket answers for the service that replaces it: `ctrld upgrade` and
+// restart take any reply to /started as "the new binary is up", so an upgrade
+// to a build that never became ready was reported successful instead of rolled
+// back. Closing late also unlinks the socket path after the new process has
+// bound its own there.
+func (p *prog) stopControlServer() {
+	p.csStopOnce.Do(func() {
+		if p.cs == nil {
+			return
+		}
+		if err := p.cs.stop(); err != nil {
+			mainLog.Load().Warn().Err(err).Msg("could not stop control server")
+		}
 	})
 }
 
@@ -1439,6 +1457,9 @@ func (p *prog) Stop(s service.Service) error {
 			os.Exit(deactivationPinInvalidExitCode)
 		}
 	}
+	// The pin check above is the last use of the control server. From here on
+	// this process is going away and must not answer for its successor.
+	p.stopControlServer()
 	close(p.stopCh)
 	return err
 }

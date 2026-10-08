@@ -1106,13 +1106,19 @@ func initRestartCmd() *cobra.Command {
 					if validateConfigErr != nil {
 						timeout = 5 * time.Second
 					}
-					if cc := newSocketControlClientWithTimeout(context.TODO(), s, dir, timeout); cc != nil {
+					// Only a ready service counts. Restart replaces nothing, so
+					// there is nothing to roll back, but a service that came
+					// back without finishing its start must not be reported as
+					// restarted cleanly.
+					if cc := newReadySocketControlClientWithTimeout(context.TODO(), s, dir, timeout); cc != nil {
 						_, _ = cc.post(ifacePath, nil)
 					} else {
-						mainLog.Load().Warn().Err(err).Msg("Service was restarted, but ctrld process may not be ready yet")
+						mainLog.Load().Warn().Msgf("Service was restarted, but ctrld did not report ready within %s; check `ctrld status`", timeout)
+						return
 					}
 				} else {
 					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
+					return
 				}
 				mainLog.Load().Notice().Msg("Service restarted")
 			} else {
@@ -1670,7 +1676,9 @@ func initUpgradeCmd() *cobra.Command {
 				}
 				if doTasks(tasks) {
 					if dir, err := socketDir(); err == nil {
-						if cc := newSocketControlClient(context.TODO(), s, dir); cc != nil {
+						// Only a ready service counts: a build that starts but
+						// never becomes ready must be rolled back.
+						if cc := newReadySocketControlClient(context.TODO(), s, dir); cc != nil {
 							_, _ = cc.post(ifacePath, nil)
 							return true
 						}
