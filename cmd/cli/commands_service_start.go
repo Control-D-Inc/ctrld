@@ -130,7 +130,7 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 	osArgsEarly = filterEmptyStrings(osArgsEarly)
 	interceptOnly := onlyInterceptFlags(osArgsEarly)
 	svcExists := serviceConfigFileExists()
-	logger.Debug().Msgf("intercept upgrade check: args=%v interceptOnly=%v svcConfigExists=%v interceptMode=%q", osArgsEarly, interceptOnly, svcExists, interceptMode)
+	logger.Debug().Msg(interceptUpgradeCheckLine(osArgsEarly, interceptOnly, svcExists, interceptMode))
 	if interceptOnly && svcExists {
 		// An explicit "off" argument must override a previously persisted config
 		// value while the service clears that value on startup.
