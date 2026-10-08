@@ -33,7 +33,7 @@ func searchDomains() ([]dnsname.FQDN, error) {
 		for a := aa.FirstDNSSuffix; a != nil; a = a.Next {
 			d, err := dnsname.ToFQDN(a.String())
 			if err != nil {
-				mainLog.Load().Debug().Err(err).Msgf("failed to parse domain: %s", a.String())
+				mainLog.Load().Debug().Err(err).Msgf("Failed to parse domain: %s", a.String())
 				continue
 			}
 			sds = append(sds, d)

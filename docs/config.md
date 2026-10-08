@@ -18,16 +18,12 @@ The config file allows for advanced configuration of the `ctrld` utility to cove
 
  - `/etc/controld` on *nix.
  - User's home directory on Windows.
- - Same directory with `ctrld` binary on these routers:
-   - `ddwrt`
-   - `merlin`
-   - `freshtomato`
  - Current directory.
 
 The user can choose to override default value using command line `--config` or `-c`:
 
 ```shell
-ctrld run --config /path/to/myconfig.toml
+ctrld-client run --config /path/to/myconfig.toml
 ```
 
 If no configuration files found, a default `ctrld.toml` file will be created in the current directory.
@@ -109,6 +105,40 @@ The `[service]` section controls general behaviors.
     log_path = "log.txt"
 ```
 
+### allow_unprivileged_log_send
+
+macOS only. Default: `false`. An administrator can opt in using the service's
+root-owned configuration file:
+
+```toml
+[service]
+    allow_unprivileged_log_send = true
+```
+
+Restart the service as administrator after enabling. Standard users can then run
+`ctrld log send` without `sudo`. **Every local-user process can trigger a
+machine-wide diagnostic upload to Control D**, not just the interactive user.
+This grants upload permission, not permission to read logs or administer ctrld.
+`--full`, `log view`, `log tail`, and other privileged commands remain restricted.
+Other platforms retain their existing behavior.
+
+This requires Control D mode, an on-disk TOML configuration, and file-backed logs.
+The config, log files, rotated logs, and every parent directory must be root-owned,
+not group/world writable, and free of extended ACLs. Symlinks and hard-linked log
+files are refused; only the standard macOS `/var`, `/etc`, and `/tmp` aliases are
+canonicalized. A user-owned home directory is not a safe service log location.
+Do not loosen log permissions or the administrative control socket to enable this
+feature. The service does not repair unsafe directories automatically.
+
+The setting and source paths are captured at startup. Reload does not activate a
+previously disabled socket or change its sources. Removing the setting or setting
+it to `false` in the protected config causes the next upload to be refused even
+before restart; an upload already in progress may finish. Restart after disabling
+to remove the socket. Service stop cancels and joins active delegated requests.
+
+See [Standard-user uploads on macOS](runtime-internal-logging.md#standard-user-uploads-on-macos)
+for bounds, refusal messages, and the native QA release gate.
+
 ### log_level
 Logging level you wish to enable.
 
@@ -121,9 +151,27 @@ Logging level you wish to enable.
 ### log_path
 Relative or absolute path of the log file. 
 
+Point `log_path` at a file that no other program rotates. ctrld renames `<log_path>.1` to `<log_path>.N` and uploads these files. A lower `log_max_backups` leaves the older numbered `log_path` files in place, but ctrld removes the extra numbered files of its internal logs.
+
 - Type: string
 - Required: no
 - Default: ""
+
+### log_max_size_mb
+Maximum size of the debug log file in MB. When the file reaches this size, ctrld rotates it. This limit also applies to the `log_path` file.
+
+- Type: integer
+- Required: no
+- Valid values: 1 to 1024
+- Default: 10
+
+### log_max_backups
+Number of rotated debug log files that ctrld keeps. If the value is 0, ctrld keeps no rotated file. This number also applies to the `log_path` file.
+
+- Type: integer
+- Required: no
+- Valid values: 0 to 64
+- Default: 4
 
 ### cache_enable
 When `cache_enable = true`, all resolved DNS query responses will be cached for duration of the upstream record TTLs.
@@ -293,7 +341,23 @@ If a remote upstream fails to resolve a query or is unreachable, `ctrld` will fo
 
 - Type: boolean
 - Required: no
-- Default: true on Windows, MacOS and non-router Linux.
+- Default: true on Windows, MacOS and Linux.
+
+### nrpt_recovery_max_attempts
+Windows DNS intercept mode uses NRPT health probes and recovery when Windows stops routing queries to the local `ctrld` listener. This limits how many consecutive recovery flows can run before `ctrld` enters a cooldown and stops making policy/Dnscache changes.
+
+Set to `0` to disable this circuit breaker and keep retrying indefinitely.
+
+- Type: integer
+- Required: no
+- Default: 0 (unlimited, current behavior)
+
+### nrpt_recovery_cooldown
+Cooldown duration after `nrpt_recovery_max_attempts` consecutive Windows NRPT recovery flows. During cooldown, `ctrld` logs the suppressed recovery and avoids additional `RefreshPolicyEx`, Dnscache `paramchange`, and DNS cache flush calls.
+
+- Type: time duration string
+- Required: no
+- Default: 30m
 
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.

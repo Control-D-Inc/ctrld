@@ -1,23 +1,19 @@
 package cli
 
 import (
+	"errors"
 	"os"
-	"reflect"
 	"runtime"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 	"unsafe"
 
-	"github.com/microsoft/wmi/pkg/base/host"
-	"github.com/microsoft/wmi/pkg/base/instance"
-	"github.com/microsoft/wmi/pkg/base/query"
-	"github.com/microsoft/wmi/pkg/constant"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
+// hasElevatedPrivilege checks if the current process has elevated privileges on Windows
 func hasElevatedPrivilege() (bool, error) {
 	var sid *windows.SID
 	if err := windows.AllocateAndInitializeSid(
@@ -37,6 +33,65 @@ func hasElevatedPrivilege() (bool, error) {
 	}
 	token := windows.Token(0)
 	return token.IsMember(sid)
+}
+
+// serviceLiveness is what could be established about the installed ctrld service. The
+// three states are distinct because a caller that must not disturb a live service has to
+// treat "could not tell" like "live", not like "stopped".
+type serviceLiveness int
+
+const (
+	// serviceLivenessUnknown means the question could not be answered: the SCM was
+	// unreachable, the caller lacked rights, or the query failed.
+	serviceLivenessUnknown serviceLiveness = iota
+	// serviceLivenessRunning means the service is running, starting, or paused - in every
+	// case a process that owns state.
+	serviceLivenessRunning
+	// serviceLivenessStopped means the service is installed and stopped, or not installed
+	// at all. Nothing of ctrld's is live.
+	serviceLivenessStopped
+)
+
+// ctrldServiceLiveness reports what can be established about the installed ctrld service.
+//
+// Only serviceLivenessStopped is positive evidence that nothing is live. Every failure
+// answers serviceLivenessUnknown rather than folding into "stopped": the SCM being
+// unreachable says nothing about whether a service is running, and a caller that acts on
+// that as absence would strip a live service's state.
+//
+// "Not installed" is deliberately stopped, not unknown: that is the answer, and it is
+// exactly the host that needs stale state cleaned - an uninstall that left filters behind
+// has no service left to protect.
+func ctrldServiceLiveness() serviceLiveness {
+	m, err := mgr.Connect()
+	if err != nil {
+		return serviceLivenessUnknown
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(ctrldServiceName)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return serviceLivenessStopped
+		}
+		return serviceLivenessUnknown
+	}
+	defer s.Close()
+
+	status, err := s.Query()
+	if err != nil {
+		return serviceLivenessUnknown
+	}
+	switch status.State {
+	case svc.Running, svc.StartPending, svc.ContinuePending, svc.PausePending, svc.Paused:
+		return serviceLivenessRunning
+	case svc.Stopped:
+		return serviceLivenessStopped
+	default:
+		// StopPending, and any state a later Windows adds: a process may still be
+		// holding its state, so this is no answer.
+		return serviceLivenessUnknown
+	}
 }
 
 // ConfigureWindowsServiceFailureActions checks if the given service
@@ -72,15 +127,29 @@ func ConfigureWindowsServiceFailureActions(serviceName string) error {
 		return err
 	}
 
-	// Then proceed with existing actions, e.g. setting failure actions
+	// Recovery policy for a service that carries enforcement.
+	//
+	// ctrld's WFP session is dynamic, so Windows removes its filters when the process
+	// dies - a host with no ctrld is unfiltered rather than locked out. That makes the
+	// restart budget part of the enforcement story: three restarts five seconds apart
+	// with a two-minute reset window could be spent inside fifteen seconds, after which
+	// the service stays stopped and the host stays unfiltered until an operator acts.
+	//
+	// The delays back off instead, and the reset window is long enough that a burst
+	// cannot exhaust the budget faster than the backoff allows. A genuine crash loop
+	// still ends in a stopped service - that is the point of a bounded policy - but it
+	// takes minutes rather than seconds, and the third restart survives a transient
+	// failure that repeats.
 	actions := []mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
-		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
-		{Type: mgr.ServiceRestart, Delay: time.Second * 5}, // 5 seconds
+		{Type: mgr.ServiceRestart, Delay: time.Second * 5},
+		{Type: mgr.ServiceRestart, Delay: time.Second * 30},
+		{Type: mgr.ServiceRestart, Delay: time.Minute * 2},
 	}
 
-	// Set the recovery actions (3 restarts, reset period = 120).
-	err = s.SetRecoveryActions(actions, 120)
+	// Reset the failure count only after the service has stayed up longer than the whole
+	// backoff schedule, so repeated failures keep escalating instead of restarting the
+	// count from the first five-second delay.
+	err = s.SetRecoveryActions(actions, uint32((10 * time.Minute).Seconds()))
 	if err != nil {
 		return err
 	}
@@ -100,6 +169,7 @@ func ConfigureWindowsServiceFailureActions(serviceName string) error {
 	return nil
 }
 
+// openLogFile opens a log file with the specified mode on Windows
 func openLogFile(path string, mode int) (*os.File, error) {
 	if len(path) == 0 {
 		return nil, &os.PathError{Path: path, Op: "open", Err: syscall.ERROR_FILE_NOT_FOUND}
@@ -150,78 +220,4 @@ func openLogFile(path string, mode int) (*os.File, error) {
 	}
 
 	return os.NewFile(uintptr(handle), path), nil
-}
-
-const processEntrySize = uint32(unsafe.Sizeof(windows.ProcessEntry32{}))
-
-// hasLocalDnsServerRunning reports whether we are on Windows and having Dns server running.
-func hasLocalDnsServerRunning() bool {
-	h, e := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
-	if e != nil {
-		return false
-	}
-	p := windows.ProcessEntry32{Size: processEntrySize}
-	for {
-		e := windows.Process32Next(h, &p)
-		if e != nil {
-			return false
-		}
-		if strings.ToLower(windows.UTF16ToString(p.ExeFile[:])) == "dns.exe" {
-			return true
-		}
-	}
-}
-
-func isRunningOnDomainControllerWindows() (bool, int) {
-	whost := host.NewWmiLocalHost()
-	q := query.NewWmiQuery("Win32_ComputerSystem")
-	instances, err := instance.GetWmiInstancesFromHost(whost, string(constant.CimV2), q)
-	if err != nil {
-		mainLog.Load().Debug().Err(err).Msg("WMI query failed")
-		return false, 0
-	}
-	if instances == nil {
-		mainLog.Load().Debug().Msg("WMI query returned nil instances")
-		return false, 0
-	}
-	defer instances.Close()
-
-	if len(instances) == 0 {
-		mainLog.Load().Debug().Msg("no rows returned from Win32_ComputerSystem")
-		return false, 0
-	}
-
-	val, err := instances[0].GetProperty("DomainRole")
-	if err != nil {
-		mainLog.Load().Debug().Err(err).Msg("failed to get DomainRole property")
-		return false, 0
-	}
-	if val == nil {
-		mainLog.Load().Debug().Msg("DomainRole property is nil")
-		return false, 0
-	}
-
-	// Safely handle varied types: string or integer
-	var roleInt int
-	switch v := val.(type) {
-	case string:
-		// "4", "5", etc.
-		parsed, parseErr := strconv.Atoi(v)
-		if parseErr != nil {
-			mainLog.Load().Debug().Err(parseErr).Msgf("failed to parse DomainRole value %q", v)
-			return false, 0
-		}
-		roleInt = parsed
-	case int8, int16, int32, int64:
-		roleInt = int(reflect.ValueOf(v).Int())
-	case uint8, uint16, uint32, uint64:
-		roleInt = int(reflect.ValueOf(v).Uint())
-	default:
-		mainLog.Load().Debug().Msgf("unexpected DomainRole type: %T value=%v", v, v)
-		return false, 0
-	}
-
-	// Check if role indicates a domain controller
-	isDC := roleInt == BackupDomainController || roleInt == PrimaryDomainController
-	return isDC, roleInt
 }
