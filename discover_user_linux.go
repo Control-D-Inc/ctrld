@@ -22,10 +22,8 @@ import (
 func DiscoverMainUser(ctx context.Context) string {
 	logger := LoggerFromCtx(ctx).Debug()
 
-	// Method 1: Check active users via loginctl
-	logger.Msg("attempting to discover user via loginctl")
-	if user := getLoginctlUser(ctx); user != "" {
-		logger.Str("method", "loginctl").Str("user", user).Msg("found user via loginctl")
+	// Method 1: an active loginctl user.
+	if user := discoverSessionUser(ctx); user != "" {
 		return user
 	}
 
@@ -45,6 +43,21 @@ func DiscoverMainUser(ctx context.Context) string {
 
 	logger.Msg("all user discovery methods failed")
 	return "unknown"
+}
+
+// discoverSessionUser returns the user of an active login session, or "" when
+// nobody is logged in. It never falls back to a guess from the account list.
+func discoverSessionUser(ctx context.Context) string {
+	logger := LoggerFromCtx(ctx).Debug()
+
+	// Method 1: Check active users via loginctl
+	logger.Msg("attempting to discover user via loginctl")
+	if user := getLoginctlUser(ctx); user != "" {
+		logger.Str("method", "loginctl").Str("user", user).Msg("found user via loginctl")
+		return user
+	}
+
+	return ""
 }
 
 // getLoginctlUser uses loginctl to find active users

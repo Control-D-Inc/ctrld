@@ -35,10 +35,8 @@ const (
 func DiscoverMainUser(ctx context.Context) string {
 	logger := LoggerFromCtx(ctx).Debug()
 
-	// Method 1: Check active console session
-	logger.Msg("attempting to discover user via active console session")
-	if user := getActiveConsoleUser(ctx); user != "" {
-		logger.Str("method", "console").Str("user", user).Msg("found user via active console session")
+	// Method 1: the active console session user.
+	if user := discoverSessionUser(ctx); user != "" {
 		return user
 	}
 
@@ -58,6 +56,21 @@ func DiscoverMainUser(ctx context.Context) string {
 
 	logger.Msg("all user discovery methods failed")
 	return "unknown"
+}
+
+// discoverSessionUser returns the user of an active login session, or "" when
+// nobody is logged in. It never falls back to a guess from the account list.
+func discoverSessionUser(ctx context.Context) string {
+	logger := LoggerFromCtx(ctx).Debug()
+
+	// Method 1: Check active console session
+	logger.Msg("attempting to discover user via active console session")
+	if user := getActiveConsoleUser(ctx); user != "" {
+		logger.Str("method", "console").Str("user", user).Msg("found user via active console session")
+		return user
+	}
+
+	return ""
 }
 
 // getActiveConsoleUser gets the username of the active console session

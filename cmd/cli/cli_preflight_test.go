@@ -57,6 +57,44 @@ func TestContextFromStopCh(t *testing.T) {
 	})
 }
 
+func TestManagedConfigFetchMetadataScope(t *testing.T) {
+	oldFetch, oldStartup := fetchResolverConfig, startupMetadata
+	oldUID := cdUID
+	t.Cleanup(func() {
+		fetchResolverConfig, startupMetadata = oldFetch, oldStartup
+		cdUID = oldUID
+	})
+	cdUID = "testuid"
+	startupMetadata = func(context.Context) map[string]string {
+		return map[string]string{"username": "session-user"}
+	}
+
+	requests := make(chan *controld.ResolverConfigRequest, 2)
+	fetchResolverConfig = func(_ context.Context, req *controld.ResolverConfigRequest, _ bool) (*controld.ResolverConfig, error) {
+		requests <- req
+		return nil, errors.New("stop after capturing metadata")
+	}
+
+	_, _ = processCDFlags(context.Background(), &ctrld.Config{})
+	startup := <-requests
+	if got := startup.Metadata["username"]; got != "session-user" {
+		t.Errorf("managed startup username = %q, want the startup metadata source", got)
+	}
+	if !startup.IncludeHostnameHints {
+		t.Error("managed startup did not request hostname hints")
+	}
+
+	p := &prog{stopCh: make(chan struct{})}
+	_, _ = p.fetchCDConfigBoundedByLifetime(&ctrld.Config{})
+	runtime := <-requests
+	if _, ok := runtime.Metadata["username"]; ok {
+		t.Error("runtime reload metadata included username")
+	}
+	if runtime.IncludeHostnameHints {
+		t.Error("runtime reload requested hostname hints")
+	}
+}
+
 // retryableNetworkErr is the shape processCDFlags treats as "retry with bootstrap
 // DNS": a url.Error wrapping a network failure.
 func retryableNetworkErr() error {
@@ -353,17 +391,18 @@ func TestStopRequested(t *testing.T) {
 // Reload fetches the ControlD config too, and it used to build the bounded context
 // itself. Nothing tested that: the wrong channel, or a dropped cancel, would have left a
 // reload retrying against an unreachable API after "Service stopped" was logged, and no
-// test would have failed. Both paths now go through one bounded fetch, so this pins it.
+// test would have failed. The reload path still binds its runtime-only metadata fetch to
+// the service lifetime, so this pins both cancellation and watcher cleanup.
 func TestReloadFetchIsBoundedByServiceLifetime(t *testing.T) {
-	original := processCDFlagsFn
-	t.Cleanup(func() { processCDFlagsFn = original })
+	original := processCDFlagsRuntimeFn
+	t.Cleanup(func() { processCDFlagsRuntimeFn = original })
 
 	t.Run("a stop request cancels the reload fetch", func(t *testing.T) {
 		stopCh := make(chan struct{})
 		close(stopCh)
 
 		var sawCancelled bool
-		processCDFlagsFn = func(ctx context.Context, _ *ctrld.Config) (*controld.ResolverConfig, error) {
+		processCDFlagsRuntimeFn = func(ctx context.Context, _ *ctrld.Config) (*controld.ResolverConfig, error) {
 			select {
 			case <-ctx.Done():
 				sawCancelled = true
@@ -385,7 +424,7 @@ func TestReloadFetchIsBoundedByServiceLifetime(t *testing.T) {
 		// stopCh stays open: the fetch's own cancel is what must end the watcher, or
 		// every reload leaks a goroutine.
 		var captured context.Context
-		processCDFlagsFn = func(ctx context.Context, _ *ctrld.Config) (*controld.ResolverConfig, error) {
+		processCDFlagsRuntimeFn = func(ctx context.Context, _ *ctrld.Config) (*controld.ResolverConfig, error) {
 			captured = ctx
 			return nil, nil
 		}

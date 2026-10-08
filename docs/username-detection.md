@@ -98,16 +98,44 @@ System metadata (OS, chassis, username, domain) is sent to the Control D API via
 | Scenario | Metadata sent? | Username included? |
 |---|---|---|
 | `ctrld-client start` with `--cd-org` (provisioning via `cdUIDFromProvToken`) | ✅ Full | ✅ Yes |
-| `ctrld-client run` startup (config validation / processCDFlags) | ✅ Lightweight | ❌ No |
+| `ctrld-client run` managed startup (`processCDFlags`) | ✅ Full | ⚠️ Only from an active login session |
+| Mobile library start (`RunMobile` → `processCDFlags`) | ✅ Full | ❌ No (see below) |
+| `ctrld-client start --cd` install validation (`doValidateCdRemoteConfig`) | ✅ Lightweight | ❌ No |
+| `ctrld-client restart` configuration validation (`doValidateCdRemoteConfig`) | ✅ Lightweight | ❌ No |
 | Runtime config reload (`doReloadApiConfig`) | ✅ Lightweight | ❌ No |
 | Runtime self-uninstall check | ✅ Lightweight | ❌ No |
 | Runtime deactivation pin refresh | ✅ Lightweight | ❌ No |
 
-Username is only collected and sent once — during initial provisioning via `cdUIDFromProvToken()`. All other API calls use `SystemMetadataRuntime()` which omits username discovery entirely.
+Provisioning runs the full `DiscoverMainUser` chain. Each managed daemon start runs only the active-session part of that chain (`SystemMetadataStartup`): the console user on macOS, the active console session on Windows, or an active `loginctl` user on Linux. The daemon usually starts at boot, before anyone logs in. When no session user is found, the start omits `username`, and the API keeps the stored value instead of replacing it with an account-list guess or `"unknown"`. Full daemon-start metadata also includes the supported hostname hints. Periodic, forced, self-uninstall, deactivation-PIN, and install/restart validation requests use `SystemMetadataRuntime()` and omit username discovery and hostname hints.
+
+A `--cd-org` install therefore sends two full snapshots: the token exchange (`cdUIDFromProvToken`), then the first check-in of the daemon that `start` launches with `--cd=<uid>`. Full discovery runs for the first and session discovery for the second. The API merges metadata objects, so the second snapshot does not erase fields from the first.
+
+The mobile library starts through `processCDFlags` too. iOS builds use `GOOS=darwin`, but the `stat` and `scutil` commands that macOS session discovery runs are not available, and Android has no `loginctl` session. Session discovery on mobile finds no user, so the mobile start omits `username`.
+
+### Host metadata wire contract (version 1)
+
+Every managed `/utility` request body carries `uid`, an optional `client_id`, and `metadata`. `metadata` is a JSON object of string values, or `null` when the caller supplies none. `UpdateCustomLastFailed` sends `null`, which the API treats as metadata omitted. All resolver-config callers supply metadata.
+
+Columns: **Provisioning** is the `--cd-org` token exchange; **Start** is the first check-in of each managed daemon start; **Runtime** is every other request in the table above.
+
+| Key | Source | Platforms | Provisioning | Start | Runtime | Value when the source is unavailable |
+|---|---|---|---|---|---|---|
+| `os` | `osinfo` | All | ✅ | ✅ | ✅ | Always present |
+| `chassis_type` | `system.GetChassisInfo` (macOS model identifier) | All | ✅ | ✅ | ✅ | `""` |
+| `chassis_vendor` | `system.GetChassisInfo` (`Apple Inc.` on macOS) | All | ✅ | ✅ | ✅ | `""` |
+| `username` | Provisioning: `DiscoverMainUser`. Start: active login session only | All | ✅ | ⚠️ Session user only | ❌ | Provisioning: `"unknown"`. Start: key omitted |
+| `domain_or_workgroup` | Windows domain-join status | Windows; `"false"` elsewhere | ✅ | ✅ | ✅ | `"false"` |
+| `domain` | Active Directory domain | Windows; `""` elsewhere | ✅ | ✅ | ✅ | `""` |
+| `hostname_ComputerName` | `scutil --get ComputerName` | macOS only | ✅ | ✅ | ❌ | Key omitted |
+| `hostname_LocalHostName` | `scutil --get LocalHostName` | macOS only | ✅ | ✅ | ❌ | Key omitted |
+| `hostname_HostName` | `scutil --get HostName` | macOS only | ✅ | ✅ | ❌ | Key omitted |
+| `hostname_os.Hostname` | `os.Hostname()` | All | ✅ | ✅ | ❌ | Key omitted |
+
+The API accepts only these ten keys. It ignores unknown keys, non-string values, and any value longer than 255 bytes, field by field, without failing the request. An omitted key keeps the stored value and a present empty string clears it. The server side of this contract is [`docs/ctrld-utility-host-metadata.md` in controld-api](https://gitlab.int.windscribe.com/controld/backend/api/-/blob/master/docs/ctrld-utility-host-metadata.md). Bump the version above when a key, its platforms, or its unavailable value changes.
 
 ### Runtime metadata (`SystemMetadataRuntime`)
 
-Runtime API calls (config reload, self-uninstall check, deactivation pin refresh) use `SystemMetadataRuntime()` which includes OS and chassis info but **skips username discovery**. This avoids:
+Runtime API calls (config reload, self-uninstall check, deactivation pin refresh, install/restart validation) use `SystemMetadataRuntime()` which includes OS and chassis info but **skips username discovery**. This avoids:
 
 - **EDR false positives**: Repeated user enumeration (registry scans, WTS queries, loginctl calls) can trigger endpoint detection and response alerts
 - **Unnecessary work**: Username is unlikely to change while the service is running

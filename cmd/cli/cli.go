@@ -823,7 +823,7 @@ type apiPreflight struct {
 // with no stop channel - as an operator stop. Reading the stop channel directly is also
 // independent of whether the context's watcher goroutine has been scheduled yet.
 func runAPIPreflight(stopCh <-chan struct{}, cfg *ctrld.Config) apiPreflight {
-	rc, err := fetchCDConfigBoundedBy(stopCh, cfg)
+	rc, err := fetchCDConfigBoundedBy(stopCh, cfg, processCDFlagsFn)
 	return apiPreflight{rc: rc, err: err, stopRequested: stopRequested(stopCh)}
 }
 
@@ -1000,25 +1000,32 @@ func handleAPIPreflightFailure(p *prog, err error, notify func()) {
 	failProvision(newProvisionResult(code, fmt.Sprintf("failed to fetch resolver config: %v", err), nil, provisionSecrets()...), notify)
 }
 
-// processCDFlagsFn is the API fetch, indirected so the lifetime binding around it can be
-// tested without reaching the network.
-var processCDFlagsFn = processCDFlags
+// The startup (full metadata) and reload (runtime metadata) API fetches are indirected so
+// their lifetime binding can be tested without reaching the network.
+var (
+	processCDFlagsFn        = processCDFlags
+	processCDFlagsRuntimeFn = processCDFlagsRuntime
+)
 
-// fetchCDConfigBoundedBy runs the API fetch bounded by stopCh, so a fetch that cannot
-// reach the API stops when the service is asked to stop instead of working on behalf of a
-// service the OS already considers stopped. The derived context is always cancelled, which
+// fetchCDConfigBoundedBy runs fetch bounded by stopCh, so a fetch that cannot reach the
+// API stops when the service is asked to stop instead of working on behalf of a service
+// the OS already considers stopped. The derived context is always cancelled, which
 // releases the goroutine watching stopCh.
-func fetchCDConfigBoundedBy(stopCh <-chan struct{}, cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+func fetchCDConfigBoundedBy(
+	stopCh <-chan struct{},
+	cfg *ctrld.Config,
+	fetch func(context.Context, *ctrld.Config) (*controld.ResolverConfig, error),
+) (*controld.ResolverConfig, error) {
 	ctx, cancel := contextFromStopCh(stopCh)
 	defer cancel()
-	return processCDFlagsFn(ctx, cfg)
+	return fetch(ctx, cfg)
 }
 
 // fetchCDConfigBoundedByLifetime is the reload path's fetch. Reload binds the same stop
 // primitives as startup - it used to wire them up itself, where a dropped cancel or the
 // wrong channel would have failed nothing.
 func (p *prog) fetchCDConfigBoundedByLifetime(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
-	return fetchCDConfigBoundedBy(p.stopCh, cfg)
+	return fetchCDConfigBoundedBy(p.stopCh, cfg, processCDFlagsRuntimeFn)
 }
 
 // stopRequested reports whether stopCh has been closed. A nil channel - mobile passes
@@ -1057,6 +1064,23 @@ func contextFromStopCh(stopCh <-chan struct{}) (context.Context, context.CancelF
 // come up), so it must be cancellable: otherwise a stop request during preflight is
 // ignored and the process keeps retrying after the service reports itself stopped.
 func processCDFlags(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+	return processCDFlagsWithMetadata(ctx, cfg, startupMetadata, true)
+}
+
+// startupMetadata is the daemon-start metadata source, indirected so tests can
+// prove that startup, and only startup, uses it.
+var startupMetadata = ctrld.SystemMetadataStartup
+
+func processCDFlagsRuntime(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+	return processCDFlagsWithMetadata(ctx, cfg, ctrld.SystemMetadataRuntime, false)
+}
+
+func processCDFlagsWithMetadata(
+	ctx context.Context,
+	cfg *ctrld.Config,
+	metadata func(context.Context) map[string]string,
+	includeHostnameHints bool,
+) (*controld.ResolverConfig, error) {
 	logger := mainLog.Load().With().Str("mode", "cd")
 	logger.Info().Msgf("Fetching Controld D configuration from API: %s", cdUID)
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
@@ -1066,9 +1090,10 @@ func processCDFlags(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverC
 	}
 	ctx = ctrld.LoggerCtx(ctx, logger)
 	req := &controld.ResolverConfigRequest{
-		RawUID:   cdUID,
-		Version:  appVersion,
-		Metadata: ctrld.SystemMetadata(ctx),
+		RawUID:               cdUID,
+		Version:              appVersion,
+		Metadata:             metadata(ctx),
+		IncludeHostnameHints: includeHostnameHints,
 	}
 	resolverConfig, err := fetchResolverConfig(ctx, req, cdDev)
 
@@ -2673,10 +2698,12 @@ func apiRejectionMessage(err error) string {
 // itself, with no process exit.
 func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 	loggerCtx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
+	// Install and restart validation use runtime metadata. The daemon start
+	// that follows sends the full snapshot.
 	req := &controld.ResolverConfigRequest{
 		RawUID:   cdUID,
 		Version:  appVersion,
-		Metadata: ctrld.SystemMetadata(loggerCtx),
+		Metadata: ctrld.SystemMetadataRuntime(loggerCtx),
 	}
 	rc, err := fetchResolverConfig(loggerCtx, req, cdDev)
 	if err != nil {

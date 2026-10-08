@@ -20,6 +20,27 @@ import (
 func DiscoverMainUser(ctx context.Context) string {
 	logger := LoggerFromCtx(ctx).Debug()
 
+	// Methods 1 and 2: the logged-in console user.
+	if user := discoverSessionUser(ctx); user != "" {
+		return user
+	}
+
+	// Method 3: Find lowest UID >= 501 from directory services
+	logger.Msg("attempting to discover user via dscl directory scan")
+	if user := getLowestRegularUser(ctx); user != "" {
+		logger.Str("method", "dscl").Str("user", user).Msg("found user via dscl scan")
+		return user
+	}
+
+	logger.Msg("all user discovery methods failed")
+	return "unknown"
+}
+
+// discoverSessionUser returns the user of an active login session, or "" when
+// nobody is logged in. It never falls back to a guess from the account list.
+func discoverSessionUser(ctx context.Context) string {
+	logger := LoggerFromCtx(ctx).Debug()
+
 	// Method 1: Check console owner via stat
 	logger.Msg("attempting to discover user via console stat")
 	if user := getConsoleUser(ctx); user != "" && user != "root" {
@@ -34,15 +55,7 @@ func DiscoverMainUser(ctx context.Context) string {
 		return user
 	}
 
-	// Method 3: Find lowest UID >= 501 from directory services
-	logger.Msg("attempting to discover user via dscl directory scan")
-	if user := getLowestRegularUser(ctx); user != "" {
-		logger.Str("method", "dscl").Str("user", user).Msg("found user via dscl scan")
-		return user
-	}
-
-	logger.Msg("all user discovery methods failed")
-	return "unknown"
+	return ""
 }
 
 // getConsoleUser uses stat to find the owner of /dev/console

@@ -22,21 +22,41 @@ var (
 	chassisVendor string
 )
 
+// username discovery modes for systemMetadata.
+const (
+	usernameNone    = iota // omit username
+	usernameSession        // username only from an active login session
+	usernameFull           // username with account-list fallbacks, or "unknown"
+)
+
+var (
+	discoverMainUserFn    = DiscoverMainUser
+	discoverSessionUserFn = discoverSessionUser
+)
+
 // SystemMetadata collects full system metadata including username discovery.
-// Use for initial provisioning and first-run config validation where full
-// device identification is needed.
+// Use for initial provisioning, where full device identification is needed.
 func SystemMetadata(ctx context.Context) map[string]string {
-	return systemMetadata(ctx, true)
+	return systemMetadata(ctx, usernameFull)
+}
+
+// SystemMetadataStartup collects the metadata for the first managed check-in of
+// each daemon start. The daemon usually starts at boot, before anyone logs in,
+// so username is sent only when an active login session provides it. Otherwise
+// the key is omitted and the API keeps the stored value instead of replacing it
+// with an account-list guess or "unknown".
+func SystemMetadataStartup(ctx context.Context) map[string]string {
+	return systemMetadata(ctx, usernameSession)
 }
 
 // SystemMetadataRuntime collects system metadata without username discovery.
 // Use for runtime API calls (config reload, self-uninstall check, deactivation
 // pin refresh) to avoid repeated user enumeration that can trigger EDR alerts.
 func SystemMetadataRuntime(ctx context.Context) map[string]string {
-	return systemMetadata(ctx, false)
+	return systemMetadata(ctx, usernameNone)
 }
 
-func systemMetadata(ctx context.Context, includeUsername bool) map[string]string {
+func systemMetadata(ctx context.Context, usernameMode int) map[string]string {
 	logger := LoggerFromCtx(ctx)
 	m := make(map[string]string)
 	oi := osinfo.New()
@@ -51,8 +71,13 @@ func systemMetadata(ctx context.Context, includeUsername bool) map[string]string
 	}
 	m[metadataChassisTypeKey] = chassisType
 	m[metadataChassisVendorKey] = chassisVendor
-	if includeUsername {
-		m[metadataUsernameKey] = DiscoverMainUser(ctx)
+	switch usernameMode {
+	case usernameFull:
+		m[metadataUsernameKey] = discoverMainUserFn(ctx)
+	case usernameSession:
+		if user := discoverSessionUserFn(ctx); user != "" {
+			m[metadataUsernameKey] = user
+		}
 	}
 	m[metadataDomainOrWorkgroupKey] = partOfDomainOrWorkgroup(ctx)
 	domain, err := system.GetActiveDirectoryDomain()

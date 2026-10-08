@@ -1716,7 +1716,7 @@ func (p *prog) doSelfUninstall(pr *proxyResponse) {
 		req := &controld.ResolverConfigRequest{
 			RawUID:   cdUID,
 			Version:  appVersion,
-			Metadata: ctrld.SystemMetadata(loggerCtx),
+			Metadata: ctrld.SystemMetadataRuntime(loggerCtx),
 		}
 		_, err := fetchResolverConfig(loggerCtx, req, cdDev)
 		logger.Debug().Msg("Maximum number of refused queries reached, checking device status")

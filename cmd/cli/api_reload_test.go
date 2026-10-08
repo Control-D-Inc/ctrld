@@ -244,6 +244,40 @@ func waitForCondition(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+func TestApiConfigReloadUsesRuntimeMetadata(t *testing.T) {
+	originalFetch, originalUID := fetchResolverConfigFn, cdUID
+	t.Cleanup(func() {
+		fetchResolverConfigFn = originalFetch
+		cdUID = originalUID
+	})
+	cdUID = "test-uid"
+
+	captured := make(chan *controld.ResolverConfigRequest, 1)
+	fetchResolverConfigFn = func(_ context.Context, req *controld.ResolverConfigRequest, _ bool) (*controld.ResolverConfig, error) {
+		captured <- req
+		return &controld.ResolverConfig{}, nil
+	}
+
+	p := progForRefresh()
+	p.cfg = &ctrld.Config{}
+	p.stopCh = make(chan struct{})
+	p.apiForceReloadCh = make(chan struct{})
+	startRefreshLoop(t, p)
+	p.apiForceReloadCh <- struct{}{}
+
+	select {
+	case req := <-captured:
+		if _, ok := req.Metadata["username"]; ok {
+			t.Error("periodic/forced API refresh included username")
+		}
+		if req.IncludeHostnameHints {
+			t.Error("periodic/forced API refresh requested hostname hints")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("periodic/forced API refresh did not fetch resolver config")
+	}
+}
+
 // TestApiConfigReloadAppliesAllowedDestinations drives apiConfigReload itself -
 // the loop that owns the refresh ticker and the forced-reload channel - rather
 // than the handler it calls, so the wiring between them is covered too: removing

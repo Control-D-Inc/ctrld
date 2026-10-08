@@ -767,7 +767,7 @@ func (p *prog) apiConfigReload() {
 		req := &controld.ResolverConfigRequest{
 			RawUID:   cdUID,
 			Version:  appVersion,
-			Metadata: ctrld.SystemMetadata(loggerCtx),
+			Metadata: ctrld.SystemMetadataRuntime(loggerCtx),
 		}
 		resolverConfig, err := fetchResolverConfigFn(loggerCtx, req, cdDev)
 		if ctx.Err() != nil {
