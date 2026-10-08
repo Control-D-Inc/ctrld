@@ -92,14 +92,20 @@ func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
 			if validateConfigErr != nil {
 				timeout = 5 * time.Second
 			}
-			if cc := newSocketControlClientWithTimeout(context.TODO(), s, dir, timeout); cc != nil {
+			// Only a ready service counts. Restart replaces nothing, so
+			// there is nothing to roll back, but a service that came
+			// back without finishing its start must not be reported as
+			// restarted cleanly.
+			if cc := newReadySocketControlClientWithTimeout(context.TODO(), s, dir, timeout); cc != nil {
 				_, _ = cc.post(ifacePath, nil)
 				logger.Debug().Msg("Control server ping successful")
 			} else {
-				logger.Warn().Err(err).Msg("Service was restarted, but ctrld process may not be ready yet")
+				logger.Warn().Msgf("Service was restarted, but ctrld did not report ready within %s; check `ctrld status`", timeout)
+				return nil
 			}
 		} else {
 			logger.Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
+			return nil
 		}
 		logger.Notice().Msg("Service restarted")
 	} else {

@@ -2355,7 +2355,37 @@ func newSocketControlClient(ctx context.Context, s service.Service, dir string) 
 
 // newSocketControlClientWithTimeout returns new control client after control server was started.
 // The timeoutDuration controls how long to wait for the server.
+//
+// Any answer to /started counts, including the 408 of a service whose start
+// never finished: callers such as the deactivation pin check need to reach a
+// running service whether or not it is ready. A caller that needs it ready uses
+// newReadySocketControlClient.
 func newSocketControlClientWithTimeout(ctx context.Context, s service.Service, dir string, timeoutDuration time.Duration) *controlClient {
+	return dialSocketControlServer(ctx, s, dir, timeoutDuration, false)
+}
+
+// newReadySocketControlClient is newSocketControlClient for a caller that needs
+// the service ready, not just reachable: only a 200 from /started counts.
+//
+// A service whose start never finishes still runs its control server, and
+// answers /started with 408 once its onStarted hooks have not completed in
+// time. `ctrld upgrade` must read that as "the new binary did not become
+// ready" and roll back, rather than report the upgrade successful.
+func newReadySocketControlClient(ctx context.Context, s service.Service, dir string) *controlClient {
+	return newReadySocketControlClientWithTimeout(ctx, s, dir, dialSocketControlServerTimeout)
+}
+
+// newReadySocketControlClientWithTimeout is newReadySocketControlClient with
+// an explicit deadline.
+func newReadySocketControlClientWithTimeout(ctx context.Context, s service.Service, dir string, timeoutDuration time.Duration) *controlClient {
+	return dialSocketControlServer(ctx, s, dir, timeoutDuration, true)
+}
+
+// dialSocketControlServer polls /started until the control server answers, or
+// with requireReady until it answers 200, and returns the client. It returns
+// nil if the service is not running, or the answer does not come within
+// timeoutDuration.
+func dialSocketControlServer(ctx context.Context, s service.Service, dir string, timeoutDuration time.Duration, requireReady bool) *controlClient {
 	// Return early if service is not running.
 	if status, err := s.Status(); err != nil || status != service.StatusRunning {
 		return nil
@@ -2370,10 +2400,15 @@ func newSocketControlClientWithTimeout(ctx context.Context, s service.Service, d
 	// The socket control server may not start yet, so attempt to ping
 	// it until we got a response.
 	for {
-		_, err := cc.post(startedPath, nil)
+		resp, err := cc.post(startedPath, nil)
 		if err == nil {
-			// Server was started, stop pinging.
-			break
+			code := resp.StatusCode
+			resp.Body.Close()
+			if !requireReady || code == http.StatusOK {
+				// Server was started, stop pinging.
+				break
+			}
+			err = fmt.Errorf("control server reported the service not ready: HTTP %d", code)
 		}
 		// The socket control server is not ready yet, backoff for waiting it to be ready.
 		bo.BackOff(ctx, err)

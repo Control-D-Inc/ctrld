@@ -125,7 +125,9 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 		}
 		if doTasks(tasks) {
 			if dir, err := socketDir(); err == nil {
-				if cc := newSocketControlClient(context.TODO(), s, dir); cc != nil {
+				// Only a ready service counts: a build that starts but
+				// never becomes ready must be rolled back.
+				if cc := newReadySocketControlClient(context.TODO(), s, dir); cc != nil {
 					_, _ = cc.post(ifacePath, nil)
 					return true
 				}
