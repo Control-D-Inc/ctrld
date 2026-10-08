@@ -139,6 +139,28 @@ func removeServiceFlag(flag string) error {
 	return nil
 }
 
+// installedServiceArgs returns the launch arguments of the installed service,
+// split from its binary path the way the other service-argument helpers do.
+func installedServiceArgs() ([]string, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to Windows SCM: %w", err)
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(ctrldServiceName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open service %q: %w", ctrldServiceName, err)
+	}
+	defer s.Close()
+
+	config, err := s.Config()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read service config: %w", err)
+	}
+	return strings.Fields(config.BinaryPathName), nil
+}
+
 func binaryPathArgumentPresent(binaryPath, argument string) bool {
 	for _, part := range strings.Fields(binaryPath) {
 		if part == argument {

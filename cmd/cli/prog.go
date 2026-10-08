@@ -1552,18 +1552,29 @@ func (p *prog) setDNS(systemNameservers []string) {
 		p.csSetDnsOk = setDnsOK
 	}()
 
-	// Validate and resolve intercept mode.
-	// CLI flag (--intercept-mode) takes priority over config file.
-	// Valid values: "" (use config), "off" (explicitly disable), "dns" (with VPN
-	// split routing), and "hard" (all DNS through ctrld).
+	// Validate and resolve intercept mode: --intercept-mode, then
+	// service.intercept_mode, then the platform default (resolveInterceptMode).
+	// Valid values: "off" (interface DNS mode), "dns" (with VPN split routing),
+	// and "hard" (all DNS through ctrld).
 	if interceptMode != "" && !validInterceptMode(interceptMode) {
 		mainLog.Load().Fatal().Msgf("invalid --intercept-mode value %q: must be 'off', 'dns', or 'hard'", interceptMode)
 	}
 	if interceptMode == "" {
-		interceptMode = p.configuredInterceptMode()
-		if interceptMode != "" && interceptMode != "off" {
-			mainLog.Load().Info().Msgf("Intercept mode enabled via config (intercept_mode = %q)", interceptMode)
+		mode, source := resolveInterceptMode("", p.cfg)
+		interceptMode, interceptModeSource = mode, source
+		switch {
+		case source == interceptModeSourceDefault && mode == "":
+			if _, reason := defaultInterceptMode(p.cfg); reason != nil {
+				mainLog.Load().Info().Err(reason).Msg("Intercept mode default not applied; using interface DNS mode")
+			}
+		case mode == "" || mode == "off":
+		case source == interceptModeSourceConfig:
+			mainLog.Load().Info().Msgf("Intercept mode enabled via config (intercept_mode = %q)", mode)
+		case source == interceptModeSourceDefault:
+			mainLog.Load().Info().Msgf("Intercept mode %q is the default on this platform; use --intercept-mode off for interface DNS mode", mode)
 		}
+	} else if interceptModeSource == "" {
+		interceptModeSource = interceptModeSourceFlag
 	}
 
 	// Derive convenience bools from interceptMode.
@@ -1728,13 +1739,11 @@ func (p *prog) setDNS(systemNameservers []string) {
 
 // configuredInterceptMode resolves the service's effective intercept mode without
 // mutating package state. An explicit flag value, including "off", takes priority
-// over the persisted config value.
+// over the persisted config value, and the platform default applies when neither
+// is set.
 func (p *prog) configuredInterceptMode() string {
-	im := interceptMode
-	if im == "" {
-		im = p.cfg.Service.InterceptMode
-	}
-	return im
+	mode, _ := resolveInterceptMode(interceptMode, p.cfg)
+	return mode
 }
 
 func (p *prog) setDnsForRunningIface(nameservers []string) (runningIface *net.Interface) {
