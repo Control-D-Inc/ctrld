@@ -29,6 +29,7 @@ type interceptTargetHarness struct {
 	ipv6Calls    int
 	now          time.Time
 	confirms     []time.Duration
+	confirmFns   []func()
 	saveErr      error
 	readErr      error
 	setErr       error
@@ -88,8 +89,10 @@ func newInterceptTargetHarness(t *testing.T) *interceptTargetHarness {
 	})
 	h.now = time.Unix(1_700_000_000, 0)
 	interceptNowFn = func() time.Time { return h.now }
-	interceptIPv6OnlyAfterFn = func(d time.Duration, _ func()) *time.Timer {
+	// Keep the scheduled follow-up so a test can run it as the timer would.
+	interceptIPv6OnlyAfterFn = func(d time.Duration, f func()) *time.Timer {
 		h.confirms = append(h.confirms, d)
+		h.confirmFns = append(h.confirmFns, f)
 		return nil
 	}
 

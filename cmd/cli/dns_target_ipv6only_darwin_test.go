@@ -85,6 +85,68 @@ func TestIPv6OnlyTargetWaitsForConfirmation(t *testing.T) {
 	}
 }
 
+// The scheduled follow-up itself admits the target after the delay. It runs
+// as network activity, so the WaitGroup must be balanced when it returns.
+func TestIPv6OnlyTargetScheduledConfirmationAdmits(t *testing.T) {
+	h := newInterceptTargetHarness(t)
+	h.ipv6Only = true
+	h.dhcpErr = errors.New("no lease")
+	p := newInterceptTargetProg()
+
+	p.ensureInterceptDNSTarget([]string{})
+	if len(h.confirmFns) != 1 || len(h.setCalls) != 0 {
+		t.Fatalf("first observation: confirms=%d set=%v", len(h.confirmFns), h.setCalls)
+	}
+	h.now = h.now.Add(ipv6OnlyConfirmDelay)
+	h.confirmFns[0]()
+	if !slices.Equal(h.dns["Wi-Fi"], []string{"127.0.0.53"}) {
+		t.Fatalf("scheduled confirmation did not admit: %v", h.dns["Wi-Fi"])
+	}
+	waitNetworkActivity(t, p)
+}
+
+// After shutdown has closed network activity, the scheduled follow-up does
+// nothing and leaves the WaitGroup balanced. With intercept already torn
+// down it also does nothing.
+func TestIPv6OnlyTargetScheduledConfirmationSkips(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(*prog)
+	}{
+		{name: "network activity closed", stop: func(p *prog) { p.closeNetMonitor() }},
+		{name: "intercept stopped", stop: func(p *prog) { p.dnsInterceptState = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newInterceptTargetHarness(t)
+			h.ipv6Only = true
+			h.dhcpErr = errors.New("no lease")
+			p := newInterceptTargetProg()
+
+			p.ensureInterceptDNSTarget([]string{})
+			calls := h.ipv6Calls
+			tc.stop(p)
+			h.now = h.now.Add(ipv6OnlyConfirmDelay)
+			h.confirmFns[0]()
+			if len(h.setCalls) != 0 || h.ipv6Calls != calls {
+				t.Fatalf("follow-up reconciled after stop: set=%v evidence reads=%d->%d", h.setCalls, calls, h.ipv6Calls)
+			}
+			waitNetworkActivity(t, p)
+		})
+	}
+}
+
+// waitNetworkActivity fails if a follow-up left netMonitorWG unbalanced.
+func waitNetworkActivity(t *testing.T, p *prog) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { p.netMonitorWG.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("netMonitorWG not balanced after the follow-up")
+	}
+}
+
 // Dual-stack network, DHCPv4 late: the RA arrives first, so the first pass
 // sees the IPv6-only shape. The lease then arrives before the confirming
 // pass, and the service is never modified.

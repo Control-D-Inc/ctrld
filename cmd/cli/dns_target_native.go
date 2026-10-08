@@ -257,7 +257,7 @@ func parseNativeIPv4Store(out string) (map[string]string, error) {
 				if !nativeServiceID.MatchString(value) {
 					return nil, errors.New("invalid service ID")
 				}
-			case "PrimaryInterface", "InterfaceName":
+			case "PrimaryInterface", "InterfaceName", "ConfirmedInterfaceName":
 				if value == "" || strings.ContainsAny(value, " \t\r\n{}") {
 					return nil, errors.New("invalid interface")
 				}
@@ -406,13 +406,21 @@ func parseNativeIPv6Global(out string) (id, device string, err error) {
 	return id, device, nil
 }
 
-// nativeIPv6OnlyAddresses requires routable IPv6 and no IPv4 address at all.
+// nativeIPv6OnlyAddresses requires routable IPv6 and no usable IPv4. An
+// IPv4 link-local address (169.254.0.0/16) is allowed: macOS self-assigns one
+// when DHCPv4 gives up, and it reaches no DNS server.
 func nativeIPv6OnlyAddresses(addrs []net.Addr) bool {
 	ipv6 := false
 	for _, addr := range addrs {
 		ip, _, err := net.ParseCIDR(addr.String())
-		if err != nil || ip.To4() != nil {
+		if err != nil {
 			return false
+		}
+		if ip.To4() != nil {
+			if !ip.IsLinkLocalUnicast() {
+				return false
+			}
+			continue
 		}
 		if ip.IsGlobalUnicast() {
 			ipv6 = true
@@ -422,11 +430,12 @@ func nativeIPv6OnlyAddresses(addrs []net.Addr) bool {
 }
 
 // ipv6OnlyService returns the primary service of a network that gives the
-// device no IPv4 at all: configd publishes no global or per-service IPv4
-// state, the IPv6 primary is this device, and the interface holds only IPv6.
-// Before macOS starts its CLAT, such a network has no DHCPv4 lease to read
-// and no CLAT to prove, yet it is just as DNS-less (issue #629). Unknown or
-// changing state is never absence evidence; the caller rechecks the tuple.
+// device no usable IPv4: configd publishes no global IPv4 state and at most a
+// link-local per-service IPv4 state, the IPv6 primary is this device, and the
+// interface holds only IPv6 plus at most an IPv4 link-local address. Before
+// macOS starts its CLAT, such a network has no DHCPv4 lease to read and no
+// CLAT to prove, yet it is just as DNS-less (issue #629). Unknown or changing
+// state is never absence evidence; the caller rechecks the tuple.
 func (r nativeTargetReader) ipv6OnlyService(ctx context.Context, device string) (nativeTargetService, error) {
 	unknown := nativeTargetService{}
 	if gone, err := r.absent(ctx, "State:/Network/Global/IPv4"); err != nil || !gone {
@@ -440,7 +449,7 @@ func (r nativeTargetReader) ipv6OnlyService(ctx context.Context, device string) 
 	if err != nil || primary != device {
 		return unknown, err
 	}
-	if gone, err := r.absent(ctx, "State:/Network/Service/"+id+"/IPv4"); err != nil || !gone {
+	if none, err := r.serviceNoUsableIPv4(ctx, id, device); err != nil || !none {
 		return unknown, err
 	}
 	iface, err := r.interfaceByName(device)
@@ -469,4 +478,55 @@ func (r nativeTargetReader) ipv6OnlyService(ctx context.Context, device string) 
 		return unknown, errors.Join(err, errors.New("default service changed during IPv6-only discovery"))
 	}
 	return nativeTargetService{ID: id, Name: name, Device: device}, nil
+}
+
+// serviceNoUsableIPv4 reports whether the per-service IPv4 state is absent or
+// only the link-local address macOS self-assigns after DHCPv4 gives up. On
+// the ctrld-qa macOS 26 guest (IPv6-only, no DHCPv4, CLAT blocked) that state
+// appears about 25 s after joining: one 169.254.0.0/16 address, no Router, no
+// CLAT46, and Global/IPv4 still absent. A DHCP, static or CLAT configuration
+// always fails this check, so it never hides a network that provides IPv4.
+func (r nativeTargetReader) serviceNoUsableIPv4(ctx context.Context, id, device string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	out, err := r.run(ctx, "show State:/Network/Service/"+id+"/IPv4\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return false, err
+	}
+	if gone, err := nativeStoreAbsent(string(out)); err != nil || gone {
+		return gone, err
+	}
+	values, err := parseNativeIPv4Store(string(out))
+	if err != nil {
+		return false, err
+	}
+	return nativeIPv4LinkLocalOnly(values, device), nil
+}
+
+// nativeIPv4LinkLocalOnly accepts only an IPv4 link-local configuration of
+// device: no router, no CLAT, not a primary, and every address in
+// 169.254.0.0/16.
+func nativeIPv4LinkLocalOnly(values map[string]string, device string) bool {
+	for _, key := range []string{"Router", "CLAT46", "PrimaryService", "PrimaryInterface", "DestinationAddresses", "ExcludedRoutes"} {
+		if _, ok := values[key]; ok {
+			return false
+		}
+	}
+	if values["InterfaceName"] != device {
+		return false
+	}
+	if c, ok := values["ConfirmedInterfaceName"]; ok && c != device {
+		return false
+	}
+	addrs := strings.Fields(values["AddressList"])
+	if len(addrs) == 0 {
+		return false
+	}
+	for _, a := range addrs {
+		if ip := net.ParseIP(a); ip == nil || ip.To4() == nil || !ip.IsLinkLocalUnicast() {
+			return false
+		}
+	}
+	return true
 }

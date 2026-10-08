@@ -13,6 +13,9 @@ import (
 const (
 	ipv6OnlyTestGlobal6 = "<dictionary> {\n  PrimaryInterface : en1\n  PrimaryService : " + nativeTargetTestServiceID + "\n  Router : fe80::5054:ff:fe51:3\n}"
 	ipv6OnlyTestNoKey   = "  No such key"
+	// The same guest about 25 s after joining, once DHCPv4 gave up and macOS
+	// self-assigned an IPv4 link-local address (Global/IPv4 still absent).
+	ipv6OnlyTestLinkLocal4 = "<dictionary> {\n  AdditionalRoutes : <array> {\n    0 : <dictionary> {\n      DestinationAddress : 169.254.131.113\n      SubnetMask : 255.255.255.255\n    }\n  }\n  Addresses : <array> {\n    0 : 169.254.131.113\n  }\n  ConfirmedInterfaceName : en1\n  InterfaceName : en1\n  SubnetMasks : <array> {\n    0 : 255.255.0.0\n  }\n}"
 )
 
 func ipv6OnlyTestOutputs() []string {
@@ -55,7 +58,24 @@ func TestNativeIPv6OnlyReader(t *testing.T) {
 			out[1] = strings.Replace(ipv6OnlyTestGlobal6, "en1", "en9", 1)
 		}},
 		{name: "CLAT address on the interface", addrs: []string{"192.0.0.2/32", "2001:db8::1/64"}},
-		{name: "any IPv4 address on the interface", addrs: []string{"169.254.10.10/16", "2001:db8::1/64"}},
+		{name: "routable IPv4 address on the interface", addrs: []string{"10.0.0.2/24", "2001:db8::1/64"}},
+		// After DHCPv4 gives up, macOS self-assigns 169.254.x.x. That is still
+		// no usable IPv4, so the evidence holds (issue #629 review).
+		{name: "DHCPv4 gave up: IPv4 link-local on service and interface", want: true,
+			addrs:  []string{"169.254.131.113/16", "fd66:6:6:0:1876:fb78:b312:107b/64", "fe80::440:5b5a:3e67:23fe/64"},
+			change: func(_ *nativeTargetReader, out []string) { out[2] = ipv6OnlyTestLinkLocal4 }},
+		{name: "link-local service state with a router", change: func(_ *nativeTargetReader, out []string) {
+			out[2] = strings.Replace(ipv6OnlyTestLinkLocal4, "  InterfaceName : en1\n", "  InterfaceName : en1\n  Router : 169.254.0.1\n", 1)
+		}},
+		{name: "link-local service state plus a routable address", change: func(_ *nativeTargetReader, out []string) {
+			out[2] = strings.Replace(ipv6OnlyTestLinkLocal4, "    0 : 169.254.131.113\n  }\n  Confirmed", "    0 : 169.254.131.113\n    1 : 10.0.0.2\n  }\n  Confirmed", 1)
+		}},
+		{name: "link-local service state on another device", change: func(_ *nativeTargetReader, out []string) {
+			out[2] = strings.ReplaceAll(ipv6OnlyTestLinkLocal4, ": en1", ": en9")
+		}},
+		{name: "link-local service state with an unknown field", change: func(_ *nativeTargetReader, out []string) {
+			out[2] = strings.Replace(ipv6OnlyTestLinkLocal4, "  InterfaceName : en1\n", "  InterfaceName : en1\n  Surprise : 1\n", 1)
+		}},
 		{name: "link-local IPv6 only", addrs: []string{"fe80::1/64"}},
 		{name: "unknown store response", change: func(_ *nativeTargetReader, out []string) {
 			out[0] = "scutil: permission denied"
@@ -140,6 +160,8 @@ func TestNativeIPv6OnlyAddresses(t *testing.T) {
 		{name: "link-local only", addrs: []string{"fe80::1/64"}},
 		{name: "no addresses"},
 		{name: "IPv4 address beside global IPv6", addrs: []string{"2001:db8::1/64", "10.0.0.2/24"}},
+		{name: "IPv4 link-local beside global IPv6", addrs: []string{"2001:db8::1/64", "169.254.131.113/16"}, want: true},
+		{name: "IPv4 link-local only", addrs: []string{"169.254.131.113/16"}},
 		{name: "CLAT address beside global IPv6", addrs: []string{"2001:db8::1/64", "192.0.0.2/32"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

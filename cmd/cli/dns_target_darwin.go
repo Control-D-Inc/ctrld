@@ -151,14 +151,16 @@ func (p *prog) persistInterceptDNSTargetStateLocked() error {
 // A failed DHCP option-6 read is not absence on its own. It admits a target
 // only with positive native evidence that the network has no IPv4: either
 // macOS's own CLAT on the primary service, or (before macOS has started a
-// CLAT) no IPv4 state at all with the device as the IPv6 primary. Without a
+// CLAT) no usable IPv4 with the device as the IPv6 primary. "No usable IPv4"
+// includes the 169.254.0.0/16 address macOS self-assigns once DHCPv4 gives
+// up, about 25 s after joining such a network. Without a
 // target there, macOS cannot emit the ipv4only.arpa lookup it needs to start
 // the CLAT, so the CLAT evidence alone can never arrive (issue #629).
 //
 // "No IPv4 yet" also describes a dual-stack network whose router
 // advertisement arrived before the DHCPv4 ACK. The IPv6-only evidence must
 // therefore hold for ipv6OnlyConfirmDelay on the same service and device
-// before it admits a target. A lease or IPv4 state arriving in that window
+// before it admits a target. A lease or usable IPv4 state arriving in that window
 // fails the evidence on the next pass (at the latest the scheduled one) and
 // ends the confirmation without a write.
 //
