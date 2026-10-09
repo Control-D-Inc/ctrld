@@ -1,2 +1,5 @@
 Dockerfile
 .git/
+# Binaries and logs from the host: the image must contain only what its own
+# build stage produces.
+ctrld-*
