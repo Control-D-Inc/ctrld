@@ -72,8 +72,8 @@ build() {
       if [ "$CGO_ENABLED" = "0" ]; then
         binary=${binary}-nocgo
       fi
-      GOOS=${goos} GOARCH=${goarch} GOARM=${3} "$go" generate ./...
-      GOOS=${goos} GOARCH=${goarch} GOARM=${3} "$go" build -ldflags="$ldflags" -o "$binary" ./cmd/ctrld
+      GOOS=${goos} GOARCH=${goarch} GOARM=${3} "$go" generate ./... || exit 1
+      GOOS=${goos} GOARCH=${goarch} GOARM=${3} "$go" build -ldflags="$ldflags" -o "$binary" ./cmd/ctrld || exit 1
       compress "$binary"
       ;;
     *)
@@ -82,8 +82,8 @@ build() {
       if [ "$CGO_ENABLED" = "0" ]; then
         binary=${binary}-nocgo
       fi
-      GOOS=${goos} GOARCH=${goarch} GOMIPS=softfloat "$go" generate ./...
-      GOOS=${goos} GOARCH=${goarch} GOMIPS=softfloat "$go" build -ldflags="$ldflags" -o "$binary" ./cmd/ctrld
+      GOOS=${goos} GOARCH=${goarch} GOMIPS=softfloat "$go" generate ./... || exit 1
+      GOOS=${goos} GOARCH=${goarch} GOMIPS=softfloat "$go" build -ldflags="$ldflags" -o "$binary" ./cmd/ctrld || exit 1
       compress "$binary"
       ;;
   esac
