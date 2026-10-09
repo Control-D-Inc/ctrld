@@ -54,6 +54,17 @@ type vpnDNSManager struct {
 	// discoverVPNDNS is injected for tests so Refresh does not depend on the
 	// runner host's real VPN/virtual adapter state.
 	discoverVPNDNS func(context.Context) []ctrld.VPNDNSConfig
+	// discoverTailscaleRoutes reads the Split DNS and App Connector suffixes
+	// that Tailscale resolves internally and does not publish to the OS. Nil
+	// where the OS already exposes them.
+	discoverTailscaleRoutes func(context.Context) ([]tailscaleRoute, error)
+	// tailscale keeps the last good Tailscale route set and the bounded retry
+	// after a failed LocalAPI read.
+	tailscale tailscaleRouteState
+	// retryRefresh runs the refresh of a Tailscale route retry. The program
+	// sets it to admit the refresh through its network activity gate, so a
+	// retry never runs during shutdown. Nil means m.Refresh(true).
+	retryRefresh func()
 	// refreshStateMu keeps noisy network-change storms from running overlapping
 	// full VPN DNS refreshes and retains one trailing refresh when an event arrives
 	// during discovery so the newest OS state is not lost.
@@ -76,9 +87,10 @@ const vpnDNSRefreshKey = "vpn_dns_refresh"
 // the OS-level intercept rules to permit ctrld's outbound queries to those IPs.
 func newVPNDNSManager(exemptFunc vpnDNSExemptFunc) *vpnDNSManager {
 	return &vpnDNSManager{
-		routes:           make(map[string][]string),
-		discoverVPNDNS:   ctrld.DiscoverVPNDNS,
-		onServersChanged: exemptFunc,
+		routes:                  make(map[string][]string),
+		discoverVPNDNS:          ctrld.DiscoverVPNDNS,
+		discoverTailscaleRoutes: discoverTailscaleRoutesFn,
+		onServersChanged:        exemptFunc,
 	}
 }
 
@@ -138,6 +150,12 @@ func (m *vpnDNSManager) refreshOnce(guardAgainstNoNameservers bool) {
 			}
 		}
 	}
+	// Tailscale routes go in after exit mode is known: routes that need the
+	// pf passthrough are skipped in exit mode.
+	configs, tailscaleDomains := withTailscaleRouteDomains(configs, m.tailscaleRoutesFor(configs))
+	if len(tailscaleDomains) > 0 {
+		logger.Debug().Msgf("Added %d Tailscale DNS routes -> Tailscale resolver", len(tailscaleDomains))
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -180,7 +198,11 @@ func (m *vpnDNSManager) refreshOnce(guardAgainstNoNameservers bool) {
 
 			if domain != "" {
 				m.routes[domain] = append([]string{}, config.Servers...)
-				logger.Debug().Msgf("Added VPN DNS route: %s -> %v", domain, config.Servers)
+				// Tailscale routes can number in the thousands; one summary
+				// line above covers them.
+				if !tailscaleDomains[domain] {
+					logger.Debug().Msgf("Added VPN DNS route: %s -> %v", domain, config.Servers)
+				}
 			}
 		}
 	}
@@ -274,6 +296,7 @@ func (m *vpnDNSManager) RefreshRoutesOnly() (routes, domainlessServers, exemptio
 			}
 		}
 	}
+	configs, _ = withTailscaleRouteDomains(configs, m.tailscaleRoutesFor(configs))
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
