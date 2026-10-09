@@ -21,6 +21,10 @@ case "$key" in
         [ "${FAKE_MODE_PRESENT:-0}" = "1" ] || exit 1
         printf '%s\n' "${FAKE_MODE:-}"
         ;;
+    ProgramArguments)
+        [ "${FAKE_ARGS_PRESENT:-0}" = "1" ] || exit 1
+        printf '%s\n' "${FAKE_ARGS:-}"
+        ;;
     CustomHostname|UseDevEnvironment)
         exit 1
         ;;
@@ -139,9 +143,10 @@ case_dir=$(run_case fresh-legacy 0 0 '')
 assert_contains 'ctrld-client start --cd-org=test-token' "$case_dir/calls"
 assert_not_contains '--intercept-mode' "$case_dir/calls"
 
+# Standard must be selected explicitly: with no flag, ctrld defaults to dns
+# intercept mode on macOS.
 case_dir=$(run_case fresh-standard 0 1 standard)
-assert_contains 'ctrld-client start --cd-org=test-token' "$case_dir/calls"
-assert_not_contains '--intercept-mode' "$case_dir/calls"
+assert_contains 'ctrld-client start --cd-org=test-token --intercept-mode off' "$case_dir/calls"
 
 case_dir=$(run_case fresh-intercept 0 1 intercept-dns)
 assert_contains 'ctrld-client start --cd-org=test-token --intercept-mode dns' "$case_dir/calls"
@@ -173,4 +178,50 @@ assert_contains 'ctrld-client start --intercept-mode off' "$case_dir/calls"
 assert_contains 'ERROR: upgrade installed but managed InterceptMode could not be applied' "$case_dir/output"
 assert_not_contains 'launchctl load' "$case_dir/calls"
 
-printf 'PASS: pkg postinstall preserves legacy mode and applies standard/intercept-dns policy\n'
+# The legacy upgrade case (#589): a profile without InterceptMode upgrading a
+# service installed in Standard mode before ctrld defaulted to dns intercept
+# mode. Its arguments select no mode, so it is pinned to Standard
+# (--intercept-mode off) instead of switching to the new default.
+legacy_args='(
+    "/usr/local/bin/ctrld-client",
+    run,
+    "--cd=abc123",
+    "--config=/etc/controld/ctrld.toml"
+)'
+export FAKE_ARGS_PRESENT=1 FAKE_ARGS="$legacy_args"
+case_dir=$(run_case upgrade-legacy-standard 1 0 '')
+assert_contains 'existing service selects no intercept mode; keeping Standard mode' "$case_dir/output"
+assert_contains 'ctrld-client start --intercept-mode off' "$case_dir/calls"
+assert_not_contains 'launchctl load' "$case_dir/calls"
+
+# An invalid profile value warns, and still keeps a legacy service in Standard.
+case_dir=$(run_case upgrade-invalid-legacy-standard 1 1 invalid)
+assert_contains 'WARNING: unsupported InterceptMode in managed preferences; preserving existing service mode' "$case_dir/output"
+assert_contains 'ctrld-client start --intercept-mode off' "$case_dir/calls"
+
+# A service whose arguments already select a mode keeps it unchanged.
+export FAKE_ARGS='(
+    "/usr/local/bin/ctrld-client",
+    run,
+    "--cd=abc123",
+    "--intercept-mode",
+    dns
+)'
+case_dir=$(run_case upgrade-legacy-intercept 1 0 '')
+assert_contains 'launchctl load' "$case_dir/calls"
+assert_not_contains 'ctrld-client start' "$case_dir/calls"
+
+# A service a fresh install marked for the default keeps the marker, and the
+# new binary applies the default to it.
+export FAKE_ARGS='(
+    "/usr/local/bin/ctrld-client",
+    run,
+    "--cd=abc123",
+    "--intercept-mode-default=true"
+)'
+case_dir=$(run_case upgrade-default-marker 1 0 '')
+assert_contains 'launchctl load' "$case_dir/calls"
+assert_not_contains 'ctrld-client start' "$case_dir/calls"
+unset FAKE_ARGS_PRESENT FAKE_ARGS
+
+printf 'PASS: pkg postinstall preserves the existing service mode and applies standard/intercept-dns policy\n'

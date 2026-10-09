@@ -39,6 +39,9 @@ type ifaceResponse struct {
 	All           bool   `json:"all"`
 	OK            bool   `json:"ok"`
 	InterceptMode string `json:"intercept_mode,omitempty"` // "dns", "hard", or "" (not intercepting)
+	// InterceptModeSource is where InterceptMode came from: "flag", "config",
+	// or "default" (the platform default). Empty from a service that predates it.
+	InterceptModeSource string `json:"intercept_mode_source,omitempty"`
 }
 
 // controlServer represents an HTTP server for handling control requests
@@ -324,6 +327,7 @@ func (p *prog) registerControlServerHandler() {
 				// Report intercept mode to the start command for proper log output.
 				if interceptMode == "dns" || interceptMode == "hard" {
 					res.InterceptMode = interceptMode
+					res.InterceptModeSource = interceptModeSource
 				}
 			}
 		}

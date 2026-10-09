@@ -72,26 +72,7 @@ func removeServiceFlag(flag string) error {
 		return fmt.Errorf("failed to read plist ProgramArguments: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 
-	// Parse the PlistBuddy output to find the flag's index.
-	// PlistBuddy prints arrays as:
-	//   Array {
-	//       /path/to/ctrld
-	//       run
-	//       --cd=xxx
-	//       --intercept-mode
-	//       dns
-	//   }
-	lines := strings.Split(string(out), "\n")
-	var entries []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "Array {" || trimmed == "}" || trimmed == "" {
-			continue
-		}
-		entries = append(entries, trimmed)
-	}
-
-	index, hasValue := serviceFlagPosition(entries, flag)
+	index, hasValue := serviceFlagPosition(plistArrayEntries(out), flag)
 
 	if index < 0 {
 		mainLog.Load().Debug().Msgf("Service flag %q not present in plist, skipping removal", flag)
@@ -122,6 +103,36 @@ func removeServiceFlag(flag string) error {
 
 	mainLog.Load().Info().Msgf("Removed %q from service launch arguments", flag)
 	return nil
+}
+
+// installedServiceArgs returns the launch arguments of the installed service.
+func installedServiceArgs() ([]string, error) {
+	out, err := exec.Command("/usr/libexec/PlistBuddy", "-c", "Print :ProgramArguments", launchdPlistPath).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read plist ProgramArguments: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+	return plistArrayEntries(out), nil
+}
+
+// plistArrayEntries parses the entries of an array PlistBuddy printed:
+//
+//	Array {
+//	    /path/to/ctrld
+//	    run
+//	    --cd=xxx
+//	    --intercept-mode
+//	    dns
+//	}
+func plistArrayEntries(out []byte) []string {
+	var entries []string
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "Array {" || trimmed == "}" || trimmed == "" {
+			continue
+		}
+		entries = append(entries, trimmed)
+	}
+	return entries
 }
 
 func serviceArgumentPresent(out []byte, argument string) bool {

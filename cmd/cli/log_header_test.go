@@ -242,16 +242,26 @@ func Test_logHeaderFromConfigKeepsUpstreamSecretsOut(t *testing.T) {
 	}
 }
 
-func Test_logHeaderFromConfigReportsOffWhenUnset(t *testing.T) {
+// An unset intercept mode reads as the platform default: "dns" where ctrld can
+// intercept (issue #589), and off (interface DNS mode) elsewhere.
+func Test_logHeaderFromConfigReportsPlatformDefaultWhenUnset(t *testing.T) {
 	old := interceptMode
 	t.Cleanup(func() { interceptMode = old })
 	interceptMode = ""
 
-	var in logHeaderInput
-	logHeaderFromConfig(&ctrld.Config{}, &in)
-
-	if in.InterceptMode != "off" {
-		t.Errorf("intercept mode = %q, want %q", in.InterceptMode, "off")
+	for _, tc := range []struct {
+		supported bool
+		want      string
+	}{
+		{supported: false, want: "off"},
+		{supported: true, want: "dns"},
+	} {
+		useInterceptByDefault(t, tc.supported)
+		var in logHeaderInput
+		logHeaderFromConfig(&ctrld.Config{}, &in)
+		if in.InterceptMode != tc.want {
+			t.Errorf("supported=%v: intercept mode = %q, want %q", tc.supported, in.InterceptMode, tc.want)
+		}
 	}
 }
 

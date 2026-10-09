@@ -309,6 +309,21 @@ Specifying the `ip` and `port` of the Prometheus metrics server. The Prometheus 
 - Required: no
 - Default: ""
 
+### intercept_mode
+How ctrld captures the host's DNS traffic. `dns` intercepts it in the OS packet filter (WFP on Windows, pf on macOS) and
+forwards VPN internal domains to the VPN's DNS server; `hard` intercepts it with no VPN split routing; `off` uses interface
+DNS mode, setting ctrld's listener as the DNS server of the network interfaces.
+
+The `--intercept-mode` flag takes precedence over this value. When neither is set, the default applies: `dns` on macOS and
+Windows desktop editions, interface DNS mode elsewhere, Windows Server included. An installed service that predates the
+default keeps interface DNS mode. `ctrld-client start --intercept-mode off` writes `off` here, because an unset value means the
+default. See [Intercept Mode Default](intercept-mode-default.md).
+
+- Type: string
+- Required: no
+- Valid values: `off`, `dns`, `hard`
+- Default: `dns` for new installations on macOS and Windows desktop editions; interface DNS mode elsewhere, Windows Server included, and for services installed before this default
+
 ### dns_watchdog_enabled
 Watches all physical interfaces for DNS changes and reverts them to ctrld's settings.The DNS watchdog process only runs on Windows and MacOS.
 

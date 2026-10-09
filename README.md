@@ -248,6 +248,8 @@ The above will start a foreground process and:
 ## DNS Intercept Mode
 When running `ctrld` alongside VPN software, DNS conflicts can cause intermittent failures, bypassed filtering, or configuration loops. DNS Intercept Mode prevents these issues by transparently capturing all DNS traffic on the system and routing it through `ctrld`, without modifying network adapter DNS settings.
 
+DNS Intercept Mode (`dns`) is the default for new installations on macOS and on Windows desktop editions when no mode is selected with `--intercept-mode` or `service.intercept_mode`; existing Standard installations keep interface DNS mode across upgrades. Windows Server and other platforms keep interface DNS mode unless intercept is selected explicitly. See [Intercept Mode Default](docs/intercept-mode-default.md).
+
 ### When to Use
 Enable DNS Intercept Mode if you:
 - Use corporate VPN software (F5, Cisco AnyConnect, Palo Alto GlobalProtect, Zscaler)
@@ -268,9 +270,9 @@ macOS
 sudo ctrld-client start --intercept-mode dns --cd RESOLVER_ID_HERE
 ```
 
-`--intercept-mode dns` automatically detects VPN internal domains and routes them to the VPN's DNS server, while Control D handles everything else.
+`--intercept-mode dns` automatically detects VPN internal domains and routes them to the VPN's DNS server, while Control D handles everything else. On macOS and Windows desktop editions the flag can be left out: `dns` is the default. On Windows Server it must be given.
 
-To disable intercept mode on a service that already has it enabled:
+To use interface DNS mode instead, on a new or an existing service:
 
 Windows (Admin Shell)
 ```shell
@@ -282,7 +284,7 @@ macOS
 sudo ctrld-client start --intercept-mode off
 ```
 
-This removes the intercept rules and reverts to standard interface-based DNS configuration.
+This removes the intercept rules and reverts to standard interface-based DNS configuration. The selection is persisted (`intercept_mode = "off"` in `ctrld.toml`), so it survives restarts and upgrades.
 
 ### Platform Support
 | Platform | Supported | Mechanism |

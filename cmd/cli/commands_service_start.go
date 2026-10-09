@@ -200,6 +200,9 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 						default:
 							logger.Notice().Msg("DNS intercept mode active — all DNS traffic intercepted via OS packet filter")
 						}
+						if res.InterceptModeSource == interceptModeSourceDefault {
+							logger.Notice().Msg("Intercept mode is the default on this platform; run \"ctrld-client start --intercept-mode off\" to use interface DNS mode instead")
+						}
 					} else {
 						name := res.Name
 						if iff, err := net.InterfaceByName(name); err == nil {
@@ -371,6 +374,30 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 
 	initInteractiveLogging()
 
+	// Record the intercept mode in the service's arguments, so the installed
+	// service can tell a fresh install from one that predates the dns default
+	// (#589). See installInterceptMode.
+	var existingArgs []string
+	if isCtrldInstalled && interceptMode == "" {
+		args, err := installedServiceArgs()
+		if err != nil {
+			logger.Debug().Err(err).Msg("Could not read the arguments of the existing service")
+		}
+		existingArgs = args
+	}
+	mode, markDefault := installInterceptMode(interceptMode, &cfg, isCtrldInstalled, existingArgs)
+	switch {
+	case mode != "":
+		if _, hadMode := interceptModeFromArgs(existingArgs); !hadMode {
+			logger.Notice().Msg("Existing service selects no intercept mode; keeping interface DNS mode (--intercept-mode off)")
+		}
+		svcConfig.Arguments = append(svcConfig.Arguments, "--intercept-mode", mode)
+		interceptMode = mode
+	case markDefault:
+		// One argument with an inline value: see interceptModeDefaultFlag.
+		svcConfig.Arguments = append(svcConfig.Arguments, interceptModeDefaultFlag+"=true")
+	}
+
 	if nextdns != "" {
 		removeNextDNSFromArgs(svcConfig)
 	}
@@ -530,7 +557,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmd.Flags().BoolVarP(&startOnly, "start_only", "", false, "Do not install new service")
 	_ = startCmd.Flags().MarkHidden("start_only")
 	startCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
-	startCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'off' (disable interception and clear a persisted intercept_mode), 'dns' (with VPN split routing), or 'hard' (all DNS through ctrld, no VPN split routing)")
+	startCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'dns' (with VPN split routing), 'hard' (all DNS through ctrld, no VPN split routing), or 'off' (interface DNS mode, persisted as intercept_mode = \"off\"). Unset uses service.intercept_mode, then the platform default: 'dns' on macOS and Windows desktop editions, interface DNS mode elsewhere (Windows Server included)")
 	startCmd.Flags().StringVarP(&firewallMode, "firewall-mode", "", "off", "DNS-resolved IP allowlist: 'on' blocks connections to IPs not resolved by ctrld, 'off' allows all")
 
 	// Start command alias

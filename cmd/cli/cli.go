@@ -189,15 +189,15 @@ var (
 	cleanupStaleDNSInterceptStateFn = cleanupStaleDNSInterceptState
 )
 
+// updateConfigInterceptMode persists an explicit --intercept-mode selection in
+// service.intercept_mode. "off" is written as "off", not cleared: with an unset
+// value meaning the platform default ("dns" on macOS and Windows desktop), a cleared
+// value would turn interception back on at the next start without the flag.
 func updateConfigInterceptMode(cfg *ctrld.Config, mode string) bool {
-	desired := ""
+	var desired string
 	switch mode {
-	case "dns", "hard":
+	case "dns", "hard", "off":
 		desired = mode
-	case "off":
-		desired = ""
-	case "":
-		return false
 	default:
 		return false
 	}
@@ -463,8 +463,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	// Keep config and the explicit CLI/service mode in sync. In particular, "off"
-	// must clear a previously persisted dns/hard value or the next service start
-	// would silently re-enable interception from config.
+	// must replace a previously persisted dns/hard value, and must be kept as
+	// "off": an unset value means the platform default, which is "dns" on
+	// macOS and Windows desktop editions.
 	if updateConfigInterceptMode(&cfg, interceptMode) {
 		updated = true
 		p.Info().Msgf("writing intercept_mode = %q to config (requested %q)", cfg.Service.InterceptMode, interceptMode)
@@ -1897,14 +1898,14 @@ func isExplicitInterceptListener(ip string, port int) bool {
 }
 
 // listenerInterceptMode resolves the mode that selects the listener binding
-// strategy. An explicit "off" is final here, the same as in setDNS. A fallback
-// to the config value would select the intercept strategy from a stale
-// persisted mode on the first start after a revert to standard mode.
+// strategy, with the same precedence as setDNS. An explicit "off" is final
+// here: a fallback to the config value would select the intercept strategy from
+// a stale persisted mode on the first start after a revert to standard mode.
+// With neither set, the platform default applies, so a macOS start that
+// intercepts by default also binds the way intercept mode needs.
 func listenerInterceptMode(cfg *ctrld.Config) string {
-	if interceptMode == "" {
-		return cfg.Service.InterceptMode
-	}
-	return interceptMode
+	mode, _ := resolveInterceptMode(interceptMode, cfg)
+	return mode
 }
 
 // tryUpdateListenerConfig tries updating listener config with a working one.
