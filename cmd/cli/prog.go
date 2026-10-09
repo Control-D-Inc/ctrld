@@ -439,6 +439,24 @@ func (p *prog) beginNetworkActivity() bool {
 	return true
 }
 
+// retryVPNDNSRefresh returns the refresh that a Tailscale route retry of m
+// runs. Like other background refreshes it is admitted through the network
+// activity gate, and it does nothing once m is no longer the live manager.
+func (p *prog) retryVPNDNSRefresh(m *vpnDNSManager) func() {
+	return func() {
+		if !p.beginNetworkActivity() {
+			return
+		}
+		defer p.netMonitorWG.Done()
+		p.vpnDNSJournalMu.Lock()
+		live := p.vpnDNS == m
+		p.vpnDNSJournalMu.Unlock()
+		if live {
+			m.Refresh(m.backgroundCtx(), true)
+		}
+	}
+}
+
 func (p *prog) networkActivityClosed() bool {
 	p.netMonitorMu.Lock()
 	defer p.netMonitorMu.Unlock()
@@ -1670,7 +1688,9 @@ func (p *prog) setDNS(systemNameservers []string) {
 				// matching queries to the DNS server on that interface.
 				// Skipped in --intercept-mode hard where all DNS goes through ctrld.
 				p.vpnDNSJournalMu.Lock()
+				p.vpnDNS.Close()
 				p.vpnDNS = newVPNDNSManager(&p.logger, p.exemptVPNDNSServers)
+				p.vpnDNS.retryRefresh = p.retryVPNDNSRefresh(p.vpnDNS)
 				p.vpnDNS.Refresh(ctrld.LoggerCtx(context.Background(), p.logger.Load()))
 				p.vpnDNSJournalMu.Unlock()
 			}
@@ -1922,6 +1942,7 @@ func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 
 		// Clean up VPN DNS manager
 		p.vpnDNSJournalMu.Lock()
+		p.vpnDNS.Close()
 		p.vpnDNS = nil
 		p.vpnDNSJournalMu.Unlock()
 
