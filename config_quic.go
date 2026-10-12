@@ -42,17 +42,23 @@ func (uc *UpstreamConfig) newDOH3Transport(addrs []string) http.RoundTripper {
 			closeUDPConnWhenDone(conn, udpConn)
 			return conn, nil
 		}
-		dialAddrs := make([]string, len(addrs))
-		for i := range addrs {
-			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
-		}
 		pd := &quicParallelDialer{}
-		conn, err := pd.Dial(ctx, dialAddrs, tlsCfg, cfg)
+		conn, err := pd.Dial(ctx, joinHostPorts(addrs, port), tlsCfg, cfg)
 		if err != nil {
-			return nil, err
+			direct := uc.directFallbackIPs()
+			if len(direct) == 0 {
+				return nil, err
+			}
+			ProxyLogger.Load().Debug().Err(err).Msgf("bootstrap addresses failed, dialing direct IPs %v", direct)
+			var directErr error
+			if conn, directErr = pd.Dial(ctx, joinHostPorts(direct, port), tlsCfg, cfg); directErr != nil {
+				return nil, errors.Join(err, directErr)
+			}
 		}
 		ProxyLogger.Load().Debug().Msgf("sending doh3 request to: %s", conn.RemoteAddr())
-		return conn, err
+		// err may still hold the bootstrap failure the direct dial recovered
+		// from; returning it would make http3 drop the connection.
+		return conn, nil
 	}
 	runtime.SetFinalizer(rt, func(rt *http3.Transport) {
 		rt.CloseIdleConnections()

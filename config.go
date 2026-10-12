@@ -307,6 +307,13 @@ type UpstreamConfig struct {
 	u                  *url.URL
 	fallbackOnce       sync.Once
 	uid                string
+
+	// bootstrapIncomplete is set while the bootstrap addresses lack a family
+	// the ip_stack needs; the next re-bootstrap looks them up again.
+	bootstrapIncomplete atomic.Bool
+	// directFallback is set once FallbackToDirectIP has fired: DoH and DoH3
+	// then also try the Control D direct IPs when the bootstrap addresses fail.
+	directFallback atomic.Bool
 }
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
@@ -461,6 +468,10 @@ func (uc *UpstreamConfig) UID() string {
 	return uc.uid
 }
 
+// bootstrapLookupFn resolves domain for bootstrapping. It is a variable so
+// tests control the lookup result.
+var bootstrapLookupFn = lookupIP
+
 // SetupBootstrapIP manually find all available IPs of the upstream.
 // The first usable IP will be used as bootstrap IP of the upstream.
 // The upstream domain will be looked up using following orders:
@@ -469,49 +480,131 @@ func (uc *UpstreamConfig) UID() string {
 // - Direct IPs table for ControlD upstreams.
 // - ControlD Bootstrap DNS 76.76.2.22
 //
-// The setup process will block until there's usable IPs found.
+// The later sources fill in what the earlier ones could not: the whole list,
+// and also an address family the ip_stack needs that a lookup left out, such
+// as an AAAA-only answer for a split-stack upstream, whose A queries need IPv4.
+//
+// The setup process will block until there's usable IPs found. A result that
+// still lacks a needed family is used as it is, and the next re-bootstrap
+// looks the missing family up again.
 func (uc *UpstreamConfig) SetupBootstrapIP() {
 	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
-	isControlD := uc.IsControlD()
 	nss := initDefaultOsResolver()
 	for {
-		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, nss)
-		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
-		// filtering them out here to prevent weird behavior.
-		if isControlD {
-			n := 0
-			for _, ip := range uc.bootstrapIPs {
-				netIP := net.ParseIP(ip)
-				if netIP != nil && !netIP.IsPrivate() {
-					uc.bootstrapIPs[n] = ip
-					n++
-				}
-			}
-			uc.bootstrapIPs = uc.bootstrapIPs[:n]
-			if len(uc.bootstrapIPs) == 0 {
-				uc.bootstrapIPs = bootstrapIPsFromControlDDomain(uc.Domain)
-				ProxyLogger.Load().Warn().Msgf("no record found for %q, lookup from direct IP table", uc.Domain)
-			}
-		}
-		if len(uc.bootstrapIPs) == 0 {
-			ProxyLogger.Load().Warn().Msgf("no record found for %q, using bootstrap server: %s", uc.Domain, PremiumDNSBoostrapIP)
-			uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, []string{net.JoinHostPort(PremiumDNSBoostrapIP, "53")})
-
-		}
-		if len(uc.bootstrapIPs) > 0 {
+		if ips := uc.lookupBootstrapIPs(nss); len(ips) > 0 {
+			uc.setBootstrapIPs(ips)
 			break
 		}
 		ProxyLogger.Load().Warn().Msg("could not resolve bootstrap IPs, retrying...")
 		b.BackOff(context.Background(), errors.New("no bootstrap IPs"))
 	}
-	for _, ip := range uc.bootstrapIPs {
-		if ctrldnet.IsIPv6(ip) {
-			uc.bootstrapIPs6 = append(uc.bootstrapIPs6, ip)
-		} else {
-			uc.bootstrapIPs4 = append(uc.bootstrapIPs4, ip)
+	ProxyLogger.Load().Debug().Msgf("bootstrap IPs: %v", uc.bootstrapIPs)
+}
+
+// lookupBootstrapIPs runs one round of the bootstrap lookup through nss and the
+// fallback sources, and returns what it found, which may be incomplete for the
+// ip_stack or empty.
+func (uc *UpstreamConfig) lookupBootstrapIPs(nss []string) []string {
+	isControlD := uc.IsControlD()
+	ips := bootstrapLookupFn(uc.Domain, uc.Timeout, nss)
+	// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
+	// filtering them out here to prevent weird behavior.
+	if isControlD {
+		n := 0
+		for _, ip := range ips {
+			netIP := net.ParseIP(ip)
+			if netIP != nil && !netIP.IsPrivate() {
+				ips[n] = ip
+				n++
+			}
+		}
+		ips = ips[:n]
+		if !uc.bootstrapComplete(ips) {
+			ProxyLogger.Load().Warn().Msgf("incomplete records for %q (%v), filling in from direct IP table", uc.Domain, ips)
+			ips = mergeMissingFamilies(ips, bootstrapIPsFromControlDDomain(uc.Domain))
 		}
 	}
-	ProxyLogger.Load().Debug().Msgf("bootstrap IPs: %v", uc.bootstrapIPs)
+	if !uc.bootstrapComplete(ips) {
+		ProxyLogger.Load().Warn().Msgf("incomplete records for %q (%v), using bootstrap server: %s", uc.Domain, ips, PremiumDNSBoostrapIP)
+		ips = mergeMissingFamilies(ips, bootstrapLookupFn(uc.Domain, uc.Timeout, []string{net.JoinHostPort(PremiumDNSBoostrapIP, "53")}))
+	}
+	return ips
+}
+
+// setBootstrapIPs replaces the bootstrap addresses, and records whether they
+// cover the families the ip_stack needs.
+func (uc *UpstreamConfig) setBootstrapIPs(ips []string) {
+	ips4, ips6 := splitAddressFamilies(ips)
+	uc.bootstrapIPs, uc.bootstrapIPs4, uc.bootstrapIPs6 = ips, ips4, ips6
+	complete := uc.bootstrapComplete(ips)
+	uc.bootstrapIncomplete.Store(!complete)
+	if !complete {
+		ProxyLogger.Load().Warn().Msgf("bootstrap IPs for %q lack an address family needed by ip_stack %q: %v; will look up again on re-bootstrap", uc.Domain, uc.IPStack, ips)
+	}
+}
+
+// bootstrapComplete reports whether ips cover the address families the
+// upstream's ip_stack needs: IPv4 for v4, IPv6 for v6, either for both, and
+// for split IPv4 for A queries plus IPv6 for the others when the host has IPv6.
+// An IPv4-only host never needs IPv6.
+func (uc *UpstreamConfig) bootstrapComplete(ips []string) bool {
+	ips4, ips6 := splitAddressFamilies(ips)
+	switch uc.IPStack {
+	case IpStackV4:
+		return len(ips4) > 0
+	case IpStackV6:
+		return len(ips6) > 0
+	case IpStackSplit:
+		return len(ips4) > 0 && (len(ips6) > 0 || !HasIPv6())
+	}
+	return len(ips) > 0
+}
+
+// splitAddressFamilies returns the IPv4 and the IPv6 addresses of ips.
+func splitAddressFamilies(ips []string) (ips4, ips6 []string) {
+	for _, ip := range ips {
+		if ctrldnet.IsIPv6(ip) {
+			ips6 = append(ips6, ip)
+		} else {
+			ips4 = append(ips4, ip)
+		}
+	}
+	return ips4, ips6
+}
+
+// mergeMissingFamilies adds to ips the addresses of extra whose family ips
+// does not have at all. A family ips already has is kept as it is.
+func mergeMissingFamilies(ips, extra []string) []string {
+	ips4, ips6 := splitAddressFamilies(ips)
+	extra4, extra6 := splitAddressFamilies(extra)
+	merged := append([]string{}, ips...)
+	if len(ips4) == 0 {
+		merged = append(merged, extra4...)
+	}
+	if len(ips6) == 0 {
+		merged = append(merged, extra6...)
+	}
+	return merged
+}
+
+// refreshIncompleteBootstrap looks the bootstrap addresses up again, once, when
+// they lack a family the ip_stack needs. Rebuilding the transports from the
+// same incomplete lists would never recover; this picks up the missing family
+// once DNS is reachable again. Families it still cannot find keep their current
+// addresses.
+func (uc *UpstreamConfig) refreshIncompleteBootstrap() {
+	if uc.BootstrapIP != "" || !uc.bootstrapIncomplete.Load() {
+		return
+	}
+	ips := uc.lookupBootstrapIPs(initDefaultOsResolver())
+	if !uc.bootstrapComplete(ips) {
+		ips = mergeMissingFamilies(ips, uc.bootstrapIPs)
+	}
+	if len(ips) == 0 {
+		return
+	}
+	uc.setBootstrapIPs(ips)
+	ProxyLogger.Load().Debug().Msgf("refreshed bootstrap IPs for %q: %v", uc.Domain, ips)
 }
 
 // ReBootstrap re-setup the bootstrap IP and the transport.
@@ -541,6 +634,7 @@ func (uc *UpstreamConfig) ForceReBootstrap() {
 		return
 	}
 	ProxyLogger.Load().Debug().Msgf("force re-bootstrapping upstream transport for %v", uc)
+	uc.refreshIncompleteBootstrap()
 	uc.SetupTransport()
 	// Clear any pending lazy re-bootstrap flag so ensureSetupTransport()
 	// doesn't redundantly recreate the transport we just built.
@@ -644,15 +738,26 @@ func (uc *UpstreamConfig) SetupTransport() {
 	uc.doqConnPool = uc.newDOQConnPool(ips)
 	uc.dotClientPool = uc.newDOTClientPool(ips)
 	if uc.IPStack == IpStackSplit {
-		uc.transport4 = uc.newDOHTransport(uc.bootstrapIPs4)
-		uc.http3RoundTripper4 = uc.newDOH3Transport(uc.bootstrapIPs4)
-		uc.doqConnPool4 = uc.newDOQConnPool(uc.bootstrapIPs4)
-		uc.dotClientPool4 = uc.newDOTClientPool(uc.bootstrapIPs4)
+		// Split picks the transport by query type, not a hard family limit:
+		// while a family is missing, its queries borrow the other family's
+		// addresses rather than fail on an empty transport until the
+		// re-bootstrap finds it (refreshIncompleteBootstrap).
+		ips4, ips6 := uc.bootstrapIPs4, uc.bootstrapIPs6
+		if len(ips4) == 0 {
+			ips4 = ips6
+		}
+		if len(ips6) == 0 {
+			ips6 = ips4
+		}
+		uc.transport4 = uc.newDOHTransport(ips4)
+		uc.http3RoundTripper4 = uc.newDOH3Transport(ips4)
+		uc.doqConnPool4 = uc.newDOQConnPool(ips4)
+		uc.dotClientPool4 = uc.newDOTClientPool(ips4)
 		if HasIPv6() {
-			uc.transport6 = uc.newDOHTransport(uc.bootstrapIPs6)
-			uc.http3RoundTripper6 = uc.newDOH3Transport(uc.bootstrapIPs6)
-			uc.doqConnPool6 = uc.newDOQConnPool(uc.bootstrapIPs6)
-			uc.dotClientPool6 = uc.newDOTClientPool(uc.bootstrapIPs6)
+			uc.transport6 = uc.newDOHTransport(ips6)
+			uc.http3RoundTripper6 = uc.newDOH3Transport(ips6)
+			uc.doqConnPool6 = uc.newDOQConnPool(ips6)
+			uc.dotClientPool6 = uc.newDOTClientPool(ips6)
 		} else {
 			uc.transport6 = uc.transport4
 			uc.http3RoundTripper6 = uc.http3RoundTripper4
@@ -667,6 +772,7 @@ func (uc *UpstreamConfig) ensureSetupTransport() {
 		uc.SetupTransport()
 	})
 	if uc.rebootstrap.CompareAndSwap(rebootstrapStarted, rebootstrapInProgress) {
+		uc.refreshIncompleteBootstrap()
 		uc.SetupTransport()
 		uc.rebootstrap.Store(rebootstrapNotStarted)
 	}
@@ -715,13 +821,17 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 		pd := &ctrldnet.ParallelDialer{}
 		pd.Timeout = dialerTimeout
 		pd.KeepAlive = dialerTimeout
-		dialAddrs := make([]string, len(addrs))
-		for i := range addrs {
-			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
-		}
-		conn, err := pd.DialContext(ctx, network, dialAddrs, ProxyLogger.Load())
+		conn, err := pd.DialContext(ctx, network, joinHostPorts(addrs, port), ProxyLogger.Load())
 		if err != nil {
-			return nil, err
+			direct := uc.directFallbackIPs()
+			if len(direct) == 0 {
+				return nil, err
+			}
+			Log(ctx, ProxyLogger.Load().Debug().Err(err), "bootstrap addresses failed, dialing direct IPs %v", direct)
+			var directErr error
+			if conn, directErr = pd.DialContext(ctx, network, joinHostPorts(direct, port), ProxyLogger.Load()); directErr != nil {
+				return nil, errors.Join(err, directErr)
+			}
 		}
 		Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", conn.RemoteAddr())
 		return conn, nil
@@ -920,7 +1030,42 @@ func (uc *UpstreamConfig) Context(ctx context.Context) (context.Context, context
 	return context.WithCancel(ctx)
 }
 
-// FallbackToDirectIP changes ControlD upstream endpoint to use direct IP instead of domain.
+// controlDDirectIPsFn returns the direct IPs of a Control D domain. It is a
+// variable so tests can point the fallback at local listeners.
+var controlDDirectIPsFn = bootstrapIPsFromControlDDomain
+
+// directFallbackIPs returns the Control D direct IPs that DoH and DoH3 try
+// when the bootstrap addresses fail, once FallbackToDirectIP has fired, or nil.
+// They are limited to the families the ip_stack dials: an IPv6-only upstream
+// must not be sent to an IPv4 literal it cannot reach.
+func (uc *UpstreamConfig) directFallbackIPs() []string {
+	if !uc.directFallback.Load() {
+		return nil
+	}
+	ips4, ips6 := splitAddressFamilies(controlDDirectIPsFn(uc.Domain))
+	switch uc.IPStack {
+	case IpStackV4:
+		return ips4
+	case IpStackV6:
+		return ips6
+	}
+	return append(ips4, ips6...)
+}
+
+// joinHostPorts returns ips joined with port.
+func joinHostPorts(ips []string, port string) []string {
+	addrs := make([]string, len(ips))
+	for i, ip := range ips {
+		addrs[i] = net.JoinHostPort(ip, port)
+	}
+	return addrs
+}
+
+// FallbackToDirectIP lets a ControlD DoH/DoH3 upstream also dial its direct
+// IPs, which DoH and DoH3 try only when the bootstrap addresses are empty or
+// all fail. The bootstrap list keeps precedence, so a working or refreshed
+// list is used again as soon as it can be, and nothing is pinned. The request
+// URL keeps the domain, so TLS still verifies the certificate for it.
 func (uc *UpstreamConfig) FallbackToDirectIP() bool {
 	if !uc.IsControlD() {
 		return false
@@ -931,17 +1076,12 @@ func (uc *UpstreamConfig) FallbackToDirectIP() bool {
 
 	done := false
 	uc.fallbackOnce.Do(func() {
-		var ip string
-		switch {
-		case dns.IsSubDomain(PremiumDnsDomain, uc.Domain):
-			ip = PremiumDNSBoostrapIP
-		case dns.IsSubDomain(FreeDnsDomain, uc.Domain):
-			ip = FreeDNSBoostrapIP
-		default:
+		ips := controlDDirectIPsFn(uc.Domain)
+		if len(ips) == 0 {
 			return
 		}
-		ProxyLogger.Load().Warn().Msgf("using direct IP for %q: %s", uc.Endpoint, ip)
-		uc.u.Host = ip
+		ProxyLogger.Load().Warn().Msgf("falling back to direct IPs for %q when its bootstrap addresses fail: %v", uc.Endpoint, ips)
+		uc.directFallback.Store(true)
 		done = true
 	})
 	return done
