@@ -80,13 +80,13 @@ func newDOTClientPool(_ context.Context, uc *UpstreamConfig, addrs []string) *do
 	// regardless of the machine DNS status.
 	dialer := newDialer(net.JoinHostPort(controldPublicDns, "53"))
 
+	// Every dial path verifies the server as uc.Domain: a bootstrap_ip, the
+	// bootstrap list, and also the empty-list path, which dials the endpoint.
+	// tls.Client needs ServerName there too; without it every handshake fails.
 	tlsConfig := &tls.Config{
 		RootCAs:    uc.certPool,
 		MinVersion: tls.VersionTLS12,
-	}
-
-	if uc.BootstrapIP != "" {
-		tlsConfig.ServerName = uc.Domain
+		ServerName: uc.Domain,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
