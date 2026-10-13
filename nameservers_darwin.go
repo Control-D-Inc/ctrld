@@ -22,9 +22,21 @@ func dnsFns() []dnsFn {
 	return []dnsFn{dnsFromResolvConf, getDNSFromScutil, getAllDHCPNameservers}
 }
 
+// quickDNSFns reads scutil once. While ctrld's own address is the configured
+// DNS server, scutil reports nothing else, and retrying only delays the read.
+func quickDNSFns() []dnsFn {
+	return []dnsFn{dnsFromResolvConf, func() []string { return getDNSFromScutilAttempts(1) }, getAllDHCPNameservers}
+}
+
 var scutilLocalAddresses = netmon.LocalAddresses
 
 func getDNSFromScutil() []string {
+	return getDNSFromScutilAttempts(10)
+}
+
+// getDNSFromScutilAttempts reads scutil --dns up to maxRetries times, until it
+// reports a nameserver that is not a local address.
+func getDNSFromScutilAttempts(maxRetries int) []string {
 	logger := *ProxyLogger.Load()
 
 	// Skip scutil on mobile platforms - not available in sandbox
@@ -33,10 +45,7 @@ func getDNSFromScutil() []string {
 		return nil
 	}
 
-	const (
-		maxRetries    = 10
-		retryInterval = 100 * time.Millisecond
-	)
+	const retryInterval = 100 * time.Millisecond
 
 	regularIPs, loopbackIPs, _ := scutilLocalAddresses()
 

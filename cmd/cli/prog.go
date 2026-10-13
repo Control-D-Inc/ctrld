@@ -210,6 +210,11 @@ type prog struct {
 	// instead of using the normal upstream flow.
 	recoveryBypass atomic.Bool
 
+	// osResolverStaleUntil is when the OS resolver's nameservers stop being
+	// treated as read before the last network change, in Unix nanoseconds.
+	// See os_resolver_stale.go.
+	osResolverStaleUntil atomic.Int64
+
 	// dns64 tracks DNS64/NAT64 synthesis state for IPv6-only networks
 	// without client-side 464XLAT. See cmd/cli/dns64.go.
 	dns64 dns64State
