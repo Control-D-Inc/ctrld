@@ -930,113 +930,134 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// answers, so a name nobody resolves gets a real negative answer.
 	internalFallback := p.internalDomainFallbackUpstreams(upstreams)
 	var internalNegative *dns.Msg
-	for n, upstreamConfig := range upstreamConfigs {
-		if upstreamConfig == nil {
-			continue
-		}
-		logger := mainLog.Load().Debug().
-			Str("upstream", upstreamConfig.String()).
-			Str("query", req.msg.Question[0].Name).
-			Bool("is_ad_query", p.isAdDomainQuery(req.msg)).
-			Bool("is_lan_query", isLanOrPtrQuery)
-
-		if p.isLoop(upstreamConfig) {
-			ctrld.Log(ctx, logger, "DNS loop detected")
-			continue
-		}
-		// A fallback-mode Internal Domain resolver that the monitor reports as
-		// down is not waited on: off the organization network every query
-		// would otherwise pay its timeout before the network fallback runs.
-		// Nothing else marks a generated resolver up again, so skipping it
-		// starts a background re-check that does.
-		if internalFallback && p.um.isDown(upstreams[n]) {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolver %s is down, skipping it", upstreams[n])
-			p.internalDomainProbes.probe(p.um, upstreams[n], upstreamConfig, req.msg)
-			continue
-		}
-		answer := resolve(upstreams[n], upstreamConfig, req.msg)
-		if answer == nil {
-			if serveStaleCache && staleAnswer != nil {
-				ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
-				p.health.countCacheHit()
-				now := time.Now()
-				setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
-				res.answer = staleAnswer
-				res.cached = true
-				return res
+	// tryUpstreams returns nil when no upstream produced an answer to serve.
+	tryUpstreams := func() *proxyResponse {
+		for n, upstreamConfig := range upstreamConfigs {
+			if upstreamConfig == nil {
+				continue
 			}
-			continue
-		}
-		// Reject an answer whose question does not match the request before it
-		// can be served or cached. A mismatched question means the upstream
-		// answered a different name/type than asked; caching it would poison
-		// the shared cache with wrong-domain records for the requested name.
-		// See github.com/Control-D-Inc/ctrld/issues/322.
-		if !sameQuestion(req.msg, answer) {
-			ctrld.Log(ctx, mainLog.Load().Debug(),
-				"discarding answer from %s: question mismatch (asked %q, got %q)",
-				upstreams[n], questionString(req.msg), questionString(answer))
-			continue
-		}
-		// We are doing LAN/PTR lookup using private resolver, so always process next one.
-		// Except for the last, we want to send response instead of saying all upstream failed.
-		if answer.Rcode != dns.RcodeSuccess && isLanOrPtrQuery && n != len(upstreamConfigs)-1 {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "no response from %s, process to next upstream", upstreams[n])
-			continue
-		}
-		if answer.Rcode != dns.RcodeSuccess && len(upstreamConfigs) > 1 && containRcode(req.failoverRcodes, answer.Rcode) {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "failover rcode matched, process to next upstream")
-			continue
-		}
-		if internalFallback && internalDomainFallbackRcode(answer.Rcode) {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolver %s answered %s, trying next resolver",
-				upstreams[n], dns.RcodeToString[answer.Rcode])
-			internalNegative = betterInternalDomainNegative(internalNegative, answer)
-			continue
-		}
+			logger := mainLog.Load().Debug().
+				Str("upstream", upstreamConfig.String()).
+				Str("query", req.msg.Question[0].Name).
+				Bool("is_ad_query", p.isAdDomainQuery(req.msg)).
+				Bool("is_lan_query", isLanOrPtrQuery)
 
-		// set compression, as it is not set by default when unpacking
-		answer.Compress = true
-
-		if cacheable {
-			p.addCachedResponse(dnscache.NewKey(req.msg, upstreams[n]), answer)
-			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
-		}
-		hostname := ""
-		if req.ci != nil {
-			hostname = req.ci.Hostname
-		}
-		// DNS64 synthesis for IPv6-only networks without CLAT: applied to the
-		// policy-approved answer only, using the same upstream for the companion
-		// A resolution. No-op unless the network state requires it.
-		var synthesizedPrefix netip.Prefix
-		answer, synthesizedPrefix = p.maybeDNS64(ctx, req.msg, answer, func(aReq *dns.Msg) *dns.Msg {
-			key := dnscache.NewKey(aReq, upstreams[n])
-			if cacheable {
-				if cachedValue := p.cache.Get(key); cachedValue != nil {
+			if p.isLoop(upstreamConfig) {
+				ctrld.Log(ctx, logger, "DNS loop detected")
+				continue
+			}
+			// A fallback-mode Internal Domain resolver that the monitor reports as
+			// down is not waited on: off the organization network every query
+			// would otherwise pay its timeout before the network fallback runs.
+			// Nothing else marks a generated resolver up again, so skipping it
+			// starts a background re-check that does.
+			if internalFallback && p.um.isDown(upstreams[n]) {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolver %s is down, skipping it", upstreams[n])
+				p.internalDomainProbes.probe(p.um, upstreams[n], upstreamConfig, req.msg)
+				continue
+			}
+			answer := resolve(upstreams[n], upstreamConfig, req.msg)
+			if answer == nil {
+				if serveStaleCache && staleAnswer != nil {
+					ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
+					p.health.countCacheHit()
 					now := time.Now()
-					if cachedValue.Expire.After(now) {
-						cached := cachedValue.Msg.Copy()
-						ctrld.SetCacheReply(cached, aReq, cached.Rcode)
-						setCachedAnswerTTL(cached, now, cachedValue.Expire)
-						return cached
+					setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
+					res.answer = staleAnswer
+					res.cached = true
+					return res
+				}
+				continue
+			}
+			// Reject an answer whose question does not match the request before it
+			// can be served or cached. A mismatched question means the upstream
+			// answered a different name/type than asked; caching it would poison
+			// the shared cache with wrong-domain records for the requested name.
+			// See github.com/Control-D-Inc/ctrld/issues/322.
+			if !sameQuestion(req.msg, answer) {
+				ctrld.Log(ctx, mainLog.Load().Debug(),
+					"discarding answer from %s: question mismatch (asked %q, got %q)",
+					upstreams[n], questionString(req.msg), questionString(answer))
+				continue
+			}
+			// We are doing LAN/PTR lookup using private resolver, so always process next one.
+			// Except for the last, we want to send response instead of saying all upstream failed.
+			if answer.Rcode != dns.RcodeSuccess && isLanOrPtrQuery && n != len(upstreamConfigs)-1 {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "no response from %s, process to next upstream", upstreams[n])
+				continue
+			}
+			if answer.Rcode != dns.RcodeSuccess && len(upstreamConfigs) > 1 && containRcode(req.failoverRcodes, answer.Rcode) {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "failover rcode matched, process to next upstream")
+				continue
+			}
+			if internalFallback && internalDomainFallbackRcode(answer.Rcode) {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolver %s answered %s, trying next resolver",
+					upstreams[n], dns.RcodeToString[answer.Rcode])
+				internalNegative = betterInternalDomainNegative(internalNegative, answer)
+				continue
+			}
+
+			// set compression, as it is not set by default when unpacking
+			answer.Compress = true
+
+			if cacheable {
+				p.addCachedResponse(dnscache.NewKey(req.msg, upstreams[n]), answer)
+				ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
+			}
+			hostname := ""
+			if req.ci != nil {
+				hostname = req.ci.Hostname
+			}
+			// DNS64 synthesis for IPv6-only networks without CLAT: applied to the
+			// policy-approved answer only, using the same upstream for the companion
+			// A resolution. No-op unless the network state requires it.
+			var synthesizedPrefix netip.Prefix
+			answer, synthesizedPrefix = p.maybeDNS64(ctx, req.msg, answer, func(aReq *dns.Msg) *dns.Msg {
+				key := dnscache.NewKey(aReq, upstreams[n])
+				if cacheable {
+					if cachedValue := p.cache.Get(key); cachedValue != nil {
+						now := time.Now()
+						if cachedValue.Expire.After(now) {
+							cached := cachedValue.Msg.Copy()
+							ctrld.SetCacheReply(cached, aReq, cached.Rcode)
+							setCachedAnswerTTL(cached, now, cachedValue.Expire)
+							return cached
+						}
 					}
 				}
+				resolved := resolve(upstreams[n], upstreamConfig, aReq)
+				if cacheable && resolved != nil && sameQuestion(aReq, resolved) {
+					p.addCachedResponse(key, resolved)
+				}
+				return resolved
+			})
+			if cacheable && synthesizedPrefix.IsValid() {
+				p.addCachedResponse(dns64CacheKey(req.msg, upstreams[n], synthesizedPrefix), answer)
+				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: add cached response variant")
 			}
-			resolved := resolve(upstreams[n], upstreamConfig, aReq)
-			if cacheable && resolved != nil && sameQuestion(aReq, resolved) {
-				p.addCachedResponse(key, resolved)
-			}
-			return resolved
-		})
-		if cacheable && synthesizedPrefix.IsValid() {
-			p.addCachedResponse(dns64CacheKey(req.msg, upstreams[n], synthesizedPrefix), answer)
-			ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: add cached response variant")
+			ctrld.Log(ctx, mainLog.Load().Info(), "REPLY: %s -> %s (%s): %s", upstreams[n], req.ufr.srcAddr, hostname, dns.RcodeToString[answer.Rcode])
+			res.answer = answer
+			res.upstream = upstreamConfig.Endpoint
+			return res
 		}
-		ctrld.Log(ctx, mainLog.Load().Info(), "REPLY: %s -> %s (%s): %s", upstreams[n], req.ufr.srcAddr, hostname, dns.RcodeToString[answer.Rcode])
-		res.answer = answer
-		res.upstream = upstreamConfig.Endpoint
-		return res
+		return nil
+	}
+	// See fresh_connection.go: after a sleep, renew the connections before
+	// the query rides them.
+	p.renewConnectionsIfSlept(ctx)
+	connEpoch := p.networkEpoch.Load()
+	if r := tryUpstreams(); r != nil {
+		return r
+	}
+	// A query that ran on connections the network left behind gets one more
+	// pass. It can take as long as the first, timeouts included, before the
+	// fallback: that is the price of not sending the query in plaintext, and
+	// it is paid only by the queries already in flight when the network
+	// changed or the host slept.
+	if p.retryOnFreshConnection(ctx, upstreams, upstreamConfigs, connEpoch) {
+		if r := tryUpstreams(); r != nil {
+			return r
+		}
 	}
 	if internalFallback {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolvers did not resolve the query; trying network resolvers")
@@ -2046,9 +2067,7 @@ func (p *prog) handleNetworkChange(delta *netmon.ChangeDelta, isMajorChange bool
 	}
 
 	mainLog.Load().Debug().Msg("Link state changed, re-bootstrapping")
-	for _, uc := range p.cfg.Upstream {
-		uc.ReBootstrap()
-	}
+	p.renewUpstreamConnections()
 
 	// Get IPs from default route interface in new state
 	selfIP := networkChangeDefaultRouteIPFn()
