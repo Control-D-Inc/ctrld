@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 // These tests touch only owned temporary files and sockets: no service, PF,
@@ -139,5 +142,47 @@ func TestDelegatedLogSendDarwinListenerLifecycle(t *testing.T) {
 	if other, err := listenDelegatedLogSend(tree, dir+"-alias"); err == nil {
 		other.Close()
 		t.Fatal("symlink parent accepted")
+	}
+}
+
+func TestDelegatedLogSendConfigPathAfterCustomConfig(t *testing.T) {
+	oldV, oldFile, oldPath := v, defaultConfigFile, configPath
+	t.Cleanup(func() { v, defaultConfigFile, configPath = oldV, oldFile, oldPath })
+
+	dir := t.TempDir()
+	onDisk := filepath.Join(dir, "ctrld.toml")
+	if err := os.WriteFile(onDisk, []byte("[service]\nallow_unprivileged_log_send = true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Service start: --config names the file and readConfigFile reads it.
+	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
+	configPath, defaultConfigFile = onDisk, onDisk
+	v.SetConfigFile(onDisk)
+	if err := v.ReadInConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if got := configFileForWrite(); got != onDisk {
+		t.Fatalf("file config: got %q, want %q", got, onDisk)
+	}
+
+	// --cd with a custom config: the production loader replaces viper with an
+	// in-memory config, so viper no longer names any file.
+	custom := base64.StdEncoding.EncodeToString([]byte("[service]\nallow_unprivileged_log_send = true\n"))
+	if err := readBase64Config(custom); err != nil {
+		t.Fatal(err)
+	}
+	if v.ConfigFileUsed() != "" {
+		t.Fatalf("precondition: viper still names %q", v.ConfigFileUsed())
+	}
+	for _, tc := range []struct{ name, configPath, defaultFile string }{
+		{"service --config", onDisk, "ctrld.toml"},
+		{"default config file", "", onDisk},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath, defaultConfigFile = tc.configPath, tc.defaultFile
+			if got := configFileForWrite(); got != onDisk {
+				t.Fatalf("custom config: got %q, want %q", got, onDisk)
+			}
+		})
 	}
 }

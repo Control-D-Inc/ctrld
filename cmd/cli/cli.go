@@ -434,6 +434,15 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		mainLog.Load().Info().Msgf("writing intercept_mode = %q to config (requested %q)", cfg.Service.InterceptMode, interceptMode)
 	}
 
+	// The API answer is the source of truth for a managed run. Without this,
+	// a custom config added (or changed) after install is applied in memory
+	// but never reaches the file, which file readers such as the macOS
+	// delegated log-send gate still use.
+	if managedConfigFetched && !updated && configFileDiffers(&cfg) {
+		updated = true
+		mainLog.Load().Info().Msg("config from Control D API differs from the config file")
+	}
+
 	if updated {
 		if err := writeConfigFile(&cfg); err != nil {
 			failRunUnclassified(mainLog.Load().Error().Err(err), fmt.Sprintf("failed to write config file: %v", err), p.notifyExitToLogServer)
@@ -527,30 +536,61 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 }
 
-func writeConfigFile(cfg *ctrld.Config) error {
+// configFileForWrite returns the config file that writeConfigFile writes:
+// viper's file when it read one, then --config, then defaultConfigFile. A
+// Control D custom config is read from memory, so viper names no file then.
+func configFileForWrite() string {
 	if cfu := v.ConfigFileUsed(); cfu != "" {
-		defaultConfigFile = cfu
-	} else if configPath != "" {
-		defaultConfigFile = configPath
+		return cfu
+	}
+	if configPath != "" {
+		return configPath
+	}
+	return defaultConfigFile
+}
+
+// renderConfigFile returns the exact bytes writeConfigFile writes for cfg.
+func renderConfigFile(cfg *ctrld.Config) ([]byte, error) {
+	var buf bytes.Buffer
+	if cdUID != "" {
+		buf.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n")
+	}
+	enc := toml.NewEncoder(&buf).SetIndentTables(true)
+	if err := enc.Encode(&cfg); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// configFileDiffers reports whether the config file on disk is not what
+// writeConfigFile would write for cfg. A missing or unreadable file differs.
+func configFileDiffers(cfg *ctrld.Config) bool {
+	want, err := renderConfigFile(cfg)
+	if err != nil {
+		return true
+	}
+	have, err := os.ReadFile(configFileForWrite())
+	if err != nil {
+		return true
+	}
+	return !bytes.Equal(have, want)
+}
+
+func writeConfigFile(cfg *ctrld.Config) error {
+	defaultConfigFile = configFileForWrite()
+	data, err := renderConfigFile(cfg)
+	if err != nil {
+		return err
 	}
 	f, err := os.OpenFile(defaultConfigFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(0o644))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if cdUID != "" {
-		if _, err := f.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n"); err != nil {
-			return err
-		}
-	}
-	enc := toml.NewEncoder(f).SetIndentTables(true)
-	if err := enc.Encode(&cfg); err != nil {
+	if _, err := f.Write(data); err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return nil
+	return f.Close()
 }
 
 // readConfigFile reads in config file.

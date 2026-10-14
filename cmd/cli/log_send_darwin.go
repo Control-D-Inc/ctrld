@@ -90,7 +90,7 @@ func (p *prog) newDelegatedLogSendServer() (*logSendServer, error) {
 		return nil, errLogSendTrust
 	}
 	tree := trustedLogTree{root: "/", uid: 0}
-	collector := delegatedLogCollector{tree: tree, config: canonicalLogSendPath(v.ConfigFileUsed())}
+	collector := delegatedLogCollector{tree: tree, config: canonicalLogSendPath(configFileForWrite())}
 	// Capture source paths and budgets once. A reload cannot redirect this socket
 	// to new files, identities, or destinations, nor enable an initially off socket.
 	var files []*rotatingFile
