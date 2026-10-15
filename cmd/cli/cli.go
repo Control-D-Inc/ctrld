@@ -490,6 +490,15 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		firewallMode = "off"
 	}
 
+	// The API answer is the source of truth for a managed run. Without this,
+	// a custom config added (or changed) after install is applied in memory
+	// but never reaches the file, which file readers such as the macOS
+	// delegated log-send gate still use.
+	if managedConfigFetched && !updated && configFileDiffers(&cfg) {
+		updated = true
+		p.Info().Msg("Config from Control D API differs from the config file")
+	}
+
 	if updated {
 		if err := writeConfigFile(&cfg); err != nil {
 			failRunUnclassified(p.Error().Err(err), fmt.Sprintf("failed to write config file: %v", err), p.notifyExitToLogServer)
@@ -564,14 +573,54 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 }
 
+// configFileForWrite returns the config file that writeConfigFile writes:
+// viper's file when it read one, then --config, then defaultConfigFile. A
+// Control D custom config is read from memory, so viper names no file then.
+func configFileForWrite() string {
+	if cfu := v.ConfigFileUsed(); cfu != "" {
+		return cfu
+	}
+	if configPath != "" {
+		return configPath
+	}
+	return defaultConfigFile
+}
+
+// renderConfigFile returns the exact bytes writeConfigFile writes for cfg.
+func renderConfigFile(cfg *ctrld.Config) ([]byte, error) {
+	var buf bytes.Buffer
+	if cdUID != "" {
+		buf.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n")
+	}
+	enc := toml.NewEncoder(&buf).SetIndentTables(true)
+	if err := enc.Encode(&cfg); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// configFileDiffers reports whether the config file on disk is not what
+// writeConfigFile would write for cfg. A missing or unreadable file differs.
+func configFileDiffers(cfg *ctrld.Config) bool {
+	want, err := renderConfigFile(cfg)
+	if err != nil {
+		return true
+	}
+	have, err := os.ReadFile(configFileForWrite())
+	if err != nil {
+		return true
+	}
+	return !bytes.Equal(have, want)
+}
+
 // writeConfigFile writes the configuration to a file
 func writeConfigFile(cfg *ctrld.Config) error {
 	mainLog.Load().Debug().Msg("Writing configuration file")
 
-	if cfu := v.ConfigFileUsed(); cfu != "" {
-		defaultConfigFile = cfu
-	} else if configPath != "" {
-		defaultConfigFile = configPath
+	defaultConfigFile = configFileForWrite()
+	data, err := renderConfigFile(cfg)
+	if err != nil {
+		return err
 	}
 
 	mainLog.Load().Debug().Str("config_file", defaultConfigFile).Msg("Opening configuration file for writing")
@@ -582,15 +631,8 @@ func writeConfigFile(cfg *ctrld.Config) error {
 		return err
 	}
 	defer f.Close()
-	if cdUID != "" {
-		if _, err := f.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n"); err != nil {
-			mainLog.Load().Error().Err(err).Msg("Failed to write CD header to configuration file")
-			return err
-		}
-	}
-	enc := toml.NewEncoder(f).SetIndentTables(true)
-	if err := enc.Encode(&cfg); err != nil {
-		mainLog.Load().Error().Err(err).Str("config_file", defaultConfigFile).Msg("Failed to encode configuration")
+	if _, err := f.Write(data); err != nil {
+		mainLog.Load().Error().Err(err).Str("config_file", defaultConfigFile).Msg("Failed to write configuration file")
 		return err
 	}
 	if err := f.Close(); err != nil {

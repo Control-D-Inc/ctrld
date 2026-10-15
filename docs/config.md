@@ -107,7 +107,9 @@ The `[service]` section controls general behaviors.
 
 ### allow_unprivileged_log_send
 
-macOS only. Default: `false`. An administrator can opt in using the service's
+macOS only. Default: `false`. The configuration that ctrld generates from the
+Control D API never enables it. An administrator opts in through the device's
+custom ctrld configuration in the Control D dashboard, which ctrld writes to its
 root-owned configuration file:
 
 ```toml
@@ -115,14 +117,17 @@ root-owned configuration file:
     allow_unprivileged_log_send = true
 ```
 
-Restart the service as administrator after enabling. Standard users can then run
+Restart the service as administrator after enabling, on a new or an existing
+install. At startup ctrld rewrites the configuration file whenever the API answer
+differs from it, so a custom config added, changed or removed after installation
+reaches the file. Standard users can then run
 `ctrld log send` without `sudo`. **Every local-user process can trigger a
 machine-wide diagnostic upload to Control D**, not just the interactive user.
 This grants upload permission, not permission to read logs or administer ctrld.
 `--full`, `log view`, `log tail`, and other privileged commands remain restricted.
 Other platforms retain their existing behavior.
 
-This requires Control D mode, an on-disk TOML configuration, and file-backed logs.
+This requires Control D mode (`--cd`) with a custom configuration, and file-backed logs.
 The config, log files, rotated logs, and every parent directory must be root-owned,
 not group/world writable, and free of extended ACLs. Symlinks and hard-linked log
 files are refused; only the standard macOS `/var`, `/etc`, and `/tmp` aliases are
