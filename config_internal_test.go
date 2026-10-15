@@ -1,7 +1,9 @@
 package ctrld
 
 import (
+	"context"
 	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,10 +38,10 @@ func TestUpstreamConfig_SetupBootstrapIP(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Enable parallel tests once https://github.com/microsoft/wmi/issues/165 fixed.
 			// t.Parallel()
-			tc.uc.Init()
-			tc.uc.SetupBootstrapIP()
+			tc.uc.Init(context.Background())
+			tc.uc.SetupBootstrapIP(context.Background())
 			if len(tc.uc.bootstrapIPs) == 0 {
-				t.Log(defaultNameservers())
+				t.Log(defaultNameservers(context.Background()))
 				t.Fatalf("could not bootstrap ip: %s", tc.uc.String())
 			}
 		})
@@ -355,7 +357,7 @@ func TestUpstreamConfig_Init(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tc.uc.Init()
+			tc.uc.Init(context.Background())
 			tc.uc.uid = "" // we don't care about the uid.
 			assert.Equal(t, tc.expected, tc.uc)
 		})
@@ -396,6 +398,59 @@ func TestUpstreamConfig_VerifyDomain(t *testing.T) {
 	}
 }
 
+// TestUpstreamConfig_isNextDNS is a regression test for issue-610: NextDNS
+// serves its alternative DoH endpoints, the "ultralow" and "anycast" variants,
+// under nextdns.io, so recognition follows the parent domain instead of the
+// single dns.nextdns.io host. Each case runs through the Domain field and
+// through the endpoint-hostname fallback, the two ways an upstream names its
+// host.
+func TestUpstreamConfig_isNextDNS(t *testing.T) {
+	tests := []struct {
+		name   string
+		domain string
+		want   bool
+	}{
+		{"the default endpoint", "dns.nextdns.io", true},
+		{"the numbered endpoints", "dns1.nextdns.io", true},
+		{"the second numbered endpoint", "dns2.nextdns.io", true},
+		{"an ultralow endpoint", "ultralow.dns.nextdns.io", true},
+		{"a numbered ultralow endpoint", "ultralow.dns1.nextdns.io", true},
+		{"the second numbered ultralow endpoint", "ultralow.dns2.nextdns.io", true},
+		{"an anycast endpoint", "anycast.dns.nextdns.io", true},
+		{"a numbered anycast endpoint", "anycast.dns1.nextdns.io", true},
+		{"the second numbered anycast endpoint", "anycast.dns2.nextdns.io", true},
+		{"a mixed case endpoint", "UltraLow.DNS.NextDNS.IO", true},
+		{"the parent domain itself", "nextdns.io", true},
+
+		{"another TLD", "dns.nextdns.com", false},
+		{"a domain ending in the same labels", "notnextdns.io", false},
+		{"the parent domain as a prefix", "xnextdns.io", false},
+		{"the parent domain under another one", "nextdns.io.example.com", false},
+		{"an unrelated resolver", "dns.google", false},
+		{"a ControlD upstream", "freedns.controld.com", false},
+		{"no host at all", "", false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name+" as a domain", func(t *testing.T) {
+			t.Parallel()
+			uc := &UpstreamConfig{Domain: tc.domain}
+			if got := uc.isNextDNS(); got != tc.want {
+				t.Errorf("isNextDNS() = %v for domain %q, want %v", got, tc.domain, tc.want)
+			}
+		})
+		t.Run(tc.name+" as an endpoint", func(t *testing.T) {
+			t.Parallel()
+			// Domain is empty, so the lookup falls back to the endpoint host.
+			uc := &UpstreamConfig{Endpoint: "https://" + tc.domain + "/abc123"}
+			if got := uc.isNextDNS(); got != tc.want {
+				t.Errorf("isNextDNS() = %v for endpoint %q, want %v", got, uc.Endpoint, tc.want)
+			}
+		})
+	}
+}
+
 func TestUpstreamConfig_UpstreamSendClientInfo(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -410,6 +465,16 @@ func TestUpstreamConfig_UpstreamSendClientInfo(t *testing.T) {
 		{
 			"default with controld upstream DoH3",
 			&UpstreamConfig{Endpoint: "https://freedns.controld.com/p2", Type: ResolverTypeDOH3},
+			true,
+		},
+		{
+			"default with nextdns upstream DoH",
+			&UpstreamConfig{Endpoint: "https://dns.nextdns.io/abc123", Type: ResolverTypeDOH},
+			true,
+		},
+		{
+			"default with nextdns ultralow upstream DoH",
+			&UpstreamConfig{Endpoint: "https://ultralow.dns2.nextdns.io/abc123", Type: ResolverTypeDOH},
 			true,
 		},
 		{
@@ -497,12 +562,58 @@ func TestUpstreamConfig_IsDiscoverable(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tc.uc.Init()
+			tc.uc.Init(context.Background())
 			if got := tc.uc.IsDiscoverable(); got != tc.discoverable {
 				t.Errorf("unexpected result, want: %v, got: %v", tc.discoverable, got)
 			}
 		})
 	}
+}
+
+func TestRebootstrapRace(t *testing.T) {
+	uc := &UpstreamConfig{
+		Name:         "test-doh",
+		Type:         ResolverTypeDOH,
+		Endpoint:     "https://example.com/dns-query",
+		Domain:       "example.com",
+		bootstrapIPs: []string{"1.1.1.1", "1.0.0.1"},
+	}
+
+	ctx := LoggerCtx(context.Background(), NopLogger)
+
+	uc.SetupTransport(ctx)
+
+	if uc.transport == nil {
+		t.Fatal("initial transport should be set")
+	}
+
+	const goroutines = 100
+
+	uc.ReBootstrap(ctx)
+
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		for {
+			switch uc.rebootstrap.Load() {
+			case rebootstrapStarted, rebootstrapInProgress:
+				uc.ReBootstrap(ctx)
+			default:
+				return
+			}
+		}
+	}()
+
+	<-started
+
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Go(func() {
+			uc.ensureSetupTransport(ctx)
+		})
+	}
+
+	wg.Wait()
 }
 
 func ptrBool(b bool) *bool {
