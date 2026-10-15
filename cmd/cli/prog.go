@@ -222,6 +222,14 @@ type prog struct {
 	// See os_resolver_stale.go.
 	osResolverStaleUntil atomic.Int64
 
+	// networkEpoch counts the events after which the upstream connections
+	// may predate the network: accepted network changes and wakes. See
+	// fresh_connection.go.
+	networkEpoch atomic.Uint64
+	connRenewMu  sync.Mutex
+	// sleepWatch finds a sleep of the host between two queries.
+	sleepWatch sleepWatch
+
 	// dns64 tracks DNS64/NAT64 synthesis state for IPv6-only networks
 	// without client-side 464XLAT. See cmd/cli/dns64.go.
 	dns64 dns64State

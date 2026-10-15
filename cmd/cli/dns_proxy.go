@@ -927,9 +927,24 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	}
 
 	ctrld.Log(ctx, p.Debug(), "No cache hit, trying upstreams")
+	// See fresh_connection.go: after a sleep, renew the connections before
+	// the query rides them.
+	p.renewConnectionsIfSlept(ctx)
+	connEpoch := p.networkEpoch.Load()
 	if res := p.tryUpstreams(ctx, req, upstreams, upstreamConfigs); res != nil {
 		ctrld.Log(ctx, p.Debug(), "Upstream query successful")
 		return res
+	}
+	// A query that ran on connections the network left behind gets one more
+	// pass. It can take as long as the first, timeouts included, before the
+	// fallback: that is the price of not sending the query in plaintext, and
+	// it is paid only by the queries already in flight when the network
+	// changed or the host slept.
+	if p.retryOnFreshConnection(ctx, upstreams, upstreamConfigs, connEpoch) {
+		if res := p.tryUpstreams(ctx, req, upstreams, upstreamConfigs); res != nil {
+			ctrld.Log(ctx, p.Debug(), "Upstream query successful on fresh connections")
+			return res
+		}
 	}
 
 	ctrld.Log(ctx, p.Debug(), "All upstreams failed, handling failure")
@@ -2258,9 +2273,7 @@ func (p *prog) handleNetworkChange(ctx context.Context, delta *netmon.ChangeDelt
 	networkChangeReadOSResolverFn(p, ctx)
 
 	p.logger.Load().Debug().Msg("Link state changed, re-bootstrapping")
-	for _, uc := range p.cfg.Upstream {
-		uc.ReBootstrap(ctrld.LoggerCtx(ctx, p.logger.Load()))
-	}
+	p.renewUpstreamConnections(ctx)
 
 	// Get IPs from default route interface in new state
 	selfIP := networkChangeDefaultRouteIPFn(p)
