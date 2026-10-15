@@ -115,6 +115,9 @@ type proxyResponse struct {
 	cached     bool
 	clientInfo bool
 	refused    bool
+	// drop asks the server to send no reply, so the client retries; answer
+	// is nil then.
+	drop bool
 }
 
 // upstreamForResult represents the result of processing rules for a request.
@@ -399,6 +402,11 @@ func (p *prog) processStandardQuery(req *standardQueryRequest) {
 			failoverRcodes: p.getFailoverRcodes(req.listenerConfig),
 			ufr:            ur,
 		})
+		if pr.drop {
+			// No reply, so the client retries; see os_resolver_stale.go.
+			p.health.countQuery()
+			return
+		}
 
 		rtt := time.Since(startTime)
 		ctrld.Log(req.ctx, p.Debug(), "Received response of %d bytes in %s", pr.answer.Len(), rtt)
@@ -1027,6 +1035,9 @@ func (p *prog) handleAllUpstreamsFailure(ctx context.Context, req *proxyRequest,
 		}
 	}
 	ctrld.Log(ctx, p.querySampler.event(sampleClassAllEndpointsFailed, ""), "All %v endpoints failed", journalUpstreamNames(upstreams))
+	// The OS resolver failed this query, as the only upstream or as the
+	// catch-all below.
+	osResolverFailed := len(upstreams) > 0 && upstreams[0] == upstreamOS
 
 	// An Internal Domain with explicit resolvers never takes the OS-resolver
 	// catch-all below: it can reach public nameservers, ctrld's own fallback
@@ -1051,7 +1062,17 @@ func (p *prog) handleAllUpstreamsFailure(ctx context.Context, req *proxyRequest,
 				ctrld.Log(ctx, p.Debug(), "OS resolver fallback successful")
 				return answer
 			}
+			osResolverFailed = true
 		}
+	}
+
+	if osResolverFailed && isNAT64DiscoveryQuery(req.msg) && p.osResolverStale() {
+		// See os_resolver_stale.go: a SERVFAIL here would end the host's
+		// NAT64 prefix discovery, and it comes from the previous network's
+		// nameservers. Without an answer the host retries.
+		ctrld.Log(ctx, p.Info(), "OS resolver nameservers predate the network change; not answering %s so the host retries", dns64WellKnownName)
+		p.countFailedClientQuery(upstreams)
+		return &proxyResponse{drop: true}
 	}
 
 	ctrld.Log(ctx, p.Debug(), "Returning server failure response")
@@ -2232,6 +2253,10 @@ func (p *prog) handleNetworkChange(ctx context.Context, delta *netmon.ChangeDelt
 	p.networkAcceptedGen.Store(transitionID)
 	p.networkSourceMu.Unlock()
 
+	// Before the re-bootstrap, so no query meets the previous network's
+	// nameservers unmarked.
+	networkChangeReadOSResolverFn(p, ctx)
+
 	p.logger.Load().Debug().Msg("Link state changed, re-bootstrapping")
 	for _, uc := range p.cfg.Upstream {
 		uc.ReBootstrap(ctrld.LoggerCtx(ctx, p.logger.Load()))
@@ -2725,8 +2750,16 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		return
 	}
 
+	// A new network can publish its resolvers after the reset, as with
+	// RDNSS, so Standard mode keeps reading them until the upstream recovers.
+	stopRefresh := func() {}
+	if !interceptRecovery && reason == RecoveryReasonNetworkChange {
+		stopRefresh = p.refreshOSResolverWhileRecovering(recoveryCtx)
+	}
+
 	// Wait for the same upstream pool used to admit this recovery.
 	recovered, err := waitForUpstreamRecoveryFn(p, recoveryCtx, upstreams, &diagnostic)
+	stopRefresh()
 	if err != nil {
 		if p.recoveryGen.Load() == gen {
 			outcome = recoveryOutcomeCanceled
@@ -2780,6 +2813,7 @@ func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool,
 		// gave none, so the journal reports the discovered list instead.
 		resolverNameservers, systemNameservers := initializeOsResolverWithSystemNameserversFn(loggerCtx, true, recoveryResolverReason)
 		diagnostic.dhcpServers = systemNameservers
+		p.noteOSResolverRead(systemNameservers)
 		if len(systemNameservers) == 0 {
 			journal(p.Warn()).Msg("DNS intercept recovery: no DHCP nameservers found")
 		} else {
@@ -2818,9 +2852,14 @@ func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool,
 	// will be appended to nameservers from the saved interface values
 	recoveryResetDNSFn(p, false, false)
 
-	// For an OS failure, reinitialize OS resolver nameservers immediately.
-	if reason == RecoveryReasonOSFailure {
-		if err := p.reinitializeOSResolver("OS resolver failure detected"); err != nil {
+	// Read the exposed nameservers right away, for an OS failure and for a
+	// network change. After a network change the OS resolver still holds
+	// the previous network's servers, and the wait for an upstream can need
+	// the new ones: on an IPv6-only network, an IPv4-only upstream comes back
+	// only once macOS starts its CLAT, and macOS discovers the NAT64 prefix
+	// by resolving ipv4only.arpa through ctrld's OS-resolver fallback.
+	if reason == RecoveryReasonOSFailure || reason == RecoveryReasonNetworkChange {
+		if err := p.reinitializeOSResolver(recoveryReasonName(reason) + "; reinitializing OS resolver nameservers"); err != nil {
 			return fmt.Errorf("failed to reinitialize OS resolver: %w", err)
 		}
 	}
@@ -2832,7 +2871,8 @@ func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool,
 func (p *prog) reinitializeOSResolver(message string) error {
 	p.Debug().Msg(message)
 	loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-	ns := ctrld.InitializeOsResolverWithReason(loggerCtx, true, recoveryResolverReason)
+	ns := initializeOsResolver(loggerCtx, true, recoveryResolverReason)
+	p.noteOSResolverRead(ns)
 	if len(ns) == 0 {
 		p.Warn().Msg("No nameservers found for OS resolver; using existing values")
 	} else {
@@ -2872,7 +2912,7 @@ func (p *prog) completeRecoveryWork(reason RecoveryReason, recovered string, int
 
 	// Apply our DNS settings back. The snapshot that follows the end event
 	// reports the interfaces.
-	p.setDNS(systemNameservers)
+	recoverySetDNSFn(p, systemNameservers)
 	return nil
 }
 
@@ -2900,6 +2940,46 @@ func (p *prog) refreshOSResolverAfterRecoverySkip(healthy string) {
 	}
 	p.osRecoveryRefreshAt = now
 	initializeOsResolverWithSystemNameserversFn(ctrld.LoggerCtx(context.Background(), p.logger.Load()), true, recoveryResolverReason)
+}
+
+// osResolverRecoveryRefreshIntervals are the gaps between the re-reads of the
+// system nameservers while a network-change recovery waits for an upstream.
+// They start short, because a new network's resolvers usually appear within a
+// few seconds of the reset, and the last one repeats: the wait has no timeout,
+// and on macOS each read runs scutil, ipconfig and networksetup.
+var osResolverRecoveryRefreshIntervals = []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 30 * time.Second}
+
+// refreshOSResolverWhileRecovering re-reads the system nameservers, at
+// osResolverRecoveryRefreshIntervals, until ctx ends or the returned stop
+// function is called, which also waits for the refresher to exit.
+//
+// A network-change recovery removes ctrld's DNS settings to expose the new
+// network's resolvers, but a network can publish them later than that, as with
+// IPv6 RDNSS. Reading once would leave the OS-resolver fallback on the previous
+// network's servers until the upstream recovers, and on an IPv6-only network
+// the upstream can only recover through that fallback (#628). Reads that find
+// no nameservers keep the current ones.
+func (p *prog) refreshOSResolverWhileRecovering(ctx context.Context) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			interval := osResolverRecoveryRefreshIntervals[min(i, len(osResolverRecoveryRefreshIntervals)-1)]
+			if !sleepWithContext(ctx, interval) {
+				return
+			}
+			ns := initializeOsResolver(ctrld.LoggerCtx(ctx, p.logger.Load()), true, recoveryResolverReason)
+			p.noteOSResolverRead(ns)
+			if len(ns) > 0 {
+				p.Debug().Msgf("Network-change recovery: OS resolver nameservers: %v", ns)
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // waitForUpstreamRecoveryFn is the seam of the upstream probe. A test drives
