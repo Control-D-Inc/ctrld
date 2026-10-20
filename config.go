@@ -1066,6 +1066,15 @@ func (uc *UpstreamConfig) Context(ctx context.Context) (context.Context, context
 // variable so tests can point the fallback at local listeners.
 var controlDDirectIPsFn = bootstrapIPsFromControlDDomain
 
+// ControlDDirectIPs returns the hardcoded IPv4 and IPv6 addresses that an
+// upstream on the Control D domain falls back to when its bootstrap lookup is
+// incomplete or its bootstrap addresses fail, or nil for any other domain.
+// Firewall Mode permits them up front: they are the addresses ctrld dials when
+// DNS is unusable, so no lookup can teach them to the allowlist.
+func ControlDDirectIPs(domain string) []string {
+	return controlDDirectIPsFn(domain)
+}
+
 // directFallbackIPs returns the Control D direct IPs that DoH and DoH3 try
 // when the bootstrap addresses fail, once FallbackToDirectIP has fired, or nil.
 // They are limited to the families the ip_stack dials: an IPv6-only upstream

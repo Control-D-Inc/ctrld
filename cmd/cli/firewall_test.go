@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/miekg/dns"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -665,4 +668,172 @@ func TestFirewallPermanentAllowListPermitsControlDEndpoints(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFirewallPermitsUpstreamDialIPsWhenLookupFails is the regression guard for
+// #645: across a restart under a Group Policy NRPT catch-all to 127.0.0.1, the
+// upstream hostname lookup reaches ctrld before it serves and fails. ctrld still
+// dials the upstream through addresses that need no lookup, so those have to be
+// permitted, or WFP's block-all refuses ctrld's own DoH upstream.
+func TestFirewallPermitsUpstreamDialIPsWhenLookupFails(t *testing.T) {
+	origLookup := firewallLookupHost
+	firewallLookupHost = func(host string) ([]string, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	t.Cleanup(func() { firewallLookupHost = origLookup })
+
+	cfg := &ctrld.Config{Upstream: map[string]*ctrld.UpstreamConfig{
+		// The API-managed upstream: bootstrap_ip 76.76.2.22, and the direct IPs
+		// DoH falls back to when the bootstrap addresses fail.
+		"0": {Endpoint: "https://dns.controld.com/abcdef", BootstrapIP: ctrld.PremiumDNSBoostrapIP, Type: ctrld.ResolverTypeDOH},
+		// A Control D upstream without bootstrap_ip: only the direct IPs.
+		"1": {Endpoint: "https://freedns.controld.com/p2", Type: ctrld.ResolverTypeDOH},
+		// A third-party upstream with a configured bootstrap_ip.
+		"2": {Endpoint: "https://doh.example.test/dns-query", BootstrapIP: "198.51.100.9", Type: ctrld.ResolverTypeDOH},
+	}}
+	al := firewall.New()
+	p := &prog{cfg: cfg}
+	p.logger.Store(mainLog.Load())
+	p.addUpstreamIPsToPermanent(al)
+
+	for _, want := range []string{
+		ctrld.PremiumDNSBoostrapIP, ctrld.PremiumDNSBoostrapIPv6,
+		ctrld.FreeDNSBoostrapIP, ctrld.FreeDNSBoostrapIPv6,
+		"198.51.100.9",
+	} {
+		if !al.Contains(netip.MustParseAddr(want)) {
+			t.Errorf("upstream address %s is not permitted after a failed lookup; Firewall Mode would block ctrld's own socket to it", want)
+		}
+	}
+	if al.Contains(netip.MustParseAddr("203.0.113.1")) {
+		t.Error("an address no upstream dials was permitted")
+	}
+}
+
+// TestSetupUpstreamPermitsBootstrapList drives the production setupUpstream:
+// the bootstrap list SetupBootstrapIP builds there, outside the listener and
+// after syncFirewallMode, has to reach the permanent allowlist before platform
+// enforcement is installed.
+func TestSetupUpstreamPermitsBootstrapList(t *testing.T) {
+	// An IP-literal DoT upstream bootstraps to itself without a network lookup,
+	// and its Ping only prepares a transport.
+	const bootstrap = "192.0.2.44"
+	cfg := &ctrld.Config{Upstream: map[string]*ctrld.UpstreamConfig{
+		"0": {Endpoint: "tls://" + bootstrap, Type: ctrld.ResolverTypeDOT},
+	}}
+	p := newInternalDomainsProg(t, cfg)
+	al := firewall.New()
+	p.setFirewallAllowList(al)
+
+	p.setupUpstream(cfg)
+
+	if got := cfg.Upstream["0"].BootstrapIPs(); len(got) != 1 || got[0] != bootstrap {
+		t.Fatalf("fixture bootstrap list = %v, want [%s]", got, bootstrap)
+	}
+	if !al.Contains(netip.MustParseAddr(bootstrap)) {
+		t.Errorf("bootstrap address %s is not permitted after setupUpstream; Firewall Mode would block ctrld's own upstream socket", bootstrap)
+	}
+
+	// Firewall Mode off: setupUpstream must not need an allowlist.
+	off := &ctrld.Config{Upstream: map[string]*ctrld.UpstreamConfig{
+		"0": {Endpoint: "tls://" + bootstrap, Type: ctrld.ResolverTypeDOT},
+	}}
+	newInternalDomainsProg(t, off).setupUpstream(off)
+}
+
+// TestReloadEnablingFirewallModePermitsBootstrapList covers a reload that turns
+// Firewall Mode on. setupUpstream bootstraps the new upstreams before the next
+// run's syncFirewallMode, so it finds no allowlist to add the bootstrap list
+// to, and the fresh allowlist syncFirewallMode builds has to permit the list
+// itself. Otherwise a third-party upstream without bootstrap_ip depends on the
+// hostname lookup again, which is the failure in #645.
+func TestReloadEnablingFirewallModePermitsBootstrapList(t *testing.T) {
+	// The bootstrap lookup goes to the OS resolver, here a fixture answering
+	// the upstream's A query with a documentation address.
+	const bootstrap = "198.51.100.77"
+	fixture := startBootstrapDNSFixture(t, bootstrap)
+	prevNameservers := ctrld.NameserversFn
+	ctrld.NameserversFn = func(context.Context) []string { return nil }
+	t.Cleanup(func() {
+		ctrld.NameserversFn = prevNameservers
+		ctrld.InitializeOsResolver(context.Background(), false)
+	})
+	ctrld.InitializeOsResolver(context.Background(), false)
+	if !ctrld.AppendOsResolverNameservers([]string{fixture}) {
+		t.Fatal("could not add the DNS fixture to the OS resolver")
+	}
+
+	// The hostname lookup Firewall Mode makes for the upstream fails, as it
+	// does when the host's DNS points at ctrld.
+	origLookup := firewallLookupHost
+	firewallLookupHost = func(host string) ([]string, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	t.Cleanup(func() { firewallLookupHost = origLookup })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The run before the reload: Firewall Mode off.
+	p := newInternalDomainsProg(t, &ctrld.Config{})
+	p.syncFirewallMode(ctx)
+	if p.firewallAllowList() != nil {
+		t.Fatal("firewall mode off created an allowlist")
+	}
+
+	// The reload, in the order the reload loop runs it: setupUpstream on the
+	// new config, the config takes effect, then the next run syncs Firewall
+	// Mode. A DoT upstream needs no Ping.
+	newCfg := &ctrld.Config{Upstream: map[string]*ctrld.UpstreamConfig{
+		"0": {Endpoint: "tls://dot.example.test", Type: ctrld.ResolverTypeDOT, Timeout: 2000},
+	}}
+	newCfg.Service.FirewallMode = "on"
+	p.setupUpstream(newCfg)
+	if got := newCfg.Upstream["0"].BootstrapIPs(); len(got) != 1 || got[0] != bootstrap {
+		t.Fatalf("fixture bootstrap list = %v, want [%s]", got, bootstrap)
+	}
+	*p.cfg = *newCfg
+	p.syncFirewallMode(ctx)
+
+	al := p.firewallAllowList()
+	if al == nil {
+		t.Fatal("firewall mode on did not create an allowlist")
+	}
+	if !al.Contains(netip.MustParseAddr(bootstrap)) {
+		t.Errorf("bootstrap address %s is not permitted after a reload turned Firewall Mode on; WFP's block-all would refuse ctrld's own upstream socket", bootstrap)
+	}
+}
+
+// startBootstrapDNSFixture serves A queries with addr and every other type with
+// an empty answer, and returns its host:port.
+func startBootstrapDNSFixture(t *testing.T, addr string) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	server := &dns.Server{
+		PacketConn:        pc,
+		NotifyStartedFunc: func() { close(started) },
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, msg *dns.Msg) {
+			reply := new(dns.Msg)
+			reply.SetReply(msg)
+			if len(msg.Question) > 0 && msg.Question[0].Qtype == dns.TypeA {
+				reply.Answer = append(reply.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: msg.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+					A:   net.ParseIP(addr),
+				})
+			}
+			_ = w.WriteMsg(reply)
+		}),
+	}
+	go func() { _ = server.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("DNS fixture did not start")
+	}
+	t.Cleanup(func() { _ = server.Shutdown() })
+	return pc.LocalAddr().String()
 }

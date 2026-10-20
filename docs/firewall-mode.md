@@ -124,6 +124,12 @@ These IPs are always allowed regardless of DNS resolution:
 | ctrld listener IPs | Self - DNS proxy must be reachable |
 | Upstream resolver IPs | DoH/DoT/DoQ endpoints |
 
+Upstream resolver IPs cover every address ctrld can dial for an upstream, not only what its
+hostname resolves to: a configured `bootstrap_ip`, the bootstrap list found at startup or on a reload, and
+for Control D upstreams the direct IPs (for example `76.76.2.22` and `2606:1a40::22`). The
+hostname lookup can fail at startup when the host's DNS already points at ctrld, for example
+a Group Policy NRPT catch-all to `127.0.0.1` across a restart, and ctrld still dials these.
+
 ## Organization Allowed Destination IPs
 
 Firewall Mode only permits what ctrld resolved, so a service addressed by literal IP - with

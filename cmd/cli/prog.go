@@ -1005,6 +1005,13 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 		} else {
 			bootstrapEvent().Str("bootstrap_ip", uc.BootstrapIP).Msgf("Using bootstrap ip for upstream.%s", n)
 		}
+		// Firewall Mode learned this upstream's addresses before it bootstrapped
+		// (syncFirewallMode), so permit the bootstrap list now: before Ping can
+		// re-bootstrap it, and before platform enforcement is installed (postRun
+		// at startup, syncFirewallMode in the run that follows a reload). A
+		// reload that turns Firewall Mode on has no allowlist yet; the next
+		// run's syncFirewallMode permits the list then.
+		p.addUpstreamBootstrapIPsToPermanent(p.firewallAllowList(), n, uc)
 		uc.SetCertPool(rootCertPool)
 		go uc.Ping(loggerCtx)
 

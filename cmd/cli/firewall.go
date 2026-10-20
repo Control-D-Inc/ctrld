@@ -11,6 +11,7 @@ import (
 	"github.com/kardianos/service"
 	"github.com/miekg/dns"
 
+	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/firewall"
 )
@@ -167,10 +168,28 @@ func (p *prog) syncFirewallMode(ctx context.Context) {
 	}
 }
 
-// addUpstreamIPsToPermanent resolves upstream endpoint hostnames and adds their
-// IPs to the permanent allowlist. Called at startup and on config reload.
+// firewallLookupHost resolves an upstream hostname for the permanent allowlist.
+// It is a variable so tests control whether the lookup works.
+var firewallLookupHost = net.LookupHost
+
+// addUpstreamIPsToPermanent adds the addresses ctrld dials for each upstream to
+// the permanent allowlist. Called at startup and on config reload.
+//
+// A lookup of the upstream hostname is not enough on its own. It goes through
+// the host's resolver, and that resolver can be ctrld itself before ctrld is
+// serving - a Group Policy NRPT catch-all to 127.0.0.1 across a restart, for
+// one. The upstream is then dialed anyway, through addresses that need no
+// lookup: a configured bootstrap_ip, the Control D direct IPs and the bootstrap
+// list, which are permitted here whether or not the lookup succeeds.
+//
+// The bootstrap list is empty at startup, because syncFirewallMode runs before
+// setupUpstream, and addUpstreamBootstrapIPsToPermanent permits it once it
+// exists. On a reload it is already filled: setupUpstream bootstraps the new
+// upstreams before the next run's syncFirewallMode, so a reload that turns
+// Firewall Mode on finds no allowlist for setupUpstream to add to, and the list
+// has to be permitted here.
 func (p *prog) addUpstreamIPsToPermanent(al *firewall.AllowList) {
-	for _, uc := range p.cfg.Upstream {
+	for name, uc := range p.cfg.Upstream {
 		if uc == nil || uc.Endpoint == "" {
 			continue
 		}
@@ -187,19 +206,54 @@ func (p *prog) addUpstreamIPsToPermanent(al *firewall.AllowList) {
 			continue
 		}
 
+		what := "upstream." + name
+		dialIPs := append([]string{uc.BootstrapIP}, ctrld.ControlDDirectIPs(host)...)
+		dialIPs = append(dialIPs, uc.BootstrapIPs()...)
+		permitted := p.addPermanentDialIPs(al, what, host, dialIPs)
+
 		// Resolve hostname to IPs.
-		ips, err := net.LookupHost(host)
+		ips, err := firewallLookupHost(host)
 		if err != nil {
-			p.Warn().Err(err).Msgf("Firewall: could not resolve upstream host %s", host)
+			if permitted == 0 {
+				p.Warn().Err(err).Msgf("Firewall: could not resolve upstream host %s", host)
+			} else {
+				p.Debug().Err(err).Msgf("Firewall: could not resolve upstream host %s; its %d bootstrap and direct IPs are permitted", host, permitted)
+			}
 			continue
 		}
-		for _, ipStr := range ips {
-			if ip, err := netip.ParseAddr(ipStr); err == nil {
-				al.AddPermanent(ip)
-				p.Debug().Msgf("Firewall: added upstream IP %s (%s) to permanent allowlist", ip, host)
-			}
-		}
+		p.addPermanentDialIPs(al, what, host, ips)
 	}
+}
+
+// addUpstreamBootstrapIPsToPermanent permits the bootstrap list upstream name
+// dials. SetupBootstrapIP fills that list after syncFirewallMode has run, from
+// the OS nameservers or the Control D bootstrap server rather than through the
+// listener, so nothing else teaches it to the allowlist.
+//
+// setupUpstream calls it right after the bootstrap, before the upstream's first
+// Ping: the list is not synchronized, and a re-bootstrap can replace it once
+// queries flow. A nil al means Firewall Mode is off.
+func (p *prog) addUpstreamBootstrapIPsToPermanent(al *firewall.AllowList, name string, uc *ctrld.UpstreamConfig) {
+	if al == nil || uc == nil {
+		return
+	}
+	p.addPermanentDialIPs(al, "upstream."+name, uc.Domain, uc.BootstrapIPs())
+}
+
+// addPermanentDialIPs permits the parseable addresses in ips for the upstream
+// named what, and returns how many it permitted.
+func (p *prog) addPermanentDialIPs(al *firewall.AllowList, what, host string, ips []string) int {
+	n := 0
+	for _, ipStr := range ips {
+		ip, err := netip.ParseAddr(ipStr)
+		if err != nil {
+			continue
+		}
+		al.AddPermanent(ip)
+		n++
+		p.Debug().Msgf("Firewall: added %s IP %s (%s) to permanent allowlist", what, ip, host)
+	}
+	return n
 }
 
 // syncAllowedDestinations applies the organization's Allowed Destination IP list
