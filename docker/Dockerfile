@@ -8,7 +8,7 @@
 # - Non-cgo ctrld-client binary.
 #
 # CI_COMMIT_TAG is used to set the version of the ctrld-client binary.
-FROM golang:1.27-bookworm AS base
+FROM golang:1.27.3-bookworm AS base
 
 WORKDIR /app
 
