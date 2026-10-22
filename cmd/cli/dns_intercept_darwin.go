@@ -788,16 +788,7 @@ func (p *prog) validateDNSIntercept() error {
 		return fmt.Errorf("dns intercept: cannot create anchor directory: %w", err)
 	}
 
-	if p.cfg != nil {
-		for name, uc := range p.cfg.Upstream {
-			if uc.Type == "os" || uc.Type == "" {
-				return fmt.Errorf("dns intercept: upstream %q uses OS resolver (port 53) which would create "+
-					"a redirect loop with pf. Use DoH upstreams (--proto doh) with dns-intercept mode", name)
-			}
-		}
-	}
-
-	return nil
+	return interceptConfigBlocker(p.cfg)
 }
 
 // buildPFAnchorRules generates the pf anchor rules for DNS interception.

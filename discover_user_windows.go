@@ -14,10 +14,9 @@ import (
 )
 
 var (
-	wtsapi32                         = windows.NewLazySystemDLL("wtsapi32.dll")
-	procWTSGetActiveConsoleSessionId = wtsapi32.NewProc("WTSGetActiveConsoleSessionId")
-	procWTSQuerySessionInformation   = wtsapi32.NewProc("WTSQuerySessionInformationW")
-	procWTSFreeMemory                = wtsapi32.NewProc("WTSFreeMemory")
+	wtsapi32                       = windows.NewLazySystemDLL("wtsapi32.dll")
+	procWTSQuerySessionInformation = wtsapi32.NewProc("WTSQuerySessionInformationW")
+	procWTSFreeMemory              = wtsapi32.NewProc("WTSFreeMemory")
 )
 
 const (
@@ -35,10 +34,8 @@ const (
 func DiscoverMainUser(ctx context.Context) string {
 	logger := ProxyLogger.Load().Debug()
 
-	// Method 1: Check active console session
-	logger.Msg("attempting to discover user via active console session")
-	if user := getActiveConsoleUser(ctx); user != "" {
-		logger.Str("method", "console").Str("user", user).Msg("found user via active console session")
+	// Method 1: the active console session user.
+	if user := discoverSessionUser(ctx); user != "" {
 		return user
 	}
 
@@ -60,14 +57,25 @@ func DiscoverMainUser(ctx context.Context) string {
 	return "unknown"
 }
 
+// discoverSessionUser returns the user of an active login session, or "" when
+// nobody is logged in. It never falls back to a guess from the account list.
+func discoverSessionUser(ctx context.Context) string {
+	logger := ProxyLogger.Load().Debug()
+
+	// Method 1: Check active console session
+	logger.Msg("attempting to discover user via active console session")
+	if user := getActiveConsoleUser(ctx); user != "" {
+		logger.Str("method", "console").Str("user", user).Msg("found user via active console session")
+		return user
+	}
+
+	return ""
+}
+
 // getActiveConsoleUser gets the username of the active console session
 func getActiveConsoleUser(ctx context.Context) string {
-	// Guard against missing WTS procedures (e.g., Windows Server Core).
-	if err := procWTSGetActiveConsoleSessionId.Find(); err != nil {
-		ProxyLogger.Load().Debug().Err(err).Msg("WTSGetActiveConsoleSessionId not available, skipping console session check")
-		return ""
-	}
-	sessionId, _, _ := procWTSGetActiveConsoleSessionId.Call()
+	// WTSGetActiveConsoleSessionId is exported by kernel32.dll, not wtsapi32.dll.
+	sessionId := windows.WTSGetActiveConsoleSessionId()
 	if sessionId == 0xFFFFFFFF { // Invalid session
 		ProxyLogger.Load().Debug().Msg("no active console session found")
 		return ""
@@ -82,7 +90,7 @@ func getActiveConsoleUser(ctx context.Context) string {
 	}
 	ret, _, _ := procWTSQuerySessionInformation.Call(
 		0, // WTS_CURRENT_SERVER_HANDLE
-		sessionId,
+		uintptr(sessionId),
 		uintptr(WTSUserName),
 		uintptr(unsafe.Pointer(&buffer)),
 		uintptr(unsafe.Pointer(&bytesReturned)),

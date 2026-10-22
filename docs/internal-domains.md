@@ -104,6 +104,19 @@ exists for a source is never overwritten. From highest precedence to lowest:
    rule, so an Internal Domain for the AD domain takes precedence over the
    auto-detected one.
 
+   A query under the AD domain whose matched rule resolves to the OS resolver
+   alone (the auto-detected rule, a Magic Folder exclude, or an OS-resolver
+   Internal Domain) is a LAN query, so the OS resolver does not race Control D's
+   public resolver (76.76.2.0) against the domain controller. Before this, a
+   rule match skipped the LAN classification and every such lookup
+   (DC hostnames, DC-locator SRV names that carry the machine name, WPAD) also
+   went to 76.76.2.0 in plaintext; when both failed, the public NXDOMAIN could
+   be the answer returned. An explicit-resolver rule for the AD domain is
+   unchanged. The same LAN mark applies wherever an AD name reaches the OS
+   resolver outside rule handling: the DNS-intercept recovery bypass, and the
+   OS-resolver retry after an explicit upstream fails with
+   `leak_on_upstream_failure` enabled.
+
 **VPN DNS auto-detection** is evaluated inside `proxy()` in DNS-intercept mode,
 after policy matching and independently of it, so it needs its own rule:
 

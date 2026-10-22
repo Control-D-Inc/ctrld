@@ -33,4 +33,5 @@ func (nd *ndpDiscover) scan() {
 
 // subscribe watches NDP table changes and update new information to local table.
 // This is a stub method, and only works on Linux at this moment.
-func (nd *ndpDiscover) subscribe(ctx context.Context) {}
+func (nd *ndpDiscover) subscribe(ctx context.Context) {
+}

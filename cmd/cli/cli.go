@@ -154,15 +154,15 @@ var (
 	newRouter = router.New
 )
 
+// updateConfigInterceptMode persists an explicit --intercept-mode selection in
+// service.intercept_mode. "off" is written as "off", not cleared: with an unset
+// value meaning the platform default ("dns" on macOS and Windows desktop), a cleared
+// value would turn interception back on at the next start without the flag.
 func updateConfigInterceptMode(cfg *ctrld.Config, mode string) bool {
-	desired := ""
+	var desired string
 	switch mode {
-	case "dns", "hard":
+	case "dns", "hard", "off":
 		desired = mode
-	case "off":
-		desired = ""
-	case "":
-		return false
 	default:
 		return false
 	}
@@ -353,6 +353,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	oldLogPath := cfg.Service.LogPath
+	// Whether this run got its configuration from the API, which is what the
+	// managed-config marker may claim once the configuration is on disk.
+	managedConfigFetched := false
 	if uid := cdUIDFromProvToken(); uid != "" {
 		cdUID = uid
 		p.initLoggingAfterProvisioning()
@@ -385,16 +388,34 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 				return
 			}
 
-			handleAPIPreflightFailure(p, pf.err, p.notifyExitToLogServer)
-			return
+			// Maintenance is temporary and says nothing about this host's
+			// configuration, so a start that already has a working one carries
+			// on with it rather than taking DNS down for the window.
+			if !useLastKnownConfigDuringMaintenance(pf.err, &cfg) {
+				handleAPIPreflightFailure(p, pf.err, p.notifyExitToLogServer)
+				return
+			}
+			// This run holds no answer from the API, so the reload loop asks
+			// again well before refetch_time would.
+			p.startedInAPIMaintenance.Store(true)
 		default:
 			p.mu.Lock()
 			p.rc = pf.rc
 			p.mu.Unlock()
+			managedConfigFetched = true
 		}
 	}
 
 	updated := updateListenerConfig(&cfg, p.notifyExitToLogServer)
+	// Whether the file on disk, before anything below rewrites it, is already
+	// one the API produced for this identity.
+	wasManagedConfig := managedConfigRecordedFor(cdUID)
+	// The marker must never vouch for a configuration that was not written.
+	// Without this, a first managed run whose listener needed no change would
+	// record the marker over the seeded default still on disk.
+	if managedConfigFetched && !wasManagedConfig {
+		updated = true
+	}
 
 	// Bootstrap and listener binding both succeeded, so an earlier run's
 	// recorded failure no longer describes this install.
@@ -405,11 +426,21 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	// Keep config and the explicit CLI/service mode in sync. In particular, "off"
-	// must clear a previously persisted dns/hard value or the next service start
-	// would silently re-enable interception from config.
+	// must replace a previously persisted dns/hard value, and must be kept as
+	// "off": an unset value means the platform default, which is "dns" on
+	// macOS and Windows desktop editions.
 	if updateConfigInterceptMode(&cfg, interceptMode) {
 		updated = true
 		mainLog.Load().Info().Msgf("writing intercept_mode = %q to config (requested %q)", cfg.Service.InterceptMode, interceptMode)
+	}
+
+	// The API answer is the source of truth for a managed run. Without this,
+	// a custom config added (or changed) after install is applied in memory
+	// but never reaches the file, which file readers such as the macOS
+	// delegated log-send gate still use.
+	if managedConfigFetched && !updated && configFileDiffers(&cfg) {
+		updated = true
+		mainLog.Load().Info().Msg("config from Control D API differs from the config file")
 	}
 
 	if updated {
@@ -419,6 +450,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		}
 		mainLog.Load().Info().Msg("writing config file to: " + defaultConfigFile)
 	}
+	recordManagedConfigForStart(managedConfigFetched, wasManagedConfig)
 
 	if newLogPath := cfg.Service.LogPath; newLogPath != "" && oldLogPath != newLogPath {
 		p.switchLogPath(oldLogPath, newLogPath)
@@ -504,30 +536,61 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 }
 
-func writeConfigFile(cfg *ctrld.Config) error {
+// configFileForWrite returns the config file that writeConfigFile writes:
+// viper's file when it read one, then --config, then defaultConfigFile. A
+// Control D custom config is read from memory, so viper names no file then.
+func configFileForWrite() string {
 	if cfu := v.ConfigFileUsed(); cfu != "" {
-		defaultConfigFile = cfu
-	} else if configPath != "" {
-		defaultConfigFile = configPath
+		return cfu
+	}
+	if configPath != "" {
+		return configPath
+	}
+	return defaultConfigFile
+}
+
+// renderConfigFile returns the exact bytes writeConfigFile writes for cfg.
+func renderConfigFile(cfg *ctrld.Config) ([]byte, error) {
+	var buf bytes.Buffer
+	if cdUID != "" {
+		buf.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n")
+	}
+	enc := toml.NewEncoder(&buf).SetIndentTables(true)
+	if err := enc.Encode(&cfg); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// configFileDiffers reports whether the config file on disk is not what
+// writeConfigFile would write for cfg. A missing or unreadable file differs.
+func configFileDiffers(cfg *ctrld.Config) bool {
+	want, err := renderConfigFile(cfg)
+	if err != nil {
+		return true
+	}
+	have, err := os.ReadFile(configFileForWrite())
+	if err != nil {
+		return true
+	}
+	return !bytes.Equal(have, want)
+}
+
+func writeConfigFile(cfg *ctrld.Config) error {
+	defaultConfigFile = configFileForWrite()
+	data, err := renderConfigFile(cfg)
+	if err != nil {
+		return err
 	}
 	f, err := os.OpenFile(defaultConfigFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(0o644))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if cdUID != "" {
-		if _, err := f.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n"); err != nil {
-			return err
-		}
-	}
-	enc := toml.NewEncoder(f).SetIndentTables(true)
-	if err := enc.Encode(&cfg); err != nil {
+	if _, err := f.Write(data); err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return nil
+	return f.Close()
 }
 
 // readConfigFile reads in config file.
@@ -538,6 +601,9 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 	// If err == nil, there's a config supplied via `--config`, no default config written.
 	err := v.ReadInConfig()
 	if err == nil {
+		// Only a file the host already had can stand in for the API answer
+		// during maintenance; the default written below cannot.
+		configReadFromDisk = true
 		if notice {
 			mainLog.Load().Notice().Msg("Reading config: " + v.ConfigFileUsed())
 		}
@@ -670,6 +736,15 @@ func processNoConfigFlags(noConfigStart bool) {
 // If cdDeactivationPin equals to this default, it means the pin code is not set from Control D API.
 const defaultDeactivationPin = -1
 
+// deactivationPinKnown reports whether this run ever had an answer from the API
+// about the deactivation PIN.
+//
+// cdDeactivationPin cannot carry this: its default means "the API said there is
+// no PIN", and a run that started on the configuration on disk during
+// maintenance never asked. Without the distinction such a run would present an
+// unknown PIN as no PIN and hand out deactivation to anyone who asked.
+var deactivationPinKnown atomic.Bool
+
 // cdDeactivationPin is used in cd mode to decide whether stop and uninstall commands can be run.
 var cdDeactivationPin atomic.Int64
 
@@ -719,7 +794,7 @@ type apiPreflight struct {
 // with no stop channel - as an operator stop. Reading the stop channel directly is also
 // independent of whether the context's watcher goroutine has been scheduled yet.
 func runAPIPreflight(stopCh <-chan struct{}, cfg *ctrld.Config) apiPreflight {
-	rc, err := fetchCDConfigBoundedBy(stopCh, cfg)
+	rc, err := fetchCDConfigBoundedBy(stopCh, cfg, processCDFlagsFn)
 	return apiPreflight{rc: rc, err: err, stopRequested: stopRequested(stopCh)}
 }
 
@@ -743,6 +818,11 @@ func permanentAPIRejection(err error) (*controld.ErrorResponse, bool) {
 	if !errors.As(err, &uer) {
 		return nil, false
 	}
+	// Maintenance is the API being away, not the API refusing this request, so
+	// it stays retryable even when it arrives with a client-error status.
+	if controld.IsMaintenance(err) {
+		return nil, false
+	}
 	switch uer.StatusCode {
 	case http.StatusRequestTimeout, http.StatusTooManyRequests:
 		return nil, false
@@ -761,6 +841,11 @@ func permanentAPIRejection(err error) (*controld.ErrorResponse, bool) {
 func apiFailureCode(err error) (provisionFailureCode, bool) {
 	if err == nil {
 		return "", false
+	}
+	// Before the device check: maintenance must never reach the self-uninstall
+	// path, because it says nothing about whether this device still exists.
+	if controld.IsMaintenance(err) {
+		return provisionCodeAPIMaintenance, true
 	}
 	var uer *controld.ErrorResponse
 	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
@@ -838,6 +923,22 @@ func provisionSecrets() []string {
 	return []string{cdUID, cdOrg, uid, clientID}
 }
 
+// redactedArgs formats command-line arguments for a log line with the
+// provision secrets removed. "ctrld start --cd-org <code>" carries the code
+// in its arguments, and a code enrolls endpoints into the organization until
+// it expires or runs out.
+func redactedArgs(args []string) string {
+	return redactSecrets(fmt.Sprint(args), provisionSecrets()...)
+}
+
+// interceptUpgradeCheckLine is the debug line "ctrld start" logs before its
+// intercept upgrade check. It is built here, not inline, so a test can hold the
+// line itself, not only redactedArgs, to never carrying a provision secret.
+func interceptUpgradeCheckLine(args []string, interceptOnly, svcConfigExists bool, mode string) string {
+	return fmt.Sprintf("intercept upgrade check: args=%s interceptOnly=%v svcConfigExists=%v interceptMode=%q",
+		redactedArgs(args), interceptOnly, svcConfigExists, mode)
+}
+
 // uninstallInvalidCdUIDFn is a var so tests can observe the self-uninstall
 // without driving the OS service manager.
 var uninstallInvalidCdUIDFn = uninstallInvalidCdUID
@@ -850,6 +951,12 @@ var uninstallInvalidCdUIDFn = uninstallInvalidCdUID
 func handleAPIPreflightFailure(p *prog, err error, notify func()) {
 	cdLogger := mainLog.Load().With().Str("mode", "cd").Logger()
 	code, _ := apiFailureCode(err)
+	if code == provisionCodeAPIMaintenance {
+		// The caller already established there is nothing to fall back on.
+		cdLogger.Error().Err(err).Msg("failed to fetch resolver config, the Control D API is in maintenance")
+		failProvision(newProvisionResult(code, maintenanceNoConfigDetail, nil, provisionSecrets()...), notify)
+		return
+	}
 	var uer *controld.ErrorResponse
 	if errors.As(err, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		r := newProvisionResult(code, apiRejectionSummary(uer.StatusCode), nil, provisionSecrets()...)
@@ -876,25 +983,32 @@ func handleAPIPreflightFailure(p *prog, err error, notify func()) {
 	failProvision(newProvisionResult(code, fmt.Sprintf("failed to fetch resolver config: %v", err), nil, provisionSecrets()...), notify)
 }
 
-// processCDFlagsFn is the API fetch, indirected so the lifetime binding around it can be
-// tested without reaching the network.
-var processCDFlagsFn = processCDFlags
+// The startup (full metadata) and reload (runtime metadata) API fetches are indirected so
+// their lifetime binding can be tested without reaching the network.
+var (
+	processCDFlagsFn        = processCDFlags
+	processCDFlagsRuntimeFn = processCDFlagsRuntime
+)
 
-// fetchCDConfigBoundedBy runs the API fetch bounded by stopCh, so a fetch that cannot
-// reach the API stops when the service is asked to stop instead of working on behalf of a
-// service the OS already considers stopped. The derived context is always cancelled, which
+// fetchCDConfigBoundedBy runs fetch bounded by stopCh, so a fetch that cannot reach the
+// API stops when the service is asked to stop instead of working on behalf of a service
+// the OS already considers stopped. The derived context is always cancelled, which
 // releases the goroutine watching stopCh.
-func fetchCDConfigBoundedBy(stopCh <-chan struct{}, cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+func fetchCDConfigBoundedBy(
+	stopCh <-chan struct{},
+	cfg *ctrld.Config,
+	fetch func(context.Context, *ctrld.Config) (*controld.ResolverConfig, error),
+) (*controld.ResolverConfig, error) {
 	ctx, cancel := contextFromStopCh(stopCh)
 	defer cancel()
-	return processCDFlagsFn(ctx, cfg)
+	return fetch(ctx, cfg)
 }
 
 // fetchCDConfigBoundedByLifetime is the reload path's fetch. Reload binds the same stop
 // primitives as startup - it used to wire them up itself, where a dropped cancel or the
 // wrong channel would have failed nothing.
 func (p *prog) fetchCDConfigBoundedByLifetime(cfg *ctrld.Config) (*controld.ResolverConfig, error) {
-	return fetchCDConfigBoundedBy(p.stopCh, cfg)
+	return fetchCDConfigBoundedBy(p.stopCh, cfg, processCDFlagsRuntimeFn)
 }
 
 // stopRequested reports whether stopCh has been closed. A nil channel - mobile passes
@@ -933,6 +1047,23 @@ func contextFromStopCh(stopCh <-chan struct{}) (context.Context, context.CancelF
 // cancellable: otherwise a stop request during preflight is ignored and the process
 // keeps retrying after the service reports itself stopped.
 func processCDFlags(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+	return processCDFlagsWithMetadata(ctx, cfg, startupMetadata, true)
+}
+
+// startupMetadata is the daemon-start metadata source, indirected so tests can
+// prove that startup, and only startup, uses it.
+var startupMetadata = ctrld.SystemMetadataStartup
+
+func processCDFlagsRuntime(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverConfig, error) {
+	return processCDFlagsWithMetadata(ctx, cfg, ctrld.SystemMetadataRuntime, false)
+}
+
+func processCDFlagsWithMetadata(
+	ctx context.Context,
+	cfg *ctrld.Config,
+	metadata func(context.Context) map[string]string,
+	includeHostnameHints bool,
+) (*controld.ResolverConfig, error) {
 	logger := mainLog.Load().With().Str("mode", "cd").Logger()
 	logger.Info().Msgf("fetching Controld D configuration from API: %s", cdUID)
 	bo := backoff.NewBackoff("processCDFlags", logf, 30*time.Second)
@@ -942,9 +1073,10 @@ func processCDFlags(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverC
 		ctx = context.Background()
 	}
 	req := &controld.ResolverConfigRequest{
-		RawUID:   cdUID,
-		Version:  rootCmd.Version,
-		Metadata: ctrld.SystemMetadataRuntime(ctx),
+		RawUID:               cdUID,
+		Version:              rootCmd.Version,
+		Metadata:             metadata(ctx),
+		IncludeHostnameHints: includeHostnameHints,
 	}
 	resolverConfig, err := fetchResolverConfig(ctx, req, cdDev)
 	for {
@@ -968,10 +1100,21 @@ func processCDFlags(ctx context.Context, cfg *ctrld.Config) (*controld.ResolverC
 		if isMobile() {
 			return nil, err
 		}
-		logger.Warn().Err(err).Msg("could not fetch resolver config")
+		if controld.IsMaintenance(err) {
+			// The caller reports this: only it knows whether a fallback is
+			// available. Saying "could not fetch resolver config" here puts a
+			// connectivity-shaped failure at the top of the bootstrap log,
+			// which is how the incident behind this was first mis-triaged.
+			logger.Debug().Err(err).Msg("resolver config fetch answered with maintenance")
+		} else {
+			logger.Warn().Err(err).Msg("could not fetch resolver config")
+		}
 		return nil, err
 	}
 
+	// The answer settles the PIN either way: a response without one means the
+	// API says there is none, which is not the same as never having asked.
+	deactivationPinKnown.Store(true)
 	if resolverConfig.DeactivationPin != nil {
 		logger.Debug().Msg("saving deactivation pin")
 		cdDeactivationPin.Store(*resolverConfig.DeactivationPin)
@@ -1713,14 +1856,14 @@ func isExplicitInterceptListener(ip string, port int) bool {
 }
 
 // listenerInterceptMode resolves the mode that selects the listener binding
-// strategy. An explicit "off" is final here, the same as in setDNS. A fallback
-// to the config value would select the intercept strategy from a stale
-// persisted mode on the first start after a revert to standard mode.
+// strategy, with the same precedence as setDNS. An explicit "off" is final
+// here: a fallback to the config value would select the intercept strategy from
+// a stale persisted mode on the first start after a revert to standard mode.
+// With neither set, the platform default applies, so a macOS start that
+// intercepts by default also binds the way intercept mode needs.
 func listenerInterceptMode(cfg *ctrld.Config) string {
-	if interceptMode == "" {
-		return cfg.Service.InterceptMode
-	}
-	return interceptMode
+	mode, _ := resolveInterceptMode(interceptMode, cfg)
+	return mode
 }
 
 // tryUpdateListenerConfig tries updating listener config with a working one.
@@ -2204,7 +2347,37 @@ func newSocketControlClient(ctx context.Context, s service.Service, dir string) 
 
 // newSocketControlClientWithTimeout returns new control client after control server was started.
 // The timeoutDuration controls how long to wait for the server.
+//
+// Any answer to /started counts, including the 408 of a service whose start
+// never finished: callers such as the deactivation pin check need to reach a
+// running service whether or not it is ready. A caller that needs it ready uses
+// newReadySocketControlClient.
 func newSocketControlClientWithTimeout(ctx context.Context, s service.Service, dir string, timeoutDuration time.Duration) *controlClient {
+	return dialSocketControlServer(ctx, s, dir, timeoutDuration, false)
+}
+
+// newReadySocketControlClient is newSocketControlClient for a caller that needs
+// the service ready, not just reachable: only a 200 from /started counts.
+//
+// A service whose start never finishes still runs its control server, and
+// answers /started with 408 once its onStarted hooks have not completed in
+// time. `ctrld upgrade` must read that as "the new binary did not become
+// ready" and roll back, rather than report the upgrade successful.
+func newReadySocketControlClient(ctx context.Context, s service.Service, dir string) *controlClient {
+	return newReadySocketControlClientWithTimeout(ctx, s, dir, dialSocketControlServerTimeout)
+}
+
+// newReadySocketControlClientWithTimeout is newReadySocketControlClient with
+// an explicit deadline.
+func newReadySocketControlClientWithTimeout(ctx context.Context, s service.Service, dir string, timeoutDuration time.Duration) *controlClient {
+	return dialSocketControlServer(ctx, s, dir, timeoutDuration, true)
+}
+
+// dialSocketControlServer polls /started until the control server answers, or
+// with requireReady until it answers 200, and returns the client. It returns
+// nil if the service is not running, or the answer does not come within
+// timeoutDuration.
+func dialSocketControlServer(ctx context.Context, s service.Service, dir string, timeoutDuration time.Duration, requireReady bool) *controlClient {
 	// Return early if service is not running.
 	if status, err := s.Status(); err != nil || status != service.StatusRunning {
 		return nil
@@ -2219,10 +2392,15 @@ func newSocketControlClientWithTimeout(ctx context.Context, s service.Service, d
 	// The socket control server may not start yet, so attempt to ping
 	// it until we got a response.
 	for {
-		_, err := cc.post(startedPath, nil)
+		resp, err := cc.post(startedPath, nil)
 		if err == nil {
-			// Server was started, stop pinging.
-			break
+			code := resp.StatusCode
+			resp.Body.Close()
+			if !requireReady || code == http.StatusOK {
+				// Server was started, stop pinging.
+				break
+			}
+			err = fmt.Errorf("control server reported the service not ready: HTTP %d", code)
 		}
 		// The socket control server is not ready yet, backoff for waiting it to be ready.
 		bo.BackOff(ctx, err)
@@ -2365,6 +2543,12 @@ var errRequiredDeactivationPin = errors.New("deactivation pin is required to sto
 // errTooManyDeactivationPin represents an error indicating excessive deactivation PIN request attempts.
 var errTooManyDeactivationPin = errors.New("too many request attempts")
 
+// errUnverifiableDeactivationPin reports that this run never had an answer from
+// the API about the PIN, so it can neither check one nor establish that none is
+// required. Refusing is the only safe answer: the alternative hands a
+// PIN-protected device to whoever asks for the duration of an API outage.
+var errUnverifiableDeactivationPin = errors.New("cannot verify the deactivation pin while the Control D API is unavailable, try again once it returns")
+
 // checkDeactivationPin validates if the deactivation pin matches one in ControlD config.
 func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 	mainLog.Load().Debug().Msg("Checking deactivation pin")
@@ -2401,6 +2585,9 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 			return nil // valid pin
 		case http.StatusNotFound:
 			return nil // the server is running older version of ctrld
+		case http.StatusServiceUnavailable:
+			mainLog.Load().Error().Msg(errUnverifiableDeactivationPin.Error())
+			return errUnverifiableDeactivationPin
 		}
 	}
 	mainLog.Load().Error().Err(err).Msg(errInvalidDeactivationPin.Error())
@@ -2411,7 +2598,8 @@ func checkDeactivationPin(s service.Service, stopCh chan struct{}) error {
 func isCheckDeactivationPinErr(err error) bool {
 	return errors.Is(err, errInvalidDeactivationPin) ||
 		errors.Is(err, errRequiredDeactivationPin) ||
-		errors.Is(err, errTooManyDeactivationPin)
+		errors.Is(err, errTooManyDeactivationPin) ||
+		errors.Is(err, errUnverifiableDeactivationPin)
 }
 
 // ensureUninstall ensures that s.Uninstall will remove ctrld service from system completely.
@@ -2547,8 +2735,8 @@ func apiRejectionMessage(err error) string {
 // restart path passes false and gets the error back to decide for itself,
 // with no process exit.
 func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
-	// Username is only sent during initial provisioning (cdUIDFromProvToken).
-	// All subsequent calls use lightweight metadata to avoid EDR triggers.
+	// Restart validation uses runtime metadata. The daemon start that follows
+	// sends the full snapshot.
 	req := &controld.ResolverConfigRequest{
 		RawUID:   cdUID,
 		Version:  rootCmd.Version,

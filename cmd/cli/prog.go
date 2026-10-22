@@ -78,11 +78,6 @@ var logf = func(format string, args ...any) {
 	mainLog.Load().Debug().Msgf(format, args...)
 }
 
-// noopLogf is like logf but discards formatted log messages and arguments without any processing.
-//
-//lint:ignore U1000 use in newLoopbackOSConfigurator
-var noopLogf = func(format string, args ...any) {}
-
 var svcConfig = &service.Config{
 	Name:        ctrldServiceName,
 	DisplayName: "Control-D Helper Service",
@@ -142,7 +137,10 @@ type prog struct {
 	querySampler              errorSampler
 	internalDomainProbes      internalDomainProber
 	lastNetworkState          atomic.Pointer[netmon.State]
-	internalLogSent           time.Time
+	logUpload                 logUploadGate
+	logSendMu                 sync.Mutex
+	logSendStopped            bool
+	logSend                   *logSendServer
 	runningIface              string
 	requiredMultiNICsConfig   bool
 	adDomain                  string
@@ -160,10 +158,17 @@ type prog struct {
 	lastNAT64Mu     sync.Mutex
 	lastNAT64Logged string
 
-	selfUninstallMu       sync.Mutex
-	refusedQueryCount     int
-	canSelfUninstall      atomic.Bool
-	checkingSelfUninstall bool
+	selfUninstallMu   sync.Mutex
+	refusedQueryCount int
+	canSelfUninstall  atomic.Bool
+
+	// startedInAPIMaintenance records that this run began on the configuration
+	// already on disk because the API was in maintenance, so it holds no answer
+	// from the API at all. The reload loop retries faster while it is set, and
+	// clears it once a recovered configuration has been applied - not when a
+	// fetch returns, because the reload receiver fetches again and can fail.
+	startedInAPIMaintenance atomic.Bool
+	checkingSelfUninstall   bool
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -205,6 +210,19 @@ type prog struct {
 	// instead of using the normal upstream flow.
 	recoveryBypass atomic.Bool
 
+	// osResolverStaleUntil is when the OS resolver's nameservers stop being
+	// treated as read before the last network change, in Unix nanoseconds.
+	// See os_resolver_stale.go.
+	osResolverStaleUntil atomic.Int64
+
+	// networkEpoch counts the events after which the upstream connections
+	// may predate the network: accepted network changes and wakes. See
+	// fresh_connection.go.
+	networkEpoch atomic.Uint64
+	connRenewMu  sync.Mutex
+	// sleepWatch finds a sleep of the host between two queries.
+	sleepWatch sleepWatch
+
 	// dns64 tracks DNS64/NAT64 synthesis state for IPv6-only networks
 	// without client-side 464XLAT. See cmd/cli/dns64.go.
 	dns64 dns64State
@@ -221,6 +239,13 @@ type prog struct {
 	interceptDNSTargetSetValue string
 	//lint:ignore U1000 used in Darwin code.
 	interceptDNSTargetLoaded bool
+	// interceptIPv6OnlySeen and interceptIPv6OnlyTimer track an IPv6-only
+	// observation that has not yet held long enough to admit a target
+	// (issue #629). Guarded by interceptDNSTargetMu.
+	//lint:ignore U1000 used in Darwin code.
+	interceptIPv6OnlySeen ipv6OnlyObservation
+	//lint:ignore U1000 used in Darwin code.
+	interceptIPv6OnlyTimer *time.Timer
 
 	// interceptTargetMirror holds the same value as interceptDNSTargetSetValue
 	// for readers that must not wait: the mutex above covers networksetup
@@ -339,6 +364,7 @@ type prog struct {
 	restoreOnce      sync.Once
 	restoreErr       error
 	releaseOnce      sync.Once
+	csStopOnce       sync.Once
 	runDone          chan struct{}
 	runAbortCh       chan struct{}
 	listenerWg       sync.WaitGroup
@@ -381,6 +407,24 @@ func (p *prog) beginNetworkActivity() bool {
 	}
 	p.netMonitorWG.Add(1)
 	return true
+}
+
+// retryVPNDNSRefresh returns the refresh that a Tailscale route retry of m
+// runs. Like other background refreshes it is admitted through the network
+// activity gate, and it does nothing once m is no longer the live manager.
+func (p *prog) retryVPNDNSRefresh(m *vpnDNSManager) func() {
+	return func() {
+		if !p.beginNetworkActivity() {
+			return
+		}
+		defer p.netMonitorWG.Done()
+		p.vpnDNSJournalMu.Lock()
+		live := p.vpnDNS == m
+		p.vpnDNSJournalMu.Unlock()
+		if live {
+			m.Refresh(true)
+		}
+	}
 }
 
 func (p *prog) networkActivityClosed() bool {
@@ -547,14 +591,16 @@ func (p *prog) runWait() {
 		}
 
 		addExtraSplitDnsRule(newCfg)
-		if err := writeConfigFile(newCfg); err != nil {
-			logger.Err(err).Msg("could not write new config")
-		}
+		persistManagedConfig(newCfg, logger)
 
 		// This needs to be done here, otherwise, the DNS handler may observe an invalid
 		// upstream config because its initialization function have not been called yet.
 		mainLog.Load().Debug().Msg("setup upstream with new config")
 		p.setupUpstream(newCfg)
+		// The configuration is in effect now. Every failure above continues the
+		// loop without applying anything, so a run that started in maintenance
+		// stays pending and keeps retrying until one gets this far.
+		p.maintenanceConfigApplied(*logger)
 
 		p.mu.Lock()
 		oldUpstreams := p.cfg.Upstream
@@ -717,7 +763,7 @@ func (p *prog) apiConfigReload() {
 		}
 		selfUninstallCheck(err, p, logger)
 		if err != nil {
-			logger.Warn().Err(err).Msg("could not fetch resolver config")
+			logResolverConfigFetchFailure(&logger, err)
 			return
 		}
 
@@ -726,6 +772,7 @@ func (p *prog) apiConfigReload() {
 			_ = selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, &logger)
 		}
 
+		deactivationPinKnown.Store(true)
 		if resolverConfig.DeactivationPin != nil {
 			newDeactivationPin := *resolverConfig.DeactivationPin
 			curDeactivationPin := cdDeactivationPin.Load()
@@ -750,11 +797,22 @@ func (p *prog) apiConfigReload() {
 		// resolver change, a domain change and a removal all reach the endpoint
 		// through the same reload as an exclude-list change.
 		noInternalDomainsChanged := true
-		if rc != nil {
+		// A run that started on the configuration on disk has applied no answer
+		// from the API yet, so nothing here is known to be current and the
+		// response has to reach the apply path instead of being compared
+		// against a configuration that was never applied. This holds until the
+		// apply lands, not until a fetch returns: the receiver fetches again
+		// and can fail, and p.rc is already replaced above, so comparing would
+		// make every later response equal the stored one and leave the excludes
+		// and Internal Domains of the previous run in place for good.
+		pendingRecovery := p.startedInAPIMaintenance.Load()
+		if rc != nil && !pendingRecovery {
 			slices.Sort(rc.Exclude)
 			slices.Sort(resolverConfig.Exclude)
 			noExcludeListChanged = slices.Equal(rc.Exclude, resolverConfig.Exclude)
 			noInternalDomainsChanged = internalDomainsEqual(rc.SplitDNS, resolverConfig.SplitDNS)
+		} else {
+			noExcludeListChanged, noInternalDomainsChanged = false, false
 		}
 		if noCustomConfig && noExcludeListChanged && noInternalDomainsChanged {
 			return
@@ -774,7 +832,7 @@ func (p *prog) apiConfigReload() {
 			return
 		}
 
-		if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated || forced {
+		if resolverConfig.Ctrld.CustomLastUpdate > lastUpdated || forced || pendingRecovery {
 			lastUpdated = time.Now().Unix()
 			cfg := &ctrld.Config{}
 			var cfgErr error
@@ -799,12 +857,37 @@ func (p *prog) apiConfigReload() {
 			logger.Debug().Msg("custom config does not change")
 		}
 	}
+	// A run that started in maintenance holds no answer from the API, so it
+	// waits out the whole refetch interval before it has one. Retry faster
+	// until it does, without touching refetch_time: that interval governs
+	// every endpoint, and shortening it fleet-wide would multiply load on an
+	// API that is by definition already struggling.
+	var maintenanceRetry *time.Timer
+	var maintenanceRetryC <-chan time.Time
+	if p.startedInAPIMaintenance.Load() {
+		maintenanceRetry = time.NewTimer(maintenanceReloadDelay())
+		defer maintenanceRetry.Stop()
+		maintenanceRetryC = maintenanceRetry.C
+		logger.Debug().Msg("started on the configuration on disk, retrying the API faster until it answers")
+	}
 	for {
 		select {
 		case <-p.apiForceReloadCh:
 			doReloadApiConfig(true, logger.With().Bool("forced", true).Logger())
 		case <-ticker.C:
 			doReloadApiConfig(false, logger)
+		case <-maintenanceRetryC:
+			// The normal ticker or a forced reload may have recovered first.
+			if !p.startedInAPIMaintenance.Load() {
+				maintenanceRetryC = nil
+				continue
+			}
+			doReloadApiConfig(false, logger.With().Bool("maintenance_retry", true).Logger())
+			if p.startedInAPIMaintenance.Load() {
+				maintenanceRetry.Reset(maintenanceReloadDelay())
+				continue
+			}
+			maintenanceRetryC = nil
 		case <-ctx.Done():
 			return
 		}
@@ -936,6 +1019,7 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 			}
 			mainLog.Load().Debug().Msgf("control server started: %s", p.cs.addr)
 		}
+		p.startLogSendServer()
 	}
 	p.onStartedDone = make(chan struct{})
 	p.loop = make(map[string]bool)
@@ -1290,6 +1374,7 @@ func (p *prog) startOSState(f func()) bool {
 // resolver that is already gone. Safe to call multiple times.
 func (p *prog) restoreOSState() error {
 	p.restoreOnce.Do(func() {
+		p.stopLogSendServer()
 		p.osStateMu.Lock()
 		p.osStateRestored = true
 		p.osStateMu.Unlock()
@@ -1313,16 +1398,33 @@ func (p *prog) restoreOSState() error {
 // queries on would fail those queries. Safe to call multiple times.
 func (p *prog) releaseResources() {
 	p.releaseOnce.Do(func() {
-		if p.cs != nil {
-			if cerr := p.cs.stop(); cerr != nil {
-				mainLog.Load().Warn().Err(cerr).Msg("could not stop control server")
-			}
-		}
+		p.stopControlServer()
 		p.closeLogConn()
 		p.mu.Lock()
 		upstreams := p.cfg.Upstream
 		p.mu.Unlock()
 		closeReplacedUpstreams(upstreams, nil)
+	})
+}
+
+// stopControlServer closes the control socket. Stop calls it as soon as the stop
+// is accepted, and releaseResources again for the stop paths that never call
+// Stop. Safe to call multiple times.
+//
+// It must not wait for the run to finish. A stopping process that still answers
+// on the socket answers for the service that replaces it: `ctrld upgrade` and
+// restart take any reply to /started as "the new binary is up", so an upgrade
+// to a build that never became ready was reported successful instead of rolled
+// back. Closing late also unlinks the socket path after the new process has
+// bound its own there.
+func (p *prog) stopControlServer() {
+	p.csStopOnce.Do(func() {
+		if p.cs == nil {
+			return
+		}
+		if err := p.cs.stop(); err != nil {
+			mainLog.Load().Warn().Err(err).Msg("could not stop control server")
+		}
 	})
 }
 
@@ -1386,6 +1488,9 @@ func (p *prog) Stop(s service.Service) error {
 			os.Exit(deactivationPinInvalidExitCode)
 		}
 	}
+	// The pin check above is the last use of the control server. From here on
+	// this process is going away and must not answer for its successor.
+	p.stopControlServer()
 	close(p.stopCh)
 	return err
 }
@@ -1439,6 +1544,7 @@ var (
 	ensureInterceptDNSTargetFn                  = (*prog).ensureInterceptDNSTarget
 	removeInterceptDNSTargetFn                  = (*prog).removeInterceptDNSTarget
 	initializeOsResolverWithSystemNameserversFn = ctrld.InitializeOsResolverWithSystemNameserversReason
+	newResolverFn                               = ctrld.NewResolver
 	setDnsForRunningIfaceFn                     = (*prog).setDnsForRunningIface
 	resetDNSFn                                  = (*prog).resetDNS
 	// refuseFallbackFatal reports a startup failure the interface-DNS fallback
@@ -1477,18 +1583,29 @@ func (p *prog) setDNS(systemNameservers []string) {
 		p.csSetDnsOk = setDnsOK
 	}()
 
-	// Validate and resolve intercept mode.
-	// CLI flag (--intercept-mode) takes priority over config file.
-	// Valid values: "" (use config), "off" (explicitly disable), "dns" (with VPN
-	// split routing), and "hard" (all DNS through ctrld).
+	// Validate and resolve intercept mode: --intercept-mode, then
+	// service.intercept_mode, then the platform default (resolveInterceptMode).
+	// Valid values: "off" (interface DNS mode), "dns" (with VPN split routing),
+	// and "hard" (all DNS through ctrld).
 	if interceptMode != "" && !validInterceptMode(interceptMode) {
 		mainLog.Load().Fatal().Msgf("invalid --intercept-mode value %q: must be 'off', 'dns', or 'hard'", interceptMode)
 	}
 	if interceptMode == "" {
-		interceptMode = p.configuredInterceptMode()
-		if interceptMode != "" && interceptMode != "off" {
-			mainLog.Load().Info().Msgf("Intercept mode enabled via config (intercept_mode = %q)", interceptMode)
+		mode, source := resolveInterceptMode("", p.cfg)
+		interceptMode, interceptModeSource = mode, source
+		switch {
+		case source == interceptModeSourceDefault && mode == "":
+			if _, reason := defaultInterceptMode(p.cfg); reason != nil {
+				mainLog.Load().Info().Err(reason).Msg("Intercept mode default not applied; using interface DNS mode")
+			}
+		case mode == "" || mode == "off":
+		case source == interceptModeSourceConfig:
+			mainLog.Load().Info().Msgf("Intercept mode enabled via config (intercept_mode = %q)", mode)
+		case source == interceptModeSourceDefault:
+			mainLog.Load().Info().Msgf("Intercept mode %q is the default on this platform; use --intercept-mode off for interface DNS mode", mode)
 		}
+	} else if interceptModeSource == "" {
+		interceptModeSource = interceptModeSourceFlag
 	}
 
 	// Derive convenience bools from interceptMode.
@@ -1572,7 +1689,9 @@ func (p *prog) setDNS(systemNameservers []string) {
 				// matching queries to the DNS server on that interface.
 				// Skipped in --intercept-mode hard where all DNS goes through ctrld.
 				p.vpnDNSJournalMu.Lock()
+				p.vpnDNS.Close()
 				p.vpnDNS = newVPNDNSManager(p.exemptVPNDNSServers)
+				p.vpnDNS.retryRefresh = p.retryVPNDNSRefresh(p.vpnDNS)
 				p.vpnDNS.Refresh(true)
 				p.vpnDNSJournalMu.Unlock()
 			}
@@ -1653,13 +1772,11 @@ func (p *prog) setDNS(systemNameservers []string) {
 
 // configuredInterceptMode resolves the service's effective intercept mode without
 // mutating package state. An explicit flag value, including "off", takes priority
-// over the persisted config value.
+// over the persisted config value, and the platform default applies when neither
+// is set.
 func (p *prog) configuredInterceptMode() string {
-	im := interceptMode
-	if im == "" {
-		im = p.cfg.Service.InterceptMode
-	}
-	return im
+	mode, _ := resolveInterceptMode(interceptMode, p.cfg)
+	return mode
 }
 
 func (p *prog) setDnsForRunningIface(nameservers []string) (runningIface *net.Interface) {
@@ -1830,6 +1947,7 @@ func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
 
 		// Clean up VPN DNS manager
 		p.vpnDNSJournalMu.Lock()
+		p.vpnDNS.Close()
 		p.vpnDNS = nil
 		p.vpnDNSJournalMu.Unlock()
 
@@ -2091,16 +2209,6 @@ func runLogServer(sockPath string) net.Conn {
 	return server
 }
 
-func errAddrInUse(err error) bool {
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return errors.Is(opErr.Err, syscall.EADDRINUSE) || errors.Is(opErr.Err, windowsEADDRINUSE)
-	}
-	return false
-}
-
-var _ = errAddrInUse
-
 // The unreachable winsock errnos (ENETUNREACH/EHOSTUNREACH) are matched via
 // ctrldnet.IsUnreachable, which owns their definitions.
 //
@@ -2108,7 +2216,6 @@ var _ = errAddrInUse
 var (
 	windowsECONNREFUSED = syscall.Errno(10061)
 	windowsEINVAL       = syscall.Errno(10022)
-	windowsEADDRINUSE   = syscall.Errno(10048)
 )
 
 // errUrlNetworkError reports whether a failed HTTP attempt is worth retrying.
@@ -2417,13 +2524,26 @@ func dnsChanged(iface *net.Interface, nameservers []string) bool {
 }
 
 // selfUninstallCheck checks if the error dues to controld.InvalidConfigCode, perform self-uninstall then.
+// selfUninstallFn is the uninstall itself, indirected so a test can prove what
+// does and does not reach it. The real one ends in os.Exit, which a test cannot
+// survive to make an assertion about.
+var selfUninstallFn = selfUninstall
+
 func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
+	// Maintenance is the API being away; it establishes nothing about whether
+	// this device still exists. Guarded here rather than at each caller because
+	// this is the one place that acts, and acting would uninstall a working
+	// install over a temporary outage.
+	if controld.IsMaintenance(uninstallErr) {
+		logger.Debug().Msg("API is in maintenance, skipping device status check")
+		return
+	}
 	var uer *controld.ErrorResponse
 	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		p.stopDnsWatchers()
 
 		// Perform self-uninstall now.
-		selfUninstall(p, logger)
+		selfUninstallFn(p, logger)
 	}
 }
 

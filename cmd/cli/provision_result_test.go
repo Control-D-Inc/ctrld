@@ -68,8 +68,8 @@ func TestProvisionCodesMapToOneStageAndInRangeExit(t *testing.T) {
 		}
 		seenExits[exit] = code
 	}
-	if len(allProvisionFailureCodes) != 17 {
-		t.Errorf("expected 17 codes, got %d", len(allProvisionFailureCodes))
+	if len(allProvisionFailureCodes) != 18 {
+		t.Errorf("expected 18 codes, got %d", len(allProvisionFailureCodes))
 	}
 }
 

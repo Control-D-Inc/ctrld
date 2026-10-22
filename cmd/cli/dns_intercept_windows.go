@@ -1639,7 +1639,8 @@ func (p *prog) osHealthcheckSuppressed() bool {
 	return state.loopbackProtectActive
 }
 
-// deactivateLoopbackWFPProtectLocked is the lock-free inner implementation.
+// deactivateLoopbackWFPProtectLocked removes the loopback protect WFP filters.
+// The sublayer and engine handle are cleaned up by cleanupWFPFilters.
 // Caller must hold state.mu.
 func (p *prog) deactivateLoopbackWFPProtectLocked(state *wfpState) {
 	if !state.loopbackProtectActive && len(state.loopbackPermitIDs) == 0 {

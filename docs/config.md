@@ -109,6 +109,45 @@ The `[service]` section controls general behaviors.
     log_path = "log.txt"
 ```
 
+### allow_unprivileged_log_send
+
+macOS only. Default: `false`. The configuration that ctrld generates from the
+Control D API never enables it. An administrator opts in through the device's
+custom ctrld configuration in the Control D dashboard, which ctrld writes to its
+root-owned configuration file:
+
+```toml
+[service]
+    allow_unprivileged_log_send = true
+```
+
+Restart the service as administrator after enabling, on a new or an existing
+install. At startup ctrld rewrites the configuration file whenever the API answer
+differs from it, so a custom config added, changed or removed after installation
+reaches the file. Standard users can then run
+`ctrld log send` without `sudo`. **Every local-user process can trigger a
+machine-wide diagnostic upload to Control D**, not just the interactive user.
+This grants upload permission, not permission to read logs or administer ctrld.
+`--full`, `log view`, `log tail`, and other privileged commands remain restricted.
+Other platforms retain their existing behavior.
+
+This requires Control D mode (`--cd`) with a custom configuration, and file-backed logs.
+The config, log files, rotated logs, and every parent directory must be root-owned,
+not group/world writable, and free of extended ACLs. Symlinks and hard-linked log
+files are refused; only the standard macOS `/var`, `/etc`, and `/tmp` aliases are
+canonicalized. A user-owned home directory is not a safe service log location.
+Do not loosen log permissions or the administrative control socket to enable this
+feature. The service does not repair unsafe directories automatically.
+
+The setting and source paths are captured at startup. Reload does not activate a
+previously disabled socket or change its sources. Removing the setting or setting
+it to `false` in the protected config causes the next upload to be refused even
+before restart; an upload already in progress may finish. Restart after disabling
+to remove the socket. Service stop cancels and joins active delegated requests.
+
+See [Standard-user uploads on macOS](runtime-internal-logging.md#standard-user-uploads-on-macos)
+for bounds, refusal messages, and the native QA release gate.
+
 ### log_level
 Logging level you wish to enable.
 
@@ -278,6 +317,21 @@ Specifying the `ip` and `port` of the Prometheus metrics server. The Prometheus 
 - Type: string
 - Required: no
 - Default: ""
+
+### intercept_mode
+How ctrld captures the host's DNS traffic. `dns` intercepts it in the OS packet filter (WFP on Windows, pf on macOS) and
+forwards VPN internal domains to the VPN's DNS server; `hard` intercepts it with no VPN split routing; `off` uses interface
+DNS mode, setting ctrld's listener as the DNS server of the network interfaces.
+
+The `--intercept-mode` flag takes precedence over this value. When neither is set, the default applies: `dns` on macOS and
+Windows desktop editions, interface DNS mode elsewhere, Windows Server included. An installed service that predates the
+default keeps interface DNS mode. `ctrld start --intercept-mode off` writes `off` here, because an unset value means the
+default. See [Intercept Mode Default](intercept-mode-default.md).
+
+- Type: string
+- Required: no
+- Valid values: `off`, `dns`, `hard`
+- Default: `dns` for new installations on macOS and Windows desktop editions; interface DNS mode elsewhere, Windows Server included, and for services installed before this default
 
 ### dns_watchdog_enabled
 Watches all physical interfaces for DNS changes and reverts them to ctrld's settings.The DNS watchdog process only runs on Windows and MacOS.
