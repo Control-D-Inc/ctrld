@@ -2,6 +2,8 @@ module github.com/Control-D-Inc/ctrld
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/ameshkov/dnsstamps v1.0.3
