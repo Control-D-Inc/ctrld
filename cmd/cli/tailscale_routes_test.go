@@ -300,6 +300,15 @@ func TestVPNDNSRefreshKeepsLastTailscaleRoutesAndRetries(t *testing.T) {
 		return slices.Clone(served), nil
 	}
 
+	// Hold the retry until the failed read is checked. With a short delay and
+	// coarse timers (Windows), it can otherwise run before the check, or be
+	// coalesced into the failing Refresh, and replace the routes first.
+	release := make(chan struct{})
+	m.retryRefresh = func() {
+		<-release
+		m.Refresh(m.backgroundCtx(), true)
+	}
+
 	m.Refresh(context.Background(), true)
 	mu.Lock()
 	served = []tailscaleRoute{{Domain: "new.example"}}
@@ -307,8 +316,10 @@ func TestVPNDNSRefreshKeepsLastTailscaleRoutesAndRetries(t *testing.T) {
 	// This refresh fails: the last good routes stay.
 	m.Refresh(context.Background(), true)
 	if got := m.UpstreamForDomain("host.old.example."); !slices.Equal(got, []string{"100.100.100.100"}) {
+		close(release)
 		t.Fatalf("last good route = %v after a failed read, want quad-100", got)
 	}
+	close(release)
 
 	// The retry reads again and replaces the set.
 	deadline := time.Now().Add(5 * time.Second)
