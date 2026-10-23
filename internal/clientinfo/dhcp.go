@@ -13,13 +13,11 @@ import (
 	"strings"
 	"sync"
 
-	"tailscale.com/net/netmon"
-
 	"github.com/fsnotify/fsnotify"
+	"tailscale.com/net/netmon"
 	"tailscale.com/util/lineread"
 
 	"github.com/Control-D-Inc/ctrld"
-	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
 type dhcp struct {
@@ -30,6 +28,7 @@ type dhcp struct {
 
 	watcher *fsnotify.Watcher
 	selfIP  string
+	logger  *ctrld.Logger
 }
 
 func (d *dhcp) init() error {
@@ -39,10 +38,6 @@ func (d *dhcp) init() error {
 	}
 	d.addSelf()
 	d.watcher = watcher
-	for file, format := range clientInfoFiles {
-		// Ignore errors for default lease files.
-		_ = d.addLeaseFile(file, format)
-	}
 	return nil
 }
 
@@ -50,11 +45,7 @@ func (d *dhcp) watchChanges() {
 	if d.watcher == nil {
 		return
 	}
-	if dir := router.LeaseFilesDir(); dir != "" {
-		if err := d.watcher.Add(dir); err != nil {
-			ctrld.ProxyLogger.Load().Err(err).Str("dir", dir).Msg("could not watch lease dir")
-		}
-	}
+
 	for {
 		select {
 		case event, ok := <-d.watcher.Events:
@@ -64,7 +55,7 @@ func (d *dhcp) watchChanges() {
 			if event.Has(fsnotify.Create) {
 				if format, ok := clientInfoFiles[event.Name]; ok {
 					if err := d.addLeaseFile(event.Name, format); err != nil {
-						ctrld.ProxyLogger.Load().Err(err).Str("file", event.Name).Msg("could not add lease file")
+						d.logger.Err(err).Str("file", event.Name).Msg("Could not add lease file")
 					}
 				}
 				continue
@@ -72,14 +63,14 @@ func (d *dhcp) watchChanges() {
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Chmod) || event.Has(fsnotify.Remove) {
 				format := clientInfoFiles[event.Name]
 				if err := d.readLeaseFile(event.Name, format); err != nil && !os.IsNotExist(err) {
-					ctrld.ProxyLogger.Load().Err(err).Str("file", event.Name).Msg("leases file changed but failed to update client info")
+					d.logger.Err(err).Str("file", event.Name).Msg("Leases file changed but failed to update client info")
 				}
 			}
 		case err, ok := <-d.watcher.Errors:
 			if !ok {
 				return
 			}
-			ctrld.ProxyLogger.Load().Err(err).Msg("could not watch client info file")
+			d.logger.Err(err).Msg("Could not watch client info file")
 		}
 	}
 
@@ -150,6 +141,9 @@ func (d *dhcp) lookupIPByHostname(name string, v6 bool) string {
 			return true
 		}
 		if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
+			// Categorize addresses into RFC1918 (private) and public
+			// RFC1918 addresses are prioritized because they're more likely to be
+			// the actual client IP in most network configurations
 			if addr.IsPrivate() {
 				rfc1918Addrs = append(rfc1918Addrs, addr)
 			} else {
@@ -222,7 +216,7 @@ func (d *dhcp) dnsmasqReadClientInfoReader(reader io.Reader) error {
 		}
 		ip := normalizeIP(string(fields[2]))
 		if net.ParseIP(ip) == nil {
-			ctrld.ProxyLogger.Load().Warn().Msgf("invalid ip address entry: %q", ip)
+			d.logger.Warn().Msgf("Invalid ip address entry: %q", ip)
 			ip = ""
 		}
 
@@ -273,13 +267,17 @@ func (d *dhcp) iscDHCPReadClientInfoReader(reader io.Reader) error {
 		}
 		switch fields[0] {
 		case "lease":
+			// Normalize IP address to lowercase for consistent comparison
+			// DHCP lease files may contain mixed-case IP addresses
 			ip = normalizeIP(strings.ToLower(fields[1]))
 			if net.ParseIP(ip) == nil {
-				ctrld.ProxyLogger.Load().Warn().Msgf("invalid ip address entry: %q", ip)
+				d.logger.Warn().Msgf("Invalid ip address entry: %q", ip)
 				ip = ""
 			}
 		case "hardware":
 			if len(fields) >= 3 {
+				// Convert MAC to lowercase and remove trailing semicolon
+				// DHCP lease files use semicolon-terminated MAC addresses
 				mac = strings.ToLower(strings.TrimRight(fields[2], ";"))
 				if _, err := net.ParseMAC(mac); err != nil {
 					// Invalid dhcp, skip.
@@ -287,6 +285,8 @@ func (d *dhcp) iscDHCPReadClientInfoReader(reader io.Reader) error {
 				}
 			}
 		case "client-hostname":
+			// Remove quotes and semicolons from hostname
+			// DHCP lease files may quote hostnames and add semicolons
 			hostname = strings.Trim(fields[1], `";`)
 		}
 	}
@@ -328,7 +328,7 @@ func (d *dhcp) keaDhcp4ReadClientInfoReader(r io.Reader) error {
 		}
 		ip := normalizeIP(record[0])
 		if net.ParseIP(ip) == nil {
-			ctrld.ProxyLogger.Load().Warn().Msgf("invalid ip address entry: %q", ip)
+			d.logger.Warn().Msgf("Invalid ip address entry: %q", ip)
 			ip = ""
 		}
 
@@ -350,7 +350,7 @@ func (d *dhcp) keaDhcp4ReadClientInfoReader(r io.Reader) error {
 func (d *dhcp) addSelf() {
 	hostname, err := os.Hostname()
 	if err != nil {
-		ctrld.ProxyLogger.Load().Err(err).Msg("could not get hostname")
+		d.logger.Err(err).Msg("Could not get hostname")
 		return
 	}
 	hostname = normalizeHostname(hostname)
@@ -390,22 +390,4 @@ func (d *dhcp) addSelf() {
 			}
 		}
 	})
-	for _, netIface := range router.SelfInterfaces() {
-		mac := netIface.HardwareAddr.String()
-		if mac == "" {
-			return
-		}
-		d.mac2name.Store(mac, hostname)
-		addrs, _ := netIface.Addrs()
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			ip := ipNet.IP
-			d.mac.LoadOrStore(ip.String(), mac)
-			d.ip.LoadOrStore(mac, ip.String())
-			d.ip2name.Store(ip.String(), hostname)
-		}
-	}
 }

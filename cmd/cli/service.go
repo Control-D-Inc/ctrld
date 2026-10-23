@@ -11,9 +11,6 @@ import (
 
 	"github.com/coreos/go-systemd/v22/unit"
 	"github.com/kardianos/service"
-
-	"github.com/Control-D-Inc/ctrld/internal/router"
-	"github.com/Control-D-Inc/ctrld/internal/router/openwrt"
 )
 
 // newService wraps service.New call to return service.Service
@@ -24,10 +21,6 @@ func newService(i service.Interface, c *service.Config) (service.Service, error)
 		return nil, err
 	}
 	switch {
-	case router.IsOldOpenwrt(), router.IsNetGearOrbi():
-		return &procd{sysV: &sysV{s}, svcConfig: c}, nil
-	case router.IsGLiNet():
-		return &sysV{s}, nil
 	case s.Platform() == "unix-systemv":
 		return &sysV{s}, nil
 	case s.Platform() == "linux-systemd":
@@ -42,13 +35,13 @@ func newService(i service.Interface, c *service.Config) (service.Service, error)
 // sysV wraps a service.Service, and provide start/stop/status command
 // base on "/etc/init.d/<service_name>".
 //
-// Use this on system where "service" command is not available, like GL.iNET router.
+// Use this on system where "service" command is not available.
 type sysV struct {
 	service.Service
 }
 
 func (s *sysV) installed() bool {
-	fi, err := os.Stat("/etc/init.d/ctrld")
+	fi, err := os.Stat(sysVInitScript)
 	if err != nil {
 		return false
 	}
@@ -60,7 +53,7 @@ func (s *sysV) Start() error {
 	if !s.installed() {
 		return service.ErrNotInstalled
 	}
-	_, err := exec.Command("/etc/init.d/ctrld", "start").CombinedOutput()
+	_, err := exec.Command(sysVInitScript, "start").CombinedOutput()
 	return err
 }
 
@@ -68,7 +61,7 @@ func (s *sysV) Stop() error {
 	if !s.installed() {
 		return service.ErrNotInstalled
 	}
-	_, err := exec.Command("/etc/init.d/ctrld", "stop").CombinedOutput()
+	_, err := exec.Command(sysVInitScript, "stop").CombinedOutput()
 	return err
 }
 
@@ -89,37 +82,6 @@ func (s *sysV) Status() (service.Status, error) {
 	return unixSystemVServiceStatus()
 }
 
-// procd wraps a service.Service, and provide start/stop command
-// base on "/etc/init.d/<service_name>", status command base on parsing "ps" command output.
-//
-// Use this on system where "/etc/init.d/<service_name> status" command is not available,
-// like old GL.iNET Opal router.
-type procd struct {
-	*sysV
-	svcConfig *service.Config
-}
-
-func (s *procd) Status() (service.Status, error) {
-	if !s.installed() {
-		return service.StatusUnknown, service.ErrNotInstalled
-	}
-	bin := s.svcConfig.Executable
-	if bin == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return service.StatusUnknown, nil
-		}
-		bin = exe
-	}
-
-	// Looking for something like "/sbin/ctrld run ".
-	shellCmd := fmt.Sprintf("ps | grep -q %q", bin+" [r]un ")
-	if err := exec.Command("sh", "-c", shellCmd).Run(); err != nil {
-		return service.StatusStopped, nil
-	}
-	return service.StatusRunning, nil
-}
-
 // systemd wraps a service.Service, and provide status command to
 // report the status correctly.
 type systemd struct {
@@ -127,7 +89,7 @@ type systemd struct {
 }
 
 func (s *systemd) Status() (service.Status, error) {
-	out, _ := exec.Command("systemctl", "status", "ctrld").CombinedOutput()
+	out, _ := exec.Command("systemctl", "status", ctrldServiceName).CombinedOutput()
 	if bytes.Contains(out, []byte("/FAILURE)")) {
 		return service.StatusStopped, nil
 	}
@@ -135,7 +97,6 @@ func (s *systemd) Status() (service.Status, error) {
 }
 
 func (s *systemd) Start() error {
-	const systemdUnitFile = "/etc/systemd/system/ctrld.service"
 	f, err := os.Open(systemdUnitFile)
 	if err != nil {
 		return err
@@ -153,7 +114,7 @@ func (s *systemd) Start() error {
 		if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
 			return fmt.Errorf("systemctl daemon-reload failed: %w\n%s", err, string(out))
 		}
-		mainLog.Load().Debug().Msg("set KillMode=process successfully")
+		mainLog.Load().Debug().Msg("Set KillMode=process successfully")
 	}
 	return s.Service.Start()
 }
@@ -162,8 +123,10 @@ func (s *systemd) Start() error {
 // This is necessary for running self-upgrade flow.
 func ensureSystemdKillMode(r io.Reader) (opts []*unit.UnitOption, change bool) {
 	opts, err := unit.DeserializeOptions(r)
+	// On success the lexer sends nothing and closes the channel, so the receive
+	// yields a nil error and this branch is not taken.
 	if err != nil {
-		mainLog.Load().Error().Err(err).Msg("failed to deserialize options")
+		mainLog.Load().Error().Err(err).Msg("Failed to deserialize options")
 		return
 	}
 	change = true
@@ -187,6 +150,7 @@ func ensureSystemdKillMode(r io.Reader) (opts []*unit.UnitOption, change bool) {
 	return opts, change
 }
 
+// newLaunchd creates a new launchd service wrapper
 func newLaunchd(s service.Service) *launchd {
 	return &launchd{
 		Service:      s,
@@ -216,28 +180,38 @@ type task struct {
 	Name         string
 }
 
-func doTasks(tasks []task) bool {
-	for _, task := range tasks {
-		mainLog.Load().Debug().Msgf("Running task %s", task.Name)
-		if err := task.f(); err != nil {
-			if task.abortOnError {
-				mainLog.Load().Error().Msgf("error running task %s: %v", task.Name, err)
-				return false
+// doTasksE runs tasks in order and reports which abortOnError task, if any,
+// stopped the run. Use it over doTasks when the failure must be attributed
+// to a specific task.
+func doTasksE(tasks []task) (failedTaskName string, err error) {
+	for _, t := range tasks {
+		mainLog.Load().Debug().Msgf("Running task %s", t.Name)
+		if taskErr := t.f(); taskErr != nil {
+			if t.abortOnError {
+				mainLog.Load().Error().Msgf("Error running task %s: %v", t.Name, taskErr)
+				return t.Name, taskErr
 			}
 			// if this is darwin stop command, dont print debug
 			// since launchctl complains on every start
-			if runtime.GOOS != "darwin" || task.Name != "Stop" {
-				mainLog.Load().Debug().Msgf("error running task %s: %v", task.Name, err)
+			if runtime.GOOS != "darwin" || t.Name != "Stop" {
+				mainLog.Load().Debug().Msgf("Error running task %s: %v", t.Name, taskErr)
 			}
 		}
 	}
-	return true
+	return "", nil
 }
 
+// doTasks executes a list of tasks and returns success status
+func doTasks(tasks []task) bool {
+	_, err := doTasksE(tasks)
+	return err == nil
+}
+
+// checkHasElevatedPrivilege checks if the process has elevated privileges and exits if not
 func checkHasElevatedPrivilege() {
 	ok, err := hasElevatedPrivilege()
 	if err != nil {
-		mainLog.Load().Error().Msgf("could not detect user privilege: %v", err)
+		mainLog.Load().Error().Msgf("Could not detect user privilege: %v", err)
 		return
 	}
 	if !ok {
@@ -246,16 +220,10 @@ func checkHasElevatedPrivilege() {
 	}
 }
 
+// unixSystemVServiceStatus checks the status of a Unix System V service
 func unixSystemVServiceStatus() (service.Status, error) {
-	out, err := exec.Command("/etc/init.d/ctrld", "status").CombinedOutput()
+	out, err := exec.Command(sysVInitScript, "status").CombinedOutput()
 	if err != nil {
-		// Specific case for openwrt >= 24.10, it returns non-success code
-		// for above status command, which may not right.
-		if router.Name() == openwrt.Name {
-			if string(bytes.ToLower(bytes.TrimSpace(out))) == "inactive" {
-				return service.StatusStopped, nil
-			}
-		}
 		return service.StatusUnknown, nil
 	}
 

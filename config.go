@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/netip"
@@ -27,7 +26,6 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	"golang.org/x/net/http2"
 	"golang.org/x/sync/singleflight"
 	"tailscale.com/logtail/backoff"
 	"tailscale.com/net/tsaddr"
@@ -79,10 +77,20 @@ const (
 	controlDNetDomain = "controld.net"
 	controlDDevDomain = "controld.dev"
 
+	// nextDNSDomain is the parent domain of the NextDNS DoH endpoints. Beside
+	// dns.nextdns.io, NextDNS serves alternative endpoints under it, such as
+	// ultralow.dns.nextdns.io and anycast.dns2.nextdns.io, which are the same
+	// service and take the same client info headers.
+	nextDNSDomain = "nextdns.io"
+
 	endpointPrefixHTTPS = "https://"
 	endpointPrefixQUIC  = "quic://"
 	endpointPrefixH3    = "h3://"
 	endpointPrefixSdns  = "sdns://"
+
+	rebootstrapNotStarted = 0
+	rebootstrapStarted    = 1
+	rebootstrapInProgress = 2
 )
 
 var (
@@ -114,6 +122,10 @@ func SetConfigNameWithPath(v *viper.Viper, name, configPath string) {
 
 // InitConfig initializes default config values for given *viper.Viper instance.
 func InitConfig(v *viper.Viper, name string) {
+	ctx := context.Background()
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "Config initialization started")
+
 	v.SetDefault("listener", map[string]*ListenerConfig{
 		"0": {
 			IP:   "",
@@ -152,6 +164,8 @@ func InitConfig(v *viper.Viper, name string) {
 			Timeout:     3000,
 		},
 	})
+
+	Log(ctx, logger.Debug(), "Config initialization completed")
 }
 
 // Config represents ctrld supported configuration.
@@ -213,8 +227,13 @@ func (c *Config) FirstUpstream() *UpstreamConfig {
 
 // ServiceConfig specifies the general ctrld config.
 type ServiceConfig struct {
+	// AllowUnprivilegedLogSend is a macOS-only, administrator-controlled opt-in.
+	AllowUnprivilegedLogSend bool `mapstructure:"allow_unprivileged_log_send" toml:"allow_unprivileged_log_send,omitempty"`
+
 	LogLevel                string         `mapstructure:"log_level" toml:"log_level,omitempty"`
 	LogPath                 string         `mapstructure:"log_path" toml:"log_path,omitempty"`
+	LogMaxSizeMB            int            `mapstructure:"log_max_size_mb" toml:"log_max_size_mb,omitempty" validate:"omitempty,gte=1,lte=1024"`
+	LogMaxBackups           *int           `mapstructure:"log_max_backups" toml:"log_max_backups,omitempty" validate:"omitempty,gte=0,lte=64"`
 	CacheEnable             bool           `mapstructure:"cache_enable" toml:"cache_enable,omitempty"`
 	CacheSize               int            `mapstructure:"cache_size" toml:"cache_size,omitempty"`
 	CacheTTLOverride        int            `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
@@ -237,8 +256,33 @@ type ServiceConfig struct {
 	RefetchTime             *int           `mapstructure:"refetch_time" toml:"refetch_time,omitempty"`
 	ForceRefetchWaitTime    *int           `mapstructure:"force_refetch_wait_time" toml:"force_refetch_wait_time,omitempty"`
 	LeakOnUpstreamFailure   *bool          `mapstructure:"leak_on_upstream_failure" toml:"leak_on_upstream_failure,omitempty"`
-	Daemon                  bool           `mapstructure:"-" toml:"-"`
-	AllocateIP              bool           `mapstructure:"-" toml:"-"`
+	InterceptMode           string         `mapstructure:"intercept_mode" toml:"intercept_mode,omitempty" validate:"omitempty,oneof=off dns hard"`
+	NRPTRecoveryMaxAttempts *int           `mapstructure:"nrpt_recovery_max_attempts" toml:"nrpt_recovery_max_attempts,omitempty" validate:"omitempty,gte=0"`
+	NRPTRecoveryCooldown    *time.Duration `mapstructure:"nrpt_recovery_cooldown" toml:"nrpt_recovery_cooldown,omitempty"`
+	// FirewallMode controls the DNS-resolved IP allowlist. When "on", only IPs
+	// that were successfully resolved by ctrld are allowed for outbound connections.
+	// This closes the "DNS gap" where apps bypass DNS policy using hardcoded IPs.
+	// Requires intercept mode to be active for enforcement on desktop platforms.
+	// On mobile, the netstack layer uses the allowlist directly.
+	FirewallMode string `mapstructure:"firewall_mode" toml:"firewall_mode,omitempty" validate:"omitempty,oneof=off on"`
+	// FirewallForwardedSources lists VM/container source subnets (CIDR) whose
+	// forwarded/NATed DNS is redirected through ctrld under Firewall Mode, so
+	// guest resolutions are policy-enforced and populate the allowlist, and guest
+	// egress to allowed destinations is permitted without an interface-wide
+	// bypass. These augment auto-detection of VM networks and are the supported way
+	// to trust a stack that auto-detection cannot prove ownership of. Empty (the
+	// default) preserves prior behavior. macOS only; see
+	// buildPFForwardedSourceRules.
+	//
+	// Deliberately not validated with `cidr`: entries are checked at use time and a
+	// bad one is dropped with a warning while the rest of the set still applies
+	// (see firewallForwardedSources). A hard validator here would make one typo in
+	// an MDM-pushed subnet fatal at startup - validateConfig exits the process -
+	// taking down DNS service for the whole host over a line that only ever
+	// widened a firewall allowance.
+	FirewallForwardedSources []string `mapstructure:"firewall_forwarded_sources" toml:"firewall_forwarded_sources,omitempty"`
+	Daemon                   bool     `mapstructure:"-" toml:"-"`
+	AllocateIP               bool     `mapstructure:"-" toml:"-"`
 }
 
 // NetworkConfig specifies configuration for networks where ctrld will handle requests.
@@ -255,8 +299,13 @@ type UpstreamConfig struct {
 	Endpoint    string `mapstructure:"endpoint" toml:"endpoint,omitempty"`
 	BootstrapIP string `mapstructure:"bootstrap_ip" toml:"bootstrap_ip,omitempty"`
 	Domain      string `mapstructure:"-" toml:"-"`
-	IPStack     string `mapstructure:"ip_stack" toml:"ip_stack,omitempty" validate:"ipstack"`
-	Timeout     int    `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
+	// InternalDomain is set only by ctrld, on the upstreams it generates for
+	// organization Internal Domains, to the mode they serve. It is never read
+	// from or written to a configuration file, so an upstream a configuration
+	// defines is never mistaken for a generated one, whatever it is named.
+	InternalDomain string `mapstructure:"-" toml:"-"`
+	IPStack        string `mapstructure:"ip_stack" toml:"ip_stack,omitempty" validate:"ipstack"`
+	Timeout        int    `mapstructure:"timeout" toml:"timeout,omitempty" validate:"gte=0"`
 	// The caller should not access this field directly.
 	// Use UpstreamSendClientInfo instead.
 	SendClientInfo *bool `mapstructure:"send_client_info" toml:"send_client_info,omitempty"`
@@ -265,7 +314,7 @@ type UpstreamConfig struct {
 	Discoverable *bool `mapstructure:"discoverable" toml:"discoverable"`
 
 	g                  singleflight.Group
-	rebootstrap        atomic.Bool
+	rebootstrap        atomic.Int64
 	bootstrapIPs       []string
 	bootstrapIPs4      []string
 	bootstrapIPs6      []string
@@ -276,10 +325,23 @@ type UpstreamConfig struct {
 	http3RoundTripper  http.RoundTripper
 	http3RoundTripper4 http.RoundTripper
 	http3RoundTripper6 http.RoundTripper
+	doqConnPool        *doqConnPool
+	doqConnPool4       *doqConnPool
+	doqConnPool6       *doqConnPool
+	dotClientPool      *dotConnPool
+	dotClientPool4     *dotConnPool
+	dotClientPool6     *dotConnPool
 	certPool           *x509.CertPool
 	u                  *url.URL
 	fallbackOnce       sync.Once
 	uid                string
+
+	// bootstrapIncomplete is set while the bootstrap addresses lack a family
+	// the ip_stack needs; the next re-bootstrap looks them up again.
+	bootstrapIncomplete atomic.Bool
+	// directFallback is set once FallbackToDirectIP has fired: DoH and DoH3
+	// then also try the Control D direct IPs when the bootstrap addresses fail.
+	directFallback atomic.Bool
 }
 
 // ListenerConfig specifies the networks configuration that ctrld will run on.
@@ -309,14 +371,20 @@ func (lc *ListenerConfig) IsDirectDnsListener() bool {
 	}
 }
 
+// MatchingConfig defines the configuration for rule matching behavior
+type MatchingConfig struct {
+	Order []string `mapstructure:"order" toml:"order,omitempty"`
+}
+
 // ListenerPolicyConfig specifies the policy rules for ctrld to filter incoming requests.
 type ListenerPolicyConfig struct {
-	Name                 string   `mapstructure:"name" toml:"name,omitempty"`
-	Networks             []Rule   `mapstructure:"networks" toml:"networks,omitempty,inline,multiline" validate:"dive,len=1"`
-	Rules                []Rule   `mapstructure:"rules" toml:"rules,omitempty,inline,multiline" validate:"dive,len=1"`
-	Macs                 []Rule   `mapstructure:"macs" toml:"macs,omitempty,inline,multiline" validate:"dive,len=1"`
-	FailoverRcodes       []string `mapstructure:"failover_rcodes" toml:"failover_rcodes,omitempty" validate:"dive,dnsrcode"`
-	FailoverRcodeNumbers []int    `mapstructure:"-" toml:"-"`
+	Name                 string          `mapstructure:"name" toml:"name,omitempty"`
+	Networks             []Rule          `mapstructure:"networks" toml:"networks,omitempty,inline,multiline" validate:"dive,len=1"`
+	Rules                []Rule          `mapstructure:"rules" toml:"rules,omitempty,inline,multiline" validate:"dive,len=1"`
+	Macs                 []Rule          `mapstructure:"macs" toml:"macs,omitempty,inline,multiline" validate:"dive,len=1"`
+	FailoverRcodes       []string        `mapstructure:"failover_rcodes" toml:"failover_rcodes,omitempty" validate:"dive,dnsrcode"`
+	FailoverRcodeNumbers []int           `mapstructure:"-" toml:"-"`
+	Matching             *MatchingConfig `mapstructure:"-" toml:"-"`
 }
 
 // Rule is a map from source to list of upstreams.
@@ -325,12 +393,13 @@ type ListenerPolicyConfig struct {
 type Rule map[string][]string
 
 // Init initialized necessary values for an UpstreamConfig.
-func (uc *UpstreamConfig) Init() {
+func (uc *UpstreamConfig) Init(ctx context.Context) {
+	logger := LoggerFromCtx(ctx)
 	if err := uc.initDnsStamps(); err != nil {
-		ProxyLogger.Load().Fatal().Err(err).Msg("invalid DNS Stamps")
+		logger.Fatal().Err(err).Msg("Invalid dns stamps")
 	}
 	uc.initDoHScheme()
-	uc.uid = upstreamUID()
+	uc.uid = upstreamUID(ctx)
 	if u, err := url.Parse(uc.Endpoint); err == nil {
 		uc.Domain = u.Hostname()
 		switch uc.Type {
@@ -350,6 +419,9 @@ func (uc *UpstreamConfig) Init() {
 		}
 	}
 	if uc.IPStack == "" {
+		// Set default IP stack based on upstream type
+		// Control-D upstreams use split stack for better IPv4/IPv6 handling,
+		// while other upstreams use both stacks for maximum compatibility
 		if uc.IsControlD() {
 			uc.IPStack = IpStackSplit
 		} else {
@@ -411,7 +483,7 @@ func (uc *UpstreamConfig) IsDiscoverable() bool {
 		return *uc.Discoverable
 	}
 	switch uc.Type {
-	case ResolverTypeOS, ResolverTypeLegacy, ResolverTypePrivate, ResolverTypeLocal:
+	case ResolverTypeOS, ResolverTypeLegacy, ResolverTypePrivate:
 		if ip, err := netip.ParseAddr(uc.Domain); err == nil {
 			return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || tsaddr.CGNATRange().Contains(ip)
 		}
@@ -434,117 +506,333 @@ func (uc *UpstreamConfig) UID() string {
 	return uc.uid
 }
 
-// SetupBootstrapIP manually find all available IPs of the upstream.
-// The first usable IP will be used as bootstrap IP of the upstream.
+// bootstrapLookupFn resolves domain for bootstrapping. It is a variable so
+// tests control the lookup result.
+var bootstrapLookupFn = lookupIP
+
+// SetupBootstrapIP sets up bootstrap IPs for the upstream config.
 // The upstream domain will be looked up using following orders:
 //
 // - Current system DNS settings.
 // - Direct IPs table for ControlD upstreams.
 // - ControlD Bootstrap DNS 76.76.2.22
 //
-// The setup process will block until there's usable IPs found.
-func (uc *UpstreamConfig) SetupBootstrapIP() {
-	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
-	isControlD := uc.IsControlD()
-	nss := initDefaultOsResolver()
-	for {
-		uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, nss)
-		// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
-		// filtering them out here to prevent weird behavior.
-		if isControlD {
-			n := 0
-			for _, ip := range uc.bootstrapIPs {
-				netIP := net.ParseIP(ip)
-				if netIP != nil && !netIP.IsPrivate() {
-					uc.bootstrapIPs[n] = ip
-					n++
-				}
-			}
-			uc.bootstrapIPs = uc.bootstrapIPs[:n]
-			if len(uc.bootstrapIPs) == 0 {
-				uc.bootstrapIPs = bootstrapIPsFromControlDDomain(uc.Domain)
-				ProxyLogger.Load().Warn().Msgf("no record found for %q, lookup from direct IP table", uc.Domain)
-			}
-		}
-		if len(uc.bootstrapIPs) == 0 {
-			ProxyLogger.Load().Warn().Msgf("no record found for %q, using bootstrap server: %s", uc.Domain, PremiumDNSBoostrapIP)
-			uc.bootstrapIPs = lookupIP(uc.Domain, uc.Timeout, []string{net.JoinHostPort(PremiumDNSBoostrapIP, "53")})
+// The later sources fill in what the earlier ones could not: the whole list,
+// and also an address family the ip_stack needs that a lookup left out, such
+// as an AAAA-only answer for a split-stack upstream, whose A queries need IPv4.
+//
+// The setup process will block until there's usable IPs found. A result that
+// still lacks a needed family is used as it is, and the next re-bootstrap
+// looks the missing family up again.
+func (uc *UpstreamConfig) SetupBootstrapIP(ctx context.Context) {
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "Setting up bootstrap IPs for upstream: %s", uc.Name)
 
-		}
-		if len(uc.bootstrapIPs) > 0 {
+	b := backoff.NewBackoff("setupBootstrapIP", func(format string, args ...any) {}, 10*time.Second)
+	nss := initDefaultOsResolver(ctx)
+	for {
+		if ips := uc.lookupBootstrapIPs(ctx, nss); len(ips) > 0 {
+			uc.setBootstrapIPs(ctx, ips)
 			break
 		}
-		ProxyLogger.Load().Warn().Msg("could not resolve bootstrap IPs, retrying...")
+		logger.Warn().Msg("Could not resolve bootstrap ips, retrying...")
 		b.BackOff(context.Background(), errors.New("no bootstrap IPs"))
 	}
-	for _, ip := range uc.bootstrapIPs {
-		if ctrldnet.IsIPv6(ip) {
-			uc.bootstrapIPs6 = append(uc.bootstrapIPs6, ip)
-		} else {
-			uc.bootstrapIPs4 = append(uc.bootstrapIPs4, ip)
+	logger.Debug().Msgf("Bootstrap ips: %v", uc.bootstrapIPs)
+	Log(ctx, logger.Debug(), "Bootstrap IP setup completed for upstream: %s", uc.Name)
+}
+
+// lookupBootstrapIPs runs one round of the bootstrap lookup through nss and the
+// fallback sources, and returns what it found, which may be incomplete for the
+// ip_stack or empty.
+func (uc *UpstreamConfig) lookupBootstrapIPs(ctx context.Context, nss []string) []string {
+	logger := LoggerFromCtx(ctx)
+	isControlD := uc.IsControlD()
+	Log(ctx, logger.Debug(), "Looking up bootstrap IPs for domain: %s", uc.Domain)
+	ips := bootstrapLookupFn(ctx, uc.Domain, uc.Timeout, nss)
+	// For ControlD upstream, the bootstrap IPs could not be RFC 1918 addresses,
+	// filtering them out here to prevent weird behavior.
+	if isControlD {
+		n := 0
+		for _, ip := range ips {
+			netIP := net.ParseIP(ip)
+			if netIP != nil && !netIP.IsPrivate() {
+				ips[n] = ip
+				n++
+			}
+		}
+		ips = ips[:n]
+		if !uc.bootstrapComplete(ctx, ips) {
+			logger.Warn().Msgf("Incomplete records for %q (%v), filling in from direct ip table", uc.Domain, ips)
+			ips = mergeMissingFamilies(ips, bootstrapIPsFromControlDDomain(uc.Domain))
 		}
 	}
-	ProxyLogger.Load().Debug().Msgf("bootstrap IPs: %v", uc.bootstrapIPs)
+	if !uc.bootstrapComplete(ctx, ips) {
+		logger.Warn().Msgf("Incomplete records for %q (%v), using bootstrap server: %s", uc.Domain, ips, PremiumDNSBoostrapIP)
+		ips = mergeMissingFamilies(ips, bootstrapLookupFn(ctx, uc.Domain, uc.Timeout, []string{net.JoinHostPort(PremiumDNSBoostrapIP, "53")}))
+	}
+	return ips
+}
+
+// setBootstrapIPs replaces the bootstrap addresses, and records whether they
+// cover the families the ip_stack needs.
+func (uc *UpstreamConfig) setBootstrapIPs(ctx context.Context, ips []string) {
+	ips4, ips6 := splitAddressFamilies(ips)
+	uc.bootstrapIPs, uc.bootstrapIPs4, uc.bootstrapIPs6 = ips, ips4, ips6
+	complete := uc.bootstrapComplete(ctx, ips)
+	uc.bootstrapIncomplete.Store(!complete)
+	if !complete {
+		logger := LoggerFromCtx(ctx)
+		logger.Warn().Msgf("Bootstrap ips for %q lack an address family needed by ip_stack %q: %v; will look up again on re-bootstrap", uc.Domain, uc.IPStack, ips)
+	}
+}
+
+// bootstrapComplete reports whether ips cover the address families the
+// upstream's ip_stack needs: IPv4 for v4, IPv6 for v6, either for both, and
+// for split IPv4 for A queries plus IPv6 for the others when the host has IPv6.
+// An IPv4-only host never needs IPv6.
+func (uc *UpstreamConfig) bootstrapComplete(ctx context.Context, ips []string) bool {
+	ips4, ips6 := splitAddressFamilies(ips)
+	switch uc.IPStack {
+	case IpStackV4:
+		return len(ips4) > 0
+	case IpStackV6:
+		return len(ips6) > 0
+	case IpStackSplit:
+		return len(ips4) > 0 && (len(ips6) > 0 || !HasIPv6(ctx))
+	}
+	return len(ips) > 0
+}
+
+// splitAddressFamilies returns the IPv4 and the IPv6 addresses of ips.
+func splitAddressFamilies(ips []string) (ips4, ips6 []string) {
+	for _, ip := range ips {
+		if ctrldnet.IsIPv6(ip) {
+			ips6 = append(ips6, ip)
+		} else {
+			ips4 = append(ips4, ip)
+		}
+	}
+	return ips4, ips6
+}
+
+// mergeMissingFamilies adds to ips the addresses of extra whose family ips
+// does not have at all. A family ips already has is kept as it is.
+func mergeMissingFamilies(ips, extra []string) []string {
+	ips4, ips6 := splitAddressFamilies(ips)
+	extra4, extra6 := splitAddressFamilies(extra)
+	merged := append([]string{}, ips...)
+	if len(ips4) == 0 {
+		merged = append(merged, extra4...)
+	}
+	if len(ips6) == 0 {
+		merged = append(merged, extra6...)
+	}
+	return merged
+}
+
+// refreshIncompleteBootstrap looks the bootstrap addresses up again, once, when
+// they lack a family the ip_stack needs. Rebuilding the transports from the
+// same incomplete lists would never recover; this picks up the missing family
+// once DNS is reachable again. Families it still cannot find keep their current
+// addresses.
+func (uc *UpstreamConfig) refreshIncompleteBootstrap(ctx context.Context) {
+	if uc.BootstrapIP != "" || !uc.bootstrapIncomplete.Load() {
+		return
+	}
+	ips := uc.lookupBootstrapIPs(ctx, initDefaultOsResolver(ctx))
+	if !uc.bootstrapComplete(ctx, ips) {
+		ips = mergeMissingFamilies(ips, uc.bootstrapIPs)
+	}
+	if len(ips) == 0 {
+		return
+	}
+	uc.setBootstrapIPs(ctx, ips)
+	logger := LoggerFromCtx(ctx)
+	logger.Debug().Msgf("Refreshed bootstrap ips for %q: %v", uc.Domain, ips)
 }
 
 // ReBootstrap re-setup the bootstrap IP and the transport.
-func (uc *UpstreamConfig) ReBootstrap() {
+func (uc *UpstreamConfig) ReBootstrap(ctx context.Context) {
 	switch uc.Type {
-	case ResolverTypeDOH, ResolverTypeDOH3:
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ, ResolverTypeDOT:
 	default:
 		return
 	}
 	_, _, _ = uc.g.Do("ReBootstrap", func() (any, error) {
-		if uc.rebootstrap.CompareAndSwap(false, true) {
-			ProxyLogger.Load().Debug().Msgf("re-bootstrapping upstream ip for %v", uc)
+		if uc.rebootstrap.CompareAndSwap(rebootstrapNotStarted, rebootstrapStarted) {
+			logger := LoggerFromCtx(ctx)
+			Log(ctx, logger.Debug(), "Re-bootstrapping upstream: %s", uc.Name)
 		}
 		return true, nil
 	})
 }
 
-// SetupTransport initializes the network transport used to connect to upstream server.
-// For now, only DoH upstream is supported.
-func (uc *UpstreamConfig) SetupTransport() {
+// ForceReBootstrap immediately creates a new transport (closing old idle
+// connections first) without waiting for the lazy re-bootstrap mechanism.
+// Used after pf state table flushes where existing TCP/QUIC connections
+// are dead and we need fresh connections immediately.
+func (uc *UpstreamConfig) ForceReBootstrap(ctx context.Context) {
 	switch uc.Type {
-	case ResolverTypeDOH:
-		uc.setupDOHTransport()
-	case ResolverTypeDOH3:
-		uc.setupDOH3Transport()
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ, ResolverTypeDOT:
+	default:
+		return
+	}
+	logger := LoggerFromCtx(ctx)
+	Log(ctx, logger.Debug(), "force re-bootstrapping upstream transport for %v", uc)
+	uc.closeTransports()
+	uc.refreshIncompleteBootstrap(ctx)
+	uc.SetupTransport(ctx)
+	// Clear any pending lazy re-bootstrap flag so ensureSetupTransport()
+	// doesn't redundantly recreate the transport we just built.
+	uc.rebootstrap.Store(rebootstrapNotStarted)
+}
+
+// CloseTransports retires the upstream's transports, including active DoT and
+// HTTP/3 connections. Callers must stop publishing this upstream before calling
+// it and must not reuse it without calling SetupTransport.
+func (uc *UpstreamConfig) CloseTransports() {
+	uc.retireTransports()
+}
+
+// retireTransports permanently closes DoT pools and HTTP/3 transports before
+// their owner discards them. Like closeTransports, it does not acquire an
+// upstream lock: callers that serialize slot access must keep that serialization
+// across retirement and replacement.
+func (uc *UpstreamConfig) retireTransports() {
+	uc.closeTransports()
+	for _, p := range []*dotConnPool{uc.dotClientPool, uc.dotClientPool4, uc.dotClientPool6} {
+		if p != nil {
+			p.Close()
+		}
+	}
+	// Unlike CloseIdleConnections, Close also cancels pending dials and active
+	// HTTP/3 requests, and prevents late requests from reviving the transport.
+	for _, rt := range []http.RoundTripper{uc.http3RoundTripper, uc.http3RoundTripper4, uc.http3RoundTripper6} {
+		if c, ok := rt.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
 	}
 }
 
-func (uc *UpstreamConfig) setupDOHTransport() {
+// closeTransports closes idle connections on all existing transports.
+// It does not retire DoT pools or HTTP/3 transports: active work may continue
+// and the resources remain usable. Use retireTransports before replacing them.
+func (uc *UpstreamConfig) closeTransports() {
+	for _, t := range []*http.Transport{uc.transport, uc.transport4, uc.transport6} {
+		if t != nil {
+			t.CloseIdleConnections()
+		}
+	}
+	for _, p := range []*doqConnPool{uc.doqConnPool, uc.doqConnPool4, uc.doqConnPool6} {
+		if p != nil {
+			p.CloseIdleConnections()
+		}
+	}
+	for _, p := range []*dotConnPool{uc.dotClientPool, uc.dotClientPool4, uc.dotClientPool6} {
+		if p != nil {
+			p.CloseIdleConnections()
+		}
+	}
+	for _, rt := range []http.RoundTripper{uc.http3RoundTripper, uc.http3RoundTripper4, uc.http3RoundTripper6} {
+		if c, ok := rt.(interface{ CloseIdleConnections() }); ok {
+			c.CloseIdleConnections()
+		}
+	}
+}
+
+// SetupTransport initializes the network transport used to connect to upstream servers.
+// For now, DoH/DoH3/DoQ/DoT upstreams are supported.
+func (uc *UpstreamConfig) SetupTransport(ctx context.Context) {
+	switch uc.Type {
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ, ResolverTypeDOT:
+	default:
+		return
+	}
+
+	// Retire old DoT/HTTP3 resources before replacing their slots. Idle-only
+	// cleanup would leave active queries and late work owning orphaned resources.
+	// DoH and DoQ retain their existing cleanup semantics.
+	uc.retireTransports()
+
+	ips := uc.bootstrapIPs
 	switch uc.IPStack {
-	case IpStackBoth, "":
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs)
 	case IpStackV4:
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs4)
+		ips = uc.bootstrapIPs4
 	case IpStackV6:
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs6)
-	case IpStackSplit:
-		uc.transport4 = uc.newDOHTransport(uc.bootstrapIPs4)
-		if HasIPv6() {
-			uc.transport6 = uc.newDOHTransport(uc.bootstrapIPs6)
+		ips = uc.bootstrapIPs6
+	}
+	uc.transport = uc.newDOHTransport(ctx, ips)
+	uc.http3RoundTripper = uc.newDOH3Transport(ctx, ips)
+	uc.doqConnPool = uc.newDOQConnPool(ctx, ips)
+	uc.dotClientPool = uc.newDOTClientPool(ctx, ips)
+	if uc.IPStack == IpStackSplit {
+		// Split picks the transport by query type, not a hard family limit:
+		// while a family is missing, its queries borrow the other family's
+		// addresses rather than fail on an empty transport until the
+		// re-bootstrap finds it (refreshIncompleteBootstrap).
+		ips4, ips6 := uc.bootstrapIPs4, uc.bootstrapIPs6
+		if len(ips4) == 0 {
+			ips4 = ips6
+		}
+		if len(ips6) == 0 {
+			ips6 = ips4
+		}
+		uc.transport4 = uc.newDOHTransport(ctx, ips4)
+		uc.http3RoundTripper4 = uc.newDOH3Transport(ctx, ips4)
+		uc.doqConnPool4 = uc.newDOQConnPool(ctx, ips4)
+		uc.dotClientPool4 = uc.newDOTClientPool(ctx, ips4)
+		if HasIPv6(ctx) {
+			uc.transport6 = uc.newDOHTransport(ctx, ips6)
+			uc.http3RoundTripper6 = uc.newDOH3Transport(ctx, ips6)
+			uc.doqConnPool6 = uc.newDOQConnPool(ctx, ips6)
+			uc.dotClientPool6 = uc.newDOTClientPool(ctx, ips6)
 		} else {
 			uc.transport6 = uc.transport4
+			uc.http3RoundTripper6 = uc.http3RoundTripper4
+			uc.doqConnPool6 = uc.doqConnPool4
+			uc.dotClientPool6 = uc.dotClientPool4
 		}
-		uc.transport = uc.newDOHTransport(uc.bootstrapIPs)
 	}
 }
 
-func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
+func (uc *UpstreamConfig) ensureSetupTransport(ctx context.Context) {
+	uc.transportOnce.Do(func() {
+		uc.SetupTransport(ctx)
+	})
+
+	if uc.rebootstrap.CompareAndSwap(rebootstrapStarted, rebootstrapInProgress) {
+		uc.refreshIncompleteBootstrap(ctx)
+		uc.SetupTransport(ctx)
+		uc.rebootstrap.Store(rebootstrapNotStarted)
+	}
+}
+
+// HTTP/2 health check for DoH connections: after dohSendPingTimeout without a
+// received frame, send a PING; close the connection if no reply arrives within
+// dohPingTimeout. Variables only so tests can shorten them.
+var (
+	dohSendPingTimeout = 10 * time.Second
+	dohPingTimeout     = 5 * time.Second
+)
+
+func (uc *UpstreamConfig) newDOHTransport(ctx context.Context, addrs []string) *http.Transport {
+	if uc.Type != ResolverTypeDOH {
+		return nil
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = 100
 	transport.TLSClientConfig = &tls.Config{
 		RootCAs:            uc.certPool,
 		ClientSessionCache: tls.NewLRUClientSessionCache(0),
+		MinVersion:         tls.VersionTLS12,
 	}
 
 	// Prevent bad tcp connection hanging the requests for too long.
 	// See: https://github.com/golang/go/issues/36026
-	if t2, err := http2.ConfigureTransports(transport); err == nil {
-		t2.ReadIdleTimeout = 10 * time.Second
-		t2.PingTimeout = 5 * time.Second
+	transport.HTTP2 = &http.HTTP2Config{
+		SendPingTimeout: dohSendPingTimeout,
+		PingTimeout:     dohPingTimeout,
 	}
 
 	dialerTimeoutMs := 2000
@@ -552,26 +840,31 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 		dialerTimeoutMs = uc.Timeout
 	}
 	dialerTimeout := time.Duration(dialerTimeoutMs) * time.Millisecond
+	logger := LoggerFromCtx(ctx)
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		_, port, _ := net.SplitHostPort(addr)
 		if uc.BootstrapIP != "" {
 			dialer := net.Dialer{Timeout: dialerTimeout, KeepAlive: dialerTimeout}
 			addr := net.JoinHostPort(uc.BootstrapIP, port)
-			Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", addr)
+			Log(ctx, logger.Debug(), "Sending doh request to: %s", addr)
 			return dialer.DialContext(ctx, network, addr)
 		}
 		pd := &ctrldnet.ParallelDialer{}
 		pd.Timeout = dialerTimeout
 		pd.KeepAlive = dialerTimeout
-		dialAddrs := make([]string, len(addrs))
-		for i := range addrs {
-			dialAddrs[i] = net.JoinHostPort(addrs[i], port)
-		}
-		conn, err := pd.DialContext(ctx, network, dialAddrs, ProxyLogger.Load())
+		conn, err := pd.DialContext(ctx, network, joinHostPorts(addrs, port), logger.Logger)
 		if err != nil {
-			return nil, err
+			direct := uc.directFallbackIPs()
+			if len(direct) == 0 {
+				return nil, err
+			}
+			Log(ctx, logger.Debug().Err(err), "Bootstrap addresses failed, dialing direct ips %v", direct)
+			var directErr error
+			if conn, directErr = pd.DialContext(ctx, network, joinHostPorts(direct, port), logger.Logger); directErr != nil {
+				return nil, errors.Join(err, directErr)
+			}
 		}
-		Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", conn.RemoteAddr())
+		Log(ctx, logger.Debug(), "Sending doh request to: %s", conn.RemoteAddr())
 		return conn, nil
 	}
 	runtime.SetFinalizer(transport, func(transport *http.Transport) {
@@ -581,21 +874,22 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 }
 
 // Ping warms up the connection to DoH/DoH3 upstream.
-func (uc *UpstreamConfig) Ping() {
-	if err := uc.ping(); err != nil {
-		ProxyLogger.Load().Debug().Err(err).Msgf("upstream ping failed: %s", uc.Endpoint)
-		_ = uc.FallbackToDirectIP()
+func (uc *UpstreamConfig) Ping(ctx context.Context) {
+	if err := uc.ping(ctx); err != nil {
+		logger := LoggerFromCtx(ctx)
+		logger.Debug().Err(err).Msgf("Upstream ping failed: %s", uc.Endpoint)
+		_ = uc.FallbackToDirectIP(ctx)
 	}
 }
 
 // ErrorPing is like Ping, but return an error if any.
-func (uc *UpstreamConfig) ErrorPing() error {
-	return uc.ping()
+func (uc *UpstreamConfig) ErrorPing(ctx context.Context) error {
+	return uc.ping(ctx)
 }
 
-func (uc *UpstreamConfig) ping() error {
+func (uc *UpstreamConfig) ping(ctx context.Context) error {
 	switch uc.Type {
-	case ResolverTypeDOH, ResolverTypeDOH3:
+	case ResolverTypeDOH, ResolverTypeDOH3, ResolverTypeDOQ:
 	default:
 		return nil
 	}
@@ -622,13 +916,21 @@ func (uc *UpstreamConfig) ping() error {
 	for _, typ := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		switch uc.Type {
 		case ResolverTypeDOH:
-			if err := ping(uc.dohTransport(typ)); err != nil {
+			if err := ping(uc.dohTransport(ctx, typ)); err != nil {
 				return err
 			}
 		case ResolverTypeDOH3:
-			if err := ping(uc.doh3Transport(typ)); err != nil {
+			if err := ping(uc.doh3Transport(ctx, typ)); err != nil {
 				return err
 			}
+		case ResolverTypeDOQ:
+			// For DoQ, we just ensure transport is set up by calling doqTransport
+			// DoQ doesn't use HTTP, so we can't ping it the same way
+			_ = uc.doqTransport(ctx, typ)
+		case ResolverTypeDOT:
+			// For DoT, we just ensure transport is set up by calling dotTransport
+			// DoT doesn't use HTTP, so we can't ping it the same way
+			_ = uc.dotTransport(ctx, typ)
 		}
 	}
 
@@ -651,6 +953,7 @@ func (uc *UpstreamConfig) IsControlD() bool {
 	return false
 }
 
+// isNextDNS reports whether this is a NextDNS upstream.
 func (uc *UpstreamConfig) isNextDNS() bool {
 	domain := uc.Domain
 	if domain == "" {
@@ -658,53 +961,15 @@ func (uc *UpstreamConfig) isNextDNS() bool {
 			domain = u.Hostname()
 		}
 	}
-	return domain == "dns.nextdns.io"
+	return dns.IsSubDomain(nextDNSDomain, domain)
 }
 
-func (uc *UpstreamConfig) dohTransport(dnsType uint16) http.RoundTripper {
-	uc.transportOnce.Do(func() {
-		uc.SetupTransport()
-	})
-	if uc.rebootstrap.CompareAndSwap(true, false) {
-		uc.SetupTransport()
-	}
-	switch uc.IPStack {
-	case IpStackBoth, IpStackV4, IpStackV6:
-		return uc.transport
-	case IpStackSplit:
-		switch dnsType {
-		case dns.TypeA:
-			return uc.transport4
-		default:
-			return uc.transport6
-		}
-	}
-	return uc.transport
+func (uc *UpstreamConfig) dohTransport(ctx context.Context, dnsType uint16) http.RoundTripper {
+	uc.ensureSetupTransport(ctx)
+	return transportByIpStack(uc.IPStack, dnsType, uc.transport, uc.transport4, uc.transport6)
 }
 
-func (uc *UpstreamConfig) bootstrapIPForDNSType(dnsType uint16) string {
-	switch uc.IPStack {
-	case IpStackBoth:
-		return pick(uc.bootstrapIPs)
-	case IpStackV4:
-		return pick(uc.bootstrapIPs4)
-	case IpStackV6:
-		return pick(uc.bootstrapIPs6)
-	case IpStackSplit:
-		switch dnsType {
-		case dns.TypeA:
-			return pick(uc.bootstrapIPs4)
-		default:
-			if HasIPv6() {
-				return pick(uc.bootstrapIPs6)
-			}
-			return pick(uc.bootstrapIPs4)
-		}
-	}
-	return pick(uc.bootstrapIPs)
-}
-
-func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
+func (uc *UpstreamConfig) netForDNSType(ctx context.Context, dnsType uint16) (string, string) {
 	switch uc.IPStack {
 	case IpStackBoth:
 		return "tcp-tls", "udp"
@@ -717,7 +982,7 @@ func (uc *UpstreamConfig) netForDNSType(dnsType uint16) (string, string) {
 		case dns.TypeA:
 			return "tcp4-tls", "udp4"
 		default:
-			if HasIPv6() {
+			if HasIPv6(ctx) {
 				return "tcp6-tls", "udp6"
 			}
 			return "tcp4-tls", "udp4"
@@ -797,8 +1062,43 @@ func (uc *UpstreamConfig) Context(ctx context.Context) (context.Context, context
 	return context.WithCancel(ctx)
 }
 
-// FallbackToDirectIP changes ControlD upstream endpoint to use direct IP instead of domain.
-func (uc *UpstreamConfig) FallbackToDirectIP() bool {
+// controlDDirectIPsFn returns the direct IPs of a Control D domain. It is a
+// variable so tests can point the fallback at local listeners.
+var controlDDirectIPsFn = bootstrapIPsFromControlDDomain
+
+// directFallbackIPs returns the Control D direct IPs that DoH and DoH3 try
+// when the bootstrap addresses fail, once FallbackToDirectIP has fired, or nil.
+// They are limited to the families the ip_stack dials: an IPv6-only upstream
+// must not be sent to an IPv4 literal it cannot reach.
+func (uc *UpstreamConfig) directFallbackIPs() []string {
+	if !uc.directFallback.Load() {
+		return nil
+	}
+	ips4, ips6 := splitAddressFamilies(controlDDirectIPsFn(uc.Domain))
+	switch uc.IPStack {
+	case IpStackV4:
+		return ips4
+	case IpStackV6:
+		return ips6
+	}
+	return append(ips4, ips6...)
+}
+
+// joinHostPorts returns ips joined with port.
+func joinHostPorts(ips []string, port string) []string {
+	addrs := make([]string, len(ips))
+	for i, ip := range ips {
+		addrs[i] = net.JoinHostPort(ip, port)
+	}
+	return addrs
+}
+
+// FallbackToDirectIP lets a ControlD DoH/DoH3 upstream also dial its direct
+// IPs, which DoH and DoH3 try only when the bootstrap addresses are empty or
+// all fail. The bootstrap list keeps precedence, so a working or refreshed
+// list is used again as soon as it can be, and nothing is pinned. The request
+// URL keeps the domain, so TLS still verifies the certificate for it.
+func (uc *UpstreamConfig) FallbackToDirectIP(ctx context.Context) bool {
 	if !uc.IsControlD() {
 		return false
 	}
@@ -808,17 +1108,13 @@ func (uc *UpstreamConfig) FallbackToDirectIP() bool {
 
 	done := false
 	uc.fallbackOnce.Do(func() {
-		var ip string
-		switch {
-		case dns.IsSubDomain(PremiumDnsDomain, uc.Domain):
-			ip = PremiumDNSBoostrapIP
-		case dns.IsSubDomain(FreeDnsDomain, uc.Domain):
-			ip = FreeDNSBoostrapIP
-		default:
+		ips := controlDDirectIPsFn(uc.Domain)
+		if len(ips) == 0 {
 			return
 		}
-		ProxyLogger.Load().Warn().Msgf("using direct IP for %q: %s", uc.Endpoint, ip)
-		uc.u.Host = ip
+		logger := LoggerFromCtx(ctx)
+		Log(ctx, logger.Warn(), "Falling back to direct ips for %q when its bootstrap addresses fail: %v", uc.Endpoint, ips)
+		uc.directFallback.Store(true)
 		done = true
 	})
 	return done
@@ -826,12 +1122,18 @@ func (uc *UpstreamConfig) FallbackToDirectIP() bool {
 
 // Init initialized necessary values for an ListenerConfig.
 func (lc *ListenerConfig) Init() {
+	logger := LoggerFromCtx(context.Background())
+	Log(context.Background(), logger.Debug(), "Initializing listener config")
+
 	if lc.Policy != nil {
 		lc.Policy.FailoverRcodeNumbers = make([]int, len(lc.Policy.FailoverRcodes))
 		for i, rcode := range lc.Policy.FailoverRcodes {
 			lc.Policy.FailoverRcodeNumbers[i] = dnsrcode.FromString(rcode)
 		}
+		Log(context.Background(), logger.Debug(), "Listener policy initialized with %d failover rcodes", len(lc.Policy.FailoverRcodes))
 	}
+
+	Log(context.Background(), logger.Debug(), "Listener config initialization completed")
 }
 
 // ValidateConfig validates the given config.
@@ -946,16 +1248,13 @@ func ResolverTypeFromEndpoint(endpoint string) string {
 	return ResolverTypeDOT
 }
 
-func pick(s []string) string {
-	return s[rand.Intn(len(s))]
-}
-
 // upstreamUID generates an unique identifier for an upstream.
-func upstreamUID() string {
+func upstreamUID(ctx context.Context) string {
+	logger := LoggerFromCtx(ctx)
 	b := make([]byte, 4)
 	for {
 		if _, err := crand.Read(b); err != nil {
-			ProxyLogger.Load().Warn().Err(err).Msg("could not generate uid for upstream, retrying...")
+			logger.Warn().Err(err).Msg("Could not generate uid for upstream, retrying...")
 			continue
 		}
 		return hex.EncodeToString(b)
@@ -984,4 +1283,19 @@ func bootstrapIPsFromControlDDomain(domain string) []string {
 		return []string{freeDNSBoostrapIP, freeDNSBoostrapIPv6}
 	}
 	return nil
+}
+
+func transportByIpStack[T any](ipStack string, dnsType uint16, transport, transport4, transport6 T) T {
+	switch ipStack {
+	case IpStackBoth, IpStackV4, IpStackV6:
+		return transport
+	case IpStackSplit:
+		switch dnsType {
+		case dns.TypeA:
+			return transport4
+		default:
+			return transport6
+		}
+	}
+	return transport
 }
