@@ -51,6 +51,9 @@ const (
 	oldBinSuffix              = "_previous"
 	msgExit                   = "$$EXIT$$"
 	shutdownTimeout           = 10 * time.Second
+	// serviceRunExitTimeout bounds how long a finished run waits for s.Run
+	// to report the stop to the service manager.
+	serviceRunExitTimeout = 5 * time.Second
 )
 
 var (
@@ -281,6 +284,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		return
 	}
 
+	// serviceRunDone closes when s.Run returns, so the process exits only after
+	// the service manager has the final status. Nil when there is no s.Run.
+	var serviceRunDone chan struct{}
 	switch {
 	case isMobile():
 		defer p.finishRun()
@@ -290,9 +296,11 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			mainLog.Load().Fatal().Err(err).Msg("failed to start ctrld")
 		}
 	case !daemon:
+		serviceRunDone = make(chan struct{})
 		// We need to call s.Run() as soon as possible to response to the OS manager, so it
 		// can see ctrld is running and don't mark ctrld as failed service.
 		go func() {
+			defer close(serviceRunDone)
 			s, err := newService(p, svcConfig)
 			if err != nil {
 				failRunUnclassified(mainLog.Load().Error().Err(err), fmt.Sprintf("failed to create new service: %v", err), p.notifyExitToLogServer)
@@ -533,6 +541,27 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	<-stopCh
 	if !isMobile() {
 		p.finishRun()
+	}
+	waitServiceRun(serviceRunDone, serviceRunExitTimeout)
+}
+
+// waitServiceRun waits for s.Run to return before run lets the process exit.
+//
+// Service Stop closes stopCh before it returns, and on Windows the service
+// manager records the service as stopped only after Stop returns and s.Run
+// reports it. A process that exits in between is a crash to the service
+// manager: it logs event 7031 and restarts the service, which applies its DNS
+// rules again after `ctrld stop` (#652). done is nil when nothing runs s.Run.
+// The wait is bounded so a service manager that never answers cannot keep a
+// finished run alive.
+func waitServiceRun(done <-chan struct{}, timeout time.Duration) {
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		mainLog.Load().Warn().Msgf("service manager did not finish the stop within %s", timeout)
 	}
 }
 
