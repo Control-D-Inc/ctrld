@@ -868,6 +868,8 @@ func (p *prog) apiConfigReload() {
 			return
 		}
 
+		vt := resolverConfig.Ctrld.VersionTarget
+		cdVersionTarget.Store(&vt)
 		// Performing self-upgrade check for production version.
 		if isStable {
 			_ = selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, logger)

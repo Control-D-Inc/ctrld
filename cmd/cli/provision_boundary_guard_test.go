@@ -50,6 +50,7 @@ var provisionBoundaryFiles = []string{
 	"cli.go",
 	"commands_service_start.go",
 	"commands_run.go",
+	"commands_upgrade.go",
 	"prog.go",
 	"provision_result.go",
 }
@@ -90,6 +91,17 @@ var provisionBoundaryFatalAllowlist = map[string]string{
 
 	"commands_service_start.go:ServiceCommand.Start": `the deactivation pin check's ` +
 		`os.Exit(126). Out of scope for this lane by contract ("pin-check 126 untouched").`,
+
+	"commands_upgrade.go:UpgradeCommand.Upgrade": `the "ctrld-client upgrade" command. Outside the --cd-org ` +
+		`provisioning boundary this lane hardened.`,
+	"commands_upgrade.go:UpgradeCommand.Rollback": `the "ctrld-client rollback" command. Outside the --cd-org ` +
+		`provisioning boundary this lane hardened.`,
+	"commands_upgrade.go:runUpgrade": `download and install shared by "ctrld-client upgrade" and "ctrld-client rollback". ` +
+		`Outside the --cd-org provisioning boundary this lane hardened.`,
+	"commands_upgrade.go:newBinarySwitch": `setup shared by "ctrld-client upgrade" and "ctrld-client rollback". ` +
+		`Outside the --cd-org provisioning boundary this lane hardened.`,
+	"commands_upgrade.go:binarySwitch.install": `binary replacement shared by "ctrld-client upgrade" and ` +
+		`"ctrld-client rollback". Outside the --cd-org provisioning boundary this lane hardened.`,
 
 	"prog.go:prog.Stop": `the deactivation pin check's os.Exit(126). Out of scope for this ` +
 		`lane by contract ("pin-check 126 untouched").`,

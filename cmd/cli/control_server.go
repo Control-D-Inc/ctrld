@@ -22,16 +22,17 @@ import (
 )
 
 const (
-	contentTypeJson  = "application/json"
-	listClientsPath  = "/clients"
-	startedPath      = "/started"
-	reloadPath       = "/reload"
-	deactivationPath = "/deactivation"
-	cdPath           = "/cd"
-	ifacePath        = "/iface"
-	viewLogsPath     = "/log/view"
-	sendLogsPath     = "/log/send"
-	tailLogsPath     = "/log/tail"
+	contentTypeJson   = "application/json"
+	listClientsPath   = "/clients"
+	startedPath       = "/started"
+	reloadPath        = "/reload"
+	deactivationPath  = "/deactivation"
+	cdPath            = "/cd"
+	versionTargetPath = "/version_target"
+	ifacePath         = "/iface"
+	viewLogsPath      = "/log/view"
+	sendLogsPath      = "/log/send"
+	tailLogsPath      = "/log/tail"
 )
 
 type ifaceResponse struct {
@@ -314,6 +315,10 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 		w.WriteHeader(http.StatusBadRequest)
+	}))
+	p.cs.register(versionTargetPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(versionTarget()))
 	}))
 	p.cs.register(ifacePath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		res := &ifaceResponse{Name: iface}

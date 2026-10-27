@@ -106,6 +106,7 @@ Available Commands:
   service     Manage ctrld service
   clients     Manage clients
   upgrade     Upgrading ctrld to latest version
+  rollback    Roll ctrld back to the previous release
   log         Manage runtime debug logs
 
 Flags:
@@ -308,6 +309,37 @@ This removes the intercept rules and reverts to standard interface-based DNS con
 - WireGuard
 
 For more details, see the [DNS Intercept Mode documentation](https://docs.controld.com/docs/dns-intercept).
+
+## Upgrade and Rollback
+`ctrld-client upgrade` replaces the installed binary with the latest build and restarts the service on it. If the new binary does not become ready, the previous one is restored automatically.
+
+```shell
+# Latest release.
+sudo ctrld-client upgrade prod
+
+# A specific release, for example to go back to an earlier one.
+sudo ctrld-client upgrade prod --version v1.5.7
+
+# Latest build of a branch.
+sudo ctrld-client upgrade dev --branch master
+```
+
+`--version` takes a release version (`v1.2.3` or `1.2.3`) and selects the `prod` channel when none is given; `ctrld-client upgrade dev --version` is refused. ctrld runs the downloaded binary before installing it, and stops without changing anything if it does not report the requested version. A version with a different major version than the installed one is refused. `--branch` selects the `dev` channel when none is given; `ctrld-client upgrade prod --branch` is refused. `--version` and `--branch` cannot be combined.
+
+To go back to an earlier release:
+
+```shell
+# The release before the installed one.
+sudo ctrld-client rollback
+
+# A specific older release.
+sudo ctrld-client rollback --version v1.5.7
+
+# The latest build of a branch.
+sudo ctrld-client rollback --branch master
+```
+
+Rollback is `ctrld-client upgrade prod --version` with an older release, with the same version check and restart. Without `--version`, it installs the release before the installed one: from `v1.5.8`, `v1.5.7`. The release before an `x.y.0` release is not known to ctrld, and development builds have no release version, so those need `--version`. A `--version` that is not older than the installed release is refused. On a device managed by Control D, a dashboard version target above the installed release makes ctrld upgrade again at the next config refresh (every hour by default), so clear or lower the target in the dashboard before rolling back or installing an older release with `--version`. Before installing a release, ctrld asks the running service for the version target it last received from Control D, and warns when that target would upgrade the device again. Branch builds are not upgraded automatically. `--branch` installs the latest build of that branch from the `dev` channel, like `ctrld-client upgrade dev --branch`. Configuration and identity are not changed. On success, both commands log the change with the old and new versions, for example `Rollback successful - v1.5.7` with `action`, `from` and `to` fields.
 
 ## Contributing
 See [Contribution Guideline](./docs/contributing.md)

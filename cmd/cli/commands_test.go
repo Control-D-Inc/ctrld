@@ -24,7 +24,7 @@ func TestBasicCommandStructure(t *testing.T) {
 	assert.Greater(t, len(commands), 0, "Root command should have at least one subcommand")
 
 	// Test that expected commands exist
-	expectedCommands := []string{"run", "service", "clients", "upgrade", "log"}
+	expectedCommands := []string{"run", "service", "clients", "upgrade", "rollback", "log"}
 	for _, cmdName := range expectedCommands {
 		found := false
 		for _, cmd := range commands {
@@ -184,7 +184,7 @@ func TestCommandSubcommands(t *testing.T) {
 	assert.Greater(t, len(commands), 0, "Root command should have subcommands")
 
 	// Test that specific subcommands exist and can be executed
-	expectedSubcommands := []string{"run", "service", "clients", "upgrade", "log"}
+	expectedSubcommands := []string{"run", "service", "clients", "upgrade", "rollback", "log"}
 	for _, subCmdName := range expectedSubcommands {
 		// Find the subcommand
 		var subCmd *cobra.Command

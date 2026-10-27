@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,13 +18,15 @@ import (
 )
 
 const (
-	upgradeChannelDev     = "dev"
-	upgradeChannelProd    = "prod"
-	upgradeChannelDefault = "default"
+	upgradeChannelDev  = "dev"
+	upgradeChannelProd = "prod"
 )
 
 // UpgradeCommand handles upgrade-related operations
 type UpgradeCommand struct {
+	// targetVersion and targetBranch are the --version and --branch flags.
+	targetVersion string
+	targetBranch  string
 }
 
 // NewUpgradeCommand creates a new upgrade command handler
@@ -30,17 +34,91 @@ func NewUpgradeCommand() (*UpgradeCommand, error) {
 	return &UpgradeCommand{}, nil
 }
 
+// defaultUpgradeChannel is the channel "ctrld-client upgrade" uses when none
+// is given: prod for a release build, dev otherwise.
+func defaultUpgradeChannel() string {
+	if isStableVersion(curVersion()) {
+		return upgradeChannelProd
+	}
+	return upgradeChannelDev
+}
+
 // Upgrade performs the upgrade operation
 func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
-	upgradeChannel := map[string]string{
-		upgradeChannelDefault: "https://dl.controld.dev",
-		upgradeChannelDev:     "https://dl.controld.dev",
-		upgradeChannelProd:    "https://dl.controld.com",
+	req, err := newUpgradeRequest(args, uc.targetVersion, uc.targetBranch, defaultUpgradeChannel(), curVersion())
+	if err != nil {
+		mainLog.Load().Fatal().Msg(capitalize(err.Error()))
 	}
-	if isStableVersion(curVersion()) {
-		upgradeChannel[upgradeChannelDefault] = upgradeChannel[upgradeChannelProd]
+	mainLog.Load().Notice().Msgf("Upgrading ctrld %s to the %s", curVersion(), req.describe())
+	return runUpgrade("upgrade", req)
+}
+
+// Rollback performs the rollback operation: an upgrade to an older build.
+func (uc *UpgradeCommand) Rollback(cmd *cobra.Command, args []string) error {
+	req, err := newRollbackRequest(curVersion(), uc.targetVersion, uc.targetBranch)
+	if err != nil {
+		mainLog.Load().Fatal().Msg(capitalize(err.Error()))
+	}
+	mainLog.Load().Notice().Msgf("Rolling ctrld back from %s to the %s", curVersion(), req.describe())
+	return runUpgrade("rollback", req)
+}
+
+// runUpgrade downloads the binary req asks for and installs it. action names
+// the change in log messages.
+func runUpgrade(action string, req upgradeRequest) error {
+	t, err := newBinarySwitch()
+	if err != nil {
+		mainLog.Load().Error().Msg(err.Error())
+		return nil
 	}
 
+	dlUrl := req.downloadUrl(upgradeBaseUrls[req.channel])
+	mainLog.Load().Debug().Msgf("Downloading binary: %s", dlUrl)
+
+	resp, err := getWithRetry(dlUrl, downloadServerIp)
+	if err != nil {
+		mainLog.Load().Fatal().Err(err).Msg("Failed to download binary")
+	}
+	defer resp.Body.Close()
+
+	switch {
+	case resp.StatusCode == http.StatusNotFound && req.version != "":
+		mainLog.Load().Fatal().Msgf("Version %s is not available for download", req.version)
+	case resp.StatusCode == http.StatusNotFound && req.branch != "":
+		mainLog.Load().Fatal().Msgf("No build of branch %s is available for download", req.branch)
+	case resp.StatusCode == http.StatusBadRequest && (req.version != "" || req.branch != ""):
+		mainLog.Load().Fatal().Msgf("Download server rejected the request for the %s", req.describe())
+	case resp.StatusCode != http.StatusOK:
+		mainLog.Load().Fatal().Msgf("Could not download binary: %s", http.StatusText(resp.StatusCode))
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadBinarySize+1))
+	if err != nil {
+		mainLog.Load().Fatal().Err(err).Msg("Failed to download binary")
+	}
+	if len(data) > maxDownloadBinarySize {
+		mainLog.Load().Fatal().Msgf("Downloaded binary is larger than %d bytes", maxDownloadBinarySize)
+	}
+	if req.version != "" {
+		if _, err := verifyDownloadedVersion(data, t.bin, req.version); err != nil {
+			mainLog.Load().Fatal().Err(err).Msg("Downloaded binary is not the requested version, nothing was changed")
+		}
+	}
+	warnVersionTargetOverride(req, runningVersionTarget)
+	return t.install(action, data)
+}
+
+// binarySwitch replaces the installed ctrld binary and restarts the service
+// on the new one, restoring the replaced binary from oldBin if the new one
+// does not become ready.
+type binarySwitch struct {
+	bin, oldBin  string
+	p            *prog
+	s            service.Service
+	svcInstalled bool
+}
+
+// newBinarySwitch prepares to replace the running ctrld binary.
+func newBinarySwitch() (*binarySwitch, error) {
 	bin, err := os.Executable()
 	if err != nil {
 		mainLog.Load().Fatal().Err(err).Msg("Failed to get current ctrld binary path")
@@ -51,8 +129,7 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 	svcCmd := NewServiceCommand()
 	s, p, err := svcCmd.initializeServiceManager()
 	if err != nil {
-		mainLog.Load().Error().Msg(err.Error())
-		return nil
+		return nil, err
 	}
 
 	if iface == "" {
@@ -68,42 +145,24 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 	if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
 		svcInstalled = false
 	}
+	return &binarySwitch{bin: bin, oldBin: bin + oldBinSuffix, p: p, s: s, svcInstalled: svcInstalled}, nil
+}
 
-	oldBin := bin + oldBinSuffix
-	baseUrl := upgradeChannel[upgradeChannelDefault]
-	if len(args) > 0 {
-		channel := args[0]
-		switch channel {
-		case upgradeChannelProd, upgradeChannelDev: // ok
-		default:
-			mainLog.Load().Fatal().Msgf("Upgrade argument must be either %q or %q", upgradeChannelProd, upgradeChannelDev)
-		}
-		baseUrl = upgradeChannel[channel]
-	}
-
-	dlUrl := upgradeUrl(baseUrl)
-	mainLog.Load().Debug().Msgf("Downloading binary: %s", dlUrl)
-
-	resp, err := getWithRetry(dlUrl, downloadServerIp)
-	if err != nil {
-		mainLog.Load().Fatal().Err(err).Msg("Failed to download binary")
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		mainLog.Load().Fatal().Msgf("Could not download binary: %s", http.StatusText(resp.StatusCode))
-	}
-
+// install makes data the installed binary and restarts the service on it.
+// action names the change in log messages.
+func (t *binarySwitch) install(action string, data []byte) error {
+	fromVer := curVersion()
 	mainLog.Load().Debug().Msg("Updating current binary")
-	if err := selfupdate.Apply(resp.Body, selfupdate.Options{OldSavePath: oldBin}); err != nil {
+	if err := selfupdate.Apply(bytes.NewReader(data), selfupdate.Options{TargetPath: t.bin, OldSavePath: t.oldBin}); err != nil {
 		if rerr := selfupdate.RollbackError(err); rerr != nil {
 			mainLog.Load().Error().Err(rerr).Msg("Could not rollback old binary")
 		}
 		mainLog.Load().Fatal().Err(err).Msg("Failed to update current binary")
 	}
 
+	s, p := t.s, t.p
 	doRestart := func() bool {
-		if !svcInstalled {
+		if !t.svcInstalled {
 			return true
 		}
 		tasks := []task{
@@ -136,24 +195,24 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 		return false
 	}
 
-	if svcInstalled {
+	if t.svcInstalled {
 		mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")
 	}
 
 	if doRestart() {
-		_ = os.Remove(oldBin)
-		_ = os.Chmod(bin, 0755)
-		ver, err := binaryVersion(bin)
+		_ = os.Remove(t.oldBin)
+		_ = os.Chmod(t.bin, 0755)
+		ver, err := binaryVersionFn(t.bin)
 		if err != nil {
 			mainLog.Load().Warn().Err(err).Msg("Failed to get new binary version")
 			ver = "unknown version"
 		}
-		mainLog.Load().Notice().Msgf("Upgrade successful - %s", ver)
+		logVersionChange(action, fromVer, ver)
 		return nil
 	}
 
 	stop := func() error {
-		if !svcInstalled {
+		if !t.svcInstalled {
 			return nil
 		}
 		if err := stopServiceAndWait(s, upgradeStopTimeout); err != nil {
@@ -164,7 +223,7 @@ func (uc *UpgradeCommand) Upgrade(cmd *cobra.Command, args []string) error {
 		p.resetDNS(false, true)
 		return nil
 	}
-	return rollbackToPreviousBinary(bin, oldBin, stop, doRestart)
+	return rollbackToPreviousBinary(t.bin, t.oldBin, stop, doRestart)
 }
 
 // rollbackToPreviousBinary restores oldBin over bin after the replacement failed to
@@ -373,24 +432,71 @@ func parseVersionOutput(out string) (string, bool) {
 
 // InitUpgradeCmd creates the upgrade command with proper logic
 func InitUpgradeCmd(rootCmd *cobra.Command) *cobra.Command {
+	uc, _ := NewUpgradeCommand()
 	upgradeCmd := &cobra.Command{
-		Use:       "upgrade",
-		Short:     "Upgrading ctrld to latest version",
+		Use:   "upgrade",
+		Short: "Upgrading ctrld to latest version",
+		Long: `Upgrading ctrld to latest version.
+
+Use --version to install a specific release from the prod channel, for
+example to go back to an earlier release, or --branch to install the latest
+build of a branch from the dev channel.`,
+		Example: `  ctrld-client upgrade
+  ctrld-client upgrade prod --version v1.5.7
+  ctrld-client upgrade dev --branch master`,
 		ValidArgs: []string{upgradeChannelDev, upgradeChannelProd},
 		Args:      cobra.MaximumNArgs(1),
 		PreRun: func(cmd *cobra.Command, args []string) {
 			checkHasElevatedPrivilege()
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			uc, err := NewUpgradeCommand()
-			if err != nil {
-				return err
-			}
 			return uc.Upgrade(cmd, args)
 		},
 	}
+	upgradeCmd.Flags().StringVarP(&uc.targetVersion, "version", "", "", "Release version to install, for example v1.2.3 (prod channel)")
+	upgradeCmd.Flags().StringVarP(&uc.targetBranch, "branch", "", "", "Branch whose latest build to install (dev channel)")
 
 	rootCmd.AddCommand(upgradeCmd)
 
 	return upgradeCmd
+}
+
+// InitRollbackCmd creates the rollback command, which installs an older build
+// through the same download, version check and restart as the upgrade command.
+func InitRollbackCmd(rootCmd *cobra.Command) *cobra.Command {
+	uc, _ := NewUpgradeCommand()
+	rollbackCmd := &cobra.Command{
+		Use:   "rollback",
+		Short: "Roll ctrld back to the previous release",
+		Long: `Roll ctrld back to the previous release.
+
+Rollback is "ctrld-client upgrade prod --version" with an older release.
+Without --version it installs the release before the installed one: from
+v1.2.3 it installs v1.2.2. The release before a v1.2.0 is not known, and
+development builds have no release version, so those need --version.
+
+Use --branch to install the latest build of a branch from the dev channel
+instead, like "ctrld-client upgrade dev --branch". Configuration and identity
+are not changed.
+
+On a device managed by Control D, a dashboard version target above the
+installed release makes ctrld upgrade again at the next config refresh, so
+clear or lower the target in the dashboard first.`,
+		Example: `  ctrld-client rollback
+  ctrld-client rollback --version v1.5.7
+  ctrld-client rollback --branch master`,
+		Args: cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			checkHasElevatedPrivilege()
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return uc.Rollback(cmd, args)
+		},
+	}
+	rollbackCmd.Flags().StringVarP(&uc.targetVersion, "version", "", "", "Release version to roll back to, for example v1.2.3 (default: the previous release)")
+	rollbackCmd.Flags().StringVarP(&uc.targetBranch, "branch", "", "", "Branch whose latest build to roll back to (dev channel)")
+
+	rootCmd.AddCommand(rollbackCmd)
+
+	return rollbackCmd
 }
