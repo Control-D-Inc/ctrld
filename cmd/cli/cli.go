@@ -143,6 +143,7 @@ func initCLI() {
 	initServicesCmd(startCmd, stopCmd, restartCmd, reloadCmd, statusCmd, uninstallCmd, interfacesCmd)
 	initClientsCmd()
 	initUpgradeCmd()
+	initRollbackCmd()
 	initLogCmd()
 	initDiagCmd()
 }
@@ -800,6 +801,20 @@ var deactivationPinKnown atomic.Bool
 // cdDeactivationPin is used in cd mode to decide whether stop and uninstall commands can be run.
 var cdDeactivationPin atomic.Int64
 
+// cdVersionTarget is the version target the Control D API last returned for
+// this device, nil before the first answer. Each config refresh upgrades the
+// device towards it, so "ctrld upgrade" and "ctrld rollback" read it through
+// the control server to warn before installing an older release.
+var cdVersionTarget atomic.Pointer[string]
+
+// versionTarget returns cdVersionTarget, or "" when no target is known.
+func versionTarget() string {
+	if vt := cdVersionTarget.Load(); vt != nil {
+		return *vt
+	}
+	return ""
+}
+
 // Brute-force protection for the deactivation PIN endpoint on the control socket.
 // After deactivationMaxFailedAttempts consecutive wrong PINs, further attempts are
 // rejected for deactivationLockoutSeconds. Counter resets on a correct PIN.
@@ -1171,6 +1186,8 @@ func processCDFlagsWithMetadata(
 		logger.Debug().Msg("saving deactivation pin")
 		cdDeactivationPin.Store(*resolverConfig.DeactivationPin)
 	}
+	vt := resolverConfig.Ctrld.VersionTarget
+	cdVersionTarget.Store(&vt)
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
 

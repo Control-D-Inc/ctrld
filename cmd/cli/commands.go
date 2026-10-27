@@ -1583,178 +1583,263 @@ func initClientsCmd() *cobra.Command {
 }
 
 func initUpgradeCmd() *cobra.Command {
-	const (
-		upgradeChannelDev     = "dev"
-		upgradeChannelProd    = "prod"
-		upgradeChannelDefault = "default"
-	)
-	upgradeChannel := map[string]string{
-		upgradeChannelDefault: "https://dl.controld.dev",
-		upgradeChannelDev:     "https://dl.controld.dev",
-		upgradeChannelProd:    "https://dl.controld.com",
-	}
+	defaultChannel := upgradeChannelDev
 	if isStableVersion(curVersion()) {
-		upgradeChannel[upgradeChannelDefault] = upgradeChannel[upgradeChannelProd]
+		defaultChannel = upgradeChannelProd
 	}
+	var targetVersion, targetBranch string
 	upgradeCmd := &cobra.Command{
-		Use:       "upgrade",
-		Short:     "Upgrading ctrld to latest version",
+		Use:   "upgrade",
+		Short: "Upgrading ctrld to latest version",
+		Long: `Upgrading ctrld to latest version.
+
+Use --version to install a specific release from the prod channel, for
+example to go back to an earlier release, or --branch to install the latest
+build of a branch from the dev channel.`,
+		Example: `  ctrld upgrade
+  ctrld upgrade prod --version v1.5.7
+  ctrld upgrade dev --branch master`,
 		ValidArgs: []string{upgradeChannelDev, upgradeChannelProd},
 		Args:      cobra.MaximumNArgs(1),
 		PreRun: func(cmd *cobra.Command, args []string) {
 			checkHasElevatedPrivilege()
 		},
 		Run: func(cmd *cobra.Command, args []string) {
-			bin, err := os.Executable()
+			req, err := newUpgradeRequest(args, targetVersion, targetBranch, defaultChannel, curVersion())
 			if err != nil {
-				mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
+				mainLog.Load().Fatal().Msg(err.Error())
 			}
-			sc := &service.Config{}
-			*sc = *svcConfig
-			sc.Executable = bin
-			readConfig(false)
-			v.Unmarshal(&cfg)
-			p := &prog{router: router.New(&cfg, runInCdMode())}
-			s, err := newService(p, sc)
-			if err != nil {
-				mainLog.Load().Error().Msg(err.Error())
-				return
-			}
-			if iface == "" {
-				iface = autoIface
-			}
-			p.preRun()
-			if ir := runningIface(s); ir != nil {
-				p.runningIface = ir.Name
-				p.requiredMultiNICsConfig = ir.All
-			}
-
-			svcInstalled := true
-			if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
-				svcInstalled = false
-			}
-			oldBin := bin + oldBinSuffix
-			baseUrl := upgradeChannel[upgradeChannelDefault]
-			if len(args) > 0 {
-				channel := args[0]
-				switch channel {
-				case upgradeChannelProd, upgradeChannelDev: // ok
-				default:
-					mainLog.Load().Fatal().Msgf("uprade argument must be either %q or %q", upgradeChannelProd, upgradeChannelDev)
-				}
-				baseUrl = upgradeChannel[channel]
-			}
-			dlUrl := upgradeUrl(baseUrl)
-			mainLog.Load().Debug().Msgf("Downloading binary: %s", dlUrl)
-
-			resp, err := getWithRetry(dlUrl, downloadServerIp)
-			if err != nil {
-
-				mainLog.Load().Fatal().Err(err).Msg("failed to download binary")
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				mainLog.Load().Fatal().Msgf("could not download binary: %s", http.StatusText(resp.StatusCode))
-			}
-			mainLog.Load().Debug().Msg("Updating current binary")
-			if err := selfupdate.Apply(resp.Body, selfupdate.Options{OldSavePath: oldBin}); err != nil {
-				if rerr := selfupdate.RollbackError(err); rerr != nil {
-					mainLog.Load().Error().Err(rerr).Msg("could not rollback old binary")
-				}
-				mainLog.Load().Fatal().Err(err).Msg("failed to update current binary")
-			}
-
-			doRestart := func() bool {
-				if !svcInstalled {
-					return true
-				}
-				tasks := []task{
-					{s.Stop, true, "Stop"},
-					{func() error {
-						p.router.Cleanup()
-						// restore static DNS settings or DHCP
-						p.resetDNS(false, true)
-						return nil
-					}, false, "Cleanup"},
-					{func() error {
-						time.Sleep(time.Second * 1)
-						return nil
-					}, false, "Waiting for service to stop"},
-				}
-				if doTasks(tasks) {
-
-					if router.WaitProcessExited() {
-						ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-						defer cancel()
-
-					loop:
-						for {
-							select {
-							case <-ctx.Done():
-								mainLog.Load().Error().Msg("timeout while waiting for service to stop")
-								break loop
-							default:
-							}
-							time.Sleep(time.Second)
-							if status, _ := s.Status(); status == service.StatusStopped {
-								break
-							}
-						}
-					}
-				}
-
-				tasks = []task{
-					{s.Start, true, "Start"},
-				}
-				if doTasks(tasks) {
-					if dir, err := socketDir(); err == nil {
-						// Only a ready service counts: a build that starts but
-						// never becomes ready must be rolled back.
-						if cc := newReadySocketControlClient(context.TODO(), s, dir); cc != nil {
-							_, _ = cc.post(ifacePath, nil)
-							return true
-						}
-					}
-				}
-				return false
-			}
-			if svcInstalled {
-				mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")
-			}
-			if doRestart() {
-				_ = os.Remove(oldBin)
-				_ = os.Chmod(bin, 0755)
-				ver, err := binaryVersion(bin)
-				if err != nil {
-					mainLog.Load().Warn().Err(err).Msg("Failed to get new binary version")
-					ver = "unknown version"
-				}
-				mainLog.Load().Notice().Msgf("Upgrade successful - %s", ver)
-				return
-			}
-
-			mainLog.Load().Warn().Msg("Upgrade failed: the new binary did not become ready")
-			stop := func() error {
-				if !svcInstalled {
-					return nil
-				}
-				if err := stopServiceAndWait(s, upgradeStopTimeout); err != nil {
-					return err
-				}
-				// Mirror the Cleanup task in doRestart: leave DNS settings as the OS
-				// had them, not as a half-started ctrld left them.
-				p.router.Cleanup()
-				p.resetDNS(false, true)
-				return nil
-			}
-			if err := rollbackToPreviousBinary(bin, oldBin, stop, doRestart); err != nil {
-				mainLog.Load().Error().Err(err).Msg("Rollback did not complete")
-			}
+			mainLog.Load().Notice().Msgf("Upgrading ctrld %s to the %s", curVersion(), req.describe())
+			runUpgrade("upgrade", req)
 		},
 	}
+	upgradeCmd.Flags().StringVarP(&targetVersion, "version", "", "", "Release version to install, for example v1.2.3 (prod channel)")
+	upgradeCmd.Flags().StringVarP(&targetBranch, "branch", "", "", "Branch whose latest build to install (dev channel)")
 	rootCmd.AddCommand(upgradeCmd)
 
 	return upgradeCmd
+}
+
+func initRollbackCmd() *cobra.Command {
+	var targetVersion, targetBranch string
+	rollbackCmd := &cobra.Command{
+		Use:   "rollback",
+		Short: "Roll ctrld back to the previous release",
+		Long: `Roll ctrld back to the previous release.
+
+Rollback is "ctrld upgrade prod --version" with an older release. Without
+--version it installs the release before the installed one: from v1.2.3 it
+installs v1.2.2. The release before a v1.2.0 is not known, and development
+builds have no release version, so those need --version.
+
+Use --branch to install the latest build of a branch from the dev channel
+instead, like "ctrld upgrade dev --branch". Configuration and identity are
+not changed.
+
+On a device managed by Control D, a dashboard version target above the
+installed release makes ctrld upgrade again at the next config refresh, so
+clear or lower the target in the dashboard first.`,
+		Example: `  ctrld rollback
+  ctrld rollback --version v1.5.7
+  ctrld rollback --branch master`,
+		Args: cobra.NoArgs,
+		PreRun: func(cmd *cobra.Command, args []string) {
+			checkHasElevatedPrivilege()
+		},
+		Run: func(cmd *cobra.Command, args []string) {
+			req, err := newRollbackRequest(curVersion(), targetVersion, targetBranch)
+			if err != nil {
+				mainLog.Load().Fatal().Msg(err.Error())
+			}
+			mainLog.Load().Notice().Msgf("Rolling ctrld back from %s to the %s", curVersion(), req.describe())
+			runUpgrade("rollback", req)
+		},
+	}
+	rollbackCmd.Flags().StringVarP(&targetVersion, "version", "", "", "Release version to roll back to, for example v1.2.3 (default: the previous release)")
+	rollbackCmd.Flags().StringVarP(&targetBranch, "branch", "", "", "Branch whose latest build to roll back to (dev channel)")
+	rootCmd.AddCommand(rollbackCmd)
+
+	return rollbackCmd
+}
+
+// runUpgrade downloads the binary req asks for and installs it. action names
+// the change in log messages.
+func runUpgrade(action string, req upgradeRequest) {
+	t := newBinarySwitch()
+	dlUrl := req.downloadUrl(upgradeBaseUrls[req.channel])
+	mainLog.Load().Debug().Msgf("Downloading binary: %s", dlUrl)
+
+	resp, err := getWithRetry(dlUrl, downloadServerIp)
+	if err != nil {
+		mainLog.Load().Fatal().Err(err).Msg("failed to download binary")
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusNotFound && req.version != "":
+		mainLog.Load().Fatal().Msgf("version %s is not available for download", req.version)
+	case resp.StatusCode == http.StatusNotFound && req.branch != "":
+		mainLog.Load().Fatal().Msgf("no build of branch %s is available for download", req.branch)
+	case resp.StatusCode == http.StatusBadRequest && (req.version != "" || req.branch != ""):
+		mainLog.Load().Fatal().Msgf("download server rejected the request for the %s", req.describe())
+	case resp.StatusCode != http.StatusOK:
+		mainLog.Load().Fatal().Msgf("could not download binary: %s", http.StatusText(resp.StatusCode))
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownloadBinarySize+1))
+	if err != nil {
+		mainLog.Load().Fatal().Err(err).Msg("failed to download binary")
+	}
+	if len(data) > maxDownloadBinarySize {
+		mainLog.Load().Fatal().Msgf("downloaded binary is larger than %d bytes", maxDownloadBinarySize)
+	}
+	if req.version != "" {
+		if _, err := verifyDownloadedVersion(data, t.bin, req.version); err != nil {
+			mainLog.Load().Fatal().Err(err).Msg("downloaded binary is not the requested version, nothing was changed")
+		}
+	}
+	warnVersionTargetOverride(req, runningVersionTarget)
+	t.install(action, data)
+}
+
+// binarySwitch replaces the installed ctrld binary and restarts the service
+// on the new one, restoring the replaced binary from oldBin if the new one
+// does not become ready.
+type binarySwitch struct {
+	bin, oldBin  string
+	p            *prog
+	s            service.Service
+	svcInstalled bool
+}
+
+// newBinarySwitch prepares to replace the running ctrld binary.
+func newBinarySwitch() *binarySwitch {
+	bin, err := os.Executable()
+	if err != nil {
+		mainLog.Load().Fatal().Err(err).Msg("failed to get current ctrld binary path")
+	}
+	sc := &service.Config{}
+	*sc = *svcConfig
+	sc.Executable = bin
+	readConfig(false)
+	v.Unmarshal(&cfg)
+	p := &prog{router: router.New(&cfg, runInCdMode())}
+	s, err := newService(p, sc)
+	if err != nil {
+		mainLog.Load().Fatal().Err(err).Msg("failed to create service")
+	}
+	if iface == "" {
+		iface = autoIface
+	}
+	p.preRun()
+	if ir := runningIface(s); ir != nil {
+		p.runningIface = ir.Name
+		p.requiredMultiNICsConfig = ir.All
+	}
+	svcInstalled := true
+	if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
+		svcInstalled = false
+	}
+	return &binarySwitch{bin: bin, oldBin: bin + oldBinSuffix, p: p, s: s, svcInstalled: svcInstalled}
+}
+
+// install makes data the installed binary and restarts the service on it.
+// action names the change in log messages.
+func (t *binarySwitch) install(action string, data []byte) {
+	fromVer := curVersion()
+	mainLog.Load().Debug().Msg("Updating current binary")
+	if err := selfupdate.Apply(bytes.NewReader(data), selfupdate.Options{TargetPath: t.bin, OldSavePath: t.oldBin}); err != nil {
+		if rerr := selfupdate.RollbackError(err); rerr != nil {
+			mainLog.Load().Error().Err(rerr).Msg("could not rollback old binary")
+		}
+		mainLog.Load().Fatal().Err(err).Msg("failed to update current binary")
+	}
+
+	s, p := t.s, t.p
+	doRestart := func() bool {
+		if !t.svcInstalled {
+			return true
+		}
+		tasks := []task{
+			{s.Stop, true, "Stop"},
+			{func() error {
+				p.router.Cleanup()
+				// restore static DNS settings or DHCP
+				p.resetDNS(false, true)
+				return nil
+			}, false, "Cleanup"},
+			{func() error {
+				time.Sleep(time.Second * 1)
+				return nil
+			}, false, "Waiting for service to stop"},
+		}
+		if doTasks(tasks) {
+
+			if router.WaitProcessExited() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+				defer cancel()
+
+			loop:
+				for {
+					select {
+					case <-ctx.Done():
+						mainLog.Load().Error().Msg("timeout while waiting for service to stop")
+						break loop
+					default:
+					}
+					time.Sleep(time.Second)
+					if status, _ := s.Status(); status == service.StatusStopped {
+						break
+					}
+				}
+			}
+		}
+
+		tasks = []task{
+			{s.Start, true, "Start"},
+		}
+		if doTasks(tasks) {
+			if dir, err := socketDir(); err == nil {
+				// Only a ready service counts: a build that starts but
+				// never becomes ready must be rolled back.
+				if cc := newReadySocketControlClient(context.TODO(), s, dir); cc != nil {
+					_, _ = cc.post(ifacePath, nil)
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if t.svcInstalled {
+		mainLog.Load().Debug().Msg("Restarting ctrld service using new binary")
+	}
+	if doRestart() {
+		_ = os.Remove(t.oldBin)
+		_ = os.Chmod(t.bin, 0755)
+		ver, err := binaryVersionFn(t.bin)
+		if err != nil {
+			mainLog.Load().Warn().Err(err).Msg("Failed to get new binary version")
+			ver = "unknown version"
+		}
+		logVersionChange(action, fromVer, ver)
+		return
+	}
+
+	mainLog.Load().Warn().Msgf("%s failed: the new binary did not become ready", capitalize(action))
+	stop := func() error {
+		if !t.svcInstalled {
+			return nil
+		}
+		if err := stopServiceAndWait(s, upgradeStopTimeout); err != nil {
+			return err
+		}
+		// Mirror the Cleanup task in doRestart: leave DNS settings as the OS
+		// had them, not as a half-started ctrld left them.
+		p.router.Cleanup()
+		p.resetDNS(false, true)
+		return nil
+	}
+	if err := rollbackToPreviousBinary(t.bin, t.oldBin, stop, doRestart); err != nil {
+		mainLog.Load().Error().Err(err).Msg("Rollback did not complete")
+	}
 }
 
 func initServicesCmd(commands ...*cobra.Command) *cobra.Command {
