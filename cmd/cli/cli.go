@@ -1643,6 +1643,7 @@ func uninstall(p *prog, s service.Service) {
 		// restore static DNS settings or DHCP
 		p.resetDNS(false, true)
 		restoreSavedStaticDNS(p.runningIface, true)
+		removeCtrldGroup()
 
 		if router.Name() != "" {
 			mainLog.Load().Debug().Msg("Router cleanup")
