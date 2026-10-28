@@ -38,6 +38,9 @@ type ifaceResponse struct {
 	All           bool   `json:"all"`
 	OK            bool   `json:"ok"`
 	InterceptMode string `json:"intercept_mode,omitempty"` // "dns", "hard", or "" (not intercepting)
+	// InterceptModeSource is where InterceptMode came from: "flag", "config",
+	// or "default" (the platform default). Empty from a service that predates it.
+	InterceptModeSource string `json:"intercept_mode_source,omitempty"`
 }
 
 type controlServer struct {
@@ -236,7 +239,8 @@ func (p *prog) registerControlServerHandler() {
 			Version:  rootCmd.Version,
 			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 		}
-		if rc, err := controld.FetchResolverConfig(context.Background(), rcReq, cdDev); rc != nil {
+		if rc, err := fetchResolverConfig(context.Background(), rcReq, cdDev); rc != nil {
+			deactivationPinKnown.Store(true)
 			if rc.DeactivationPin != nil {
 				cdDeactivationPin.Store(*rc.DeactivationPin)
 			} else {
@@ -246,8 +250,17 @@ func (p *prog) registerControlServerHandler() {
 			mainLog.Load().Warn().Err(err).Msg("could not re-fetch deactivation pin code")
 		}
 
-		// If pin code not set, allowing deactivation.
+		// If pin code not set, allowing deactivation - but only when the API
+		// actually said so. A run that started on the configuration on disk
+		// during maintenance never asked, and the re-fetch above leaves the
+		// default untouched while the API stays away, so an unknown PIN would
+		// otherwise read as no PIN and authorize the deactivation it protects.
 		if !deactivationPinSet() {
+			if !deactivationPinKnown.Load() {
+				mainLog.Load().Warn().Msg("cannot verify deactivation pin: no answer from the Control D API this run")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -299,6 +312,7 @@ func (p *prog) registerControlServerHandler() {
 				// Report intercept mode to the start command for proper log output.
 				if interceptMode == "dns" || interceptMode == "hard" {
 					res.InterceptMode = interceptMode
+					res.InterceptModeSource = interceptModeSource
 				}
 			}
 		}
@@ -310,16 +324,18 @@ func (p *prog) registerControlServerHandler() {
 	}))
 	p.cs.register(viewLogsPath, http.HandlerFunc(p.handleLogView))
 	p.cs.register(sendLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if time.Since(p.internalLogSent) < logWriterSentInterval {
+		if !p.logUpload.reserve() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		defer p.logUpload.release()
 		r, err := p.logReader(wantFullLogs(request))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if r.size == 0 {
+			r.r.Close()
 			w.WriteHeader(http.StatusMovedPermanently)
 			return
 		}
@@ -340,7 +356,6 @@ func (p *prog) registerControlServerHandler() {
 		if err := json.NewEncoder(w).Encode(&resp); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
-		p.internalLogSent = time.Now()
 	}))
 	p.cs.register(tailLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		flusher, ok := w.(http.Flusher)

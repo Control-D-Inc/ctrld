@@ -96,6 +96,9 @@ type proxyResponse struct {
 	cached     bool
 	clientInfo bool
 	upstream   string
+	// drop asks the server to send no reply, so the client retries; answer
+	// is nil then.
+	drop bool
 }
 
 // upstreamForResult represents the result of processing rules for a request.
@@ -248,6 +251,10 @@ func (p *prog) serveDNS(listenerNum string) error {
 				failoverRcodes: failoverRcode,
 				ufr:            ur,
 			})
+			if pr.drop {
+				p.health.countQuery()
+				return
+			}
 			go p.doSelfUninstall(pr.answer)
 
 			answer = pr.answer
@@ -585,9 +592,17 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// may use.
 	if dnsIntercept && p.recoveryBypass.Load() && !p.internalDomainExplicitUpstreams(req.ufr.upstreams) {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "Recovery bypass active: forwarding to OS resolver")
-		resolver, err := ctrld.NewResolver(osUpstreamConfig)
+		// The bypass runs before rule handling, so an Active Directory name
+		// needs its LAN mark here too, or it races the domain controller
+		// against Control D's public resolver in plaintext.
+		bypassCtx := ctx
+		if p.isAdDomainLookup(req.msg) {
+			bypassCtx = ctrld.LanQueryCtx(ctx)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "active directory domain lookup, skipping public DNS")
+		}
+		resolver, err := newResolverFn(osUpstreamConfig)
 		if err == nil {
-			resolveCtx, cancel := osUpstreamConfig.Context(ctx)
+			resolveCtx, cancel := osUpstreamConfig.Context(bypassCtx)
 			defer cancel()
 			answer, _ := resolver.Resolve(resolveCtx, req.msg)
 			if answer != nil {
@@ -645,6 +660,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	isLanOrPtrQuery := false
 	if req.ufr.matched {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
+		// A rule sending an Active Directory name to the OS resolver (the
+		// auto-added AD split rule, or an operator's equivalent) is a LAN
+		// lookup: keep it off Control D's public resolver, which osResolver
+		// otherwise races against the domain controller in plaintext.
+		if p.isAdOSResolverLookup(upstreams, req.msg) {
+			ctx = ctrld.LanQueryCtx(ctx)
+			ctrld.Log(ctx, mainLog.Load().Debug(), "active directory domain lookup, skipping public DNS")
+		}
 	} else {
 		switch {
 		case req.ufr.zpaDNSEcho:
@@ -847,7 +870,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 
 	resolve1 := func(upstream string, upstreamConfig *ctrld.UpstreamConfig, msg *dns.Msg) (*dns.Msg, error) {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "sending query to %s: %s", upstream, upstreamConfig.Name)
-		dnsResolver, err := ctrld.NewResolver(upstreamConfig)
+		dnsResolver, err := newResolverFn(upstreamConfig)
 		if err != nil {
 			ctrld.Log(ctx, mainLog.Load().Error().Err(err), "failed to create resolver")
 			return nil, err
@@ -907,113 +930,134 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// answers, so a name nobody resolves gets a real negative answer.
 	internalFallback := p.internalDomainFallbackUpstreams(upstreams)
 	var internalNegative *dns.Msg
-	for n, upstreamConfig := range upstreamConfigs {
-		if upstreamConfig == nil {
-			continue
-		}
-		logger := mainLog.Load().Debug().
-			Str("upstream", upstreamConfig.String()).
-			Str("query", req.msg.Question[0].Name).
-			Bool("is_ad_query", p.isAdDomainQuery(req.msg)).
-			Bool("is_lan_query", isLanOrPtrQuery)
-
-		if p.isLoop(upstreamConfig) {
-			ctrld.Log(ctx, logger, "DNS loop detected")
-			continue
-		}
-		// A fallback-mode Internal Domain resolver that the monitor reports as
-		// down is not waited on: off the organization network every query
-		// would otherwise pay its timeout before the network fallback runs.
-		// Nothing else marks a generated resolver up again, so skipping it
-		// starts a background re-check that does.
-		if internalFallback && p.um.isDown(upstreams[n]) {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolver %s is down, skipping it", upstreams[n])
-			p.internalDomainProbes.probe(p.um, upstreams[n], upstreamConfig, req.msg)
-			continue
-		}
-		answer := resolve(upstreams[n], upstreamConfig, req.msg)
-		if answer == nil {
-			if serveStaleCache && staleAnswer != nil {
-				ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
-				p.health.countCacheHit()
-				now := time.Now()
-				setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
-				res.answer = staleAnswer
-				res.cached = true
-				return res
+	// tryUpstreams returns nil when no upstream produced an answer to serve.
+	tryUpstreams := func() *proxyResponse {
+		for n, upstreamConfig := range upstreamConfigs {
+			if upstreamConfig == nil {
+				continue
 			}
-			continue
-		}
-		// Reject an answer whose question does not match the request before it
-		// can be served or cached. A mismatched question means the upstream
-		// answered a different name/type than asked; caching it would poison
-		// the shared cache with wrong-domain records for the requested name.
-		// See github.com/Control-D-Inc/ctrld/issues/322.
-		if !sameQuestion(req.msg, answer) {
-			ctrld.Log(ctx, mainLog.Load().Debug(),
-				"discarding answer from %s: question mismatch (asked %q, got %q)",
-				upstreams[n], questionString(req.msg), questionString(answer))
-			continue
-		}
-		// We are doing LAN/PTR lookup using private resolver, so always process next one.
-		// Except for the last, we want to send response instead of saying all upstream failed.
-		if answer.Rcode != dns.RcodeSuccess && isLanOrPtrQuery && n != len(upstreamConfigs)-1 {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "no response from %s, process to next upstream", upstreams[n])
-			continue
-		}
-		if answer.Rcode != dns.RcodeSuccess && len(upstreamConfigs) > 1 && containRcode(req.failoverRcodes, answer.Rcode) {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "failover rcode matched, process to next upstream")
-			continue
-		}
-		if internalFallback && internalDomainFallbackRcode(answer.Rcode) {
-			ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolver %s answered %s, trying next resolver",
-				upstreams[n], dns.RcodeToString[answer.Rcode])
-			internalNegative = betterInternalDomainNegative(internalNegative, answer)
-			continue
-		}
+			logger := mainLog.Load().Debug().
+				Str("upstream", upstreamConfig.String()).
+				Str("query", req.msg.Question[0].Name).
+				Bool("is_ad_query", p.isAdDomainQuery(req.msg)).
+				Bool("is_lan_query", isLanOrPtrQuery)
 
-		// set compression, as it is not set by default when unpacking
-		answer.Compress = true
-
-		if cacheable {
-			p.addCachedResponse(dnscache.NewKey(req.msg, upstreams[n]), answer)
-			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
-		}
-		hostname := ""
-		if req.ci != nil {
-			hostname = req.ci.Hostname
-		}
-		// DNS64 synthesis for IPv6-only networks without CLAT: applied to the
-		// policy-approved answer only, using the same upstream for the companion
-		// A resolution. No-op unless the network state requires it.
-		var synthesizedPrefix netip.Prefix
-		answer, synthesizedPrefix = p.maybeDNS64(ctx, req.msg, answer, func(aReq *dns.Msg) *dns.Msg {
-			key := dnscache.NewKey(aReq, upstreams[n])
-			if cacheable {
-				if cachedValue := p.cache.Get(key); cachedValue != nil {
+			if p.isLoop(upstreamConfig) {
+				ctrld.Log(ctx, logger, "DNS loop detected")
+				continue
+			}
+			// A fallback-mode Internal Domain resolver that the monitor reports as
+			// down is not waited on: off the organization network every query
+			// would otherwise pay its timeout before the network fallback runs.
+			// Nothing else marks a generated resolver up again, so skipping it
+			// starts a background re-check that does.
+			if internalFallback && p.um.isDown(upstreams[n]) {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolver %s is down, skipping it", upstreams[n])
+				p.internalDomainProbes.probe(p.um, upstreams[n], upstreamConfig, req.msg)
+				continue
+			}
+			answer := resolve(upstreams[n], upstreamConfig, req.msg)
+			if answer == nil {
+				if serveStaleCache && staleAnswer != nil {
+					ctrld.Log(ctx, mainLog.Load().Debug(), "serving stale cached response")
+					p.health.countCacheHit()
 					now := time.Now()
-					if cachedValue.Expire.After(now) {
-						cached := cachedValue.Msg.Copy()
-						ctrld.SetCacheReply(cached, aReq, cached.Rcode)
-						setCachedAnswerTTL(cached, now, cachedValue.Expire)
-						return cached
+					setCachedAnswerTTL(staleAnswer, now, now.Add(staleTTL))
+					res.answer = staleAnswer
+					res.cached = true
+					return res
+				}
+				continue
+			}
+			// Reject an answer whose question does not match the request before it
+			// can be served or cached. A mismatched question means the upstream
+			// answered a different name/type than asked; caching it would poison
+			// the shared cache with wrong-domain records for the requested name.
+			// See github.com/Control-D-Inc/ctrld/issues/322.
+			if !sameQuestion(req.msg, answer) {
+				ctrld.Log(ctx, mainLog.Load().Debug(),
+					"discarding answer from %s: question mismatch (asked %q, got %q)",
+					upstreams[n], questionString(req.msg), questionString(answer))
+				continue
+			}
+			// We are doing LAN/PTR lookup using private resolver, so always process next one.
+			// Except for the last, we want to send response instead of saying all upstream failed.
+			if answer.Rcode != dns.RcodeSuccess && isLanOrPtrQuery && n != len(upstreamConfigs)-1 {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "no response from %s, process to next upstream", upstreams[n])
+				continue
+			}
+			if answer.Rcode != dns.RcodeSuccess && len(upstreamConfigs) > 1 && containRcode(req.failoverRcodes, answer.Rcode) {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "failover rcode matched, process to next upstream")
+				continue
+			}
+			if internalFallback && internalDomainFallbackRcode(answer.Rcode) {
+				ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolver %s answered %s, trying next resolver",
+					upstreams[n], dns.RcodeToString[answer.Rcode])
+				internalNegative = betterInternalDomainNegative(internalNegative, answer)
+				continue
+			}
+
+			// set compression, as it is not set by default when unpacking
+			answer.Compress = true
+
+			if cacheable {
+				p.addCachedResponse(dnscache.NewKey(req.msg, upstreams[n]), answer)
+				ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
+			}
+			hostname := ""
+			if req.ci != nil {
+				hostname = req.ci.Hostname
+			}
+			// DNS64 synthesis for IPv6-only networks without CLAT: applied to the
+			// policy-approved answer only, using the same upstream for the companion
+			// A resolution. No-op unless the network state requires it.
+			var synthesizedPrefix netip.Prefix
+			answer, synthesizedPrefix = p.maybeDNS64(ctx, req.msg, answer, func(aReq *dns.Msg) *dns.Msg {
+				key := dnscache.NewKey(aReq, upstreams[n])
+				if cacheable {
+					if cachedValue := p.cache.Get(key); cachedValue != nil {
+						now := time.Now()
+						if cachedValue.Expire.After(now) {
+							cached := cachedValue.Msg.Copy()
+							ctrld.SetCacheReply(cached, aReq, cached.Rcode)
+							setCachedAnswerTTL(cached, now, cachedValue.Expire)
+							return cached
+						}
 					}
 				}
+				resolved := resolve(upstreams[n], upstreamConfig, aReq)
+				if cacheable && resolved != nil && sameQuestion(aReq, resolved) {
+					p.addCachedResponse(key, resolved)
+				}
+				return resolved
+			})
+			if cacheable && synthesizedPrefix.IsValid() {
+				p.addCachedResponse(dns64CacheKey(req.msg, upstreams[n], synthesizedPrefix), answer)
+				ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: add cached response variant")
 			}
-			resolved := resolve(upstreams[n], upstreamConfig, aReq)
-			if cacheable && resolved != nil && sameQuestion(aReq, resolved) {
-				p.addCachedResponse(key, resolved)
-			}
-			return resolved
-		})
-		if cacheable && synthesizedPrefix.IsValid() {
-			p.addCachedResponse(dns64CacheKey(req.msg, upstreams[n], synthesizedPrefix), answer)
-			ctrld.Log(ctx, mainLog.Load().Debug(), "dns64: add cached response variant")
+			ctrld.Log(ctx, mainLog.Load().Info(), "REPLY: %s -> %s (%s): %s", upstreams[n], req.ufr.srcAddr, hostname, dns.RcodeToString[answer.Rcode])
+			res.answer = answer
+			res.upstream = upstreamConfig.Endpoint
+			return res
 		}
-		ctrld.Log(ctx, mainLog.Load().Info(), "REPLY: %s -> %s (%s): %s", upstreams[n], req.ufr.srcAddr, hostname, dns.RcodeToString[answer.Rcode])
-		res.answer = answer
-		res.upstream = upstreamConfig.Endpoint
-		return res
+		return nil
+	}
+	// See fresh_connection.go: after a sleep, renew the connections before
+	// the query rides them.
+	p.renewConnectionsIfSlept(ctx)
+	connEpoch := p.networkEpoch.Load()
+	if r := tryUpstreams(); r != nil {
+		return r
+	}
+	// A query that ran on connections the network left behind gets one more
+	// pass. It can take as long as the first, timeouts included, before the
+	// fallback: that is the price of not sending the query in plaintext, and
+	// it is paid only by the queries already in flight when the network
+	// changed or the host slept.
+	if p.retryOnFreshConnection(ctx, upstreams, upstreamConfigs, connEpoch) {
+		if r := tryUpstreams(); r != nil {
+			return r
+		}
 	}
 	if internalFallback {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "internal domain resolvers did not resolve the query; trying network resolvers")
@@ -1040,6 +1084,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 	}
 	ctrld.Log(ctx, p.querySampler.event(sampleClassAllEndpointsFailed, ""), "all %v endpoints failed", journalUpstreamNames(upstreams))
+	// The OS resolver failed this query, as the only upstream or as the
+	// catch-all below.
+	osResolverFailed := len(upstreams) > 0 && upstreams[0] == upstreamOS
 
 	// An Internal Domain with explicit resolvers never takes the OS-resolver
 	// catch-all below: it can reach public nameservers, ctrld's own fallback
@@ -1074,6 +1121,12 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		// we dont want this to happen if leakOnUpstreamFailure is false
 		if upstreams[0] != upstreamOS {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "attempting query to OS resolver as a retry catch all")
+			// An Active Directory name that falls back from its explicit
+			// upstream still must not reach Control D's public resolver.
+			if p.isAdDomainLookup(req.msg) {
+				ctx = ctrld.LanQueryCtx(ctx)
+				ctrld.Log(ctx, mainLog.Load().Debug(), "active directory domain lookup, skipping public DNS")
+			}
 			answer := resolve(upstreamOS, osUpstreamConfig, req.msg)
 			if answer != nil {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query successful")
@@ -1082,7 +1135,18 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				return res
 			}
 			ctrld.Log(ctx, mainLog.Load().Debug(), "OS resolver retry query failed")
+			osResolverFailed = true
 		}
+	}
+
+	if osResolverFailed && isNAT64DiscoveryQuery(req.msg) && p.osResolverStale() {
+		// See os_resolver_stale.go: a SERVFAIL here would end the host's
+		// NAT64 prefix discovery, and it comes from the previous network's
+		// nameservers. Without an answer the host retries.
+		ctrld.Log(ctx, mainLog.Load().Info(), "OS resolver nameservers predate the network change; not answering %s so the host retries", dns64WellKnownName)
+		p.countFailedClientQuery(upstreams)
+		res.drop = true
+		return res
 	}
 
 	p.countFailedClientQuery(upstreams)
@@ -1473,12 +1537,12 @@ func (p *prog) doSelfUninstall(answer *dns.Msg) {
 			Version:  rootCmd.Version,
 			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
 		}
-		_, err := controld.FetchResolverConfig(context.Background(), req, cdDev)
+		_, err := fetchResolverConfig(context.Background(), req, cdDev)
 		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
 		selfUninstallCheck(err, p, logger)
 
 		if err != nil {
-			logger.Warn().Err(err).Msg("could not fetch resolver config")
+			logResolverConfigFetchFailure(&logger, err)
 		}
 		// Cool-of period to prevent abusing the API.
 		go p.selfUninstallCoolOfPeriod()
@@ -1996,10 +2060,14 @@ func (p *prog) handleNetworkChange(delta *netmon.ChangeDelta, isMajorChange bool
 	p.networkAcceptedGen.Store(transitionID)
 	p.networkSourceMu.Unlock()
 
-	mainLog.Load().Debug().Msg("Link state changed, re-bootstrapping")
-	for _, uc := range p.cfg.Upstream {
-		uc.ReBootstrap()
+	// Before the re-bootstrap, so no query meets the previous network's
+	// nameservers unmarked. Routers run no recovery, as below.
+	if router.Name() == "" {
+		networkChangeReadOSResolverFn(p)
 	}
+
+	mainLog.Load().Debug().Msg("Link state changed, re-bootstrapping")
+	p.renewUpstreamConnections()
 
 	// Get IPs from default route interface in new state
 	selfIP := networkChangeDefaultRouteIPFn()
@@ -2475,6 +2543,9 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		mainLog.Load().Info().Msg("Force-reset upstream transports for network change recovery")
 	}
 
+	// Stops the OS resolver refresh of a network-change recovery; a no-op otherwise.
+	stopRefresh := func() {}
+
 	// In DNS intercept mode, don't tear down WFP/pf filters.
 	// Instead, enable recovery bypass so proxy() forwards queries to
 	// the OS/DHCP resolver. This handles captive portal authentication
@@ -2488,6 +2559,7 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		// gave none, so the journal reports the discovered list instead.
 		resolverNameservers, systemNameservers := initializeOsResolverWithSystemNameserversFn(true, recoveryResolverReason)
 		diagnostic.dhcpServers = systemNameservers
+		p.noteOSResolverRead(systemNameservers)
 		if len(systemNameservers) == 0 {
 			journal(mainLog.Load().Warn()).Msg("DNS intercept recovery: no DHCP nameservers found")
 		} else {
@@ -2524,20 +2596,32 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		// Traditional flow: remove DNS settings to expose DHCP nameservers
 		recoveryResetDNSFn(p, false, false)
 
-		// For an OS failure, reinitialize OS resolver nameservers immediately.
-		if reason == RecoveryReasonOSFailure {
-			mainLog.Load().Debug().Msg("OS resolver failure detected; reinitializing OS resolver nameservers")
-			ns := ctrld.InitializeOsResolverWithReason(true, recoveryResolverReason)
+		// Read the exposed nameservers right away, for an OS failure and for a
+		// network change. After a network change the OS resolver still holds
+		// the previous network's servers, and the wait below can need the new
+		// ones: on an IPv6-only network, an IPv4-only upstream comes back only
+		// once macOS starts its CLAT, and macOS discovers the NAT64 prefix by
+		// resolving ipv4only.arpa through ctrld's OS-resolver fallback.
+		if reason == RecoveryReasonOSFailure || reason == RecoveryReasonNetworkChange {
+			mainLog.Load().Debug().Msgf("%s; reinitializing OS resolver nameservers", recoveryReasonName(reason))
+			ns := initializeOsResolver(true, recoveryResolverReason)
+			p.noteOSResolverRead(ns)
 			if len(ns) == 0 {
 				mainLog.Load().Warn().Msg("No nameservers found for OS resolver; using existing values")
 			} else {
 				journal(mainLog.Load().Info()).Msgf("Reinitialized OS resolver with nameservers: %v", ns)
 			}
 		}
+		// A new network can publish its resolvers after the reset, as with
+		// RDNSS, so keep reading them until the upstream recovers.
+		if reason == RecoveryReasonNetworkChange {
+			stopRefresh = p.refreshOSResolverWhileRecovering(recoveryCtx)
+		}
 	}
 
 	// Wait for the same upstream pool used to admit this recovery.
 	recovered, err := waitForUpstreamRecoveryFn(p, recoveryCtx, upstreams, &diagnostic)
+	stopRefresh()
 	if err != nil {
 		if p.recoveryGen.Load() == gen {
 			outcome = recoveryOutcomeCanceled
@@ -2568,7 +2652,8 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 
 		// Reinitialize OS resolver for the recovered state.
 		if reason == RecoveryReasonNetworkChange {
-			ns := ctrld.InitializeOsResolverWithReason(true, recoveryResolverReason)
+			ns := initializeOsResolver(true, recoveryResolverReason)
+			p.noteOSResolverRead(ns)
 			if len(ns) == 0 {
 				mainLog.Load().Warn().Msg("No nameservers found for OS resolver during network-change recovery; using existing values")
 			} else {
@@ -2584,7 +2669,8 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 			// on a healthy DHCP network.
 			systemNameservers = systemNameserversForInterceptRetry()
 		} else if reason == RecoveryReasonNetworkChange {
-			ns := ctrld.InitializeOsResolverWithReason(true, recoveryResolverReason)
+			ns := initializeOsResolver(true, recoveryResolverReason)
+			p.noteOSResolverRead(ns)
 			if len(ns) == 0 {
 				mainLog.Load().Warn().Msg("No nameservers found for OS resolver during network-change recovery; using existing values")
 			} else {
@@ -2594,7 +2680,7 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 
 		// Apply our DNS settings back. The snapshot that follows the end event
 		// reports the interfaces.
-		p.setDNS(systemNameservers)
+		recoverySetDNSFn(p, systemNameservers)
 	}
 
 	if !p.completeRecovery(gen) {
@@ -2631,6 +2717,46 @@ func (p *prog) refreshOSResolverAfterRecoverySkip(healthy string) {
 	}
 	p.osRecoveryRefreshAt = now
 	initializeOsResolverWithSystemNameserversFn(true, recoveryResolverReason)
+}
+
+// osResolverRecoveryRefreshIntervals are the gaps between the re-reads of the
+// system nameservers while a network-change recovery waits for an upstream.
+// They start short, because a new network's resolvers usually appear within a
+// few seconds of the reset, and the last one repeats: the wait has no timeout,
+// and on macOS each read runs scutil, ipconfig and networksetup.
+var osResolverRecoveryRefreshIntervals = []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 30 * time.Second}
+
+// refreshOSResolverWhileRecovering re-reads the system nameservers, at
+// osResolverRecoveryRefreshIntervals, until ctx ends or the returned stop
+// function is called, which also waits for the refresher to exit.
+//
+// A network-change recovery removes ctrld's DNS settings to expose the new
+// network's resolvers, but a network can publish them later than that, as with
+// IPv6 RDNSS. Reading once would leave the OS-resolver fallback on the previous
+// network's servers until the upstream recovers, and on an IPv6-only network
+// the upstream can only recover through that fallback (#628). Reads that find
+// no nameservers keep the current ones.
+func (p *prog) refreshOSResolverWhileRecovering(ctx context.Context) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			interval := osResolverRecoveryRefreshIntervals[min(i, len(osResolverRecoveryRefreshIntervals)-1)]
+			if !sleepWithContext(ctx, interval) {
+				return
+			}
+			ns := initializeOsResolver(true, recoveryResolverReason)
+			p.noteOSResolverRead(ns)
+			if len(ns) > 0 {
+				mainLog.Load().Debug().Msgf("Network-change recovery: OS resolver nameservers: %v", ns)
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // waitForUpstreamRecoveryFn is the seam of the upstream probe. A test drives
@@ -2787,4 +2913,17 @@ func (p *prog) buildRecoveryUpstreams(reason RecoveryReason) map[string]*ctrld.U
 // The network monitor uses transition-aware validation instead.
 func ValidateDefaultLocalIPsFromDelta(newState *netmon.State) {
 	validateDefaultLocalIPsFromDelta(newState, 0)
+}
+
+// isAdOSResolverLookup reports whether a rule-matched query is for the machine's
+// Active Directory domain and goes to the OS resolver alone. Such a query is a
+// LAN lookup; osResolver must not race it against Control D's public resolver.
+func (p *prog) isAdOSResolverLookup(upstreams []string, msg *dns.Msg) bool {
+	return len(upstreams) == 1 && upstreams[0] == upstreamOS && p.isAdDomainLookup(msg)
+}
+
+// isAdDomainLookup reports whether msg asks for a name under the machine's
+// Active Directory domain. A public answer for such a name is never correct.
+func (p *prog) isAdDomainLookup(msg *dns.Msg) bool {
+	return len(msg.Question) > 0 && p.isAdDomainQuery(msg)
 }

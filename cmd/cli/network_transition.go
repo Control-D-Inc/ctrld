@@ -41,6 +41,8 @@ var (
 	networkChangeIgnoredInterceptFn = (*prog).handleDNSInterceptIgnoredNetworkChange
 	handleRecoveryForTransitionFn   = (*prog).handleRecoveryForTransition
 	recoveryResetDNSFn              = (*prog).resetDNS
+	recoverySetDNSFn                = (*prog).setDNS
+	networkChangeReadOSResolverFn   = (*prog).readOSResolverOnNetworkChange
 )
 
 // Minor callbacks have no observation sequence in netmon v1.74.0. Read only

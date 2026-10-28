@@ -21,6 +21,15 @@ const (
 	nativeTargetMaxOutput  = 64 * 1024
 )
 
+// ipv6OnlyObservation is the first sighting of IPv6-only evidence that an
+// admission must still match after ipv6OnlyConfirmDelay.
+type ipv6OnlyObservation struct {
+	//lint:ignore U1000 used in Darwin code.
+	service nativeTargetService
+	//lint:ignore U1000 used in Darwin code.
+	since time.Time
+}
+
 var errNativeTargetOutputLimit = errors.New("native DNS evidence output exceeds limit")
 
 type nativeTargetOutput struct{ buf bytes.Buffer }
@@ -85,6 +94,24 @@ func parseNativeServiceName(out string) (string, error) {
 	return name, nil
 }
 
+// serviceName validates the configured service root for id and returns the
+// unique enabled networksetup service mapped to device. Both native readers
+// share it, so a fix to either check applies to both.
+func (r nativeTargetReader) serviceName(ctx context.Context, id, device string) (string, error) {
+	out, err := r.run(ctx, "show Setup:/Network/Service/"+id+"\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return "", err
+	}
+	if _, err := parseNativeServiceName(string(out)); err != nil {
+		return "", err
+	}
+	out, err = r.run(ctx, "", "/usr/sbin/networksetup", "-listnetworkserviceorder")
+	if err != nil {
+		return "", err
+	}
+	return targetNetworkServiceName(string(out), device)
+}
+
 // defaultService returns the actual primary service, not the first service
 // networksetup happens to list for the device. Unknown or changing state is
 // never absence evidence. The caller must carry and recheck the whole tuple.
@@ -130,19 +157,7 @@ func (r nativeTargetReader) defaultService(ctx context.Context, device string) (
 	if !matched {
 		return unknown, nil
 	}
-	out, err := r.run(ctx, "show Setup:/Network/Service/"+id+"\nquit\n", "/usr/sbin/scutil")
-	if err != nil {
-		return unknown, err
-	}
-	_, err = parseNativeServiceName(string(out))
-	if err != nil {
-		return unknown, err
-	}
-	out, err = r.run(ctx, "", "/usr/sbin/networksetup", "-listnetworkserviceorder")
-	if err != nil {
-		return unknown, err
-	}
-	name, err := targetNetworkServiceName(string(out), device)
+	name, err := r.serviceName(ctx, id, device)
 	if err != nil {
 		return unknown, err
 	}
@@ -242,7 +257,7 @@ func parseNativeIPv4Store(out string) (map[string]string, error) {
 				if !nativeServiceID.MatchString(value) {
 					return nil, errors.New("invalid service ID")
 				}
-			case "PrimaryInterface", "InterfaceName":
+			case "PrimaryInterface", "InterfaceName", "ConfirmedInterfaceName":
 				if value == "" || strings.ContainsAny(value, " \t\r\n{}") {
 					return nil, errors.New("invalid interface")
 				}
@@ -322,4 +337,196 @@ func nativeCLATAddresses(addrs []net.Addr) bool {
 		}
 	}
 	return clat && ipv6
+}
+
+// nativeStoreAbsent reports whether scutil printed its exact missing-key
+// response. Absence is evidence only in that exact form; a dictionary means
+// present, and anything else is unknown.
+func nativeStoreAbsent(out string) (bool, error) {
+	s := strings.TrimSpace(out)
+	if s == "No such key" {
+		return true, nil
+	}
+	if strings.HasPrefix(s, "<dictionary> {") {
+		return false, nil
+	}
+	return false, errors.New("unknown native store response")
+}
+
+func (r nativeTargetReader) absent(ctx context.Context, key string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	out, err := r.run(ctx, "show "+key+"\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return false, err
+	}
+	return nativeStoreAbsent(string(out))
+}
+
+// parseNativeIPv6Global reads only State:/Network/Global/IPv6. Unknown,
+// nested or duplicate fields fail closed, like the IPv4 reader.
+func parseNativeIPv6Global(out string) (id, device string, err error) {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 || lines[0] != "<dictionary> {" || lines[len(lines)-1] != "}" {
+		return "", "", errors.New("invalid native IPv6 dictionary")
+	}
+	seen := make(map[string]bool)
+	for _, line := range lines[1 : len(lines)-1] {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), " : ")
+		if !ok || strings.HasSuffix(value, "{") {
+			return "", "", errors.New("invalid native IPv6 field")
+		}
+		if seen[key] {
+			return "", "", errors.New("duplicate native IPv6 field")
+		}
+		seen[key] = true
+		switch key {
+		case "PrimaryService":
+			if !nativeServiceID.MatchString(value) {
+				return "", "", errors.New("invalid service ID")
+			}
+			id = value
+		case "PrimaryInterface":
+			if value == "" || strings.ContainsAny(value, " \t\r\n{}") {
+				return "", "", errors.New("invalid interface")
+			}
+			device = value
+		case "Router":
+			if ip := net.ParseIP(value); ip == nil || ip.To4() != nil {
+				return "", "", errors.New("invalid IPv6 router")
+			}
+		default:
+			return "", "", errors.New("unknown native IPv6 field")
+		}
+	}
+	if id == "" || device == "" {
+		return "", "", errors.New("incomplete native IPv6 dictionary")
+	}
+	return id, device, nil
+}
+
+// nativeIPv6OnlyAddresses requires routable IPv6 and no usable IPv4. An
+// IPv4 link-local address (169.254.0.0/16) is allowed: macOS self-assigns one
+// when DHCPv4 gives up, and it reaches no DNS server.
+func nativeIPv6OnlyAddresses(addrs []net.Addr) bool {
+	ipv6 := false
+	for _, addr := range addrs {
+		ip, _, err := net.ParseCIDR(addr.String())
+		if err != nil {
+			return false
+		}
+		if ip.To4() != nil {
+			if !ip.IsLinkLocalUnicast() {
+				return false
+			}
+			continue
+		}
+		if ip.IsGlobalUnicast() {
+			ipv6 = true
+		}
+	}
+	return ipv6
+}
+
+// ipv6OnlyService returns the primary service of a network that gives the
+// device no usable IPv4: configd publishes no global IPv4 state and at most a
+// link-local per-service IPv4 state, the IPv6 primary is this device, and the
+// interface holds only IPv6 plus at most an IPv4 link-local address. Before
+// macOS starts its CLAT, such a network has no DHCPv4 lease to read and no
+// CLAT to prove, yet it is just as DNS-less (issue #629). Unknown or changing
+// state is never absence evidence; the caller rechecks the tuple.
+func (r nativeTargetReader) ipv6OnlyService(ctx context.Context, device string) (nativeTargetService, error) {
+	unknown := nativeTargetService{}
+	if gone, err := r.absent(ctx, "State:/Network/Global/IPv4"); err != nil || !gone {
+		return unknown, err
+	}
+	out, err := r.run(ctx, "show State:/Network/Global/IPv6\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return unknown, err
+	}
+	id, primary, err := parseNativeIPv6Global(string(out))
+	if err != nil || primary != device {
+		return unknown, err
+	}
+	if none, err := r.serviceNoUsableIPv4(ctx, id, device); err != nil || !none {
+		return unknown, err
+	}
+	iface, err := r.interfaceByName(device)
+	if err != nil {
+		return unknown, err
+	}
+	if iface == nil || iface.Name != device || iface.Flags&net.FlagUp == 0 {
+		return unknown, nil
+	}
+	addrs, err := r.interfaceAddrs(iface)
+	if err != nil || !nativeIPv6OnlyAddresses(addrs) {
+		return unknown, err
+	}
+	name, err := r.serviceName(ctx, id, device)
+	if err != nil {
+		return unknown, err
+	}
+	if gone, err := r.absent(ctx, "State:/Network/Global/IPv4"); err != nil || !gone {
+		return unknown, errors.Join(err, errors.New("IPv4 appeared during IPv6-only discovery"))
+	}
+	out, err = r.run(ctx, "show State:/Network/Global/IPv6\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return unknown, err
+	}
+	if afterID, afterDevice, err := parseNativeIPv6Global(string(out)); err != nil || afterID != id || afterDevice != device {
+		return unknown, errors.Join(err, errors.New("default service changed during IPv6-only discovery"))
+	}
+	return nativeTargetService{ID: id, Name: name, Device: device}, nil
+}
+
+// serviceNoUsableIPv4 reports whether the per-service IPv4 state is absent or
+// only the link-local address macOS self-assigns after DHCPv4 gives up. On
+// the ctrld-qa macOS 26 guest (IPv6-only, no DHCPv4, CLAT blocked) that state
+// appears about 25 s after joining: one 169.254.0.0/16 address, no Router, no
+// CLAT46, and Global/IPv4 still absent. A DHCP, static or CLAT configuration
+// always fails this check, so it never hides a network that provides IPv4.
+func (r nativeTargetReader) serviceNoUsableIPv4(ctx context.Context, id, device string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	out, err := r.run(ctx, "show State:/Network/Service/"+id+"/IPv4\nquit\n", "/usr/sbin/scutil")
+	if err != nil {
+		return false, err
+	}
+	if gone, err := nativeStoreAbsent(string(out)); err != nil || gone {
+		return gone, err
+	}
+	values, err := parseNativeIPv4Store(string(out))
+	if err != nil {
+		return false, err
+	}
+	return nativeIPv4LinkLocalOnly(values, device), nil
+}
+
+// nativeIPv4LinkLocalOnly accepts only an IPv4 link-local configuration of
+// device: no router, no CLAT, not a primary, and every address in
+// 169.254.0.0/16.
+func nativeIPv4LinkLocalOnly(values map[string]string, device string) bool {
+	for _, key := range []string{"Router", "CLAT46", "PrimaryService", "PrimaryInterface", "DestinationAddresses", "ExcludedRoutes"} {
+		if _, ok := values[key]; ok {
+			return false
+		}
+	}
+	if values["InterfaceName"] != device {
+		return false
+	}
+	if c, ok := values["ConfirmedInterfaceName"]; ok && c != device {
+		return false
+	}
+	addrs := strings.Fields(values["AddressList"])
+	if len(addrs) == 0 {
+		return false
+	}
+	for _, a := range addrs {
+		if ip := net.ParseIP(a); ip == nil || ip.To4() == nil || !ip.IsLinkLocalUnicast() {
+			return false
+		}
+	}
+	return true
 }

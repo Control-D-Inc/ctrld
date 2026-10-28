@@ -42,6 +42,9 @@ func (p *prog) noteHostWoke(source string, gap time.Duration, state *netmon.Stat
 	if p.dnsConfig != nil {
 		p.dnsConfig.noteActivity(now)
 	}
+	// Connections opened before the sleep are likely dead, on the same
+	// network too, once a NAT or the server dropped them.
+	p.renewUpstreamConnections()
 	p.wake.note(now, wakeReport{source: source, gap: gap, state: state}, logHostWoke)
 }
 

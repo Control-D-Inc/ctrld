@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,6 +28,16 @@ import (
 )
 
 const resolvConfBackupFailedMsg = "open /etc/resolv.pre-ctrld-backup.conf: read-only file system"
+
+func errAddrInUse(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return errors.Is(opErr.Err, syscall.EADDRINUSE) || errors.Is(opErr.Err, windowsEADDRINUSE)
+	}
+	return false
+}
+
+var windowsEADDRINUSE = syscall.Errno(10048)
 
 // allocate loopback ip
 // sudo ip a add 127.0.0.2/24 dev lo

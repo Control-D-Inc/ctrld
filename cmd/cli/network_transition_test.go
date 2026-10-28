@@ -51,15 +51,19 @@ func sourceTestGlobals(t *testing.T) {
 	v4, v6 := ctrld.GetDefaultLocalIPv4(), ctrld.GetDefaultLocalIPv6()
 	valid, route := networkChangeValidInterfacesFn, networkChangeDefaultRouteIPFn
 	reconcile, ignored := networkChangeReconcileFn, networkChangeIgnoredInterceptFn
+	readOSResolver := networkChangeReadOSResolverFn
 	intercept := dnsIntercept
 	dnsIntercept = true
 	networkChangeValidInterfacesFn = func() map[string]struct{} { return map[string]struct{}{"en0": {}} }
 	networkChangeDefaultRouteIPFn = func() string { return "" }
+	// Nor may it read the host's nameservers.
+	networkChangeReadOSResolverFn = func(*prog) {}
 	t.Cleanup(func() {
 		ctrld.SetDefaultLocalIPv4(v4)
 		ctrld.SetDefaultLocalIPv6(v6)
 		networkChangeValidInterfacesFn, networkChangeDefaultRouteIPFn = valid, route
 		networkChangeReconcileFn, networkChangeIgnoredInterceptFn = reconcile, ignored
+		networkChangeReadOSResolverFn = readOSResolver
 		dnsIntercept = intercept
 	})
 }

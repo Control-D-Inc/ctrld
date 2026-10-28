@@ -24,8 +24,15 @@ DNS intercept mode works at a lower level than interface settings:
 
 ## Usage
 
+On macOS and Windows desktop editions, `dns` is the default mode for new installations: a fresh
+start that selects no mode, by flag or by `service.intercept_mode`, intercepts. An existing
+Standard installation keeps interface DNS mode across upgrades. `--intercept-mode off`
+selects interface DNS mode and is persisted. See
+[Intercept Mode Default](intercept-mode-default.md) for the full precedence.
+
 ```bash
-# Start ctrld with DNS intercept mode (auto-detects VPN search domains)
+# Start ctrld with DNS intercept mode (the default on macOS and Windows desktop editions)
+ctrld start --cd <resolver-uid>
 ctrld start --intercept-mode dns --cd <resolver-uid>
 
 # Hard intercept: all DNS through ctrld, no VPN split routing
@@ -37,6 +44,9 @@ ctrld start --intercept-mode dns -c /path/to/ctrld.toml
 # Run in foreground (debug)
 ctrld run --intercept-mode dns --cd <resolver-uid>
 ctrld run --intercept-mode hard --cd <resolver-uid>
+
+# Interface DNS mode instead (persisted as intercept_mode = "off")
+ctrld start --intercept-mode off --cd <resolver-uid>
 ```
 
 ### Intercept Modes
@@ -202,9 +212,9 @@ This is periodic (not just network-event-driven) because VPN software can clear 
 
 **ctrld's own traffic**: ctrld's upstream queries use DoH (HTTPS on port 443), not plain DNS on port 53, so the pf redirect does not create a loop for DoH upstreams. **Warning:** If an "os" upstream is configured (which uses plain DNS on port 53 to external servers), the pf redirect will capture ctrld's own outbound queries and create a loop. ctrld will log a warning at startup if this is detected. Use DoH upstreams when DNS intercept mode is active.
 
-## What Changes vs Default Mode
+## What Changes vs Interface DNS Mode
 
-| Behavior | Default Mode | DNS Intercept Mode |
+| Behavior | Interface DNS Mode | DNS Intercept Mode |
 |----------|-------------|-------------------|
 | Interface DNS settings | Set to `127.0.0.1` | **Not modified** |
 | DNS watchdog | Active (polls every 20s) | **Disabled** |
@@ -291,6 +301,11 @@ dig @127.0.0.1 example.com
 - **Linux**: Not supported. Linux uses `systemd-resolved` or `/etc/resolv.conf` which don't have the same VPN conflict issues. If needed in the future, `iptables`/`nftables` REDIRECT could be used.
 
 - **Split DNS for VPN internal domains**: In `--intercept-mode dns` mode, VPN search domains are auto-detected from virtual network adapters and forwarded to the VPN's DNS servers automatically. In `--intercept-mode hard` mode, VPN internal domains (e.g., `*.corp.local`) will NOT resolve unless configured as explicit upstream rules in ctrld's configuration.
+
+- **Tailscale Split DNS and App Connectors (macOS)**: The sandboxed Tailscale app keeps Split DNS routes with custom resolvers and App Connector domains inside its own resolver (`100.100.100.100`); they do not appear in `scutil --dns`. When a discovered resolver is Tailscale's, ctrld also reads Tailscale's route list from its LocalAPI (`/localapi/v0/dns-config`, Tailscale v1.98.0 or later) and routes those suffixes to `100.100.100.100`. The list is read on each VPN DNS refresh; after changing Split DNS or App Connectors, reconnect Tailscale to apply them. Names routed this way are resolved by the tailnet and not filtered by Control D, as in standard mode. If the LocalAPI is unavailable, only `scutil --dns` domains are used.
+  - **Loop guard**: a route is taken only when quad-100 can reach its resolvers without crossing pf's port-53 redirect. DoH and App Connector (peerAPI) resolvers always qualify. A plain port-53 resolver qualifies only on a Tailscale IPv4 address and only in non-exit mode, where the VPN DNS interface passthrough exists (section 9). Routes with any other resolver (public, LAN, IPv6, or any port-53 resolver in exit-node mode) keep going to Control D; routing them to quad-100 would loop back to ctrld.
+  - **Endpoint trust**: root-owned credentials are tried first (Standalone `/Library/Tailscale`, then `/var/run/tailscaled.socket`). The App Store extension is used last, and only when the process holding the `sameuserproof` file is named exactly `IPNExtension`, the file sits in a user's `Library/Group Containers/*.tailscale.ipn.macos/`, and the running process passes a Tailscale code-signature check.
+  - **Failed reads**: a failed LocalAPI read (for example a 503 while Tailscale starts) keeps the last good route set while quad-100 is still discovered, and retries after 5 s, 15 s and 60 s, then stops until the next network change.
 
 - **macOS mDNSResponder interaction**: On macOS, ctrld uses a workaround ("mDNSResponder hack") that binds to `0.0.0.0:53` instead of `127.0.0.1:53` and refuses queries from non-localhost sources. In dns-intercept mode, pf's `rdr` rewrites the destination IP to `127.0.0.1:53` but preserves the original source IP (e.g., `192.168.2.73`). The mDNSResponder source-IP check is automatically bypassed in dns-intercept mode because the pf/WFP rules already ensure only legitimate intercepted DNS traffic reaches ctrld's listener.
 

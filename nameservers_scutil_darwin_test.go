@@ -49,3 +49,40 @@ func TestScutilIPv6ProductionReader(t *testing.T) {
 		t.Fatalf("local-address reads=%d, want 1", localReads)
 	}
 }
+
+// While ctrld's own address is the only configured server, the full read
+// retries scutil, and the quick read runs it once.
+func TestScutilQuickReadDoesNotRetry(t *testing.T) {
+	old := scutilLocalAddresses
+	t.Cleanup(func() { scutilLocalAddresses = old })
+	scutilLocalAddresses = func() ([]netip.Addr, []netip.Addr, error) {
+		return nil, []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	dir := t.TempDir()
+	count := filepath.Join(dir, "count")
+	script := "#!/bin/sh\necho x >> '" + count + "'\nprintf '%s\\n' 'nameserver[0] : 127.0.0.1'\n"
+	if err := os.WriteFile(filepath.Join(dir, "scutil"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	runs := func() int {
+		b, _ := os.ReadFile(count)
+		os.Remove(count)
+		return len(b) / 2
+	}
+	for _, tc := range []struct {
+		name string
+		read func() []string
+		want int
+	}{
+		{"quick", func() []string { return getDNSFromScutilAttempts(1) }, 1},
+		{"full", getDNSFromScutil, 10},
+	} {
+		if got := tc.read(); len(got) != 0 {
+			t.Fatalf("%s read = %v, want none", tc.name, got)
+		}
+		if got := runs(); got != tc.want {
+			t.Fatalf("%s read ran scutil %d times, want %d", tc.name, got, tc.want)
+		}
+	}
+}

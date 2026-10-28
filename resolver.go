@@ -172,8 +172,9 @@ func defaultNameservers() []string {
 	return nss
 }
 
-// availableNameservers returns list of current available DNS servers of the system.
-func availableNameservers() []string {
+// availableNameservers returns list of current available DNS servers of the
+// system, as read reports them.
+func availableNameservers(read func() []string) []string {
 	var nss []string
 	// Ignore local addresses to prevent loop.
 	regularIPs, loopbackIPs, _ := netmon.LocalAddresses()
@@ -192,7 +193,7 @@ func availableNameservers() []string {
 			"Added local IP to OS resolverexclusion map: %s", ipStr)
 	}
 
-	systemNameservers := NameserversFn()
+	systemNameservers := read()
 	logSystemNameservers(systemNameservers)
 
 	for _, ns := range systemNameservers {
@@ -303,13 +304,30 @@ func InitializeOsResolverWithSystemNameservers(guardAgainstNoNameservers bool) (
 // InitializeOsResolverWithSystemNameservers with the reason that the journal
 // reports when the resolver set changes.
 func InitializeOsResolverWithSystemNameserversReason(guardAgainstNoNameservers bool, reason string) (effective, system []string) {
+	return initializeOsResolverFrom(NameserversFn, guardAgainstNoNameservers, reason)
+}
+
+// InitializeOsResolverQuickWithReason is InitializeOsResolverWithReason, with
+// guardAgainstNoNameservers set, that does not wait for the system to publish
+// its nameservers. It suits a read that may run while ctrld's own address is
+// the configured DNS server, where on macOS the full read retries scutil for
+// about a second, holding the lock every OS resolver query and lookup takes.
+func InitializeOsResolverQuickWithReason(reason string) []string {
+	effective, _ := initializeOsResolverFrom(quickNameserversFn, true, reason)
+	return effective
+}
+
+// quickNameserversFn is NameserversFn for InitializeOsResolverQuickWithReason.
+var quickNameserversFn = quickNameservers
+
+func initializeOsResolverFrom(read func() []string, guardAgainstNoNameservers bool, reason string) (effective, system []string) {
 	resolverMutex.Lock()
 	defer resolverMutex.Unlock()
 
 	setOsResolverReason(reason)
 	defer setOsResolverReason(osResolverReasonUnspecified)
 
-	system = availableNameservers()
+	system = availableNameservers(read)
 	if system == nil {
 		// A non-nil empty slice means discovery completed and found no DNS.
 		// Callers use nil to mean that discovery was not attempted.

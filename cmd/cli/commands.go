@@ -85,11 +85,25 @@ func initLogCmd() *cobra.Command {
 	logSendCmd := &cobra.Command{
 		Use:   "send",
 		Short: "Send runtime debug logs to ControlD",
+		Long:  "Send runtime debug logs to ControlD. On macOS, an administrator can enable service.allow_unprivileged_log_send and restart ctrld to allow standard users to send bounded diagnostics. --full still requires elevation.",
 		Args:  cobra.NoArgs,
-		PreRun: func(cmd *cobra.Command, args []string) {
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if delegatedLogSendCLI() {
+				if sendFullLogs {
+					return errors.New("log send --full requires administrator privileges")
+				}
+				return nil
+			}
 			checkHasElevatedPrivilege()
+			return nil
 		},
 		Run: func(cmd *cobra.Command, args []string) {
+			// The standard-user macOS route must precede service.Status and
+			// socketDir: both depend on the calling user's launchd/home context.
+			if delegatedLogSendCLI() {
+				runDelegatedLogSend(cmd.Context(), sendFullLogs)
+				return
+			}
 
 			p := &prog{router: router.New(&cfg, false)}
 			s, _ := newService(p, svcConfig)
@@ -321,7 +335,12 @@ func initRunCmd() *cobra.Command {
 	_ = runCmd.Flags().MarkHidden("iface")
 	runCmd.Flags().StringVarP(&cdUpstreamProto, "proto", "", ctrld.ResolverTypeDOH, `Control D upstream type, either "doh" or "doh3"`)
 	runCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
-	runCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'off' (disable interception and clear a persisted intercept_mode), 'dns' (with VPN split routing), or 'hard' (all DNS through ctrld, no VPN split routing)")
+	runCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'dns' (with VPN split routing), 'hard' (all DNS through ctrld, no VPN split routing), or 'off' (interface DNS mode, persisted as intercept_mode = \"off\"). Unset uses service.intercept_mode, then the platform default: 'dns' on macOS and Windows desktop editions, interface DNS mode elsewhere (Windows Server included)")
+
+	// Set by "ctrld start" on a service it installs with no intercept mode
+	// selected; not for users. See interceptModeDefaultFlag.
+	runCmd.Flags().BoolVar(&interceptModeDefault, strings.TrimPrefix(interceptModeDefaultFlag, "--"), false, "Apply the platform default intercept mode (set by ctrld start)")
+	_ = runCmd.Flags().MarkHidden(strings.TrimPrefix(interceptModeDefaultFlag, "--"))
 
 	runCmd.FParseErrWhitelist = cobra.FParseErrWhitelist{UnknownFlags: true}
 	rootCmd.AddCommand(runCmd)
@@ -452,7 +471,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 			osArgsEarly = filterEmptyStrings(osArgsEarly)
 			interceptOnly := onlyInterceptFlags(osArgsEarly)
 			svcExists := serviceConfigFileExists()
-			mainLog.Load().Debug().Msgf("intercept upgrade check: args=%v interceptOnly=%v svcConfigExists=%v interceptMode=%q", osArgsEarly, interceptOnly, svcExists, interceptMode)
+			mainLog.Load().Debug().Msg(interceptUpgradeCheckLine(osArgsEarly, interceptOnly, svcExists, interceptMode))
 			if interceptOnly && svcExists {
 				// An explicit "off" argument must override a previously persisted config
 				// value while the service clears that value on startup.
@@ -520,6 +539,9 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 									mainLog.Load().Notice().Msg("DNS hard intercept mode active — all DNS traffic intercepted, no VPN split routing")
 								default:
 									mainLog.Load().Notice().Msg("DNS intercept mode active — all DNS traffic intercepted via OS packet filter")
+								}
+								if res.InterceptModeSource == interceptModeSourceDefault {
+									mainLog.Load().Notice().Msg("Intercept mode is the default on this platform; run \"ctrld start --intercept-mode off\" to use interface DNS mode instead")
 								}
 							} else {
 								name := res.Name
@@ -711,6 +733,30 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 
 			initInteractiveLogging()
 
+			// Record the intercept mode in the service's arguments, so the
+			// installed service can tell a fresh install from one that predates
+			// the dns default (#589). See installInterceptMode.
+			var existingArgs []string
+			if isCtrldInstalled && interceptMode == "" {
+				args, err := installedServiceArgs()
+				if err != nil {
+					mainLog.Load().Debug().Err(err).Msg("could not read the arguments of the existing service")
+				}
+				existingArgs = args
+			}
+			mode, markDefault := installInterceptMode(interceptMode, &cfg, isCtrldInstalled, existingArgs)
+			switch {
+			case mode != "":
+				if _, hadMode := interceptModeFromArgs(existingArgs); !hadMode {
+					mainLog.Load().Notice().Msg("Existing service selects no intercept mode; keeping interface DNS mode (--intercept-mode off)")
+				}
+				sc.Arguments = append(sc.Arguments, "--intercept-mode", mode)
+				interceptMode = mode
+			case markDefault:
+				// One argument with an inline value: see interceptModeDefaultFlag.
+				sc.Arguments = append(sc.Arguments, interceptModeDefaultFlag+"=true")
+			}
+
 			if nextdns != "" {
 				removeNextDNSFromArgs(sc)
 			}
@@ -844,7 +890,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 	startCmd.Flags().BoolVarP(&startOnly, "start_only", "", false, "Do not install new service")
 	_ = startCmd.Flags().MarkHidden("start_only")
 	startCmd.Flags().BoolVarP(&rfc1918, "rfc1918", "", false, "Listen on RFC1918 addresses when 127.0.0.1 is the only listener")
-	startCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'off' (disable interception and clear a persisted intercept_mode), 'dns' (with VPN split routing), or 'hard' (all DNS through ctrld, no VPN split routing)")
+	startCmd.Flags().StringVarP(&interceptMode, "intercept-mode", "", "", "OS-level DNS interception mode: 'dns' (with VPN split routing), 'hard' (all DNS through ctrld, no VPN split routing), or 'off' (interface DNS mode, persisted as intercept_mode = \"off\"). Unset uses service.intercept_mode, then the platform default: 'dns' on macOS and Windows desktop editions, interface DNS mode elsewhere (Windows Server included)")
 
 	routerCmd := &cobra.Command{
 		Use: "setup",
@@ -1092,13 +1138,19 @@ func initRestartCmd() *cobra.Command {
 					if validateConfigErr != nil {
 						timeout = 5 * time.Second
 					}
-					if cc := newSocketControlClientWithTimeout(context.TODO(), s, dir, timeout); cc != nil {
+					// Only a ready service counts. Restart replaces nothing, so
+					// there is nothing to roll back, but a service that came
+					// back without finishing its start must not be reported as
+					// restarted cleanly.
+					if cc := newReadySocketControlClientWithTimeout(context.TODO(), s, dir, timeout); cc != nil {
 						_, _ = cc.post(ifacePath, nil)
 					} else {
-						mainLog.Load().Warn().Err(err).Msg("Service was restarted, but ctrld process may not be ready yet")
+						mainLog.Load().Warn().Msgf("Service was restarted, but ctrld did not report ready within %s; check `ctrld status`", timeout)
+						return
 					}
 				} else {
 					mainLog.Load().Warn().Err(err).Msg("Service was restarted, but could not ping the control server")
+					return
 				}
 				mainLog.Load().Notice().Msg("Service restarted")
 			} else {
@@ -1656,7 +1708,9 @@ func initUpgradeCmd() *cobra.Command {
 				}
 				if doTasks(tasks) {
 					if dir, err := socketDir(); err == nil {
-						if cc := newSocketControlClient(context.TODO(), s, dir); cc != nil {
+						// Only a ready service counts: a build that starts but
+						// never becomes ready must be rolled back.
+						if cc := newReadySocketControlClient(context.TODO(), s, dir); cc != nil {
 							_, _ = cc.post(ifacePath, nil)
 							return true
 						}

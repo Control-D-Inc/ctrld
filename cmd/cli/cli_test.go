@@ -5,8 +5,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Control-D-Inc/ctrld"
 )
 
 func Test_writeConfigFile(t *testing.T) {
@@ -20,6 +23,31 @@ func Test_writeConfigFile(t *testing.T) {
 
 	_, err = os.Stat(configPath)
 	require.NoError(t, err)
+}
+
+// A managed start rewrites the config file only when the API answer differs
+// from it, e.g. a custom config added after install.
+func Test_configFileDiffers(t *testing.T) {
+	oldV, oldFile, oldPath, oldUID := v, defaultConfigFile, configPath, cdUID
+	t.Cleanup(func() { v, defaultConfigFile, configPath, cdUID = oldV, oldFile, oldPath, oldUID })
+	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
+	configPath = filepath.Join(t.TempDir(), "ctrld.toml")
+	cdUID = "test-uid"
+
+	generated := &ctrld.Config{Upstream: map[string]*ctrld.UpstreamConfig{"0": {Type: "doh", Endpoint: "https://dns.controld.com/test-uid"}}}
+	assert.True(t, configFileDiffers(generated), "missing file must differ")
+	require.NoError(t, writeConfigFile(generated))
+	assert.False(t, configFileDiffers(generated), "file written from the same config must not differ")
+
+	custom := *generated
+	custom.Service.AllowUnprivilegedLogSend = true
+	assert.True(t, configFileDiffers(&custom), "custom config added after install must differ")
+	require.NoError(t, writeConfigFile(&custom))
+	assert.False(t, configFileDiffers(&custom))
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "allow_unprivileged_log_send = true")
+	assert.True(t, configFileDiffers(generated), "custom config removed must differ")
 }
 
 func Test_isStableVersion(t *testing.T) {

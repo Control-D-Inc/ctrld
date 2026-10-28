@@ -172,12 +172,21 @@ func TestNetworkShutdownCancelsIndefiniteRecoveryWait(t *testing.T) {
 	oldReset, oldIntercept := recoveryResetDNSFn, dnsIntercept
 	dnsIntercept = false
 	defer func() { recoveryResetDNSFn, dnsIntercept = oldReset, oldIntercept }()
-	p := &prog{cfg: &ctrld.Config{}}
+	// The only upstream is a loopback port nothing listens on, so recovery
+	// can never succeed. An empty upstream map no longer does that: recovery
+	// then checks upstream.os, and on a host with working DNS that answers,
+	// completes the recovery and turns the test into a probe of the host.
+	dead := &ctrld.UpstreamConfig{Type: ctrld.ResolverTypeLegacy, Endpoint: deadUDPAddr(t), Timeout: 300}
+	dead.Init()
+	cfg := &ctrld.Config{Upstream: map[string]*ctrld.UpstreamConfig{"0": dead}}
+	// Recovery reads the upstream monitor, which run creates before network
+	// monitoring can start any recovery.
+	p := &prog{cfg: cfg, um: newUpstreamMonitor(cfg)}
 	entered := make(chan struct{})
 	recoveryResetDNSFn = func(*prog, bool, bool) { close(entered) }
 	recovered := make(chan struct{})
-	// An empty upstream map can never recover. Shutdown must cancel that wait
-	// without waiting on a mutex held for the recovery's entire lifetime.
+	// Shutdown must cancel that wait without waiting on a mutex held for the
+	// recovery's entire lifetime.
 	go func() { p.handleRecovery(RecoveryReasonRegularFailure); close(recovered) }()
 	waitNetworkShutdownSignal(t, entered, "recovery reset seam")
 	closed := make(chan struct{})

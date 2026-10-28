@@ -351,7 +351,6 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 	p.initInternalLogWriterOnce.Do(func() {
 		mainLog.Load().Notice().Msg("internal logging enabled")
 		p.internalLogWriter = newLogWriter()
-		p.internalLogSent = time.Now().Add(-logWriterSentInterval)
 		p.internalJournalWriter = newSmallLogWriter()
 		p.openInternalLogFiles()
 		// A restart appends to the file it finds, so the header marks the

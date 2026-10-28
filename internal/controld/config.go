@@ -49,6 +49,45 @@ const (
 	ReasonTokenDisabled     = "token_disabled"
 )
 
+// MaintenanceCode is the error.code the API answers with in hard maintenance
+// mode (Application::ERROR_HARD_MAINTENANCE), on HTTP 503, for every public
+// API request including /utility and /logs.
+//
+// The code decides. The message match in IsMaintenance stays as the
+// compatibility path for deployments that answer without it.
+//
+// Two neighbouring codes are deliberately not maintenance. 50301 is the
+// generic "service unavailable" (a provisioning rate limit, Internal Domains or
+// log storage down), a failure rather than a maintenance window. 50003 is
+// read-only mode, which only gates authenticated controllers and so never
+// answers /utility or /logs; its message ("Maintenance is in progress, cannot
+// make any modifications.") does not match MaintenanceMessage either.
+const MaintenanceCode = 50302
+
+// MaintenanceMessage is what the API says while it is in hard maintenance. It
+// classifies an answer that carries no MaintenanceCode. Matched as a substring because the answer carries guidance after it
+// ("Please try again later.") that is not part of the condition itself.
+const MaintenanceMessage = "Maintenance is in progress."
+
+// IsMaintenance reports whether err is the Control D API saying it is in
+// maintenance, rather than refusing this particular request.
+//
+// Maintenance is temporary and says nothing about the configuration that was
+// asked for, so a caller must not treat it as a permanent rejection: the same
+// request succeeds once the window ends. The HTTP status cannot classify it on
+// its own, because a maintenance answer can arrive with a client-error status
+// that otherwise means "this request will be refused again".
+func IsMaintenance(err error) bool {
+	var uer *ErrorResponse
+	if !errors.As(err, &uer) {
+		return false
+	}
+	if uer.ErrorField.Code == MaintenanceCode {
+		return true
+	}
+	return strings.Contains(uer.ErrorField.Message, MaintenanceMessage)
+}
+
 // ResolverConfig represents Control D resolver data.
 type ResolverConfig struct {
 	DOH   string `json:"doh"`
@@ -182,9 +221,36 @@ type UtilityOrgRequest struct {
 
 // ResolverConfigRequest contains request data for fetching resolver config.
 type ResolverConfigRequest struct {
-	RawUID   string
-	Version  string
-	Metadata map[string]string
+	RawUID               string
+	Version              string
+	Metadata             map[string]string
+	IncludeHostnameHints bool
+}
+
+var hostnameHintsFn = hostnameHints
+
+func resolverConfigUtilityRequest(req *ResolverConfigRequest, uid, clientID string) utilityRequest {
+	var metadata map[string]string
+	if req.Metadata != nil {
+		metadata = make(map[string]string, len(req.Metadata))
+		for key, value := range req.Metadata {
+			metadata[key] = value
+		}
+	}
+	if req.IncludeHostnameHints {
+		if metadata == nil {
+			metadata = make(map[string]string)
+		}
+		for key, value := range hostnameHintsFn() {
+			metadata["hostname_"+key] = value
+		}
+	}
+
+	return utilityRequest{
+		UID:      uid,
+		ClientID: clientID,
+		Metadata: metadata,
+	}
 }
 
 // LogsRequest contains request data for sending runtime logs to API.
@@ -196,13 +262,7 @@ type LogsRequest struct {
 // FetchResolverConfig fetch Control D config for given uid.
 func FetchResolverConfig(ctx context.Context, req *ResolverConfigRequest, cdDev bool) (*ResolverConfig, error) {
 	uid, clientID := ParseRawUID(req.RawUID)
-	uReq := utilityRequest{
-		UID:      uid,
-		Metadata: req.Metadata,
-	}
-	if clientID != "" {
-		uReq.ClientID = clientID
-	}
+	uReq := resolverConfigUtilityRequest(req, uid, clientID)
 	body, _ := json.Marshal(uReq)
 	return postUtilityAPI(ctx, req.Version, cdDev, false, bytes.NewReader(body))
 }

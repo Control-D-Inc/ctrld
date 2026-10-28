@@ -33,9 +33,17 @@ func readNativeTargetStaticDNS(ctx context.Context, iface *net.Interface) ([]str
 }
 
 func nativeCLATDefaultService(ctx context.Context, device string) (nativeTargetService, error) {
-	return (nativeTargetReader{
+	return newNativeTargetReader().defaultService(ctx, device)
+}
+
+func nativeIPv6OnlyDefaultService(ctx context.Context, device string) (nativeTargetService, error) {
+	return newNativeTargetReader().ipv6OnlyService(ctx, device)
+}
+
+func newNativeTargetReader() nativeTargetReader {
+	return nativeTargetReader{
 		run:             runNativeTargetCommand,
 		interfaceByName: net.InterfaceByName,
 		interfaceAddrs:  (*net.Interface).Addrs,
-	}).defaultService(ctx, device)
+	}
 }

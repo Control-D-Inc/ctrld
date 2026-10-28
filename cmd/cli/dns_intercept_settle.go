@@ -2,7 +2,13 @@ package cli
 
 import "github.com/Control-D-Inc/ctrld"
 
+// initializeOsResolver re-reads the system nameservers into the OS resolver.
+// Tests replace it, so they never read the host's resolver configuration.
 var initializeOsResolver = ctrld.InitializeOsResolverWithReason
+
+// initializeOsResolverQuick is initializeOsResolver without waiting for the
+// system to publish its nameservers.
+var initializeOsResolverQuick = ctrld.InitializeOsResolverQuickWithReason
 
 // Reasons that the journal reports when the resolver set changes. Each one
 // names the code path that read the resolvers of the host.
@@ -11,6 +17,7 @@ const (
 	osResolverReasonWakeProbe      = "wake_probe"
 	osResolverReasonVPNSettle      = "vpn_settle"
 	osResolverReasonDelayedRecheck = "delayed_recheck"
+	osResolverReasonNetworkChange  = "network_change"
 )
 
 func (p *prog) refreshDNSAfterVPNSettle(reason string) (routes, domainlessServers, exemptions int) {

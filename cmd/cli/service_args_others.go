@@ -36,6 +36,12 @@ func verifyServiceRegistration() error {
 	return nil
 }
 
+// installedServiceArgs is not implemented on this platform. It has no dns
+// intercept default, so installInterceptMode never needs the arguments here.
+func installedServiceArgs() ([]string, error) {
+	return nil, errServiceFlagsUnsupported
+}
+
 // removeServiceFlag is not yet implemented on this platform.
 func removeServiceFlag(flag string) error {
 	return errServiceFlagsUnsupported
