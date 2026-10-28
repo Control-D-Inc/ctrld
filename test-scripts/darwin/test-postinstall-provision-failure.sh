@@ -472,12 +472,13 @@ assert_contains "$output" "stage=package code=PROFILE_PREFS_MISSING (exit 1)" "e
 assert_contains "$output" "ProvisionToken value is empty" "empty-token: names the empty value, not a missing profile"
 assert_not_contains "$calls_out" "ctrld-client start" "empty-token: ctrld start never invoked"
 
-# --- Case: control character in token arrives escaped, passes preflight ----
-# 'defaults read' prints a non-whitespace control character as escaped text
-# (a byte 0x01 becomes the four characters \001), so the preflight sees a
-# plain 6-64 character value and hands it to ctrld unchanged. The stub emits
-# that escaped text; real-defaults mode stores the raw byte and lets the
-# real binary escape it.
+# --- Case: control character in token passes preflight unchanged ---------
+# The preflight checks only length and whitespace. A non-whitespace control
+# character is ctrld's job to reject, so postinstall must hand ctrld exactly
+# what 'defaults read' printed. The stub prints the escaped text \001.
+# Real-defaults mode stores the raw byte and compares against what the real
+# binary prints for it. That rendering is not the same on every macOS
+# runner, and it is not part of the postinstall contract.
 
 reset_fakes
 if [ "$real_defaults" = "1" ]; then
@@ -488,9 +489,25 @@ fi
 export FAKE_CTRLD_EXIT=0
 run_case control-char-token-escaped
 
-assert_eq "$exit_code" "0" "control-char-token-escaped: preflight passes the escaped text"
-assert_contains "$calls_out" 'ctrld-client start --cd-org=org-v1-abc\001def' "control-char-token-escaped: ctrld receives the escaped text unchanged"
-assert_not_contains "$output" "PROVISION_TOKEN_MALFORMED" "control-char-token-escaped: preflight does not classify escaped text as malformed"
+if [ "$real_defaults" = "1" ]; then
+    # Same read as the production script, against the same fixture plist.
+    ctrl_expected=$(defaults read "$prefs" ProvisionToken 2>/dev/null) || ctrl_expected=""
+    printf 'control-char-token-escaped: macOS %s defaults read prints:' "$(sw_vers -productVersion 2>/dev/null || echo unknown)" >&2
+    printf '%s' "$ctrl_expected" | od -An -c >&2
+    nl='
+'
+    assert_not_contains "$ctrl_expected" "$nl" "control-char-token-escaped: fixture read stays on one line"
+else
+    ctrl_expected='org-v1-abc\001def'
+fi
+case "$ctrl_expected" in
+    org-v1-abc?*def) ;;
+    *) fail "control-char-token-escaped: fixture read did not keep the control character between abc and def (got '$ctrl_expected')" ;;
+esac
+
+assert_eq "$exit_code" "0" "control-char-token-escaped: preflight passes the control-character value"
+assert_eq "$(sed -n '/^ctrld-client start /p' "$calls")" "ctrld-client start --cd-org=$ctrl_expected" "control-char-token-escaped: ctrld receives the defaults read text unchanged"
+assert_not_contains "$output" "PROVISION_TOKEN_MALFORMED" "control-char-token-escaped: preflight does not classify the value as malformed"
 
 # --- Case: UseDevEnvironment false -> no warning, no --dev -----------------
 
