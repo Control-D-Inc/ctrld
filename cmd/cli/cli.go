@@ -1750,6 +1750,7 @@ func uninstall(p *prog, s service.Service) {
 		// restore static DNS settings or DHCP
 		p.resetDNS(false, true)
 		restoreSavedStaticDNS(p.runningIface, true)
+		removeCtrldGroup()
 
 		mainLog.Load().Notice().Msg("Service uninstalled")
 		return

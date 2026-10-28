@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -158,78 +159,99 @@ type pfState struct {
 	targetDiagnostic dnsTargetDecisionDiagnostic
 }
 
-// ensureCtrldGroup creates the _ctrld system group if it doesn't exist and returns its GID.
-// Uses dscl (macOS Directory Services) to manage the group. This function is idempotent —
-// safe to call multiple times across restarts. The group is intentionally never removed
-// on shutdown to avoid race conditions during rapid restart cycles.
+// ensureCtrldGroup makes sure the _ctrld system group exists with a GID that
+// is ctrld's alone, and returns it. See ensureCtrldGroupIn. The group is
+// intentionally never removed on shutdown to avoid race conditions during
+// rapid restart cycles; uninstall removes it.
 func ensureCtrldGroup() (int, error) {
-	// Check if the group already exists.
-	out, err := exec.Command("dscl", ".", "-read", "/Groups/"+pfGroupName, "PrimaryGroupID").CombinedOutput()
-	if err == nil {
-		// Group exists — parse and return its GID.
-		// Output format: "PrimaryGroupID: 350"
-		line := strings.TrimSpace(string(out))
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) == 2 {
-			gid, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err != nil {
-				return 0, fmt.Errorf("failed to parse existing group GID from %q: %w", line, err)
-			}
-			mainLog.Load().Debug().Msgf("DNS intercept: group %s already exists with GID %d", pfGroupName, gid)
-			return gid, nil
-		}
-		return 0, fmt.Errorf("unexpected dscl output for existing group: %q", line)
-	}
+	return ensureCtrldGroupIn(dsclGroupDirectory{}, pfGroupName)
+}
 
-	// Group doesn't exist — find an unused GID in the 350-450 range (system group range on macOS,
-	// above Apple's reserved range but below typical user groups).
-	listOut, err := exec.Command("dscl", ".", "-list", "/Groups", "PrimaryGroupID").CombinedOutput()
+// removeCtrldGroup deletes the _ctrld group on uninstall, so its GID is free
+// for other software once ctrld is gone.
+func removeCtrldGroup() {
+	dir := dsclGroupDirectory{}
+	if _, found, err := dir.localGID(pfGroupName); err != nil || !found {
+		return
+	}
+	if err := dir.deleteGroup(pfGroupName); err != nil {
+		mainLog.Load().Warn().Err(err).Msgf("Could not remove system group %s", pfGroupName)
+		return
+	}
+	mainLog.Load().Debug().Msgf("Removed system group %s", pfGroupName)
+}
+
+// dsclGroupDirectory is groupDirectory over dscl.
+type dsclGroupDirectory struct{}
+
+// ctrldGroupSearchTimeout bounds a /Search lookup, which waits on every bound
+// directory node; an unreachable Active Directory must not stall startup.
+const ctrldGroupSearchTimeout = 5 * time.Second
+
+func (dsclGroupDirectory) localGID(name string) (int, bool, error) {
+	out, err := exec.Command("dscl", ".", "-read", "/Groups/"+name, "PrimaryGroupID").CombinedOutput()
+	gid, perr := parseDsclPrimaryGroupID(string(out))
+	if errors.Is(perr, errDSRecordNotFound) {
+		return 0, false, nil
+	}
 	if err != nil {
-		return 0, fmt.Errorf("failed to list existing groups: %w (output: %s)", err, strings.TrimSpace(string(listOut)))
+		return 0, false, fmt.Errorf("%w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
+	if perr != nil {
+		return 0, false, perr
+	}
+	return gid, true, nil
+}
 
-	usedGIDs := make(map[int]bool)
-	for _, line := range strings.Split(string(listOut), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 {
-			if gid, err := strconv.Atoi(fields[len(fields)-1]); err == nil {
-				usedGIDs[gid] = true
-			}
-		}
-	}
-
-	chosenGID := 0
-	for gid := 350; gid <= 450; gid++ {
-		if !usedGIDs[gid] {
-			chosenGID = gid
-			break
-		}
-	}
-	if chosenGID == 0 {
-		return 0, fmt.Errorf("no unused GID found in range 350-450")
-	}
-
-	// Create the group record. Handle eDSRecordAlreadyExists gracefully in case of a
-	// race with another ctrld instance.
-	createOut, err := exec.Command("dscl", ".", "-create", "/Groups/"+pfGroupName).CombinedOutput()
+func (dsclGroupDirectory) localGIDs() (map[int]bool, error) {
+	out, err := exec.Command("dscl", ".", "-list", "/Groups", "PrimaryGroupID").CombinedOutput()
 	if err != nil {
-		outStr := strings.TrimSpace(string(createOut))
-		if !strings.Contains(outStr, "eDSRecordAlreadyExists") {
-			return 0, fmt.Errorf("failed to create group record: %w (output: %s)", err, outStr)
+		return nil, fmt.Errorf("%w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+	return parseDsclGIDList(string(out)), nil
+}
+
+func (dsclGroupDirectory) groupsWithGID(gid int) ([]string, error) {
+	// /Search covers every node macOS resolves group IDs through, including
+	// a bound LDAP or Active Directory, which the local node does not show.
+	ctx, cancel := context.WithTimeout(context.Background(), ctrldGroupSearchTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "dscl", "/Search", "-search", "/Groups", "PrimaryGroupID", strconv.Itoa(gid)).Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseDsclSearch(string(out)), nil
+}
+
+func (d dsclGroupDirectory) createGroup(name string, gid int) error {
+	// Handle eDSRecordAlreadyExists gracefully in case of a race with another ctrld instance.
+	if out, err := exec.Command("dscl", ".", "-create", "/Groups/"+name).CombinedOutput(); err != nil {
+		if !strings.Contains(string(out), "eDSRecordAlreadyExists") {
+			return fmt.Errorf("%w (output: %s)", err, strings.TrimSpace(string(out)))
 		}
 	}
-
-	// Set the GID. This is idempotent — dscl overwrites the attribute if it already exists.
-	if out, err := exec.Command("dscl", ".", "-create", "/Groups/"+pfGroupName, "PrimaryGroupID", strconv.Itoa(chosenGID)).CombinedOutput(); err != nil {
-		return 0, fmt.Errorf("failed to set group GID: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	if err := d.setGID(name, gid); err != nil {
+		return err
 	}
-
-	if out, err := exec.Command("dscl", ".", "-create", "/Groups/"+pfGroupName, "RealName", "ctrld DNS Intercept Group").CombinedOutput(); err != nil {
-		return 0, fmt.Errorf("failed to set group RealName: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	if out, err := exec.Command("dscl", ".", "-create", "/Groups/"+name, "RealName", "ctrld DNS Intercept Group").CombinedOutput(); err != nil {
+		return fmt.Errorf("could not set RealName: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
+	return nil
+}
 
-	mainLog.Load().Info().Msgf("DNS intercept: created system group %s with GID %d", pfGroupName, chosenGID)
-	return chosenGID, nil
+func (dsclGroupDirectory) setGID(name string, gid int) error {
+	// dscl overwrites the attribute if it already exists.
+	if out, err := exec.Command("dscl", ".", "-create", "/Groups/"+name, "PrimaryGroupID", strconv.Itoa(gid)).CombinedOutput(); err != nil {
+		return fmt.Errorf("could not set GID %d: %w (output: %s)", gid, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (dsclGroupDirectory) deleteGroup(name string) error {
+	if out, err := exec.Command("dscl", ".", "-delete", "/Groups/"+name).CombinedOutput(); err != nil {
+		return fmt.Errorf("%w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // setCtrldGroupID sets the process's effective GID to the _ctrld group.
