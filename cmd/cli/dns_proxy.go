@@ -192,6 +192,11 @@ func (p *prog) serveDNS(ctx context.Context, listenerNum string) error {
 	}
 
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
+		// Before the semaphore: a returned query of ctrld's own must be answered
+		// even when every slot is held by the queries waiting for it.
+		if p.handleSelfQuery(w, m) {
+			return
+		}
 		p.handleDNSQuery(w, m, listenerNum, listenerConfig)
 	})
 

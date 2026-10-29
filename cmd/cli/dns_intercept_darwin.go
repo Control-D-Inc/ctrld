@@ -308,9 +308,14 @@ func (p *prog) startDNSIntercept() error {
 	}
 
 	p.startInterceptBackgroundWork()
+	go logInterceptExemptionContextFn()
 
 	return nil
 }
+
+// logInterceptExemptionContextFn is a seam: tests that drive startDNSIntercept
+// must not run the host commands behind it.
+var logInterceptExemptionContextFn = logInterceptExemptionContext
 
 // installPFInterceptFn is the privileged-install seam. Everything behind it needs root,
 // a live pf and a writable /etc/pf.anchors - which is what kept startDNSIntercept, and

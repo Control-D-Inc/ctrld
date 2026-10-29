@@ -182,6 +182,10 @@ type prog struct {
 
 	loopMu sync.Mutex
 	loop   map[string]bool
+	// selfLoops reports ctrld's own DNS queries that came back to the listener.
+	selfLoops selfLoopReporter
+	// selfLoopSuspects reports copies that matched a question, not an ID.
+	selfLoopSuspects selfLoopReporter
 
 	recoveryCancelMu sync.Mutex
 	recoveryCancel   context.CancelFunc

@@ -532,6 +532,8 @@ func internalDomainFailureReason(err error) string {
 	switch {
 	case err == nil:
 		return "no_answer"
+	case errors.Is(err, ctrld.ErrSelfLoop):
+		return "self_loop"
 	case errors.Is(err, syscall.ECONNREFUSED):
 		return "refused"
 	case errors.Is(err, syscall.EADDRNOTAVAIL):
