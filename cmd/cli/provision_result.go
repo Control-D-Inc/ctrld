@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -287,6 +288,9 @@ func clearProvisionResult() {
 	}
 }
 
+// pendingProvisionFailure holds a failure recorded instead of exited on.
+var pendingProvisionFailure atomic.Pointer[provisionResult]
+
 // failProvision persists the result, prints the identifier line, unblocks a
 // waiting "ctrld start" via notify, then exits with the stage code. The write
 // comes first so the file survives even if logging or notify misbehaves.
@@ -297,6 +301,11 @@ func failProvision(r *provisionResult, notify func()) {
 	mainLog.Load().Error().Msg(r.failureLine())
 	if notify != nil {
 		notify()
+	}
+	// On mobile ctrld shares the host app's process, so os.Exit would kill the app.
+	if isMobile() {
+		pendingProvisionFailure.Store(r)
+		return
 	}
 	provisionExit(r.ExitCode)
 }

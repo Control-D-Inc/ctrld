@@ -182,6 +182,19 @@ func initCLI() *cobra.Command {
 	return rootCmd
 }
 
+// abortOnProvisionFailure reports a failure recorded instead of exited on, and
+// reports whether startup must stop. Only mobile records one.
+func abortOnProvisionFailure(appCallback *AppCallback) bool {
+	r := pendingProvisionFailure.Swap(nil)
+	if r == nil {
+		return false
+	}
+	if appCallback != nil && appCallback.Exit != nil {
+		appCallback.Exit(r.failureLine())
+	}
+	return true
+}
+
 // isMobile reports whether the current OS is a mobile platform.
 var isMobile = func() bool {
 	return runtime.GOOS == "android" || runtime.GOOS == "ios"
@@ -272,6 +285,10 @@ func CheckDeactivationPin(pin int64, stopCh chan struct{}) int {
 
 // run runs ctrld cli with given app callback and stop channel.
 func run(appCallback *AppCallback, stopCh chan struct{}) {
+	// A failure belongs to the run that recorded it: drop one an earlier run
+	// left behind, and report any this run records, whichever path it returns by.
+	pendingProvisionFailure.Store(nil)
+	defer abortOnProvisionFailure(appCallback)
 	if stopCh == nil {
 		failRunUnclassified(mainLog.Load().Error(), "run() called with a nil stop channel", nil)
 		return
@@ -405,6 +422,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		cdUID = uid
 		p.initLoggingAfterProvisioning()
 	}
+	if abortOnProvisionFailure(appCallback) {
+		return
+	}
 	if cdUID != "" {
 		if !validateCdUpstreamProtocol(p.notifyExitToLogServer) {
 			return
@@ -452,6 +472,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 
 	updated := updateListenerConfig(&cfg, p.notifyExitToLogServer)
+	if abortOnProvisionFailure(appCallback) {
+		return
+	}
 	// Whether the file on disk, before anything below rewrites it, is already
 	// one the API produced for this identity.
 	wasManagedConfig := managedConfigRecordedFor(cdUID)

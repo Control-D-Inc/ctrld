@@ -1025,6 +1025,9 @@ func (p *prog) setupUpstream(cfg *ctrld.Config) {
 func (p *prog) reportServeDNSFailure(listenerNum string, err error) {
 	msg := fmt.Sprintf("unable to start dns proxy on listener.%s: %v", listenerNum, err)
 	failRunUnclassified(p.Error().Err(err), msg, p.notifyExitToLogServer)
+	// On mobile the run is already up and waiting for the host app, so report
+	// now: the app stops the run, as it would have done for an exit.
+	abortOnProvisionFailure(p.appCallback)
 }
 
 // run runs the ctrld main components.
