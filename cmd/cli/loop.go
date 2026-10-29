@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -111,7 +112,9 @@ func (p *prog) checkDnsLoop() {
 	}
 	p.loopMu.Unlock()
 
-	for uid := range p.loop {
+	// Range over the local copy: p.loop is shared with the listener, which
+	// marks a returned query's upstream while this loop runs.
+	for uid := range upstream {
 		msg := loopTestMsg(uid)
 		uc := upstream[uid]
 		// Skipping upstream which is being marked as down.
@@ -131,7 +134,13 @@ func (p *prog) checkDnsLoop() {
 			timeout = time.Millisecond * time.Duration(uc.Timeout)
 		}
 		if err := resolveLoopTestMsg(resolver, msg, timeout); err != nil {
-			logUpstreamProbeFailure(reference[uid], uc, err, mainLog.Load().Warn, "could not send DNS loop check query")
+			level := mainLog.Load().Warn
+			// The probe came back to the listener, which marked the loop and
+			// reported it once already; a warning per probe adds nothing.
+			if errors.Is(err, ctrld.ErrSelfLoop) {
+				level = mainLog.Load().Debug
+			}
+			logUpstreamProbeFailure(reference[uid], uc, err, level, "could not send DNS loop check query")
 		}
 	}
 	mainLog.Load().Debug().Msg("end checking DNS loop")

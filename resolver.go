@@ -552,7 +552,7 @@ func exchangeDNS(ctx context.Context, msg *dns.Msg, server string, localIP net.I
 	}
 	dnsClient := &dns.Client{Net: "udp"}
 	dnsClient.Dialer = baseDialer
-	return dnsClient.ExchangeContext(ctx, msg, server)
+	return exchangeTracked(ctx, dnsClient, msg, server, SelfQueryKindOS, "")
 }
 
 func defaultLocalIPForServer(server string) net.IP {
@@ -885,7 +885,7 @@ func (r *legacyResolver) Resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, e
 		endpoint = net.JoinHostPort(r.uc.BootstrapIP, port)
 	}
 
-	answer, _, err := dnsClient.ExchangeContext(ctx, msg, endpoint)
+	answer, _, err := exchangeTracked(ctx, dnsClient, msg, endpoint, SelfQueryKindLegacy, r.uc.UID())
 	return answer, err
 }
 
