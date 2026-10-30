@@ -17,6 +17,7 @@ type ptrDiscover struct {
 	hostname   sync.Map // ip => hostname
 	resolver   ctrld.Resolver
 	serverDown atomic.Bool
+	logger     *ctrld.Logger
 }
 
 func (p *ptrDiscover) refresh() error {
@@ -73,14 +74,14 @@ func (p *ptrDiscover) lookupHostname(ip string) string {
 	msg := new(dns.Msg)
 	addr, err := dns.ReverseAddr(ip)
 	if err != nil {
-		ctrld.ProxyLogger.Load().Info().Str("discovery", "ptr").Err(err).Msg("invalid ip address")
+		p.logger.Info().Str("discovery", "ptr").Err(err).Msg("Invalid ip address")
 		return ""
 	}
 	msg.SetQuestion(addr, dns.TypePTR)
 	ans, err := p.resolver.Resolve(ctx, msg)
 	if err != nil {
 		if p.serverDown.CompareAndSwap(false, true) {
-			ctrld.ProxyLogger.Load().Info().Str("discovery", "ptr").Err(err).Msg("could not perform PTR lookup")
+			p.logger.Info().Str("discovery", "ptr").Err(err).Msg("Could not perform ptr lookup")
 			go p.checkServer()
 		}
 		return ""
@@ -104,10 +105,9 @@ func (p *ptrDiscover) lookupIPByHostname(name string, v6 bool) string {
 		if value == name {
 			if addr, err := netip.ParseAddr(key.(string)); err == nil && addr.Is6() == v6 {
 				ip = addr.String()
-				if addr.IsLoopback() { // Continue searching if this is loopback address.
-					return true
-				}
-				return false
+				// Continue searching if this is a loopback address
+				// We prefer non-loopback addresses as they're more likely to be the actual client IP
+				return addr.IsLoopback() // Continue searching if this is loopback address.
 			}
 		}
 		return true

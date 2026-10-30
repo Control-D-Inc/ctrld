@@ -20,6 +20,8 @@ func (a *arpDiscover) scan() {
 		}
 
 		// trim brackets
+		// Unix "arp -an" output formats IP addresses with parentheses like "(192.168.1.1)"
+		// We need to remove these brackets for proper IP parsing
 		ip := strings.ReplaceAll(fields[1], "(", "")
 		ip = strings.ReplaceAll(ip, ")", "")
 
