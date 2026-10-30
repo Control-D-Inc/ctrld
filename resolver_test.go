@@ -108,7 +108,7 @@ func Test_customDNSExchangeWith_RetriesUnboundOnUnreachableSource(t *testing.T) 
 				return answer, time.Millisecond, nil
 			}
 
-			answer, _, err := customDNSExchangeWith(context.Background(), msg, tt.server, tt.boundIP, true, exchange)
+			answer, _, _, err := customDNSExchangeWith(context.Background(), msg, tt.server, tt.boundIP, true, nil, exchange)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -146,7 +146,7 @@ func Test_customDNSExchangeWith_PreservesReachableBoundSource(t *testing.T) {
 		return answer, time.Millisecond, nil
 	}
 
-	answer, _, err := customDNSExchangeWith(context.Background(), msg, "192.0.2.53:53", boundIP, true, exchange)
+	answer, _, _, err := customDNSExchangeWith(context.Background(), msg, "192.0.2.53:53", boundIP, true, nil, exchange)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func Test_customDNSExchangeWith_DoesNotRetryOtherFailures(t *testing.T) {
 		return nil, 0, context.DeadlineExceeded
 	}
 
-	_, _, err := customDNSExchangeWith(context.Background(), msg, "192.0.2.53:53", net.ParseIP("192.0.2.10"), true, exchange)
+	_, _, _, err := customDNSExchangeWith(context.Background(), msg, "192.0.2.53:53", net.ParseIP("192.0.2.10"), true, nil, exchange)
 	if err == nil {
 		t.Fatal("expected exchange failure")
 	}
@@ -185,7 +185,7 @@ func Test_customDNSExchangeWith_DoesNotRetryWithoutBoundSource(t *testing.T) {
 		return nil, 0, &net.OpError{Op: "write", Net: "udp", Err: syscall.EHOSTUNREACH}
 	}
 
-	_, _, err := customDNSExchangeWith(context.Background(), msg, "192.0.2.53:53", nil, true, exchange)
+	_, _, _, err := customDNSExchangeWith(context.Background(), msg, "192.0.2.53:53", nil, true, nil, exchange)
 	if err == nil {
 		t.Fatal("expected exchange failure")
 	}
@@ -205,7 +205,7 @@ func Test_customDNSExchangeWith_DoesNotRetryCanceledContext(t *testing.T) {
 		return nil, 0, &net.OpError{Op: "write", Net: "udp", Err: syscall.EHOSTUNREACH}
 	}
 
-	_, _, err := customDNSExchangeWith(ctx, msg, "192.0.2.53:53", net.ParseIP("192.0.2.10"), true, exchange)
+	_, _, _, err := customDNSExchangeWith(ctx, msg, "192.0.2.53:53", net.ParseIP("192.0.2.10"), true, nil, exchange)
 	if err == nil {
 		t.Fatal("expected exchange failure")
 	}
@@ -227,7 +227,7 @@ func Test_customDNSExchangeWith_ReturnsUnboundRetryFailure(t *testing.T) {
 		return nil, 0, retryErr
 	}
 
-	_, _, err := customDNSExchangeWith(context.Background(), msg, "192.0.2.53:53", net.ParseIP("192.0.2.10"), true, exchange)
+	_, _, _, err := customDNSExchangeWith(context.Background(), msg, "192.0.2.53:53", net.ParseIP("192.0.2.10"), true, nil, exchange)
 	if !errors.Is(err, retryErr) {
 		t.Fatalf("exchange error: got %v, want retry error %v", err, retryErr)
 	}
@@ -245,7 +245,7 @@ func Test_customDNSExchangeWith_DoesNotRetryReadSideUnreachable(t *testing.T) {
 		return nil, 0, &net.OpError{Op: "read", Net: "udp", Err: syscall.EHOSTUNREACH}
 	}
 
-	_, _, err := customDNSExchangeWith(context.Background(), msg, "192.0.2.53:53", net.ParseIP("192.0.2.10"), true, exchange)
+	_, _, _, err := customDNSExchangeWith(context.Background(), msg, "192.0.2.53:53", net.ParseIP("192.0.2.10"), true, nil, exchange)
 	if err == nil {
 		t.Fatal("expected exchange failure")
 	}
@@ -336,6 +336,246 @@ func Test_osResolver_ResolveDoesNotRetrySyntheticControlDFallbackUnbound(t *test
 	msg.SetQuestion("internal.example.", dns.TypeA)
 	_, err := resolver.Resolve(context.Background(), msg)
 	if err == nil {
+		t.Fatal("expected exchange failure")
+	}
+	if calls != 1 {
+		t.Fatalf("exchange calls: got %d, want one bound synthetic fallback attempt", calls)
+	}
+}
+
+func readTimeoutErr() error {
+	return &net.OpError{Op: "read", Net: "udp", Err: os.ErrDeadlineExceeded}
+}
+
+// The no-reply shape must match what a real bound exchange returns when the
+// server never answers, not only the fake error used below.
+func Test_readTimedOut_MatchesRealExchangeTimeout(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	msg := new(dns.Msg)
+	msg.SetQuestion("internal.example.", dns.TypeA)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, _, err = exchangeDNS(ctx, msg, pc.LocalAddr().String(), net.ParseIP("127.0.0.1"))
+	if !readTimedOut(err) {
+		t.Fatalf("readTimedOut(%v) = false, want true", err)
+	}
+	if preSendUnreachable(err) {
+		t.Fatalf("preSendUnreachable(%v) = true, want false", err)
+	}
+}
+
+func Test_customDNSExchangeWith_RetriesRouteSelectedOnNoReply(t *testing.T) {
+	msg := new(dns.Msg)
+	msg.SetQuestion("internal.example.", dns.TypeA)
+	boundIP := net.ParseIP("192.168.77.142")
+	var localIPs []net.IP
+	exchange := func(_ context.Context, msg *dns.Msg, _ string, localIP net.IP) (*dns.Msg, time.Duration, error) {
+		localIPs = append(localIPs, append(net.IP(nil), localIP...))
+		if localIP != nil {
+			return nil, 0, readTimeoutErr()
+		}
+		answer := new(dns.Msg)
+		answer.SetReply(msg)
+		return answer, time.Millisecond, nil
+	}
+	routeSource := func(string) net.IP { return net.ParseIP("100.64.0.153") }
+
+	answer, _, reason, err := customDNSExchangeWith(context.Background(), msg, "100.64.0.1:53", boundIP, true, routeSource, exchange)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer == nil {
+		t.Fatal("expected answer from route-selected retry")
+	}
+	if reason != routeSelectedReasonNoReply {
+		t.Fatalf("reason: got %q, want %q", reason, routeSelectedReasonNoReply)
+	}
+	if len(localIPs) != 2 || !localIPs[0].Equal(boundIP) || localIPs[1] != nil {
+		t.Fatalf("exchange sources: got %v, want [%v <nil>]", localIPs, boundIP)
+	}
+}
+
+// When the route to the server already uses the stored source, an unbound
+// retry would leave on the same path, so the no-reply case is final.
+func Test_customDNSExchangeWith_NoReplyNotRetriedWhenRouteUsesSameSource(t *testing.T) {
+	msg := new(dns.Msg)
+	msg.SetQuestion("internal.example.", dns.TypeA)
+	boundIP := net.ParseIP("192.168.77.142")
+	for _, tt := range []struct {
+		name   string
+		routed net.IP
+	}{
+		{"same source", net.ParseIP("192.168.77.142")},
+		{"no route", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			exchange := func(_ context.Context, _ *dns.Msg, _ string, _ net.IP) (*dns.Msg, time.Duration, error) {
+				calls++
+				return nil, 0, readTimeoutErr()
+			}
+			_, _, reason, err := customDNSExchangeWith(context.Background(), msg, "192.168.77.1:53", boundIP, true, func(string) net.IP { return tt.routed }, exchange)
+			if err == nil {
+				t.Fatal("expected exchange failure")
+			}
+			if calls != 1 || reason != "" {
+				t.Fatalf("calls=%d reason=%q, want one bound attempt and no retry", calls, reason)
+			}
+		})
+	}
+}
+
+// fakeSplitTunnel models a full-tunnel VPN: the tunnel-only server answers
+// only route-selected (tunnel source) sends, while the LAN server answers any
+// source with NXDOMAIN.
+type fakeSplitTunnel struct {
+	mu      sync.Mutex
+	tunnel  string
+	lan     string
+	sources map[string][]net.IP
+}
+
+func (f *fakeSplitTunnel) exchange(_ context.Context, msg *dns.Msg, server string, localIP net.IP) (*dns.Msg, time.Duration, error) {
+	f.mu.Lock()
+	f.sources[server] = append(f.sources[server], append(net.IP(nil), localIP...))
+	f.mu.Unlock()
+	answer := new(dns.Msg)
+	answer.SetReply(msg)
+	switch server {
+	case f.tunnel:
+		if localIP != nil {
+			return nil, 0, readTimeoutErr()
+		}
+		answer.Answer = append(answer.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: msg.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("100.64.0.153"),
+		})
+	case f.lan:
+		answer.Rcode = dns.RcodeNameError
+	}
+	return answer, time.Millisecond, nil
+}
+
+func (f *fakeSplitTunnel) sourcesFor(server string) []net.IP {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]net.IP(nil), f.sources[server]...)
+}
+
+// ctrld#653: the stored physical source gets no reply from a tunnel-only
+// resolver. The answer must come from the route-selected attempt, not the
+// LAN server's NXDOMAIN; later queries go route-selected directly until the
+// stored source changes.
+func Test_osResolver_ResolveRetriesRouteSelectedOnNoReply(t *testing.T) {
+	const tunnelServer = "100.64.0.1:53"
+	const lanServer = "192.168.77.1:53"
+	f := &fakeSplitTunnel{tunnel: tunnelServer, lan: lanServer, sources: map[string][]net.IP{}}
+	resolver := newResolverWithNameserver([]string{tunnelServer, lanServer})
+	stored := net.ParseIP("192.168.77.142")
+	var storedMu sync.Mutex
+	resolver.localIP = func(string) net.IP {
+		storedMu.Lock()
+		defer storedMu.Unlock()
+		return stored
+	}
+	resolver.routeSource = func(server string) net.IP {
+		if server == tunnelServer {
+			return net.ParseIP("100.64.0.153")
+		}
+		return net.ParseIP("192.168.77.142")
+	}
+	resolver.exchangeDNS = f.exchange
+
+	query := func(name string) *dns.Msg {
+		t.Helper()
+		msg := new(dns.Msg)
+		msg.SetQuestion(name, dns.TypeA)
+		answer, err := resolver.resolve(context.Background(), msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return answer
+	}
+
+	answer := query("probe.split.lab.")
+	if answer.Rcode != dns.RcodeSuccess || len(answer.Answer) != 1 {
+		t.Fatalf("first answer: rcode %s, %d records; want the tunnel server's answer", dns.RcodeToString[answer.Rcode], len(answer.Answer))
+	}
+	got := f.sourcesFor(tunnelServer)
+	if len(got) != 2 || !got[0].Equal(stored) || got[1] != nil {
+		t.Fatalf("tunnel server sources after first query: got %v, want [%v <nil>]", got, stored)
+	}
+
+	answer = query("second.split.lab.")
+	if answer.Rcode != dns.RcodeSuccess {
+		t.Fatalf("second answer rcode: %s", dns.RcodeToString[answer.Rcode])
+	}
+	got = f.sourcesFor(tunnelServer)
+	if len(got) != 3 || got[2] != nil {
+		t.Fatalf("tunnel server sources after second query: got %v, want one more route-selected send and no bound send", got)
+	}
+	// The LAN server keeps its bound source.
+	for _, ip := range f.sourcesFor(lanServer) {
+		if !ip.Equal(net.ParseIP("192.168.77.142")) {
+			t.Fatalf("LAN server source: got %v, want bound source", ip)
+		}
+	}
+
+	// A new stored source is tried bound again.
+	storedMu.Lock()
+	stored = net.ParseIP("172.20.10.2")
+	storedMu.Unlock()
+	query("third.split.lab.")
+	got = f.sourcesFor(tunnelServer)
+	if len(got) != 5 || !got[3].Equal(net.ParseIP("172.20.10.2")) || got[4] != nil {
+		t.Fatalf("tunnel server sources after source change: got %v, want bound 172.20.10.2 then route-selected", got)
+	}
+}
+
+// When the route-selected path stops answering too (for example the VPN
+// went down), the next query tries the stored source first again.
+func Test_osResolver_RouteSelectedFailureRestoresBoundSource(t *testing.T) {
+	const server = "100.64.0.1:53"
+	stored := net.ParseIP("192.168.77.142")
+	resolver := newResolverWithNameserver([]string{server})
+	resolver.localIP = func(string) net.IP { return stored }
+	resolver.routeSource = func(string) net.IP { return net.ParseIP("100.64.0.153") }
+	resolver.unboundSources.Store(server, stored.String())
+	var localIPs []net.IP
+	resolver.exchangeDNS = func(_ context.Context, _ *dns.Msg, _ string, localIP net.IP) (*dns.Msg, time.Duration, error) {
+		localIPs = append(localIPs, append(net.IP(nil), localIP...))
+		return nil, 0, readTimeoutErr()
+	}
+	msg := new(dns.Msg)
+	msg.SetQuestion("internal.example.", dns.TypeA)
+	if _, err := resolver.resolve(context.Background(), msg); err == nil {
+		t.Fatal("expected failure")
+	}
+	if len(localIPs) != 1 || localIPs[0] != nil {
+		t.Fatalf("sources: got %v, want one route-selected send", localIPs)
+	}
+	if _, ok := resolver.unboundSources.Load(server); ok {
+		t.Fatal("route-selected preference kept after the route-selected send failed")
+	}
+}
+
+// ctrld's synthetic public fallback keeps its bound source on no reply too.
+func Test_osResolver_NoReplyDoesNotRetrySyntheticControlDFallback(t *testing.T) {
+	resolver := newResolverWithNameserver([]string{controldPublicDnsWithPort})
+	resolver.localIP = func(string) net.IP { return net.ParseIP("198.51.100.10") }
+	resolver.routeSource = func(string) net.IP { return net.ParseIP("100.64.0.153") }
+	calls := 0
+	resolver.exchangeDNS = func(_ context.Context, _ *dns.Msg, _ string, _ net.IP) (*dns.Msg, time.Duration, error) {
+		calls++
+		return nil, 0, readTimeoutErr()
+	}
+	msg := new(dns.Msg)
+	msg.SetQuestion("internal.example.", dns.TypeA)
+	if _, err := resolver.resolve(context.Background(), msg); err == nil {
 		t.Fatal("expected exchange failure")
 	}
 	if calls != 1 {

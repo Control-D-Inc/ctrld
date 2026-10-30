@@ -486,6 +486,13 @@ type osResolver struct {
 	// mutating process-wide resolver state.
 	exchangeDNS dnsExchangeFunc
 	localIP     func(string) net.IP
+	// routeSource reports the source the kernel picks for a server. nil uses
+	// routeSelectedSource.
+	routeSource func(string) net.IP
+	// unboundSources maps a server to the stored source whose bound sends got
+	// no usable result while a route-selected send was answered. That server
+	// is then queried route-selected until the stored source changes.
+	unboundSources sync.Map
 }
 
 type osResolverResult struct {
@@ -573,18 +580,66 @@ func preSendUnreachable(err error) bool {
 	return ctrldnet.IsUnreachable(err)
 }
 
+// readTimedOut reports a send that left but got no reply before the read
+// deadline. A full-tunnel VPN produces this when the bound physical source
+// sends a tunnel-only resolver's query out of the physical interface.
+func readTimedOut(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "read" && opErr.Timeout()
+}
+
+// Reasons for a route-selected exchange, as logged.
+const (
+	routeSelectedReasonUnreachable = "bound source unreachable"
+	routeSelectedReasonNoReply     = "no reply from bound source"
+)
+
+// routeSelectedSource returns the source address the kernel selects for
+// server. Connecting a UDP socket only selects a route; nothing is sent.
+func routeSelectedSource(server string) net.IP {
+	conn, err := net.Dial("udp", server)
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return addr.IP
+	}
+	return nil
+}
+
 // customDNSExchangeWith preserves the preferred source first. A route-selected
 // retry is allowed only when the caller knows the server is an OS-selected resolver,
 // not ctrld's synthetic public fallback. This includes public DNS pushed by a VPN:
 // unbinding changes the source route, not the recipient.
-func customDNSExchangeWith(ctx context.Context, msg *dns.Msg, server string, desiredLocalIP net.IP, allowRouteSelectedRetry bool, exchange dnsExchangeFunc) (*dns.Msg, time.Duration, error) {
+//
+// The retry runs when the bound send fails before leaving the host, or, when
+// routeSource is set, when the bound send gets no reply and the kernel's route
+// to the server uses a different source. The second case is skipped when the
+// route picks the same source: a retry would take the same path. The returned
+// reason is empty when no retry ran.
+func customDNSExchangeWith(ctx context.Context, msg *dns.Msg, server string, desiredLocalIP net.IP, allowRouteSelectedRetry bool, routeSource func(string) net.IP, exchange dnsExchangeFunc) (*dns.Msg, time.Duration, string, error) {
 	answer, rtt, err := exchange(ctx, msg, server, desiredLocalIP)
-	if answer != nil || err == nil || ctx.Err() != nil || desiredLocalIP == nil || !allowRouteSelectedRetry || !preSendUnreachable(err) {
-		return answer, rtt, err
+	if answer != nil || err == nil || ctx.Err() != nil || desiredLocalIP == nil || !allowRouteSelectedRetry {
+		return answer, rtt, "", err
+	}
+	var reason string
+	switch {
+	case preSendUnreachable(err):
+		reason = routeSelectedReasonUnreachable
+	case routeSource != nil && readTimedOut(err):
+		routed := routeSource(server)
+		if routed == nil || routed.Equal(desiredLocalIP) {
+			return answer, rtt, "", err
+		}
+		reason = routeSelectedReasonNoReply
+	default:
+		return answer, rtt, "", err
 	}
 
-	LoggerFromCtx(ctx).Debug().Msg("OS resolver source binding is unreachable; retrying with route-selected source")
-	return exchange(ctx, msg.Copy(), server, nil)
+	Log(ctx, LoggerFromCtx(ctx).Debug(), "OS resolver %s: %s %s; retrying with route-selected source", server, reason, desiredLocalIP)
+	answer, rtt, err = exchange(ctx, msg.Copy(), server, nil)
+	return answer, rtt, reason, err
 }
 
 // allowRouteSelectedRetryForOSServer excludes only ctrld's synthetic public
@@ -730,6 +785,10 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 	if localIPForServer == nil {
 		localIPForServer = defaultLocalIPForServer
 	}
+	routeSource := o.routeSource
+	if routeSource == nil {
+		routeSource = routeSelectedSource
+	}
 	wg.Add(numServers)
 	go func() {
 		wg.Wait()
@@ -748,7 +807,7 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 				defer release()
 
 				localOSResolverIP := localIPForServer(server)
-				answer, _, err := customDNSExchangeWith(ctx, msg.Copy(), server, localOSResolverIP, allowRouteSelectedRetryForOSServer(server), exchange)
+				answer, err := o.exchangeOSServer(ctx, msg, server, localOSResolverIP, routeSource, exchange)
 				ch <- &osResolverResult{answer: answer, err: err, server: server, lan: isLan}
 			}(server)
 		}
@@ -841,6 +900,42 @@ func (o *osResolver) resolve(ctx context.Context, msg *dns.Msg) (*dns.Msg, error
 		return nonSuccessAnswer, nil
 	}
 	return nil, errors.Join(errs...)
+}
+
+// exchangeOSServer sends one OS resolver query to server. Once a bound send to
+// server has been answered only through a route-selected retry, later queries
+// to server skip the bound send while the stored source stays the same, so
+// only the first query after a source change pays the no-reply timeout.
+func (o *osResolver) exchangeOSServer(ctx context.Context, msg *dns.Msg, server string, localIP net.IP, routeSource func(string) net.IP, exchange dnsExchangeFunc) (*dns.Msg, error) {
+	allowRetry := allowRouteSelectedRetryForOSServer(server)
+	if localIP == nil || !allowRetry {
+		answer, _, err := exchange(ctx, msg.Copy(), server, localIP)
+		return answer, err
+	}
+	source := localIP.String()
+	if v, ok := o.unboundSources.Load(server); ok {
+		if v.(string) == source {
+			answer, _, err := exchange(ctx, msg.Copy(), server, nil)
+			if answer == nil && ctx.Err() == nil {
+				// The route-selected path stopped working too: let the next
+				// query try the stored source first again.
+				o.unboundSources.CompareAndDelete(server, v)
+			}
+			return answer, err
+		}
+		// The stored source changed: try the new one bound again.
+		if o.unboundSources.CompareAndDelete(server, v) {
+			Log(ctx, LoggerFromCtx(ctx).Info(), "OS resolver %s: stored source changed from %s to %s; trying the stored source again", server, v.(string), source)
+		}
+	}
+	answer, _, reason, err := customDNSExchangeWith(ctx, msg.Copy(), server, localIP, true, routeSource, exchange)
+	if reason == "" || answer == nil {
+		return answer, err
+	}
+	if _, loaded := o.unboundSources.Swap(server, source); !loaded {
+		Log(ctx, LoggerFromCtx(ctx).Warn(), "OS resolver %s: %s %s; using route-selected source until the stored source changes", server, reason, source)
+	}
+	return answer, err
 }
 
 func acquireOSResolverExchangeSlot(ctx context.Context) (func(), bool) {
