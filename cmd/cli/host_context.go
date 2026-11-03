@@ -190,6 +190,31 @@ func parseNEConfigurations(data []byte) ([]string, string) {
 	return slices.Compact(out), "ok"
 }
 
+// enabledDNSProxies returns "app:provider" for every enabled DNS proxy
+// configuration in the output of parseNEConfigurations. ctrld installs no
+// Network Extension, so each one belongs to another product. macOS hands
+// that product's extension the DNS traffic of every process, ctrld's own
+// lookups included, and it can send them on from a socket of its own. pf's
+// group exemption then no longer matches them, and in Intercept mode they
+// come back to ctrld's listener (a self loop). A leftover proxy whose app
+// was removed (for example by MDM) stays enabled in the store and keeps
+// doing this.
+func enabledDNSProxies(confs []string) []string {
+	var proxies []string
+	for _, c := range confs {
+		rest, ok := strings.CutPrefix(c, "dns_proxy:")
+		if !ok {
+			continue
+		}
+		rest, ok = strings.CutSuffix(rest, ":enabled")
+		if !ok {
+			continue
+		}
+		proxies = append(proxies, rest)
+	}
+	return proxies
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "-"
