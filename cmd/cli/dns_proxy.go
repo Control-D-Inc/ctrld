@@ -2593,7 +2593,7 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 				exemptions = append(exemptions, vpnDNSExemption{Server: host})
 			}
 			mainLog.Load().Info().Msgf("DNS intercept recovery: exempting DHCP nameservers from filters: %v", exemptions)
-			if err := p.exemptVPNDNSServers(exemptions); err != nil {
+			if err := p.exemptRecoveryNameservers(exemptions); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("DNS intercept recovery: failed to exempt DHCP nameservers — recovery queries may fail")
 			}
 		}
