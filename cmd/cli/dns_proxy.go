@@ -2851,7 +2851,7 @@ func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool,
 				dhcpExemptions = append(dhcpExemptions, vpnDNSExemption{Server: host})
 			}
 			p.Info().Msgf("DNS intercept recovery: exempting DHCP nameservers from filters: %v", resolverNameservers)
-			if err := p.exemptVPNDNSServers(dhcpExemptions); err != nil {
+			if err := p.exemptRecoveryNameservers(dhcpExemptions); err != nil {
 				p.Warn().Err(err).Msg("DNS intercept recovery: failed to exempt DHCP nameservers — recovery queries may fail")
 			}
 		}
