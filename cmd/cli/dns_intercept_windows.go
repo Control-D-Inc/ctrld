@@ -1152,7 +1152,10 @@ func (p *prog) startDNSInterceptLocked() error {
 		// The first probe ran before loopback WFP protection existed. Verify once
 		// more synchronously after WFP setup so service readiness does not race an
 		// async proof; this path is ownership-aware and never mutates GP NRPT.
-		externalProbeOK = p.nrptProbeAndHeal(state)
+		// Startup readiness waits on this call, so it keeps the plain 2 s first probe:
+		// the late window would add up to nrptProbeLateGrace to the start whenever
+		// nothing routes. The asynchronous heal cycles that follow use the late window.
+		externalProbeOK = p.nrptProbeAndHealStartup(state)
 	}
 
 	// Everything the host needs is in place: publish, then start the goroutines that
@@ -2481,9 +2484,12 @@ func gpCatchAllConflictBlocksFallback(state *wfpState, reason string) bool {
 // they cause. Tests substitute it to drive a transition - probe outcomes, registry
 // state, concurrency - without touching the host's registry or DNS Client.
 type nrptOps struct {
-	probe      func(state *wfpState) bool
-	ruleExists func() bool
-	addRule    func(listenerIP string) error
+	probe func(state *wfpState) bool
+	// probeWithGrace is probe with a late window: it also reports a probe that reached
+	// ctrld after the normal timeout. See probeNRPTWithGrace.
+	probeWithGrace func(state *wfpState) (verified, late bool)
+	ruleExists     func() bool
+	addRule        func(listenerIP string) error
 	// restoreLocalRule re-writes only ctrld's local-store catch-all, leaving the GP
 	// store exactly as found. See restoreNRPTLocalCatchAllRule.
 	restoreLocalRule func(listenerIP string) error
@@ -2512,6 +2518,7 @@ func (p *prog) nrptOps() nrptOps {
 	}
 	return nrptOps{
 		probe:            p.probeNRPT,
+		probeWithGrace:   p.probeNRPTWithGrace,
 		ruleExists:       nrptCatchAllRuleExists,
 		addRule:          addNRPTCatchAllRule,
 		restoreLocalRule: restoreNRPTLocalCatchAllRule,
@@ -3285,6 +3292,13 @@ const (
 
 	// nrptProbeTimeout is how long to wait for a single probe query to arrive.
 	nrptProbeTimeout = 2 * time.Second
+
+	// nrptProbeLateGrace is how long the first probe of a heal cycle keeps listening
+	// after nrptProbeTimeout. A probe that arrives in this time proves the rule routes
+	// to ctrld and only the DNS Client is slow. Signalling would not help: on a host
+	// where a forced policy refresh stalls the DNS Client, it makes the next probe late
+	// too (#657).
+	nrptProbeLateGrace = 15 * time.Second
 )
 
 // nrptProbeRunning ensures only one NRPT probe sequence runs at a time.
@@ -3303,8 +3317,28 @@ var nrptProbeRunning atomic.Bool
 // state is passed explicitly rather than read from p.dnsInterceptState so that startup
 // can probe before it publishes, and so a probe belongs to exactly one intercept.
 func (p *prog) probeNRPT(state *wfpState) bool {
+	return p.probeNRPTWithin(state, nrptProbeTimeout, nrptProbeTimeout) == interceptProbeOnTime
+}
+
+// probeNRPTWithGrace is probeNRPT with a late window. It reports whether the probe
+// reached ctrld at all, and whether it came after nrptProbeTimeout. A late probe is
+// logged at warn with its latency.
+func (p *prog) probeNRPTWithGrace(state *wfpState) (verified, late bool) {
+	switch p.probeNRPTWithin(state, nrptProbeTimeout, nrptProbeTimeout+nrptProbeLateGrace) {
+	case interceptProbeOnTime:
+		return true, false
+	case interceptProbeLate:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+// probeNRPTWithin sends one probe and waits for it: up to onTime for an on-time
+// arrival, then up to late in total for a late one. A nil state counts as on time.
+func (p *prog) probeNRPTWithin(state *wfpState, onTime, late time.Duration) interceptProbeOutcome {
 	if state == nil {
-		return true
+		return interceptProbeOnTime
 	}
 
 	// Generate unique probe domain to defeat DNS caching.
@@ -3320,7 +3354,10 @@ func (p *prog) probeNRPT(state *wfpState) bool {
 	// Use Go's default resolver which calls GetAddrInfoW → DNS Client service → NRPT.
 	// If NRPT is active, the DNS Client routes this to 127.0.0.1 → ctrld receives it.
 	// If NRPT isn't loaded, the query goes to interface DNS → times out or NXDOMAIN.
-	ctx, cancel := context.WithTimeout(context.Background(), nrptProbeTimeout)
+	if late < onTime {
+		late = onTime
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), late)
 	defer cancel()
 
 	go func() {
@@ -3331,23 +3368,20 @@ func (p *prog) probeNRPT(state *wfpState) bool {
 
 	// Poll for a pending stop so a service stop never waits out the probe timeout on
 	// top of the lifecycle lock.
-	shutdownPoll := time.NewTicker(interceptRevocationPollInterval)
-	defer shutdownPoll.Stop()
-	for {
-		select {
-		case <-probeCh:
-			mainLog.Load().Debug().Str("domain", probeID).Msg("DNS intercept: NRPT probe received - interception verified")
-			return true
-		case <-ctx.Done():
-			mainLog.Load().Debug().Str("domain", probeID).Msg("DNS intercept: NRPT probe timed out - interception not working")
-			return false
-		case <-shutdownPoll.C:
-			if p.interceptStateRevoked(state) {
-				mainLog.Load().Debug().Str("domain", probeID).Msg("DNS intercept: abandoning NRPT probe - shutdown in progress")
-				return false
-			}
-		}
+	outcome, waited := awaitInterceptProbe(probeCh, onTime, late, interceptRevocationPollInterval,
+		func() bool { return p.interceptStateRevoked(state) })
+	switch outcome {
+	case interceptProbeOnTime:
+		mainLog.Load().Debug().Str("domain", probeID).Msg("DNS intercept: NRPT probe received - interception verified")
+	case interceptProbeLate:
+		mainLog.Load().Warn().Str("domain", probeID).Int64("latency_ms", waited.Milliseconds()).Int64("timeout_ms", onTime.Milliseconds()).
+			Msg("DNS intercept: NRPT probe arrived late - interception verified, the DNS Client is slow; skipping NRPT recovery")
+	case interceptProbeAbandoned:
+		mainLog.Load().Debug().Str("domain", probeID).Msg("DNS intercept: abandoning NRPT probe - shutdown in progress")
+	default:
+		mainLog.Load().Debug().Str("domain", probeID).Msg("DNS intercept: NRPT probe timed out - interception not working")
 	}
+	return outcome
 }
 
 // nrptProbeAndHeal runs the NRPT probe with retries and escalating remediation.
@@ -3368,6 +3402,19 @@ func (p *prog) probeNRPT(state *wfpState) bool {
 // readiness answer - startup's synchronous verification - use that; the asynchronous
 // callers ignore it.
 func (p *prog) nrptProbeAndHeal(state *wfpState) bool {
+	return p.nrptProbeAndHealWith(state, true)
+}
+
+// nrptProbeAndHealStartup is nrptProbeAndHeal for startup's synchronous verification.
+// Its first probe has no late window, so service start reports in the same time as
+// before #657.
+func (p *prog) nrptProbeAndHealStartup(state *wfpState) bool {
+	return p.nrptProbeAndHealWith(state, false)
+}
+
+// nrptProbeAndHealWith runs the heal cycle. With lateGrace, the first ctrld-owned probe
+// also accepts an arrival after nrptProbeTimeout (see nrptProbeLateGrace).
+func (p *prog) nrptProbeAndHealWith(state *wfpState, lateGrace bool) bool {
 	if p.interceptStateRevoked(state) {
 		return false
 	}
@@ -3449,8 +3496,17 @@ func (p *prog) nrptProbeAndHeal(state *wfpState) bool {
 	// Log parent key state for diagnostics.
 	logNRPTParentKeyState("probe-start")
 
-	// Attempt 1: immediate probe
-	if ops.probe(state) {
+	// Attempt 1: immediate probe, with a late window unless startup is waiting on it. A probe that reaches ctrld after
+	// the normal timeout proves the rule routes, so the cycle ends without signalling:
+	// policy refresh, paramchange and two-phase recovery cannot fix a slow DNS Client,
+	// and on some hosts the forced refresh is what keeps it slow (#657). A probe that
+	// never arrives continues to the bounded retries below.
+	// probeNRPTWithin already logged a late arrival at warn with its latency.
+	firstProbe := func() bool { return ops.probe(state) }
+	if lateGrace {
+		firstProbe = func() bool { verified, _ := ops.probeWithGrace(state); return verified }
+	}
+	if firstProbe() {
 		mainLog.Load().Info().Msg("DNS intercept: NRPT verified working")
 		return true
 	}
