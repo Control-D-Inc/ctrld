@@ -98,6 +98,28 @@ func TestParseNEConfigurations(t *testing.T) {
 	}
 }
 
+// Only enabled DNS proxy configurations are named; a disabled one, and other
+// kinds, cannot redirect ctrld's lookups. The input is the parser's own output
+// for a store shaped like a live host, so the two stay in step.
+func TestEnabledDNSProxies(t *testing.T) {
+	confs, code := parseNEConfigurations(buildNEArchive(t))
+	if code != "ok" {
+		t.Fatalf("code = %s", code)
+	}
+	confs = append(confs,
+		"dns_proxy:com.example.old:com.example.old.dnsproxy:disabled",
+		"vpn:com.example.vpn:com.example.vpn.tunnel:enabled",
+	)
+	got := enabledDNSProxies(confs)
+	want := []string{"com.example.agent:com.example.agent.dnsproxy"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if got := enabledDNSProxies(nil); got != nil {
+		t.Errorf("no configurations: got %v", got)
+	}
+}
+
 func TestParseThirdPartyKexts(t *testing.T) {
 	out := `No variant specified, falling back to release
     3  198 0                  0          0          com.apple.kpi.bsd (27.0.0) 77F5F1F1-C717-3A42-A5FA-487ACF280495 <>

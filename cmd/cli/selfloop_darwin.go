@@ -130,6 +130,13 @@ var listPFAnchorsFn = func() ([]string, string) {
 // pf anchors. Product identifiers only; each is a short bounded read, run
 // once per report.
 func addSelfLoopHostContext(e *ctrld.LogEvent) {
+	addHostContext(e)
+}
+
+// addHostContext adds the host context to e and returns the enabled DNS
+// proxies of other products (see enabledDNSProxies), which are also logged
+// as dns_proxies_enabled.
+func addHostContext(e *ctrld.LogEvent) []string {
 	rule := capturePFGroupRuleFn()
 	e.Str("pf_group_rule_status", rule.Code)
 	if rule.GID != "" {
@@ -144,21 +151,33 @@ func addSelfLoopHostContext(e *ctrld.LogEvent) {
 	all, network, code := listSystemExtensionsFn()
 	e.Str("system_extensions_status", code).Strs("system_extensions", all).Strs("network_extensions", network)
 	confs, code := listNEConfigurationsFn()
-	e.Str("ne_configurations_status", code).Strs("ne_configurations", confs)
+	proxies := enabledDNSProxies(confs)
+	e.Str("ne_configurations_status", code).Strs("ne_configurations", confs).Strs("dns_proxies_enabled", proxies)
 	vpns, code := listVPNServicesFn()
 	e.Str("vpn_services_status", code).Strs("vpn_services", vpns)
 	kexts, code := listThirdPartyKextsFn()
 	e.Str("kernel_extensions_status", code).Strs("kernel_extensions", kexts)
 	anchors, code := listPFAnchorsFn()
 	e.Str("pf_anchors_status", code).Strs("pf_anchors", anchors)
+	return proxies
 }
 
 // logInterceptExemptionContext logs, once per intercept start, the same host
 // context a self loop report carries. A healthy host then has a baseline to
 // compare with: the group number pf loaded, what the group name resolves to,
 // and which network extensions are active.
+//
+// When another product's DNS proxy is enabled, it also warns once, before
+// any lookup fails: that is the known trigger of a self loop, and naming it
+// at start lets support see the cause without waiting for a failure.
 func logInterceptExemptionContext() {
 	e := journal(mainLog.Load().Info())
-	addSelfLoopHostContext(e)
+	proxies := addHostContext(e)
 	e.Msg("DNS intercept: pf exemption context for ctrld's own traffic")
+	if len(proxies) == 0 {
+		return
+	}
+	journal(mainLog.Load().Warn()).
+		Strs("dns_proxies_enabled", proxies).
+		Msg("DNS intercept: another product's DNS proxy is enabled; it may send ctrld's own lookups back to ctrld, so Internal Domain and VPN DNS lookups can fail")
 }
