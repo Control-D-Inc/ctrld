@@ -139,6 +139,8 @@ The health monitor keeps using functional probes:
 
 Deploy the GPO **before** starting or restarting ctrld if adapter DNS must remain completely untouched. Remove or unlink the GP rule before intentionally removing the ctrld service. A GP catch-all that remains pointed at loopback while no listener is running causes DNS failure by design; ctrld cannot safely delete an administrator-owned policy during uninstall.
 
+**Deployment prerequisite for registry-written rules:** Windows only loads a GP-store NRPT key during Group Policy processing. Tooling that writes the matching child straight into the registry (an MDM script or a registry deployment) instead of shipping it as real Group Policy must load it itself, for example with `gpupdate /target:computer /force`, before it starts or restarts ctrld. A Dnscache `paramchange` with a cache flush does not load the key. ctrld does not refresh machine policy for an administrator rule it has not proven: until Windows loads the rule, ctrld reports the external policy as ineffective and sends no refresh, `paramchange` or flush for it. Once the rule is loaded, the next health-monitor cycle proves it and records Group Policy as the owner. `gpupdate` does not raise the network-change event behind the delayed re-checks, so detection waits for the periodic monitor.
+
 #### WFP Filter Architecture
 
 **Filter priority**: Permit filters have weight 10, block filters have weight 1. WFP evaluates higher-weight filters first, so localhost and private-range DNS is always permitted.
