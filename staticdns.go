@@ -8,14 +8,9 @@ import (
 	"strings"
 )
 
-var homedir string
-
-// absHomeDir returns the absolute path to given filename using home directory as root dir.
-func absHomeDir(filename string) string {
-	if homedir != "" {
-		return filepath.Join(homedir, filename)
-	}
-	dir, err := userHomeDir()
+// AbsHomeDir returns the absolute path to given filename using home directory as root dir.
+func AbsHomeDir(filename string) string {
+	dir, err := UserHomeDir()
 	if err != nil {
 		return filename
 	}
@@ -31,8 +26,11 @@ func dirWritable(dir string) (bool, error) {
 	return true, f.Close()
 }
 
-func userHomeDir() (string, error) {
-	// viper will expand for us.
+// ServiceHomeDir returns the directory where a ctrld service with root or
+// administrator rights keeps its files. It has no fallback to the home
+// directory of the current user. A caller without root that only reads can
+// thus look where the service wrote.
+func ServiceHomeDir() (string, error) {
 	if runtime.GOOS == "windows" {
 		// If we're on windows, use the install path for this.
 		exePath, err := os.Executable()
@@ -42,7 +40,16 @@ func userHomeDir() (string, error) {
 
 		return filepath.Dir(exePath), nil
 	}
-	dir := "/etc/controld"
+	return "/etc/controld", nil
+}
+
+// UserHomeDir returns the home directory for user who is running ctrld.
+func UserHomeDir() (string, error) {
+	// viper will expand for us.
+	dir, err := ServiceHomeDir()
+	if err != nil || runtime.GOOS == "windows" {
+		return dir, err
+	}
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return os.UserHomeDir() // fallback to user home directory
 	}
@@ -54,13 +61,18 @@ func userHomeDir() (string, error) {
 
 // SavedStaticDnsSettingsFilePath returns the file path where the static DNS settings
 // for the provided interface are saved.
+//
+// The caller must ensure iface is non-nil.
 func SavedStaticDnsSettingsFilePath(iface *net.Interface) string {
 	// The file is stored in the user home directory under a hidden file.
-	return absHomeDir(".dns_" + iface.Name)
+	return AbsHomeDir(".dns_" + iface.Name)
 }
 
-// SavedStaticNameservers returns the stored static nameservers for the given interface.
-func SavedStaticNameservers(iface *net.Interface) ([]string, string) {
+// SavedStaticNameserversAndPath returns the stored static nameservers for the given interface,
+// and the absolute path to file that stored the settings.
+//
+// The caller must ensure iface is non-nil.
+func SavedStaticNameserversAndPath(iface *net.Interface) ([]string, string) {
 	file := SavedStaticDnsSettingsFilePath(iface)
 	data, err := os.ReadFile(file)
 	if err != nil || len(data) == 0 {
@@ -76,4 +88,10 @@ func SavedStaticNameservers(iface *net.Interface) ([]string, string) {
 		ns = append(ns, v)
 	}
 	return ns, file
+}
+
+// SavedStaticNameservers is like SavedStaticNameserversAndPath, but only returns the static nameservers.
+func SavedStaticNameservers(iface *net.Interface) []string {
+	nss, _ := SavedStaticNameserversAndPath(iface)
+	return nss
 }

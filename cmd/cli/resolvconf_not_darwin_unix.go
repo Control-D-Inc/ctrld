@@ -14,7 +14,7 @@ import (
 )
 
 // setResolvConf sets the content of the resolv.conf file using the given nameservers list.
-func setResolvConf(iface *net.Interface, ns []netip.Addr) error {
+func (p *prog) setResolvConf(iface *net.Interface, ns []netip.Addr) error {
 	r, err := newLoopbackOSConfigurator()
 	if err != nil {
 		return err
@@ -27,7 +27,7 @@ func setResolvConf(iface *net.Interface, ns []netip.Addr) error {
 	if sds, err := searchDomains(); err == nil {
 		oc.SearchDomains = sds
 	} else {
-		mainLog.Load().Debug().Err(err).Msg("failed to get search domains list when reverting resolv.conf file")
+		p.Debug().Err(err).Msg("Failed to get search domains list when reverting resolv.conf file")
 	}
 	return r.SetDNS(oc)
 }

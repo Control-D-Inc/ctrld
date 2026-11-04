@@ -77,7 +77,8 @@ func Test_prog_upstreamFor(t *testing.T) {
 	cfg := testhelper.SampleConfig(t)
 	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(false)
 	p := &prog{cfg: cfg}
-	p.um = newUpstreamMonitor(p.cfg)
+	p.logger.Store(mainLog.Load())
+	p.um = newUpstreamMonitor(p.cfg, mainLog.Load())
 	p.lanLoopGuard = newLoopGuard()
 	p.ptrLoopGuard = newLoopGuard()
 	for _, nc := range p.cfg.Network {
@@ -142,9 +143,94 @@ func Test_prog_upstreamFor(t *testing.T) {
 	}
 }
 
+func Test_prog_upstreamForWithCustomMatching(t *testing.T) {
+	cfg := testhelper.SampleConfig(t)
+	prog := &prog{cfg: cfg}
+	prog.logger.Store(mainLog.Load())
+	for _, nc := range prog.cfg.Network {
+		for _, cidr := range nc.Cidrs {
+			_, ipNet, err := net.ParseCIDR(cidr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nc.IPNets = append(nc.IPNets, ipNet)
+		}
+	}
+
+	// Create a custom policy with domain-first matching order
+	customPolicy := &ctrld.ListenerPolicyConfig{
+		Name: "Custom Policy",
+		Networks: []ctrld.Rule{
+			{"network.0": []string{"upstream.1", "upstream.0"}},
+		},
+		Macs: []ctrld.Rule{
+			{"14:45:A0:67:83:0A": []string{"upstream.2"}},
+		},
+		Rules: []ctrld.Rule{
+			{"*.ru": []string{"upstream.1"}},
+		},
+		Matching: &ctrld.MatchingConfig{
+			Order: []string{"domain", "mac", "network"},
+		},
+	}
+
+	customListener := &ctrld.ListenerConfig{
+		Policy: customPolicy,
+	}
+
+	tests := []struct {
+		name      string
+		ip        string
+		mac       string
+		domain    string
+		upstreams []string
+		matched   bool
+	}{
+		{
+			name:      "Domain rule should match first with custom order",
+			ip:        "192.168.0.1:0",
+			mac:       "14:45:A0:67:83:0A",
+			domain:    "example.ru",
+			upstreams: []string{"upstream.1"},
+			matched:   true,
+		},
+		{
+			name:      "MAC rule should match when no domain rule",
+			ip:        "192.168.0.1:0",
+			mac:       "14:45:A0:67:83:0A",
+			domain:    "example.com",
+			upstreams: []string{"upstream.2"},
+			matched:   true,
+		},
+		{
+			name:      "Network rule should match when no domain or MAC rule",
+			ip:        "192.168.0.1:0",
+			mac:       "00:11:22:33:44:55",
+			domain:    "example.com",
+			upstreams: []string{"upstream.1", "upstream.0"},
+			matched:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, err := net.ResolveUDPAddr("udp", tc.ip)
+			require.NoError(t, err)
+			require.NotNil(t, addr)
+
+			ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, requestID())
+			ufr := prog.upstreamFor(ctx, "0", customListener, addr, tc.mac, tc.domain)
+
+			assert.Equal(t, tc.matched, ufr.matched)
+			assert.Equal(t, tc.upstreams, ufr.upstreams)
+		})
+	}
+}
+
 func TestCache(t *testing.T) {
 	cfg := testhelper.SampleConfig(t)
 	prog := &prog{cfg: cfg}
+	prog.logger.Store(mainLog.Load())
 	for _, nc := range prog.cfg.Network {
 		for _, cidr := range nc.Cidrs {
 			_, ipNet, err := net.ParseCIDR(cidr)
@@ -198,6 +284,52 @@ func TestCache(t *testing.T) {
 	assert.NotSame(t, got1, got2)
 	assert.Equal(t, answer1.Rcode, got1.answer.Rcode)
 	assert.Equal(t, answer2.Rcode, got2.answer.Rcode)
+}
+
+func TestDNS64CacheLookup(t *testing.T) {
+	cfg := testhelper.SampleConfig(t)
+	p := &prog{cfg: cfg}
+	cache, err := dnscache.NewLRUCache(16)
+	require.NoError(t, err)
+	p.cache = cache
+
+	now := time.Now()
+	prefix := dns64WellKnownPrefix
+	req := mkAAAAReq("legacy.example")
+	upstream := "upstream.0"
+	empty := new(dns.Msg)
+	empty.SetReply(req)
+	synthesized := new(dns.Msg)
+	synthesized.SetReply(req)
+	synthesized.Answer = []dns.RR{&dns.AAAA{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 60}, AAAA: net.ParseIP("64:ff9b::c000:201")}}
+
+	t.Run("fresh variant hit", func(t *testing.T) {
+		p.cache.Purge()
+		p.cache.Add(dns64CacheKey(req, upstream, prefix), dnscache.NewValue(synthesized, now.Add(time.Minute)))
+		answer, stale, hit, dns64Hit, bypass := p.cachedResponse(req, upstream, prefix, true, now)
+		if answer == nil || !answerHasAAAA(answer) || stale != nil || !hit || !dns64Hit || bypass {
+			t.Fatalf("unexpected lookup result: answer=%v stale=%v hit=%v dns64Hit=%v bypass=%v", answer, stale, hit, dns64Hit, bypass)
+		}
+	})
+
+	t.Run("fresh empty normal answer is retained as stale while bypassed", func(t *testing.T) {
+		p.cache.Purge()
+		p.cache.Add(dnscache.NewKey(req, upstream), dnscache.NewValue(empty, now.Add(time.Minute)))
+		answer, stale, hit, dns64Hit, bypass := p.cachedResponse(req, upstream, prefix, true, now)
+		if answer != nil || stale == nil || hit || dns64Hit || !bypass {
+			t.Fatalf("unexpected lookup result: answer=%v stale=%v hit=%v dns64Hit=%v bypass=%v", answer, stale, hit, dns64Hit, bypass)
+		}
+	})
+
+	t.Run("expired variant is preferred as stale", func(t *testing.T) {
+		p.cache.Purge()
+		p.cache.Add(dns64CacheKey(req, upstream, prefix), dnscache.NewValue(synthesized, now.Add(-time.Minute)))
+		p.cache.Add(dnscache.NewKey(req, upstream), dnscache.NewValue(empty, now.Add(-time.Minute)))
+		answer, stale, hit, dns64Hit, bypass := p.cachedResponse(req, upstream, prefix, true, now)
+		if answer != nil || stale == nil || !answerHasAAAA(stale) || hit || dns64Hit || bypass {
+			t.Fatalf("unexpected lookup result: answer=%v stale=%v hit=%v dns64Hit=%v bypass=%v", answer, stale, hit, dns64Hit, bypass)
+		}
+	})
 }
 
 func Test_ipAndMacFromMsg(t *testing.T) {
@@ -405,6 +537,8 @@ func Test_isPrivatePtrLookup(t *testing.T) {
 		{"CGNAT", newDnsMsgPtr("100.66.27.28", t), true},
 		{"Loopback", newDnsMsgPtr("127.0.0.1", t), true},
 		{"Link Local Unicast", newDnsMsgPtr("fe80::69f6:e16e:8bdb:433f", t), true},
+		// RFC 7335 IPv4 Service Continuity Prefix (464XLAT/DS-Lite CLAT), see #552.
+		{"464XLAT CLAT host", newDnsMsgPtr("192.0.0.2", t), true},
 		{"Public IP", newDnsMsgPtr("8.8.8.8", t), false},
 	}
 	for _, tc := range tests {
@@ -452,6 +586,11 @@ func Test_isWanClient(t *testing.T) {
 		{"CGNAT", &net.UDPAddr{IP: net.ParseIP("100.66.27.28")}, false},
 		{"Loopback", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")}, false},
 		{"Link Local Unicast", &net.UDPAddr{IP: net.ParseIP("fe80::69f6:e16e:8bdb:433f")}, false},
+		// RFC 7335 IPv4 Service Continuity Prefix (464XLAT/DS-Lite CLAT), see #552.
+		{"464XLAT PLAT side", &net.UDPAddr{IP: net.ParseIP("192.0.0.1")}, false},
+		{"464XLAT CLAT host", &net.UDPAddr{IP: net.ParseIP("192.0.0.2")}, false},
+		// Outside the /29 but inside 192.0.0.0/24: still WAN (fix is scoped to /29).
+		{"192.0.0.0/24 outside /29", &net.UDPAddr{IP: net.ParseIP("192.0.0.100")}, true},
 		{"Public", &net.UDPAddr{IP: net.ParseIP("8.8.8.8")}, true},
 	}
 	for _, tc := range tests {
@@ -463,4 +602,62 @@ func Test_isWanClient(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_reinitializeOSResolver(t *testing.T) {
+	p := newTestProg(t)
+
+	err := p.reinitializeOSResolver("Test message")
+
+	// This function should not return an error under normal circumstances
+	// The actual behavior depends on the OS resolver implementation
+	assert.NoError(t, err)
+}
+
+func Test_prog_queryFromSelf(t *testing.T) {
+	p := newTestProg(t)
+	require.NotPanics(t, func() {
+		p.queryFromSelf("")
+	})
+	require.NotPanics(t, func() {
+		p.queryFromSelf("foo")
+	})
+}
+
+func Test_sameQuestion(t *testing.T) {
+	mk := func(name string, qtype uint16) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion(name, qtype)
+		return m
+	}
+	tests := []struct {
+		name   string
+		req    *dns.Msg
+		answer *dns.Msg
+		want   bool
+	}{
+		{"identical", mk("example.com.", dns.TypeA), mk("example.com.", dns.TypeA), true},
+		{"case insensitive", mk("Example.COM.", dns.TypeA), mk("example.com.", dns.TypeA), true},
+		{"different name", mk("victim.example.", dns.TypeA), mk("attacker.example.", dns.TypeA), false},
+		{"different type", mk("example.com.", dns.TypeA), mk("example.com.", dns.TypeAAAA), false},
+		{"nil req", nil, mk("example.com.", dns.TypeA), false},
+		{"nil answer", mk("example.com.", dns.TypeA), nil, false},
+		{"empty answer question", mk("example.com.", dns.TypeA), new(dns.Msg), false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameQuestion(tc.req, tc.answer); got != tc.want {
+				t.Errorf("sameQuestion() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// newTestProg creates a properly initialized *prog for testing.
+func newTestProg(t *testing.T) *prog {
+	p := &prog{cfg: testhelper.SampleConfig(t)}
+	p.logger.Store(mainLog.Load())
+	p.um = newUpstreamMonitor(p.cfg, mainLog.Load())
+	return p
 }

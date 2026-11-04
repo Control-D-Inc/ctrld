@@ -1,9 +1,12 @@
 package ctrld
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestNameservers(t *testing.T) {
-	ns := nameservers()
+	ns := nameservers(context.Background())
 	if len(ns) == 0 {
 		t.Fatal("failed to get nameservers")
 	}

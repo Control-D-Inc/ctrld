@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"net"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -65,4 +67,10 @@ func currentStaticDnsPowershell(iface *net.Interface) ([]string, error) {
 		}
 	}
 	return ns, nil
+}
+
+// powershell runs the given powershell command.
+func powershell(cmd string) ([]byte, error) {
+	out, err := exec.Command("powershell", "-Command", cmd).CombinedOutput()
+	return bytes.TrimSpace(out), err
 }

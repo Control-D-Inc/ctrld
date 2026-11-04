@@ -1,7 +1,7 @@
 #!/bin/bash
 
 go=${GOBIN:-go}
-executable_name="ctrld"
+executable_name="ctrld-client"
 os_archs=(
     darwin/arm64
     darwin/amd64
@@ -44,11 +44,11 @@ compress() {
       return 0
       ;;
     *-linux-armv*)
-      echo >&2 "upx does not work on arm routers"
+      echo >&2 "upx does not work on arm platforms"
       return 0
       ;;
     *-linux-mips*)
-      echo >&2 "upx does not work on mips routers"
+      echo >&2 "upx does not work on mips platforms"
       return 0
       ;;
   esac
