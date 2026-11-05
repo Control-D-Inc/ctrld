@@ -147,6 +147,13 @@ func (p *prog) initPlatformFirewall() {
 	// listener/loopback traffic, LAN ranges, and other permanent exceptions.
 	fwState.populatePermanentFilters(p)
 
+	// DHCP is permitted by port, not address: a client joining a network
+	// broadcasts DISCOVER to 255.255.255.255, which no allowlist prefix covers,
+	// so without this the block-all filter leaves it on a 169.254 address after
+	// every network change. UDP 68 -> 67 matches the macOS pf rule
+	// (firewall_darwin.go).
+	fwState.addDHCPPermit(p)
+
 	// The organization's allowed destinations are applied as soon as the allowlist
 	// exists, which is before WFP enforcement comes up. This session holds no
 	// filters of its own yet, so mark the set for a full install and let the
@@ -367,6 +374,92 @@ func (s *wfpFirewallState) populatePermanentFilters(p *prog) {
 		s.permanentFilterMap[key] = filterID
 		p.Debug().Msgf("Firewall: added permanent WFP permit for %s (ID: %d)", prefix, filterID)
 	}
+}
+
+// DHCPv4 client and server ports. DHCPv6 needs no rule of its own: it goes to
+// ff02::1:2, inside the permanent ff00::/8 prefix.
+const (
+	dhcpV4ClientPort = 68
+	dhcpV4ServerPort = 67
+)
+
+// fwpmConditionIPLocalPort is FWPM_CONDITION_IP_LOCAL_PORT.
+var fwpmConditionIPLocalPort = windows.GUID{
+	Data1: 0x0c1ba1af,
+	Data2: 0x5765,
+	Data3: 0x453f,
+	Data4: [8]byte{0xaf, 0x22, 0xa8, 0xf7, 0x91, 0xac, 0x77, 0x5b},
+}
+
+// addDHCPPermit installs the permanent DHCPv4 permit. It is kept in
+// permanentFilterMap so shutdown removes it with the other permanent permits.
+func (s *wfpFirewallState) addDHCPPermit(p *prog) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	const key = "dhcp:v4"
+	if _, exists := s.permanentFilterMap[key]; exists {
+		return
+	}
+	filterID, err := p.addWFPFirewallPermitUDPPorts(s, "ctrld Firewall Permit DHCP", dhcpV4ClientPort, dhcpV4ServerPort)
+	if err != nil {
+		p.Warn().Err(err).Msg("Firewall: failed to add DHCP WFP permit; joining a new network may fail")
+		return
+	}
+	s.permanentFilterMap[key] = filterID
+	p.Debug().Msgf("Firewall: added permanent WFP permit for DHCP (UDP %d -> %d, ID: %d)", dhcpV4ClientPort, dhcpV4ServerPort, filterID)
+}
+
+// addWFPFirewallPermitUDPPorts permits outbound IPv4 UDP from one local port
+// to one remote port, at the firewall permit weight (5), so it overrides the
+// block-all filter. Matching the local port too keeps the permit from being a
+// general hole: binding a privileged client port such as 68 needs the owning
+// service's privilege, so ordinary processes cannot tunnel through it.
+func (p *prog) addWFPFirewallPermitUDPPorts(fwState *wfpFirewallState, name string, localPort, remotePort uint16) (uint64, error) {
+	filterName, _ := windows.UTF16PtrFromString(name)
+
+	conditions := make([]fwpmFilterCondition0, 3)
+	conditions[0] = fwpmFilterCondition0{
+		fieldKey:  fwpmConditionIPProtocol,
+		matchType: fwpMatchEqual,
+	}
+	conditions[0].condValue.valueType = fwpUint8
+	conditions[0].condValue.value = uint64(ipprotoUDP)
+	conditions[1] = fwpmFilterCondition0{
+		fieldKey:  fwpmConditionIPRemotePort,
+		matchType: fwpMatchEqual,
+	}
+	conditions[1].condValue.valueType = fwpUint16
+	conditions[1].condValue.value = uint64(remotePort)
+	conditions[2] = fwpmFilterCondition0{
+		fieldKey:  fwpmConditionIPLocalPort,
+		matchType: fwpMatchEqual,
+	}
+	conditions[2].condValue.valueType = fwpUint16
+	conditions[2].condValue.value = uint64(localPort)
+
+	filter := fwpmFilter0{
+		layerKey:        fwpmLayerALEAuthConnectV4,
+		subLayerKey:     ctrldSubLayerGUID,
+		numFilterConds:  3,
+		filterCondition: &conditions[0],
+	}
+	filter.displayData.name = filterName
+	filter.weight.valueType = fwpUint8
+	filter.weight.value = 5
+	filter.action.actionType = fwpActionPermit
+
+	var filterID uint64
+	r1, _, _ := procFwpmFilterAdd0.Call(
+		fwState.engineHandle,
+		uintptr(unsafe.Pointer(&filter)),
+		0,
+		uintptr(unsafe.Pointer(&filterID)),
+	)
+	runtime.KeepAlive(conditions)
+	if r1 != 0 {
+		return 0, fmt.Errorf("FwpmFilterAdd0 (permit UDP %d -> %d) failed: HRESULT 0x%x", localPort, remotePort, r1)
+	}
+	return filterID, nil
 }
 
 // fwpErrFilterNotFound is FWP_E_FILTER_NOT_FOUND: the filter is already gone, so
