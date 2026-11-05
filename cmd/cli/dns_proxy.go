@@ -170,6 +170,11 @@ func (p *prog) serveDNS(listenerNum string) error {
 	}
 
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
+		// Before the semaphore: a returned query of ctrld's own must be answered
+		// even when every slot is held by the queries waiting for it.
+		if p.handleSelfQuery(w, m) {
+			return
+		}
 		p.sema.acquire()
 		defer p.sema.release()
 		if len(m.Question) == 0 {
@@ -2588,7 +2593,7 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 				exemptions = append(exemptions, vpnDNSExemption{Server: host})
 			}
 			mainLog.Load().Info().Msgf("DNS intercept recovery: exempting DHCP nameservers from filters: %v", exemptions)
-			if err := p.exemptVPNDNSServers(exemptions); err != nil {
+			if err := p.exemptRecoveryNameservers(exemptions); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("DNS intercept recovery: failed to exempt DHCP nameservers — recovery queries may fail")
 			}
 		}

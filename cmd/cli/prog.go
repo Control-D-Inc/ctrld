@@ -172,6 +172,10 @@ type prog struct {
 
 	loopMu sync.Mutex
 	loop   map[string]bool
+	// selfLoops reports ctrld's own DNS queries that came back to the listener.
+	selfLoops selfLoopReporter
+	// selfLoopSuspects reports copies that matched a question, not an ID.
+	selfLoopSuspects selfLoopReporter
 
 	recoveryCancelMu sync.Mutex
 	recoveryCancel   context.CancelFunc
@@ -983,6 +987,9 @@ func (p *prog) closeLogConn() {
 // before the process exits.
 func (p *prog) reportServeDNSFailure(listenerNum string, err error) {
 	failRunUnclassified(mainLog.Load().Error().Err(err), fmt.Sprintf("unable to start dns proxy on listener.%s: %v", listenerNum, err), p.notifyExitToLogServer)
+	// On mobile the run is already up and waiting for the host app, so report
+	// now: the app stops the run, as it would have done for an exit.
+	abortOnProvisionFailure(p.appCallback)
 }
 
 // run runs the ctrld main components.
