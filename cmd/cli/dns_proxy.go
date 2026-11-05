@@ -197,7 +197,10 @@ func (p *prog) serveDNS(ctx context.Context, listenerNum string) error {
 		if p.handleSelfQuery(w, m) {
 			return
 		}
-		p.handleDNSQuery(w, m, listenerNum, listenerConfig)
+		// Read the listener config per query, not once above: a reload replaces
+		// p.cfg.Listener while this listener keeps serving, and the captured
+		// copy would keep the old policy (rules, failover_rcodes) until restart.
+		p.handleDNSQuery(w, m, listenerNum, p.cfg.Listener[listenerNum])
 	})
 
 	logger.Debug().Msg("DNS server setup completed")
