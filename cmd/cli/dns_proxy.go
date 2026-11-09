@@ -98,7 +98,10 @@ type proxyRequest struct {
 	ufr             *upstreamForResult
 	staleAnswer     *dns.Msg
 	isLanOrPtrQuery bool
-	upstreamConfigs []*ctrld.UpstreamConfig
+	// lanHostnameQuery marks a LAN hostname lookup that may take the NetBIOS/mDNS
+	// fallback when the OS resolver answers NXDOMAIN (issue #674).
+	lanHostnameQuery bool
+	upstreamConfigs  []*ctrld.UpstreamConfig
 	// internalFallback is set when the upstreams are the configured resolvers
 	// of an Internal Domain in explicit-with-network-fallback mode.
 	// internalNegative keeps the best SERVFAIL or NXDOMAIN answer those
@@ -762,6 +765,7 @@ func (p *prog) handleSpecialQueryTypes(ctx *context.Context, req *proxyRequest, 
 		return nil
 	case isLanHostnameQuery(req.msg):
 		req.isLanOrPtrQuery = true
+		req.lanHostnameQuery = true
 		if answer := p.proxyLanHostnameQuery(*ctx, req.msg); answer != nil {
 			return &proxyResponse{answer: answer, clientInfo: true}
 		}
@@ -1311,6 +1315,13 @@ func (p *prog) processUpstream(ctx context.Context, req *proxyRequest, upstream 
 	}
 	if p.shouldContinueWithNextUpstream(ctx, req, answer, upstream, lastUpstream) {
 		return nil
+	}
+	// The NXDOMAIN is where Windows would have tried NetBIOS and mDNS,
+	// had Intercept mode's NRPT rule not stopped it (issue #674).
+	if req.lanHostnameQuery && answer.Rcode == dns.RcodeNameError && upstream == upstreamOS {
+		if fallback := p.lanNameFallbackAnswer(ctx, req.msg); fallback != nil {
+			answer = fallback
+		}
 	}
 	return p.prepareSuccessResponse(ctx, req, answer, upstream, upstreamConfig)
 }
