@@ -260,6 +260,12 @@ type prog struct {
 	// On Windows: *wfpState, on macOS: *pfState, nil on other platforms.
 	dnsInterceptState any
 
+	// lanFallback answers LAN names from NetBIOS/mDNS in Windows Intercept
+	// mode when DNS has none (issue #674). Created on first use; nil on other
+	// platforms.
+	lanFallback     *lanNameFallback
+	lanFallbackOnce sync.Once
+
 	// dnsInterceptMu serializes DNS intercept lifecycle transitions - start, stop and
 	// the health monitor's rebuild - and guards every write to dnsInterceptState, so a
 	// service stop can never interleave with a monitor-driven rebuild.

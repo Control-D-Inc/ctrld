@@ -663,6 +663,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// 3. Try private resolver.
 	// 4. Try remote upstream.
 	isLanOrPtrQuery := false
+	// lanHostnameQuery marks a LAN hostname lookup that may take the NetBIOS/mDNS
+	// fallback when the OS resolver answers NXDOMAIN (issue #674).
+	lanHostnameQuery := false
 	if req.ufr.matched {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
 		// A rule sending an Active Directory name to the OS resolver (the
@@ -697,6 +700,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
 		case isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
+			lanHostnameQuery = true
 			if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
 				res.answer = answer
 				res.clientInfo = true
@@ -1000,6 +1004,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 					upstreams[n], dns.RcodeToString[answer.Rcode])
 				internalNegative = betterInternalDomainNegative(internalNegative, answer)
 				continue
+			}
+
+			// The NXDOMAIN is where Windows would have tried NetBIOS and mDNS,
+			// had Intercept mode's NRPT rule not stopped it (issue #674).
+			if lanHostnameQuery && answer.Rcode == dns.RcodeNameError && upstreams[n] == upstreamOS {
+				if fallback := p.lanNameFallbackAnswer(ctx, req.msg); fallback != nil {
+					answer = fallback
+				}
 			}
 
 			// set compression, as it is not set by default when unpacking
