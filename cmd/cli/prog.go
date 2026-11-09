@@ -34,6 +34,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
@@ -686,21 +687,27 @@ func (p *prog) preRun() {
 }
 
 func (p *prog) postRun() {
-	if !service.Interactive() {
+	if runningAsService() {
 		if runtime.GOOS == "windows" {
 			isDC, roleInt := isRunningOnDomainController()
 			p.runningOnDomainController = isDC
 			mainLog.Load().Debug().Msgf("running on domain controller: %t, role: %d", p.runningOnDomainController, roleInt)
 		}
+		// The iOS app owns the DNS settings of the device. An iOS extension
+		// runs under launchd, so it also gets here. Android keeps the earlier
+		// behavior.
+		ownsDeviceDNS := !mobile.IsIOS()
 		// A Windows organization can install a GP-owned NRPT catch-all before
 		// starting ctrld. Detect that policy before resetDNS touches adapter DNS;
 		// startDNSIntercept will then prove the rule functionally before adopting it.
-		if !p.skipInitialDNSReset() {
-			p.resetDNS(false, false)
+		if ownsDeviceDNS && !p.skipInitialDNSReset() {
+			resetDNSFn(p, false, false)
 		}
 		ns, systemNameservers := initializeOsResolverWithSystemNameserversFn(false, osResolverReasonStart)
 		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
-		p.setDNS(systemNameservers)
+		if ownsDeviceDNS {
+			p.setDNS(systemNameservers)
+		}
 		p.csSetDnsDone <- struct{}{}
 		close(p.csSetDnsDone)
 	}
@@ -2556,6 +2563,15 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 	var uer *controld.ErrorResponse
 	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		p.stopDnsWatchers()
+		// On mobile ctrld runs inside the app. It cannot start an uninstall,
+		// and it must not end the process, so the app gets the code and
+		// stops the run.
+		if isMobile() {
+			if p.appCallback != nil && p.appCallback.Exit != nil {
+				p.appCallback.Exit(mobileAPIFailureLine(uninstallErr))
+			}
+			return
+		}
 
 		// Perform self-uninstall now.
 		selfUninstallFn(p, logger)
@@ -2639,6 +2655,11 @@ func performUpgrade(vt string) bool {
 // The callers must ensure curVer and logger are non-nil.
 // Returns true if upgrade is allowed and should proceed, false otherwise.
 func selfUpgradeCheck(vt string, cv *semver.Version, logger *zerolog.Logger) bool {
+	// On mobile ctrld updates with the app, and the sandbox does not let it
+	// start the upgrade command.
+	if isMobile() {
+		return false
+	}
 	if shouldUpgrade(vt, cv, logger) {
 		return performUpgrade(vt)
 	}

@@ -144,7 +144,7 @@ func initInteractiveLogging() {
 func initLoggingWithBackup(doBackup bool) []io.Writer {
 	var writers []io.Writer
 	if rf := openLogPathWriter(doBackup); rf != nil {
-		writers = append(writers, rf)
+		writers = append(writers, mobileLogFile(rf))
 	}
 	writers = append(writers, consoleWriter)
 	multi := zerolog.MultiLevelWriter(writers...)

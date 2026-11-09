@@ -60,6 +60,9 @@ func discoverSessionUser(ctx context.Context) string {
 
 // getConsoleUser uses stat to find the owner of /dev/console
 func getConsoleUser(ctx context.Context) string {
+	if isMobile() {
+		return ""
+	}
 	cmd := exec.CommandContext(ctx, "stat", "-f", "%Su", "/dev/console")
 	out, err := cmd.Output()
 	if err != nil {
@@ -71,6 +74,9 @@ func getConsoleUser(ctx context.Context) string {
 
 // getScutilConsoleUser uses scutil to get the current console user
 func getScutilConsoleUser(ctx context.Context) string {
+	if isMobile() {
+		return ""
+	}
 	cmd := exec.CommandContext(ctx, "scutil", "-r", "ConsoleUser")
 	out, err := cmd.Output()
 	if err != nil {
@@ -92,6 +98,9 @@ func getScutilConsoleUser(ctx context.Context) string {
 
 // getLowestRegularUser finds the user with the lowest UID >= 501
 func getLowestRegularUser(ctx context.Context) string {
+	if isMobile() {
+		return ""
+	}
 	// Get list of all users with UID >= 501
 	cmd := exec.CommandContext(ctx, "dscl", ".", "list", "/Users", "UniqueID")
 	out, err := cmd.Output()

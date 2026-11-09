@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
 
@@ -27,8 +29,11 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 	const childEnv = "CTRLD_TEST_MOBILE_PROVISION_FAILURE"
 	mode := os.Getenv(childEnv)
 	if mode == "" {
-		for _, mode := range []string{"token-shape", "listener-bind", "network-down", "proto-then-valid", "stale"} {
+		for _, mode := range []string{"token-shape", "listener-bind", "network-down", "network-stop", "proto-then-valid", "stale", "api-error-secret", "no-host-tools", "token-exchange-redacts"} {
 			t.Run(mode, func(t *testing.T) {
+				if mode == "no-host-tools" && runtime.GOOS != "darwin" {
+					t.Skip("the fake tools are the tools of macOS and iOS")
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 				defer cancel()
 				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRunMobileReportsProvisionFailure$", "-test.v")
@@ -41,7 +46,7 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 	}
 
 	isMobile = func() bool { return true }
-	networkUp = func() bool { return true }
+	networkUp = func(<-chan struct{}) bool { return true }
 	newRouter = func(*ctrld.Config, bool) router.Router { return &startupTestRouter{} }
 	provisionExit = func(code int) { t.Fatalf("process exit %d on mobile", code) }
 	dir := t.TempDir()
@@ -90,9 +95,17 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 		runOnce(AppConfig{})
 		wantExit(provisionCodeListenerAddrUnavail)
 	case "network-down":
-		networkUp = func() bool { return false }
+		networkUp = func(<-chan struct{}) bool { return false }
 		runOnce(AppConfig{CdUID: "testuid"})
 		wantExit(provisionCodeUnclassified)
+		require.Zero(t, fetches)
+	case "network-stop":
+		// A stop while the network is down is a normal stop, not a failure.
+		networkUp = func(stop <-chan struct{}) bool { <-stop; return false }
+		stopCh := make(chan struct{})
+		close(stopCh)
+		RunMobile(appConfig(AppConfig{CdUID: "testuid"}), &callback, stopCh)
+		require.Empty(t, exits)
 		require.Zero(t, fetches)
 	case "proto-then-valid":
 		runOnce(AppConfig{CdUID: "testuid", UpstreamProto: "dot"})
@@ -101,13 +114,62 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 		// The next start must reach the API instead of replaying that failure.
 		runOnce(AppConfig{CdUID: "testuid"})
 		require.Equal(t, 1, fetches)
-		require.Equal(t, []string{"preflight rejected"}, exits)
+		require.Equal(t, []string{"provisioning failed: stage=api code=API_UNREACHABLE (exit 30)"}, exits)
 	case "stale":
 		// A failure recorded outside any run must not abort the next one.
 		pendingProvisionFailure.Store(newProvisionResult(provisionCodeUnclassified, "stale", nil))
 		runOnce(AppConfig{CdUID: "testuid"})
 		require.Equal(t, 1, fetches)
-		require.Equal(t, []string{"preflight rejected"}, exits)
+		require.Equal(t, []string{"provisioning failed: stage=api code=API_UNREACHABLE (exit 30)"}, exits)
+	case "api-error-secret":
+		// The API can echo the request back, so its error text reaches the
+		// app only as a code.
+		const uid = "1e0rkx9a7tq"
+		processCDFlagsFn = func(context.Context, *ctrld.Config) (*controld.ResolverConfig, error) {
+			fetches++
+			resp := &controld.ErrorResponse{StatusCode: 404}
+			resp.ErrorField.Message = "resolver " + uid + " not found"
+			return nil, resp
+		}
+		runOnce(AppConfig{CdUID: uid})
+		require.Equal(t, []string{"provisioning failed: stage=api code=API_REJECTED (exit 31) http_status=404"}, exits)
+		require.NotContains(t, exits[0], uid)
+	case "no-host-tools":
+		// The whole run, with the real router and the startup metadata,
+		// must start no system tool in an iOS app. The router package reads
+		// the platform at init, before this stub, so its own test covers it.
+		marker := fakeHostTools(t)
+		mobile.IsIOS = func() bool { return true }
+		newRouter = router.New
+		processCDFlagsFn = func(ctx context.Context, _ *ctrld.Config) (*controld.ResolverConfig, error) {
+			fetches++
+			startupMetadata(ctx)
+			return nil, errors.New("preflight rejected")
+		}
+		runOnce(AppConfig{CdUID: "testuid"})
+		require.Equal(t, 1, fetches)
+		require.Equal(t, []string{"provisioning failed: stage=api code=API_UNREACHABLE (exit 30)"}, exits)
+		requireNoHostTools(t, marker)
+	case "token-exchange-redacts":
+		// On iOS the UID exists only after the token exchange, so the
+		// exchange must hand the UID to the log redaction for the whole run.
+		const uid = "1e0rkx9a7tq"
+		const token = "org-v1-provisiontoken"
+		fetchResolverUIDFn = func(context.Context, *controld.UtilityOrgRequest, string, bool) (*controld.ResolverConfig, error) {
+			return &controld.ResolverConfig{UID: uid}, nil
+		}
+		processCDFlagsFn = func(context.Context, *ctrld.Config) (*controld.ResolverConfig, error) {
+			fetches++
+			mainLog.Load().Error().Msgf("resolver %s rejected for %s", cdUID, cdOrg)
+			return nil, errors.New("preflight rejected")
+		}
+		runOnce(AppConfig{ProvisionID: token})
+		require.Equal(t, 1, fetches)
+		logText, err := os.ReadFile(filepath.Join(dir, "ctrld.log"))
+		require.NoError(t, err)
+		require.Contains(t, string(logText), "rejected for")
+		require.NotContains(t, string(logText), uid)
+		require.NotContains(t, string(logText), token)
 	default:
 		t.Fatalf("unknown mode %q", mode)
 	}

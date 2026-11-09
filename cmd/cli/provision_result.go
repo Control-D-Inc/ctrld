@@ -27,6 +27,10 @@ const (
 	provisionStageBootstrap provisionStage = "bootstrap"
 	provisionStageListener  provisionStage = "listener"
 	provisionStageService   provisionStage = "service"
+	// provisionStageAPI names the API preflight in the Exit text of the mobile
+	// library. No code maps to it: the codes keep their bootstrap stage and
+	// exit code in the result file.
+	provisionStageAPI provisionStage = "api"
 )
 
 type provisionFailureCode string
@@ -40,6 +44,8 @@ const (
 	provisionCodeAPIRejected             provisionFailureCode = "API_REJECTED"
 	provisionCodeAPIDeviceInvalid        provisionFailureCode = "API_DEVICE_INVALID"
 	provisionCodeAPIMaintenance          provisionFailureCode = "API_MAINTENANCE"
+	provisionCodeAPIRateLimited          provisionFailureCode = "API_RATE_LIMITED"
+	provisionCodeAPIUnavailable          provisionFailureCode = "API_UNAVAILABLE"
 	provisionCodeTokenInvalid            provisionFailureCode = "TOKEN_INVALID"
 	provisionCodeTokenExpired            provisionFailureCode = "TOKEN_EXPIRED"
 	provisionCodeTokenLimitReached       provisionFailureCode = "TOKEN_LIMIT_REACHED"
@@ -61,6 +67,8 @@ var allProvisionFailureCodes = []provisionFailureCode{
 	provisionCodeAPIRejected,
 	provisionCodeAPIDeviceInvalid,
 	provisionCodeAPIMaintenance,
+	provisionCodeAPIRateLimited,
+	provisionCodeAPIUnavailable,
 	provisionCodeTokenInvalid,
 	provisionCodeTokenExpired,
 	provisionCodeTokenLimitReached,
@@ -82,6 +90,8 @@ var provisionStageForCode = map[provisionFailureCode]provisionStage{
 	provisionCodeAPIRejected:             provisionStageBootstrap,
 	provisionCodeAPIDeviceInvalid:        provisionStageBootstrap,
 	provisionCodeAPIMaintenance:          provisionStageBootstrap,
+	provisionCodeAPIRateLimited:          provisionStageBootstrap,
+	provisionCodeAPIUnavailable:          provisionStageBootstrap,
 	provisionCodeTokenInvalid:            provisionStageBootstrap,
 	provisionCodeTokenExpired:            provisionStageBootstrap,
 	provisionCodeTokenLimitReached:       provisionStageBootstrap,
@@ -107,6 +117,8 @@ var provisionExitCodeForCode = map[provisionFailureCode]int{
 	provisionCodeAPIRejected:             31,
 	provisionCodeAPIDeviceInvalid:        32,
 	provisionCodeAPIMaintenance:          37,
+	provisionCodeAPIRateLimited:          38,
+	provisionCodeAPIUnavailable:          39,
 	provisionCodeTokenInvalid:            33,
 	provisionCodeTokenExpired:            34,
 	provisionCodeTokenLimitReached:       35,

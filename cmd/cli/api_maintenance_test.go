@@ -375,3 +375,27 @@ func Test_maintenanceRetryRecoversBeforeRefetchInterval(t *testing.T) {
 }
 
 func ptrTo[T any](v T) *T { return &v }
+
+// On mobile ctrld runs inside the app, so it cannot start an uninstall or end
+// the process. A deleted device must reach the app as one coded Exit.
+func Test_selfUninstallCheckOnMobileExitsToTheApp(t *testing.T) {
+	called := stubSelfUninstall(t)
+	oldIsMobile := isMobile
+	t.Cleanup(func() { isMobile = oldIsMobile })
+	isMobile = func() bool { return true }
+	var exits []string
+	p := newSelfUninstallTestProg()
+	p.appCallback = &AppCallback{Exit: func(line string) { exits = append(exits, line) }}
+	deleted := &controld.ErrorResponse{StatusCode: 404}
+	deleted.ErrorField.Code = controld.InvalidConfigCode
+
+	selfUninstallCheck(deleted, p, zerolog.Nop())
+
+	if *called {
+		t.Fatal("a deleted device started a self-uninstall on mobile")
+	}
+	want := "provisioning failed: stage=api code=API_DEVICE_INVALID (exit 32) http_status=404"
+	if len(exits) != 1 || exits[0] != want {
+		t.Fatalf("Exit lines = %q, want [%q]", exits, want)
+	}
+}

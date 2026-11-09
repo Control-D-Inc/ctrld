@@ -4,7 +4,13 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/mobile"
 )
+
+// isIOS reports whether ctrld runs in an iOS app, where the sandbox does not
+// let it start scutil. Tests replace it.
+var isIOS = func() bool { return mobile.IsIOS() }
 
 // preferredHostname returns the best available hostname on macOS.
 // It prefers scutil --get ComputerName which is the user-configured name
@@ -15,6 +21,9 @@ import (
 //
 // Fallback chain: ComputerName → LocalHostName → os.Hostname()
 func preferredHostname() (string, error) {
+	if isIOS() {
+		return os.Hostname()
+	}
 	for _, key := range []string{"ComputerName", "LocalHostName"} {
 		if out, err := exec.Command("scutil", "--get", key).Output(); err == nil {
 			if name := strings.TrimSpace(string(out)); name != "" {
@@ -30,7 +39,7 @@ func preferredHostname() (string, error) {
 // best hostname if the primary one looks generic (e.g., "Mac").
 func hostnameHints() map[string]string {
 	hints := make(map[string]string)
-	for _, key := range []string{"ComputerName", "LocalHostName", "HostName"} {
+	for _, key := range scutilHostnameKeys() {
 		if out, err := exec.Command("scutil", "--get", key).Output(); err == nil {
 			if name := strings.TrimSpace(string(out)); name != "" {
 				hints[key] = name
@@ -41,4 +50,12 @@ func hostnameHints() map[string]string {
 		hints["os.Hostname"] = h
 	}
 	return hints
+}
+
+// scutilHostnameKeys lists the scutil keys that hostnameHints reads.
+func scutilHostnameKeys() []string {
+	if isIOS() {
+		return nil
+	}
+	return []string{"ComputerName", "LocalHostName", "HostName"}
 }

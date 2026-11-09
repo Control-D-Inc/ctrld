@@ -3,8 +3,6 @@ package ctrld
 import (
 	"context"
 
-	"github.com/cuonglm/osinfo"
-
 	"github.com/Control-D-Inc/ctrld/internal/system"
 )
 
@@ -58,8 +56,10 @@ func SystemMetadataRuntime(ctx context.Context) map[string]string {
 
 func systemMetadata(ctx context.Context, usernameMode int) map[string]string {
 	m := make(map[string]string)
-	oi := osinfo.New()
-	m[metadataOsKey] = oi.String()
+	m[metadataOsKey] = OSVersion()
+	if isMobile() {
+		return mobileMetadata(m)
+	}
 	if chassisType == "" && chassisVendor == "" {
 		if ci, err := system.GetChassisInfo(); err == nil {
 			chassisType, chassisVendor = ci.Type, ci.Vendor
@@ -82,5 +82,16 @@ func systemMetadata(ctx context.Context, usernameMode int) map[string]string {
 	}
 	m[metadataDomainKey] = domain
 
+	return m
+}
+
+// mobileMetadata completes m without the host values. Each of them starts a
+// system tool on iOS, and an iOS app has no login user. With no username key,
+// the API keeps the value that it has.
+func mobileMetadata(m map[string]string) map[string]string {
+	m[metadataChassisTypeKey] = ""
+	m[metadataChassisVendorKey] = ""
+	m[metadataDomainOrWorkgroupKey] = "false"
+	m[metadataDomainKey] = ""
 	return m
 }

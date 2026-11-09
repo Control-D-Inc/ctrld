@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -45,15 +44,17 @@ var probeStackDialer = &net.Dialer{
 	Timeout:  probeStackTimeout,
 }
 
+// probeStackDial is the dial of the network probe. Tests replace it.
+var probeStackDial = probeStackDialer.DialContext
+
 var (
-	stackOnce          atomic.Pointer[sync.Once]
+	// stackMu holds the probe result. A probe that a stop cuts short leaves
+	// stackProbed false, so the next run of the same process probes again.
+	stackMu            sync.Mutex
+	stackProbed        bool
 	canListenIPv6Local bool
 	hasNetworkUp       bool
 )
-
-func init() {
-	stackOnce.Store(new(sync.Once))
-}
 
 // supportIPv6 checks for IPv6 connectivity by attempting to connect to predefined ports
 // on a specific IPv6 address.
@@ -88,44 +89,74 @@ func supportListenIPv6Local() bool {
 	return false
 }
 
-func probeStack() {
+// probeStack waits until the network is up. It returns false if a signal or
+// stopCh stopped it first.
+func probeStack(stopCh <-chan struct{}) bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() {
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-		<-sigs
+		// A stop can end the probe early, and the next start probes again.
+		// Without Stop, each probe leaves one more channel in os/signal.
+		defer signal.Stop(sigs)
+		select {
+		case <-sigs:
+		case <-stopCh:
+		case <-ctx.Done():
+		}
 		cancel()
 	}()
 
 	b := backoff.NewBackoff("probeStack", func(format string, args ...any) {}, 5*time.Second)
-	for {
-		if _, err := probeStackDialer.DialContext(ctx, "udp", v4BootstrapDNS); err == nil {
-			hasNetworkUp = true
-			break
+	for !dialBootstrapDNS(ctx) {
+		if ctx.Err() != nil {
+			return false
 		}
-		if _, err := probeStackDialer.DialContext(ctx, "udp", v6BootstrapDNS); err == nil {
-			hasNetworkUp = true
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		b.BackOff(context.Background(), errors.New("network is down"))
+		b.BackOff(ctx, errors.New("network is down"))
 	}
+	hasNetworkUp = true
 	canListenIPv6Local = supportListenIPv6Local()
+	return true
+}
+
+// dialBootstrapDNS reports whether one of the bootstrap DNS servers can be dialed.
+func dialBootstrapDNS(ctx context.Context) bool {
+	for _, addr := range []string{v4BootstrapDNS, v6BootstrapDNS} {
+		if conn, err := probeStackDial(ctx, "udp", addr); err == nil {
+			_ = conn.Close()
+			return true
+		}
+	}
+	return false
+}
+
+// probeStackOnce probes the network one time per process. A probe that
+// stopCh cuts short is not kept. The caller holds stackMu.
+func probeStackOnce(stopCh <-chan struct{}) {
+	if !stackProbed {
+		stackProbed = probeStack(stopCh)
+	}
 }
 
 func Up() bool {
-	stackOnce.Load().Do(probeStack)
+	return UpUntil(nil)
+}
+
+// UpUntil is Up, but it returns false when stopCh closes before the network
+// is up. A start that waits for the network must stop when ctrld stops.
+func UpUntil(stopCh <-chan struct{}) bool {
+	stackMu.Lock()
+	defer stackMu.Unlock()
+	probeStackOnce(stopCh)
 	return hasNetworkUp
 }
 
 func SupportsIPv6ListenLocal() bool {
-	stackOnce.Load().Do(probeStack)
+	stackMu.Lock()
+	defer stackMu.Unlock()
+	probeStackOnce(nil)
 	return canListenIPv6Local
 }
 

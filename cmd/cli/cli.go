@@ -40,6 +40,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
@@ -93,6 +94,7 @@ var rootCmd = &cobra.Command{
 	Short:   strings.TrimLeft(rootShortDesc, "\n"),
 	Version: curVersion(),
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		storeJournalSecrets()
 		initConsoleLogging()
 	},
 }
@@ -163,11 +165,15 @@ func abortOnProvisionFailure(appCallback *AppCallback) bool {
 
 // isMobile reports whether the current OS is a mobile platform.
 var isMobile = func() bool {
-	return runtime.GOOS == "android" || runtime.GOOS == "ios"
+	return runtime.GOOS == "android" || mobile.IsIOS()
 }
 
+// errNoHostTools is the error of a system tool that ctrld does not start on
+// mobile. The iOS sandbox does not let an app start a process.
+var errNoHostTools = errors.New("system network tools are not available on mobile")
+
 var (
-	networkUp = ctrldnet.Up
+	networkUp = ctrldnet.UpUntil
 	newRouter = router.New
 )
 
@@ -222,20 +228,7 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 		panic("appConfig is nil")
 	}
 	initConsoleLogging()
-	noConfigStart = false
-	homedir = appConfig.HomeDir
-	verbose = appConfig.Verbose
-	if appConfig.ProvisionID != "" {
-		cdOrg = appConfig.ProvisionID
-	}
-	if appConfig.CustomHostname != "" {
-		customHostname = appConfig.CustomHostname
-	}
-	if appConfig.CdUID != "" {
-		cdUID = appConfig.CdUID
-	}
-	cdUpstreamProto = appConfig.UpstreamProto
-	logPath = appConfig.LogPath
+	applyAppConfig(appConfig)
 	run(appCallback, stopCh)
 }
 
@@ -358,7 +351,12 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	mainLog.Load().Info().Msgf("os: %s", osVersion())
 
 	// Wait for network up.
-	if !networkUp() {
+	if !networkUp(p.stopCh) {
+		if stopRequested(p.stopCh) {
+			mainLog.Load().Notice().Msg("stop requested while waiting for the network, shutting down")
+			p.notifyExitToLogServer()
+			return
+		}
 		failRunUnclassified(mainLog.Load().Error(), "network is not up yet", p.notifyExitToLogServer)
 		return
 	}
@@ -383,7 +381,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// managed-config marker may claim once the configuration is on disk.
 	managedConfigFetched := false
 	if uid := cdUIDFromProvToken(); uid != "" {
-		cdUID = uid
+		setCdUID(uid)
 		p.initLoggingAfterProvisioning()
 	}
 	if abortOnProvisionFailure(appCallback) {
@@ -413,7 +411,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			return
 		case pf.err != nil:
 			if isMobile() {
-				appCallback.Exit(pf.err.Error())
+				appCallback.Exit(mobileAPIFailureLine(pf.err))
 				return
 			}
 
@@ -925,6 +923,37 @@ func apiFailureCode(err error) (provisionFailureCode, bool) {
 		return provisionCodeAPIRejected, true
 	}
 	return provisionCodeAPIUnreachable, true
+}
+
+// mobileAPIFailureLine is the Exit text of the mobile library for an API
+// preflight error. The app reads the code to select a retry or an error
+// screen. The text has no error message, because the API can echo the UID or
+// the token in it.
+func mobileAPIFailureLine(err error) string {
+	code, ok := apiFailureCode(err)
+	if !ok {
+		code = provisionCodeUnclassified
+	}
+	var uer *controld.ErrorResponse
+	status := 0
+	if errors.As(err, &uer) {
+		status = uer.StatusCode
+	}
+	// On a desktop the service manager retries all of these alike. The app
+	// waits longer for a rate limit than for an API that is down.
+	if code == provisionCodeAPIUnreachable {
+		switch {
+		case status == http.StatusTooManyRequests:
+			code = provisionCodeAPIRateLimited
+		case status >= http.StatusInternalServerError:
+			code = provisionCodeAPIUnavailable
+		}
+	}
+	r := &provisionResult{Stage: string(provisionStageAPI), Code: string(code), ExitCode: provisionExitCodeForCode[code]}
+	if status == 0 {
+		return r.failureLine()
+	}
+	return fmt.Sprintf("%s http_status=%d", r.failureLine(), status)
 }
 
 // tokenFailureCodeForReason maps error.metadata.reason on a provisioning-token
@@ -2250,13 +2279,13 @@ func dirWritable(dir string) (bool, error) {
 }
 
 func osVersion() string {
-	oi := osinfo.New()
+	version := ctrld.OSVersion()
 	if runtime.GOOS == "freebsd" {
-		if ver, _, found := strings.Cut(oi.String(), ":"); found {
+		if ver, _, found := strings.Cut(version, ":"); found {
 			return ver
 		}
 	}
-	return oi.String()
+	return version
 }
 
 // provisionTokenMinLen, provisionTokenMaxLen, and provisionTokenExpectedPrefix

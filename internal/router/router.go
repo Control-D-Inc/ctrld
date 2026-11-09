@@ -14,6 +14,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/certs"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 	"github.com/Control-D-Inc/ctrld/internal/router/ddwrt"
 	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
 	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
@@ -230,6 +231,12 @@ func ServiceDependencies() []string {
 }
 
 func distroName() string {
+	// An iOS device is never a router, and the iOS sandbox does not let an
+	// app start uname or ubnt-device-info. The service package init reads
+	// the name, so this runs as soon as the library loads.
+	if mobile.IsIOS() {
+		return osName
+	}
 	switch {
 	case bytes.HasPrefix(unameO(), []byte("DD-WRT")):
 		return ddwrt.Name

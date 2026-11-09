@@ -4,7 +4,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"runtime/debug"
+	"strings"
 	"time"
+
+	"gitlab.int.windscribe.com/controld/clients/ctrld.git"
 )
 
 // AppCallback provides hooks for injecting certain functionalities
@@ -25,6 +29,67 @@ type AppConfig struct {
 	UpstreamProto  string
 	Verbose        int
 	LogPath        string
+	// Dev makes ctrld use the dev API, like the --dev flag.
+	Dev bool
+	// MemoryLimitMiB, if more than 0, is the Go memory limit of the process.
+	MemoryLimitMiB int
+	// Nameservers is a comma-separated list of the OS resolvers that the app
+	// reports. If it is empty, ctrld finds the OS resolvers itself. Each start
+	// replaces the list that SetMobileNameservers set before it.
+	Nameservers string
+}
+
+// osResolverReasonAppNameservers marks an OS resolver read that the app
+// started with SetMobileNameservers.
+const osResolverReasonAppNameservers = "app_nameservers"
+
+// setMemoryLimit is debug.SetMemoryLimit. Tests replace it.
+var setMemoryLimit = debug.SetMemoryLimit
+
+// applyAppConfig puts the values of appConfig into the CLI flag globals.
+// The globals stay between runs in one process, so each input of a run is
+// set on every run. cdUID is the exception: a token exchange sets it during
+// a run, and the next run with the same token must use that UID. Without it,
+// that run exchanges the token again and the API makes a new device.
+func applyAppConfig(appConfig *AppConfig) {
+	noConfigStart = false
+	homedir = appConfig.HomeDir
+	verbose = appConfig.Verbose
+	cdOrg = appConfig.ProvisionID
+	customHostname = appConfig.CustomHostname
+	if appConfig.CdUID != "" {
+		cdUID = appConfig.CdUID
+	}
+	storeJournalSecrets()
+	cdUpstreamProto = appConfig.UpstreamProto
+	logPath = appConfig.LogPath
+	cdDev = appConfig.Dev
+	if appConfig.MemoryLimitMiB > 0 {
+		setMemoryLimit(int64(appConfig.MemoryLimitMiB) << 20)
+	}
+	ctrld.SetAppNameservers(splitNameservers(appConfig.Nameservers))
+}
+
+// SetMobileNameservers makes the comma-separated list csv the OS resolvers,
+// and builds the OS resolver again from them. The app calls it when the
+// network of the device changes. It is safe to call while ctrld runs. A list
+// with no IP address keeps the current OS resolver, because a device without
+// a network reports no nameservers. The next start replaces the list with
+// the nameservers of its AppConfig.
+func SetMobileNameservers(csv string) {
+	nss := ctrld.ParseNameservers(splitNameservers(csv))
+	if len(nss) == 0 {
+		return
+	}
+	ctrld.SetAppNameservers(nss)
+	ctrld.InitializeOsResolverWithReason(true, osResolverReasonAppNameservers)
+}
+
+func splitNameservers(csv string) []string {
+	if strings.TrimSpace(csv) == "" {
+		return nil
+	}
+	return strings.Split(csv, ",")
 }
 
 const (

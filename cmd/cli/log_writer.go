@@ -367,7 +367,7 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 		wrapConsoleWritersAtNotice(writers)
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	}
-	writers = append(writers, lw, newJournalLevelWriter(jlw))
+	writers = append(writers, mobileLogFile(lw), newJournalLevelWriter(jlw))
 	multi := zerolog.MultiLevelWriter(writers...)
 	l := mainLog.Load().Output(multi).With().Logger()
 	mainLog.Store(&l)

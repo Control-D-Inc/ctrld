@@ -703,7 +703,7 @@ NOTE: running "ctrld start" without any arguments will start already installed c
 				// Skip doValidateCdRemoteConfig() here - run command will handle
 				// validation and config fetch via processCDFlags().
 			} else if uid := cdUIDFromProvToken(); uid != "" {
-				cdUID = uid
+				setCdUID(uid)
 				mainLog.Load().Debug().Msg("using uid from provision token")
 				removeOrgFlagsFromArgs(sc)
 				// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.
@@ -1050,7 +1050,7 @@ func initRestartCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			readConfig(false)
 			v.Unmarshal(&cfg)
-			cdUID = curCdUID()
+			setCdUID(curCdUID())
 			cdMode := cdUID != ""
 
 			p := &prog{router: router.New(&cfg, cdMode)}
