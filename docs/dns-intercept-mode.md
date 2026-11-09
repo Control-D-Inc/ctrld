@@ -197,6 +197,22 @@ A dedicated background goroutine (`nrptHealthMonitor`) runs every 30 seconds and
 
 This is periodic (not just network-event-driven) because VPN software can clear NRPT at any time. Additionally, `scheduleDelayedRechecks()` (called on network change events) performs immediate NRPT verification at 2s and 4s after changes.
 
+#### LAN Names from NetBIOS and mDNS
+
+Without ctrld, the Windows DNS Client tries NetBIOS (single-label names) and mDNS (`<name>.local`) after DNS answers NXDOMAIN. Any NRPT rule that matches a name stops that fallback, and NRPT cannot exclude names from the catch-all rule. On a network with no local DNS server, devices that are known only by NetBIOS or mDNS (a PC, NAS or printer) would then stop resolving in Intercept mode.
+
+ctrld does the fallback itself, only where Windows would have:
+
+- **When:** Windows, Intercept mode (`dns` or `hard`). The query is an A/AAAA LAN hostname lookup, and the OS resolver answered NXDOMAIN. Every other answer and every other upstream is unchanged.
+- **Which names:** a single label (`nas`), `<label>.local`, or `<label>.<suffix>` where `<suffix>` is a DNS suffix an adapter uses (connection suffix, primary suffix or search list). The DNS Client appends the suffix before asking DNS, so `NAS` reaches ctrld as `nas.lan`. Other multi-label names never qualify. `<label>.local` is asked over mDNS only; NetBIOS is used only for labels of 15 characters or fewer.
+- **Windows settings are followed:** NetBIOS is used only on adapters where NetBIOS over TCP/IP is in effect. mDNS is off when `EnableMDNS=0` is set (local or policy) or the "Turn off multicast name resolution" policy (`EnableMulticast=0`) is set, and is used only on adapters that send multicast. If Windows would not fall back, ctrld does not either.
+- **LAN only:** queries go from an ephemeral port on the adapter's own IPv4 address, to the subnet broadcast address for NetBIOS and to `224.0.0.251:5353` for mDNS. Answers from outside the adapter's subnet are dropped, and point-to-point adapters (/31, /32, most VPN tunnels) are skipped. ctrld does not listen on ports 137 or 5353.
+- **Bounded:** at most 1.5 s per lookup, with NetBIOS resent every 750 ms. A/AAAA pairs and DNS Client retries for the same name share one lookup, and a name nobody answered is not asked again for 10 s.
+- **Answer:** an A record with a 60 s TTL under the exact name asked. AAAA gets NODATA, because NetBIOS and the mDNS A lookup only return IPv4. If nobody answers, the original NXDOMAIN is returned.
+- **Log line** (debug): `lan name fallback: <name> answered by NetBIOS: <address>` (or `mDNS`).
+
+In Interface DNS mode Windows does its own fallback, so ctrld does not. On macOS, mDNSResponder resolves `.local` names before DNS, so no fallback is needed there.
+
 #### Known Caveats
 
 - **`nslookup` bypasses NRPT**: `nslookup.exe` uses its own DNS resolver implementation and does NOT go through the Windows DNS Client service, so it ignores NRPT rules entirely. Use `Resolve-DnsName` (PowerShell) or `ping` to verify DNS resolution through NRPT. This is a well-known Windows behavior, not a ctrld bug.
