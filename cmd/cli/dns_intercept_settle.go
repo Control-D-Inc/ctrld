@@ -32,6 +32,9 @@ func (p *prog) refreshDNSAfterVPNSettle(reason string) (routes, domainlessServer
 	ctx := ctrld.LoggerCtx(context.Background(), mainLog.Load())
 	ns := initializeOsResolver(ctx, true, osResolverReasonVPNSettle)
 	mainLog.Load().Debug().Msgf("DNS intercept: post-settle OS resolver nameservers: %v", ns)
+	// A VPN that just settled can make an organization resolver reachable
+	// that was down while the VPN was off. Let the next lookup ask it.
+	p.resetDownInternalDomainFallbackUpstreams()
 
 	if p.vpnDNS == nil {
 		mainLog.Load().Debug().Msg("DNS intercept: post-settle VPN DNS route refresh skipped — manager unavailable")

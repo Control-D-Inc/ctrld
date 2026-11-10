@@ -155,6 +155,14 @@ seconds, with the query that was skipped. Once it answers it is used again.
 `resolvers_only` mode never skips: with no fallback to go to, skipping would
 only turn the resolver's answer into SERVFAIL.
 
+On macOS in Intercept mode, a VPN that finishes connecting (pf stabilization,
+then the post-settle VPN DNS refresh) marks every down fallback-mode resolver
+up again. A resolver that is reachable only through the VPN goes down each time
+the VPN is off. Without this, the first lookups after the VPN came back would
+skip it and get the network's answer, usually NXDOMAIN for a VPN-only name,
+which the host then caches. A resolver that is still unreachable costs the next
+lookup one timeout before the monitor marks it down again.
+
 The first NOERROR answer wins. NXDOMAIN triggers the fallback because the
 configured resolver may be reachable but not know a name that the local
 network's resolver does, for example on another subnet. REFUSED and NOTIMP
