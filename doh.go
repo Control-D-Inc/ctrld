@@ -11,9 +11,6 @@ import (
 	"net/url"
 	"runtime"
 	"strings"
-	"sync"
-
-	"github.com/cuonglm/osinfo"
 
 	"github.com/miekg/dns"
 )
@@ -71,10 +68,13 @@ func init() {
 	}
 }
 
-var dohOsHeaderValue = sync.OnceValue(func() string {
-	oi := osinfo.New()
-	return strings.Join([]string{EncodeOsNameMap[runtime.GOOS], EncodeArchNameMap[runtime.GOARCH], oi.Dist}, "-")
-})()
+var dohOsHeaderValue = newDohOsHeaderValue()
+
+// newDohOsHeaderValue returns the OS, the architecture, and the distribution
+// of the OS in the format of the DoH OS header.
+func newDohOsHeaderValue() string {
+	return strings.Join([]string{EncodeOsNameMap[runtime.GOOS], EncodeArchNameMap[runtime.GOARCH], osDist()}, "-")
+}
 
 func newDohResolver(uc *UpstreamConfig) *dohResolver {
 	r := &dohResolver{

@@ -18,3 +18,12 @@ func OSVersion() string {
 	}
 	return osinfoNew().String()
 }
+
+// osDist returns the distribution of the OS, such as "15.1" on macOS. On
+// mobile it reads the version without a system tool.
+func osDist() string {
+	if isMobile() {
+		return sandboxOSVersion()
+	}
+	return osinfoNew().Dist
+}

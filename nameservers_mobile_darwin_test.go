@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cuonglm/osinfo"
+	"golang.org/x/sys/unix"
 )
 
 // fakeHostTools puts fakes of the system tools that ctrld can start on macOS
@@ -50,6 +51,7 @@ func TestMobileStartsNoHostTools(t *testing.T) {
 	DiscoverVPNDNS(context.Background())
 	getScutilConsoleUser(context.Background())
 	OSVersion()
+	newDohOsHeaderValue()
 	SystemMetadataStartup(context.Background())
 	SystemMetadata(context.Background())
 	if _, err := DHCPNameserversForInterfaceContext(context.Background(), "en0"); !errors.Is(err, errNoHostTools) {
@@ -92,5 +94,20 @@ func TestMobileMetadataHasNoHostValues(t *testing.T) {
 	}
 	if got := SystemMetadata(context.Background())[metadataUsernameKey]; got != "" {
 		t.Errorf("mobile provisioning metadata sent username %q", got)
+	}
+}
+
+// The DoH OS header is built when the package loads, before any run. On
+// iOS it must take the OS version without sw_vers.
+func TestMobileDohOsHeaderHasTheVersion(t *testing.T) {
+	stubMobile(t)
+	stubOSInfo(t)
+	header := newDohOsHeaderValue()
+	want, err := unix.Sysctl("kern.osproductversion")
+	if err != nil || want == "" {
+		t.Fatalf("kern.osproductversion = %q, %v", want, err)
+	}
+	if !strings.HasSuffix(header, "-"+want) {
+		t.Errorf("DoH OS header = %q, want the suffix %q", header, "-"+want)
 	}
 }
