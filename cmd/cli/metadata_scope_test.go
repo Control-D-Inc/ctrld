@@ -76,16 +76,7 @@ func TestAPIConfigReloadUsesRuntimeMetadata(t *testing.T) {
 }
 
 func TestDeactivationPinRefreshUsesRuntimeMetadata(t *testing.T) {
-	oldFetch, oldUID := fetchResolverConfig, cdUID
-	oldPin, oldKnown := cdDeactivationPin.Load(), deactivationPinKnown.Load()
-	t.Cleanup(func() {
-		fetchResolverConfig, cdUID = oldFetch, oldUID
-		cdDeactivationPin.Store(oldPin)
-		deactivationPinKnown.Store(oldKnown)
-		deactivationLockedUntil.Store(0)
-	})
-	cdUID = "test-uid"
-	deactivationLockedUntil.Store(0)
+	isolateDeactivationPinState(t)
 
 	var captured *controld.ResolverConfigRequest
 	fetchResolverConfig = func(_ context.Context, req *controld.ResolverConfigRequest, _ bool) (*controld.ResolverConfig, error) {

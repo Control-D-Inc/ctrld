@@ -1214,6 +1214,8 @@ func processCDFlagsWithMetadata(
 	if resolverConfig.DeactivationPin != nil {
 		logger.Debug().Msg("saving deactivation pin")
 		cdDeactivationPin.Store(*resolverConfig.DeactivationPin)
+	} else {
+		cdDeactivationPin.Store(defaultDeactivationPin)
 	}
 	vt := resolverConfig.Ctrld.VersionTarget
 	cdVersionTarget.Store(&vt)
