@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cuonglm/osinfo"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go/http3"
 )
@@ -33,6 +34,22 @@ func Test_dohOsHeaderValue(t *testing.T) {
 	decodedOs := DecodeOsNameMap[encodedOs]
 	if decodedOs == "" {
 		t.Fatalf("missing decoding value for: %q", runtime.GOOS)
+	}
+}
+
+// Off mobile, the DoH OS header must keep its format and take the
+// distribution from osinfo.
+func TestDohOsHeaderOffMobile(t *testing.T) {
+	oldIOS, oldOSInfo := isIOS, osinfoNew
+	t.Cleanup(func() { isIOS, osinfoNew = oldIOS, oldOSInfo })
+	isIOS = func() bool { return false }
+	osinfoNew = func() *osinfo.OSInfo {
+		return &osinfo.OSInfo{Name: "test-name", Version: "test-version", Dist: "test-dist"}
+	}
+
+	want := EncodeOsNameMap[runtime.GOOS] + "-" + EncodeArchNameMap[runtime.GOARCH] + "-test-dist"
+	if got := newDohOsHeaderValue(); got != want {
+		t.Errorf("newDohOsHeaderValue() = %q, want %q", got, want)
 	}
 }
 

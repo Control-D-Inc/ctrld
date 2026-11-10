@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cuonglm/osinfo"
+	"golang.org/x/sys/unix"
 )
 
 // fakeHostTools puts fakes of the system tools that ctrld can start on macOS
@@ -105,7 +106,11 @@ func TestMobileDohOsHeaderHasTheVersion(t *testing.T) {
 	stubIOS(t)
 	stubOSInfo(t)
 	header := newDohOsHeaderValue()
-	if strings.HasSuffix(header, "-") || strings.HasSuffix(header, osinfo.UnknownRelease) {
-		t.Errorf("DoH OS header = %q, want the OS version at the end", header)
+	want, err := unix.Sysctl("kern.osproductversion")
+	if err != nil || want == "" {
+		t.Fatalf("kern.osproductversion = %q, %v", want, err)
+	}
+	if !strings.HasSuffix(header, "-"+want) {
+		t.Errorf("DoH OS header = %q, want the suffix %q", header, "-"+want)
 	}
 }
