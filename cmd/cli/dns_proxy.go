@@ -48,7 +48,9 @@ const (
 	// This is also dns.EDNS0LOCALSTART, but define our own constant here for clarification.
 	EDNS0_OPTION_MAC = 0xFDE9
 
-	// selfUninstallMaxQueries is number of REFUSED queries seen before checking for self-uninstallation.
+	// selfUninstallMaxQueries is the number of REFUSED answers that the device
+	// check lets pass. It starts on the first REFUSED answer after more than
+	// this number.
 	selfUninstallMaxQueries = 32
 )
 
@@ -261,7 +263,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 				p.health.countQuery()
 				return
 			}
-			go p.doSelfUninstall(pr.answer)
+			p.countAnswerForDeviceCheck(pr.answer)
 
 			answer = pr.answer
 			rtt := time.Since(t)
@@ -1530,30 +1532,45 @@ func (p *prog) spoofLoopbackIpInClientInfo(ci *ctrld.ClientInfo) {
 	}
 }
 
-// doSelfUninstall is the device check after refused lookups. It performs
-// self-uninstall if these condition met:
+// countAnswerForDeviceCheck counts a REFUSED answer for the device check
+// after refused lookups. The check asks the API whether the device was
+// deleted, and it starts only when all of these are true:
 //
 // - There is only 1 ControlD upstream in-use.
-// - Number of refused queries seen so far equals to selfUninstallMaxQueries.
-// - The cdUID is deleted.
-func (p *prog) doSelfUninstall(answer *dns.Msg) {
+// - More than selfUninstallMaxQueries REFUSED answers came before this one.
+// - No other check runs or waits for its cool-off.
+//
+// The DNS handler calls this for each answer, so it must never wait. A check
+// holds selfUninstallMu for its whole fetch, so this does not take the lock.
+func (p *prog) countAnswerForDeviceCheck(answer *dns.Msg) {
 	if !p.canSelfUninstall.Load() || answer == nil || answer.Rcode != dns.RcodeRefused {
 		return
 	}
+	if p.checkingSelfUninstall.Load() {
+		return
+	}
+	refusedBefore := p.refusedQueryCount.Add(1) - 1
+	if refusedBefore <= selfUninstallMaxQueries {
+		return
+	}
+	// Many answers can pass the count at the same time. Only one starts
+	// the check.
+	if !p.checkingSelfUninstall.CompareAndSwap(false, true) {
+		return
+	}
+	go p.checkDeviceStatus()
+}
 
+// checkDeviceStatus is the device check. It holds selfUninstallMu from start
+// to end, so endDeviceCheck waits for it.
+func (p *prog) checkDeviceStatus() {
 	p.selfUninstallMu.Lock()
 	defer p.selfUninstallMu.Unlock()
-	if p.checkingSelfUninstall || p.deviceCheckEnded {
+	if p.deviceCheckEnded {
 		return
 	}
-
 	logger := mainLog.Load().With().Str("mode", "self-uninstall").Logger()
-	if p.refusedQueryCount > selfUninstallMaxQueries {
-		p.checkingSelfUninstall = true
-		p.reportDeviceStatus(p.fetchDeviceStatus(), logger)
-		return
-	}
-	p.refusedQueryCount++
+	p.reportDeviceStatus(p.fetchDeviceStatus(), logger)
 }
 
 // reportDeviceStatus acts on the answer of the device check. The caller holds
@@ -1629,12 +1646,16 @@ func (p *prog) endDeviceCheck() {
 	p.deviceCheckEnded = true
 }
 
-// selfUninstallCoolOfPeriod waits for 30 minutes before
+// deviceCheckCoolOff is how long the next device check waits after one ran,
+// so that ctrld does not flood the API.
+var deviceCheckCoolOff = 30 * time.Minute
+
+// selfUninstallCoolOfPeriod waits for deviceCheckCoolOff before
 // calling API again for checking ControlD device status.
 // It ends with the run, so the prog of an ended mobile run does not stay in
 // memory for that time.
 func (p *prog) selfUninstallCoolOfPeriod() {
-	t := time.NewTimer(time.Minute * 30)
+	t := time.NewTimer(deviceCheckCoolOff)
 	defer t.Stop()
 	select {
 	case <-t.C:
@@ -1643,10 +1664,10 @@ func (p *prog) selfUninstallCoolOfPeriod() {
 	case <-p.runAbortCh:
 		return
 	}
-	p.selfUninstallMu.Lock()
-	p.checkingSelfUninstall = false
-	p.refusedQueryCount = 0
-	p.selfUninstallMu.Unlock()
+	// Reset the count first, so that no answer counts toward the next check
+	// before the reset.
+	p.refusedQueryCount.Store(0)
+	p.checkingSelfUninstall.Store(false)
 }
 
 // forceFetchingAPI sends signal to force syncing API config if run in cd mode,

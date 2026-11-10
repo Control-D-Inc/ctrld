@@ -159,8 +159,11 @@ type prog struct {
 	lastNAT64Mu     sync.Mutex
 	lastNAT64Logged string
 
+	// selfUninstallMu is held for the whole device check, so endDeviceCheck
+	// waits for a check in progress. The answers of the DNS handler never take
+	// it.
 	selfUninstallMu   sync.Mutex
-	refusedQueryCount int
+	refusedQueryCount atomic.Int64
 	canSelfUninstall  atomic.Bool
 	// selfUninstalling is set while a desktop uninstall runs, so a second one
 	// does not start next to it.
@@ -172,7 +175,10 @@ type prog struct {
 	// clears it once a recovered configuration has been applied - not when a
 	// fetch returns, because the reload receiver fetches again and can fail.
 	startedInAPIMaintenance atomic.Bool
-	checkingSelfUninstall   bool
+	// checkingSelfUninstall is set by the answer that starts a device check,
+	// and the end of the cool-off clears it. A check that ends with its run
+	// leaves it set, so late answers start no other check.
+	checkingSelfUninstall atomic.Bool
 	// deviceCheckEnded stops device checks after finishRun. Only mobile sets
 	// it. Each mobile run has its own prog, so it never reaches the next run.
 	// Guarded by selfUninstallMu.

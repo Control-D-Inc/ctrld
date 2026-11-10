@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +33,18 @@ func (r *exitRecorder) callback() *AppCallback {
 		defer r.mu.Unlock()
 		r.lines = append(r.lines, line)
 	}}
+}
+
+// waitForOne waits for the first Exit. A check that started on its own
+// goroutine must reach Exit before the test stops the run, or the stop drops
+// the answer.
+func (r *exitRecorder) waitForOne(t *testing.T) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); len(r.got()) == 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for Exit")
+		}
+	}
 }
 
 func (r *exitRecorder) got() []string {
@@ -75,7 +89,7 @@ func newDeviceCheckRun(callback *AppCallback) *prog {
 	}
 	close(p.runDone)
 	p.canSelfUninstall.Store(true)
-	p.refusedQueryCount = selfUninstallMaxQueries + 1
+	p.refusedQueryCount.Store(selfUninstallMaxQueries + 1)
 	return p
 }
 
@@ -85,8 +99,8 @@ func refusedAnswer() *dns.Msg {
 	return answer
 }
 
-// startDeviceCheck runs the check on its own goroutine, as the DNS handler
-// does, and returns a channel that closes when the check returns.
+// startDeviceCheck claims the check and runs it on its own goroutine, as the
+// DNS handler does, and returns a channel that closes when the check returns.
 //
 // The test does not end before the check returns: the cleanup stops the run
 // and waits for the check. Otherwise a check that outlives a failed test sees
@@ -96,9 +110,10 @@ func refusedAnswer() *dns.Msg {
 func startDeviceCheck(t *testing.T, p *prog) <-chan struct{} {
 	t.Helper()
 	done := make(chan struct{})
+	p.checkingSelfUninstall.Store(true)
 	go func() {
 		defer close(done)
-		p.doSelfUninstall(refusedAnswer())
+		p.checkDeviceStatus()
 	}()
 	t.Cleanup(func() {
 		if !stopRequested(p.stopCh) {
@@ -234,17 +249,21 @@ func TestDeviceCheckCoolOffEndsWithTheRun(t *testing.T) {
 // After finishRun no device check starts, so a late REFUSED answer of the run
 // sends no request to the API.
 func TestNoDeviceCheckStartsAfterFinishRun(t *testing.T) {
-	stubDeviceCheck(t, true, fetchDeviceInvalid)
+	var fetches atomic.Int32
+	stubDeviceCheck(t, true, func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+		fetches.Add(1)
+		return nil, deviceInvalidErr()
+	})
 	run := newDeviceCheckRun(nil)
-	waitNetworkShutdownSignal(t, stopRun(run), "finishRun")
+	// Only the step of finishRun that ends the checks. With the stop channels
+	// still open, a check that ignored the end would wait for its fetch, so
+	// the count below would see it.
+	run.endDeviceCheck()
 
 	waitNetworkShutdownSignal(t, startDeviceCheck(t, run), "the late device check")
 
-	run.selfUninstallMu.Lock()
-	started := run.checkingSelfUninstall
-	run.selfUninstallMu.Unlock()
-	if started {
-		t.Fatal("a device check started after finishRun")
+	if got := fetches.Load(); got != 0 {
+		t.Fatalf("a device check after finishRun fetched %d times", got)
 	}
 }
 
@@ -314,4 +333,261 @@ func TestFinishRunDoesNotWaitForDesktopUninstall(t *testing.T) {
 	t.Cleanup(func() { close(leaveUninstall) })
 	waitNetworkShutdownSignal(t, inUninstall, "the device check to start the uninstall")
 	waitNetworkShutdownSignal(t, stopRun(run), "finishRun during the desktop uninstall")
+}
+
+const answerGoroutineCreator = "/cmd/cli.(*prog).countAnswerForDeviceCheck in goroutine"
+
+// answerGoroutinesWaitingOnALock counts the goroutines that the DNS handler
+// started for an answer and that wait on a mutex.
+func answerGoroutinesWaitingOnALock() int {
+	waiting := 0
+	for _, stack := range strings.Split(allGoroutineStacks(), "\n\n") {
+		header, _, _ := strings.Cut(stack, "\n")
+		if strings.Contains(header, "[sync.Mutex.Lock") && strings.Contains(stack, answerGoroutineCreator) {
+			waiting++
+		}
+	}
+	return waiting
+}
+
+// requireAnswerGoroutineCreator fails the test when no goroutine has the
+// creator that answerGoroutinesWaitingOnALock looks for. The check that holds
+// the fetch has it, so a stale name fails here and does not make the count 0.
+func requireAnswerGoroutineCreator(t *testing.T) {
+	t.Helper()
+	if !strings.Contains(allGoroutineStacks(), answerGoroutineCreator) {
+		t.Fatalf("no goroutine was created by %q: update the name", answerGoroutineCreator)
+	}
+}
+
+// allGoroutineStacks grows the buffer until the dump fits, because
+// runtime.Stack cuts the dump at the end of the buffer.
+func allGoroutineStacks() string {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return string(buf[:n])
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// A deleted device makes every answer REFUSED. If the answers that come during
+// a device check waited for its fetch, one goroutine would wait for each query
+// until the fetch ends.
+func TestAnswersDuringDeviceCheckDoNotWaitForTheFetch(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var fetches atomic.Int32
+	stubDeviceCheck(t, true, func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+		if fetches.Add(1) == 1 {
+			close(entered)
+		}
+		<-release
+		return nil, deviceInvalidErr()
+	})
+	exits := &exitRecorder{}
+	run := newDeviceCheckRun(exits.callback())
+	// finishRun waits for the check, so the check ends before the stubs go
+	// back. Cleanups run last in, first out: the fetch is released first.
+	t.Cleanup(func() {
+		if !stopRequested(run.stopCh) {
+			<-stopRun(run)
+		}
+	})
+	var releaseOnce sync.Once
+	releaseFetch := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseFetch)
+
+	run.countAnswerForDeviceCheck(refusedAnswer())
+	waitNetworkShutdownSignal(t, entered, "the device fetch")
+	requireAnswerGoroutineCreator(t)
+
+	const answersDuringCheck = 200
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		for range answersDuringCheck {
+			run.countAnswerForDeviceCheck(refusedAnswer())
+		}
+	}()
+	waitNetworkShutdownSignal(t, answered, "the answers during the check, which must not wait")
+	// A goroutine needs a moment to reach the lock.
+	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if waiting := answerGoroutinesWaitingOnALock(); waiting > 0 {
+			t.Fatalf("%d of %d answers wait for the device fetch", waiting, answersDuringCheck)
+		}
+	}
+
+	releaseFetch()
+	exits.waitForOne(t)
+	waitNetworkShutdownSignal(t, stopRun(run), "finishRun after the fetch")
+	if got := fetches.Load(); got != 1 {
+		t.Errorf("device fetches = %d, want 1", got)
+	}
+	if lines := exits.got(); len(lines) != 1 || lines[0] != deviceInvalidExitLine {
+		t.Errorf("Exit lines = %q, want [%q]", lines, deviceInvalidExitLine)
+	}
+}
+
+// The check starts on the first REFUSED answer after more than
+// selfUninstallMaxQueries of them, and answers with another code do not count.
+func TestDeviceCheckStartsAfterTheRefusedCount(t *testing.T) {
+	var fetches atomic.Int32
+	stubDeviceCheck(t, true, func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+		fetches.Add(1)
+		return nil, deviceInvalidErr()
+	})
+	exits := &exitRecorder{}
+	run := newDeviceCheckRun(exits.callback())
+	run.refusedQueryCount.Store(0)
+	// finishRun waits for a check in progress, so no check outlives the stubs.
+	t.Cleanup(func() { <-stopRun(run) })
+
+	answered := new(dns.Msg)
+	answered.SetRcode(newDnsMsgWithHostname("example.com.", dns.TypeA), dns.RcodeSuccess)
+	run.countAnswerForDeviceCheck(answered)
+	for range selfUninstallMaxQueries + 1 {
+		run.countAnswerForDeviceCheck(refusedAnswer())
+	}
+	if run.checkingSelfUninstall.Load() {
+		t.Fatalf("the check started after %d REFUSED answers", selfUninstallMaxQueries+1)
+	}
+
+	run.countAnswerForDeviceCheck(refusedAnswer())
+	if !run.checkingSelfUninstall.Load() {
+		t.Fatalf("the check did not start on REFUSED answer %d", selfUninstallMaxQueries+2)
+	}
+	exits.waitForOne(t)
+	if got := fetches.Load(); got != 1 {
+		t.Errorf("device fetches = %d, want 1", got)
+	}
+}
+
+// The DNS handler serves queries in parallel, so many answers can pass the
+// count at the same time. Only one of them starts the check. A second check
+// would wait on the lock for the fetch of the first. One burst seldom hits the
+// race, so the test runs many bursts.
+func TestParallelAnswersStartOneDeviceCheck(t *testing.T) {
+	for round := range 20 {
+		t.Run(strconv.Itoa(round), testOneBurstStartsOneDeviceCheck)
+	}
+}
+
+func testOneBurstStartsOneDeviceCheck(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var fetches atomic.Int32
+	stubDeviceCheck(t, true, func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+		if fetches.Add(1) == 1 {
+			close(entered)
+		}
+		<-release
+		return nil, deviceInvalidErr()
+	})
+	run := newDeviceCheckRun(nil)
+	t.Cleanup(func() { <-stopRun(run) })
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	// The answers spin on a flag, not on a channel: a channel wakes them one
+	// by one, and the first answer then ends before the next one starts.
+	var start atomic.Bool
+	var ready, answers sync.WaitGroup
+	for range max(2, runtime.GOMAXPROCS(0)-1) {
+		ready.Add(1)
+		answers.Go(func() {
+			answer := refusedAnswer()
+			ready.Done()
+			for !start.Load() {
+			}
+			run.countAnswerForDeviceCheck(answer)
+		})
+	}
+	ready.Wait()
+	start.Store(true)
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		answers.Wait()
+	}()
+	waitNetworkShutdownSignal(t, answered, "the answers, which must not wait")
+	waitNetworkShutdownSignal(t, entered, "the device fetch")
+	requireAnswerGoroutineCreator(t)
+
+	for deadline := time.Now().Add(20 * time.Millisecond); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if waiting := answerGoroutinesWaitingOnALock(); waiting > 0 {
+			t.Fatalf("%d more device checks started and wait for the first", waiting)
+		}
+	}
+}
+
+// After the cool-off, the count starts again from 0, so the next check starts
+// on the same answer as the first one did.
+func TestDeviceCheckCountStartsAgainAfterTheCoolOff(t *testing.T) {
+	var fetches atomic.Int32
+	// An answer that is not a deleted device: no Exit, and the cool-off runs.
+	stubDeviceCheck(t, true, func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+		fetches.Add(1)
+		return nil, errors.New("the API is down")
+	})
+	oldCoolOff := deviceCheckCoolOff
+	t.Cleanup(func() { deviceCheckCoolOff = oldCoolOff })
+	deviceCheckCoolOff = 10 * time.Millisecond
+	run := newDeviceCheckRun(nil)
+	t.Cleanup(func() { <-stopRun(run) })
+
+	run.countAnswerForDeviceCheck(refusedAnswer())
+	waitForDeviceCheckState(t, "the end of the first cool-off", func() bool {
+		return fetches.Load() == 1 && !run.checkingSelfUninstall.Load()
+	})
+
+	for range selfUninstallMaxQueries + 1 {
+		run.countAnswerForDeviceCheck(refusedAnswer())
+	}
+	if run.checkingSelfUninstall.Load() {
+		t.Fatalf("the second check started after %d REFUSED answers", selfUninstallMaxQueries+1)
+	}
+	run.countAnswerForDeviceCheck(refusedAnswer())
+	// The cleanup puts deviceCheckCoolOff back, so the second cool-off must end
+	// first.
+	waitForDeviceCheckState(t, "the end of the second cool-off", func() bool {
+		return fetches.Load() == 2 && !run.checkingSelfUninstall.Load()
+	})
+}
+
+func waitForDeviceCheckState(t *testing.T, what string, reached func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); !reached(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+// Only a run with one Control D upstream checks the device. Other runs do not
+// count their REFUSED answers.
+func TestNoDeviceCheckWithoutOneControlDUpstream(t *testing.T) {
+	var fetches atomic.Int32
+	stubDeviceCheck(t, true, func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+		fetches.Add(1)
+		return nil, deviceInvalidErr()
+	})
+	run := newDeviceCheckRun(nil)
+	run.canSelfUninstall.Store(false)
+	run.refusedQueryCount.Store(0)
+	t.Cleanup(func() { <-stopRun(run) })
+
+	for range selfUninstallMaxQueries + 8 {
+		run.countAnswerForDeviceCheck(refusedAnswer())
+	}
+
+	if count := run.refusedQueryCount.Load(); count != 0 {
+		t.Errorf("refusedQueryCount = %d, want 0", count)
+	}
+	if run.checkingSelfUninstall.Load() {
+		t.Error("a device check started without one Control D upstream")
+	}
+	if got := fetches.Load(); got != 0 {
+		t.Errorf("device fetches = %d, want 0", got)
+	}
 }

@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
-
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
@@ -106,11 +104,7 @@ func TestSelfUninstallCheckUsesRuntimeMetadata(t *testing.T) {
 	}
 
 	p := &prog{}
-	p.canSelfUninstall.Store(true)
-	p.refusedQueryCount = selfUninstallMaxQueries + 1
-	refused := new(dns.Msg)
-	refused.SetRcode(newDnsMsgWithHostname("example.com.", dns.TypeA), dns.RcodeRefused)
-	p.doSelfUninstall(refused)
+	p.checkDeviceStatus()
 
 	requireRuntimeMetadata(t, "self-uninstall check", captured)
 }
