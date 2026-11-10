@@ -32,7 +32,7 @@ const (
 // 2. Registry ProfileList scan for Administrators group members
 // 3. Fallback to lowest RID from ProfileList
 func DiscoverMainUser(ctx context.Context) string {
-	logger := ProxyLogger.Load().Debug()
+	logger := ProxyLogger.Load()
 
 	// Method 1: the active console session user.
 	if user := discoverSessionUser(ctx); user != "" {
@@ -40,32 +40,32 @@ func DiscoverMainUser(ctx context.Context) string {
 	}
 
 	// Method 2: Scan registry for admin users
-	logger.Msg("attempting to discover user via registry with admin preference")
+	logger.Debug().Msg("attempting to discover user via registry with admin preference")
 	if user := getRegistryUserWithAdminPreference(ctx); user != "" {
-		logger.Str("method", "registry+admin").Str("user", user).Msg("found admin user via registry")
+		logger.Debug().Str("method", "registry+admin").Str("user", user).Msg("found admin user via registry")
 		return user
 	}
 
 	// Method 3: Fallback to lowest RID from registry
-	logger.Msg("attempting to discover user via registry lowest RID")
+	logger.Debug().Msg("attempting to discover user via registry lowest RID")
 	if user := getLowestRegistryUser(ctx); user != "" {
-		logger.Str("method", "registry").Str("user", user).Msg("found user via registry")
+		logger.Debug().Str("method", "registry").Str("user", user).Msg("found user via registry")
 		return user
 	}
 
-	logger.Msg("all user discovery methods failed")
+	logger.Debug().Msg("all user discovery methods failed")
 	return "unknown"
 }
 
 // discoverSessionUser returns the user of an active login session, or "" when
 // nobody is logged in. It never falls back to a guess from the account list.
 func discoverSessionUser(ctx context.Context) string {
-	logger := ProxyLogger.Load().Debug()
+	logger := ProxyLogger.Load()
 
 	// Method 1: Check active console session
-	logger.Msg("attempting to discover user via active console session")
+	logger.Debug().Msg("attempting to discover user via active console session")
 	if user := getActiveConsoleUser(ctx); user != "" {
-		logger.Str("method", "console").Str("user", user).Msg("found user via active console session")
+		logger.Debug().Str("method", "console").Str("user", user).Msg("found user via active console session")
 		return user
 	}
 

@@ -18,7 +18,7 @@ import (
 // 2. Active console session user via scutil
 // 3. First user with UID >= 501 from dscl (standard macOS user range)
 func DiscoverMainUser(ctx context.Context) string {
-	logger := ProxyLogger.Load().Debug()
+	logger := ProxyLogger.Load()
 
 	// Methods 1 and 2: the logged-in console user.
 	if user := discoverSessionUser(ctx); user != "" {
@@ -26,32 +26,32 @@ func DiscoverMainUser(ctx context.Context) string {
 	}
 
 	// Method 3: Find lowest UID >= 501 from directory services
-	logger.Msg("attempting to discover user via dscl directory scan")
+	logger.Debug().Msg("attempting to discover user via dscl directory scan")
 	if user := getLowestRegularUser(ctx); user != "" {
-		logger.Str("method", "dscl").Str("user", user).Msg("found user via dscl scan")
+		logger.Debug().Str("method", "dscl").Str("user", user).Msg("found user via dscl scan")
 		return user
 	}
 
-	logger.Msg("all user discovery methods failed")
+	logger.Debug().Msg("all user discovery methods failed")
 	return "unknown"
 }
 
 // discoverSessionUser returns the user of an active login session, or "" when
 // nobody is logged in. It never falls back to a guess from the account list.
 func discoverSessionUser(ctx context.Context) string {
-	logger := ProxyLogger.Load().Debug()
+	logger := ProxyLogger.Load()
 
 	// Method 1: Check console owner via stat
-	logger.Msg("attempting to discover user via console stat")
+	logger.Debug().Msg("attempting to discover user via console stat")
 	if user := getConsoleUser(ctx); user != "" && user != "root" {
-		logger.Str("method", "stat").Str("user", user).Msg("found user via console stat")
+		logger.Debug().Str("method", "stat").Str("user", user).Msg("found user via console stat")
 		return user
 	}
 
 	// Method 2: Check active console session via scutil
-	logger.Msg("attempting to discover user via scutil ConsoleUser")
+	logger.Debug().Msg("attempting to discover user via scutil ConsoleUser")
 	if user := getScutilConsoleUser(ctx); user != "" && user != "root" {
-		logger.Str("method", "scutil").Str("user", user).Msg("found user via scutil ConsoleUser")
+		logger.Debug().Str("method", "scutil").Str("user", user).Msg("found user via scutil ConsoleUser")
 		return user
 	}
 
@@ -83,7 +83,7 @@ func getScutilConsoleUser(ctx context.Context) string {
 		ProxyLogger.Load().Debug().Err(err).Msg("failed to get ConsoleUser via scutil")
 		return ""
 	}
-	
+
 	lines := strings.Split(string(out), "\n")
 	for _, line := range lines {
 		if strings.Contains(line, "Name :") {
@@ -123,7 +123,7 @@ func getLowestRegularUser(ctx context.Context) string {
 
 		username := fields[0]
 		uidStr := fields[1]
-		
+
 		uid, err := strconv.Atoi(uidStr)
 		if err != nil {
 			continue
@@ -145,7 +145,7 @@ func getLowestRegularUser(ctx context.Context) string {
 	// Find the candidate with the lowest UID (deterministic choice)
 	lowestUID := candidates[0].uid
 	result := candidates[0].name
-	
+
 	for _, candidate := range candidates[1:] {
 		if candidate.uid < lowestUID {
 			lowestUID = candidate.uid

@@ -20,7 +20,7 @@ import (
 // 2. Parse /etc/passwd for users with UID >= 1000, prefer admin group members
 // 3. Fallback to lowest UID >= 1000 from /etc/passwd
 func DiscoverMainUser(ctx context.Context) string {
-	logger := ProxyLogger.Load().Debug()
+	logger := ProxyLogger.Load()
 
 	// Method 1: an active loginctl user.
 	if user := discoverSessionUser(ctx); user != "" {
@@ -28,32 +28,32 @@ func DiscoverMainUser(ctx context.Context) string {
 	}
 
 	// Method 2: Parse /etc/passwd and find admin users first
-	logger.Msg("attempting to discover user via /etc/passwd with admin preference")
+	logger.Debug().Msg("attempting to discover user via /etc/passwd with admin preference")
 	if user := getPasswdUserWithAdminPreference(ctx); user != "" {
-		logger.Str("method", "passwd+admin").Str("user", user).Msg("found admin user via /etc/passwd")
+		logger.Debug().Str("method", "passwd+admin").Str("user", user).Msg("found admin user via /etc/passwd")
 		return user
 	}
 
 	// Method 3: Fallback to lowest UID >= 1000 from /etc/passwd
-	logger.Msg("attempting to discover user via /etc/passwd lowest UID")
+	logger.Debug().Msg("attempting to discover user via /etc/passwd lowest UID")
 	if user := getLowestPasswdUser(ctx); user != "" {
-		logger.Str("method", "passwd").Str("user", user).Msg("found user via /etc/passwd")
+		logger.Debug().Str("method", "passwd").Str("user", user).Msg("found user via /etc/passwd")
 		return user
 	}
 
-	logger.Msg("all user discovery methods failed")
+	logger.Debug().Msg("all user discovery methods failed")
 	return "unknown"
 }
 
 // discoverSessionUser returns the user of an active login session, or "" when
 // nobody is logged in. It never falls back to a guess from the account list.
 func discoverSessionUser(ctx context.Context) string {
-	logger := ProxyLogger.Load().Debug()
+	logger := ProxyLogger.Load()
 
 	// Method 1: Check active users via loginctl
-	logger.Msg("attempting to discover user via loginctl")
+	logger.Debug().Msg("attempting to discover user via loginctl")
 	if user := getLoginctlUser(ctx); user != "" {
-		logger.Str("method", "loginctl").Str("user", user).Msg("found user via loginctl")
+		logger.Debug().Str("method", "loginctl").Str("user", user).Msg("found user via loginctl")
 		return user
 	}
 
@@ -105,7 +105,7 @@ func getLoginctlUser(ctx context.Context) string {
 	// Return user with lowest UID (deterministic choice)
 	lowestUID := candidates[0].uid
 	result := candidates[0].name
-	
+
 	for _, candidate := range candidates[1:] {
 		if candidate.uid < lowestUID {
 			lowestUID = candidate.uid
@@ -154,7 +154,7 @@ func getPasswdUserWithAdminPreference(ctx context.Context) string {
 	// Return user with lowest UID (deterministic choice)
 	lowestUID := candidates[0].uid
 	result := candidates[0].name
-	
+
 	for _, candidate := range candidates[1:] {
 		if candidate.uid < lowestUID {
 			lowestUID = candidate.uid
@@ -175,7 +175,7 @@ func getLowestPasswdUser(ctx context.Context) string {
 	// Return user with lowest UID (deterministic choice)
 	lowestUID := users[0].uid
 	result := users[0].name
-	
+
 	for _, user := range users[1:] {
 		if user.uid < lowestUID {
 			lowestUID = user.uid
@@ -234,18 +234,18 @@ func parsePasswdFile() []struct {
 // isUserInAdminGroups checks if a user is in common admin groups
 func isUserInAdminGroups(ctx context.Context, username string) bool {
 	adminGroups := []string{"sudo", "wheel", "admin"}
-	
+
 	for _, group := range adminGroups {
 		cmd := exec.CommandContext(ctx, "groups", username)
 		out, err := cmd.Output()
 		if err != nil {
 			continue
 		}
-		
+
 		if strings.Contains(string(out), group) {
 			return true
 		}
 	}
-	
+
 	return false
 }
