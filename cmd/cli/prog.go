@@ -162,6 +162,9 @@ type prog struct {
 	selfUninstallMu   sync.Mutex
 	refusedQueryCount int
 	canSelfUninstall  atomic.Bool
+	// selfUninstalling is set while a desktop uninstall runs, so a second one
+	// does not start next to it.
+	selfUninstalling atomic.Bool
 
 	// startedInAPIMaintenance records that this run began on the configuration
 	// already on disk because the API was in maintenance, so it holds no answer
@@ -717,6 +720,8 @@ func (p *prog) postRun() {
 	}
 }
 
+type resolverConfigFetch = func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error)
+
 var fetchResolverConfigForReload = controld.FetchResolverConfig
 
 // startAPIConfigReload starts one program-lifetime worker, not one per reload.
@@ -726,6 +731,32 @@ func (p *prog) startAPIConfigReload() {
 		defer p.apiReloadWg.Done()
 		p.apiConfigReload()
 	}()
+}
+
+// fetchUntilDone fills req.Metadata and runs the fetch on its own goroutine.
+// It returns the answer, or ctx.Err() when ctx ends first. The metadata
+// collection queries the system (WMI, system_profiler) without the context,
+// so it does not stop at the cancel, and the stop must not wait for it. The
+// caller reads the globals into fetch, req and dev, because the goroutine can
+// outlive the run, and the next run writes them. The goroutine touches
+// nothing else of the run.
+func fetchUntilDone(ctx context.Context, fetch resolverConfigFetch, req *controld.ResolverConfigRequest, dev bool) (*controld.ResolverConfig, error) {
+	type answer struct {
+		rc  *controld.ResolverConfig
+		err error
+	}
+	fetched := make(chan answer, 1)
+	go func() {
+		req.Metadata = ctrld.SystemMetadataRuntime(ctx)
+		rc, err := fetch(ctx, req, dev)
+		fetched <- answer{rc, err}
+	}()
+	select {
+	case a := <-fetched:
+		return a.rc, a.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // apiConfigReload calls API to check for latest config update then reload ctrld if necessary.
@@ -773,12 +804,8 @@ func (p *prog) apiConfigReload() {
 		if ctx.Err() != nil {
 			return
 		}
-		req := &controld.ResolverConfigRequest{
-			RawUID:   cdUID,
-			Version:  rootCmd.Version,
-			Metadata: ctrld.SystemMetadataRuntime(ctx),
-		}
-		resolverConfig, err := fetchResolverConfigForReload(ctx, req, cdDev)
+		req := &controld.ResolverConfigRequest{RawUID: cdUID, Version: rootCmd.Version}
+		resolverConfig, err := fetchUntilDone(ctx, fetchResolverConfigForReload, req, cdDev)
 		if ctx.Err() != nil {
 			return
 		}
@@ -1355,6 +1382,10 @@ func (p *prog) metricsEnabled() bool {
 	return p.cfg.Service.MetricsQueryStats || p.cfg.Service.MetricsListener != ""
 }
 
+// reloadWaitWarning is how long a mobile stop waits for the reload worker
+// before it logs that it waits.
+var reloadWaitWarning = shutdownTimeout
+
 // finishRun also cancels workers waiting for startup when preflight returns early.
 // The caller's stop channel belongs to the mobile controller, not to this cleanup.
 func (p *prog) finishRun() {
@@ -1372,7 +1403,7 @@ func (p *prog) finishRun() {
 	}
 	// Listeners live across config reloads, so they belong to prog rather
 	// than the per-run wait group. runDone closes after their final Add.
-	p.apiReloadWg.Wait()
+	p.waitAPIReload()
 	p.listenerWg.Wait()
 	p.endDeviceCheck()
 	if p.waitNetworkJournal != nil {
@@ -1381,6 +1412,20 @@ func (p *prog) finishRun() {
 	if err := p.shutdown(); err != nil {
 		mainLog.Load().Warn().Err(err).Msg("error during shutdown")
 	}
+}
+
+// waitAPIReload waits for the reload worker. On mobile, a reload that found
+// a deleted device waits in the Exit callback of the app. The usual cause of
+// a long wait is an Exit that waits for the run to end. Without the warning,
+// the app sees only a slow stop.
+func (p *prog) waitAPIReload() {
+	if isMobile() {
+		slow := time.AfterFunc(reloadWaitWarning, func() {
+			mainLog.Load().Warn().Msg("the stop waits for the configuration reload: the Exit callback of the app must not wait for the run to end")
+		})
+		defer slow.Stop()
+	}
+	p.apiReloadWg.Wait()
 }
 
 // startOSState serializes startup's OS mutations with restoration. A stop
@@ -2550,12 +2595,15 @@ func dnsChanged(iface *net.Interface, nameservers []string) bool {
 	return false
 }
 
-// selfUninstallCheck checks if the error dues to controld.InvalidConfigCode, perform self-uninstall then.
 // selfUninstallFn is the uninstall itself, indirected so a test can prove what
 // does and does not reach it. The real one ends in os.Exit, which a test cannot
 // survive to make an assertion about.
 var selfUninstallFn = selfUninstall
 
+// selfUninstallCheck acts when the error says that the device was deleted
+// (controld.InvalidConfigCode). On mobile it calls the Exit callback of the
+// app and returns when Exit returns. On desktop it starts the uninstall and
+// does not wait for it.
 func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 	// Maintenance is the API being away; it establishes nothing about whether
 	// this device still exists. Guarded here rather than at each caller because
@@ -2577,10 +2625,25 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 			}
 			return
 		}
-
-		// Perform self-uninstall now.
-		selfUninstallFn(p, logger)
+		p.startSelfUninstall(logger)
 	}
+}
+
+// startSelfUninstall starts the desktop uninstall and does not wait for it.
+// The uninstall stops the service, and that stop waits for this process to
+// exit. The caller can be work that the stop waits for, such as the
+// configuration reload, so a wait here would hang the stop until the service
+// manager kills the process. The flag lets one uninstall run at a time. It
+// clears when the uninstall returns, so a failed uninstall can run again.
+func (p *prog) startSelfUninstall(logger zerolog.Logger) {
+	if !p.selfUninstalling.CompareAndSwap(false, true) {
+		return
+	}
+	uninstall := selfUninstallFn
+	go func() {
+		defer p.selfUninstalling.Store(false)
+		uninstall(p, logger)
+	}()
 }
 
 // shouldUpgrade checks if the version target vt is greater than the current one cv.

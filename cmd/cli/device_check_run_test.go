@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,18 +40,24 @@ func (r *exitRecorder) got() []string {
 }
 
 // stubDeviceCheck sets the platform to mobile or desktop and replaces the
-// device fetch with fetch until the test ends. The uninstall fails the test,
-// because the real one changes the host and ends the process.
+// device fetch with fetch until the test ends. An uninstall fails the test,
+// because the real one changes the host and ends the process. The uninstall
+// runs on its own goroutine, so the test checks for it at the end, not in
+// the stub.
 func stubDeviceCheck(t *testing.T, mobile bool, fetch func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error)) {
 	t.Helper()
 	oldFetch, oldUID, oldIsMobile, oldUninstall := fetchResolverConfig, cdUID, isMobile, selfUninstallFn
+	var uninstalled atomic.Bool
 	t.Cleanup(func() {
 		fetchResolverConfig, cdUID, isMobile, selfUninstallFn = oldFetch, oldUID, oldIsMobile, oldUninstall
+		if uninstalled.Load() {
+			t.Error("the device check started the uninstall")
+		}
 	})
 	fetchResolverConfig = fetch
 	cdUID = "test-uid"
 	isMobile = func() bool { return mobile }
-	selfUninstallFn = func(*prog, zerolog.Logger) { t.Error("the device check started the uninstall") }
+	selfUninstallFn = func(*prog, zerolog.Logger) { uninstalled.Store(true) }
 }
 
 // fetchDeviceInvalid is a device fetch that reports a deleted device.

@@ -76,7 +76,7 @@ func TestRunListenerShutdown(t *testing.T) {
 	const env = "CTRLD_TEST_LISTENER_SHUTDOWN"
 	mode := os.Getenv(env)
 	if mode == "" {
-		for _, mode := range []string{"stop-before-ready", "abort-before-ready", "drain", "reload", "reload-before-ready", "stop-during-hook", "stop-during-post", "wire-udp", "wire-tcp", "api-drain"} {
+		for _, mode := range []string{"stop-before-ready", "abort-before-ready", "drain", "reload", "reload-before-ready", "stop-during-hook", "stop-during-post", "wire-udp", "wire-tcp", "api-drain", "api-exit-drain"} {
 			t.Run(mode, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 				defer cancel()
@@ -100,14 +100,23 @@ func TestRunListenerShutdown(t *testing.T) {
 	cdUID = ""
 	iface = ""
 	apiEntered, apiCanceled, apiRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	if mode == "api-drain" {
+	apiMode := mode == "api-drain" || mode == "api-exit-drain"
+	if apiMode {
 		cdUID = "testuid"
+	}
+	if mode == "api-drain" {
 		fetchResolverConfigForReload = func(ctx context.Context, _ *controld.ResolverConfigRequest, _ bool) (*controld.ResolverConfig, error) {
 			close(apiEntered)
 			<-ctx.Done()
 			close(apiCanceled)
 			<-apiRelease
 			return nil, ctx.Err()
+		}
+	}
+	if mode == "api-exit-drain" {
+		fetchResolverConfigForReload = func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+			close(apiEntered)
+			return nil, deviceInvalidErr()
 		}
 	}
 	var monitorCalls, postCalls atomic.Int32
@@ -121,6 +130,13 @@ func TestRunListenerShutdown(t *testing.T) {
 		reloadDoneCh:     make(chan struct{}, 1),
 		apiForceReloadCh: make(chan struct{}),
 	}
+	// In api-exit-drain the reload of the production run finds the device
+	// deleted and holds in Exit, so finishRun must wait for it.
+	exitEntered, exitRelease := make(chan struct{}), make(chan struct{})
+	p.appCallback = &AppCallback{Exit: func(string) {
+		close(exitEntered)
+		<-exitRelease
+	}}
 	logConnection := &closeCountingLogConn{}
 	p.logConn = logConnection
 	entered, drain, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -163,7 +179,7 @@ func TestRunListenerShutdown(t *testing.T) {
 	} else {
 		serveDNSFn = func(p *prog, _ string) error {
 			close(entered)
-			if mode == "drain" || mode == "reload" || mode == "api-drain" || stopDuringMutation {
+			if mode == "drain" || mode == "reload" || apiMode || stopDuringMutation {
 				p.started <- struct{}{}
 			}
 			select {
@@ -193,13 +209,16 @@ func TestRunListenerShutdown(t *testing.T) {
 		}()
 	}
 	awaitShutdown(t, entered)
-	if mode == "api-drain" {
+	if apiMode {
 		select {
 		case p.apiForceReloadCh <- struct{}{}:
 		case <-time.After(time.Second):
 			t.Fatal("production run did not start the API reload worker")
 		}
 		awaitShutdown(t, apiEntered)
+	}
+	if mode == "api-exit-drain" {
+		awaitShutdown(t, exitEntered)
 	}
 	if mode == "reload" || mode == "reload-before-ready" {
 		if mode == "reload" {
@@ -263,13 +282,21 @@ func TestRunListenerShutdown(t *testing.T) {
 	}
 	unblock()
 	if mode == "api-drain" {
+		// The stop cancels the fetch, and this fetch then holds on, like the
+		// metadata collection, which does not take the context. The worker
+		// no longer waits for the fetch. api-exit-drain shows that finishRun
+		// still waits for the worker.
 		awaitShutdown(t, apiCanceled)
+		awaitShutdown(t, finished)
+		close(apiRelease)
+	}
+	if mode == "api-exit-drain" {
 		select {
 		case <-finished:
-			t.Fatal("finishRun returned before the API reload worker")
+			t.Fatal("finishRun returned before the API reload worker of the production run")
 		case <-time.After(30 * time.Millisecond):
 		}
-		close(apiRelease)
+		close(exitRelease)
 	}
 	awaitShutdown(t, finished)
 	require.EqualValues(t, 1, logConnection.closes.Load(), "startup and shutdown must share log-connection ownership")

@@ -1612,8 +1612,8 @@ var deviceCheckWaitWarning = shutdownTimeout
 // returns, so taking the lock waits for it.
 //
 // Only mobile waits, because there the app can start the next run in the same
-// process. On desktop, finishRun ends the process, and a check that found a
-// deleted device is in the uninstall, which waits for this process to stop.
+// process. On desktop, finishRun ends the process, so nothing has to wait. A
+// check that found a deleted device only starts the uninstall and returns.
 func (p *prog) endDeviceCheck() {
 	if !isMobile() {
 		return
