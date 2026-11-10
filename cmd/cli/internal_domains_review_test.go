@@ -481,15 +481,12 @@ func TestInternalDomainsKeepRefusedQueryCounting(t *testing.T) {
 
 	refused := new(dns.Msg)
 	refused.SetRcode(newDnsMsgWithHostname("host.corp.example.", dns.TypeA), dns.RcodeRefused)
-	p.doSelfUninstall(&proxyResponse{answer: refused, refused: false})
+	p.countAnswerForDeviceCheck(&proxyResponse{answer: refused, refused: false})
 
-	p.selfUninstallMu.Lock()
-	count, checking := p.refusedQueryCount, p.checkingSelfUninstall
-	p.selfUninstallMu.Unlock()
-	if count != 1 {
+	if count := p.refusedQueryCount.Load(); count != 1 {
 		t.Errorf("refusedQueryCount = %d, want 1", count)
 	}
-	if checking {
+	if p.checkingSelfUninstall.Load() {
 		t.Error("a single REFUSED answer must not start a device-status check")
 	}
 }
