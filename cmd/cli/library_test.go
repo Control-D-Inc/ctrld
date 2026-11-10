@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git"
+	"github.com/Control-D-Inc/ctrld"
 )
 
 func stubAppConfigGlobals(t *testing.T) *[]int64 {

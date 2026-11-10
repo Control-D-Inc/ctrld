@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
@@ -1529,7 +1530,8 @@ func (p *prog) spoofLoopbackIpInClientInfo(ci *ctrld.ClientInfo) {
 	}
 }
 
-// doSelfUninstall performs self-uninstall if these condition met:
+// doSelfUninstall is the device check after refused lookups. It performs
+// self-uninstall if these condition met:
 //
 // - There is only 1 ControlD upstream in-use.
 // - Number of refused queries seen so far equals to selfUninstallMaxQueries.
@@ -1541,39 +1543,106 @@ func (p *prog) doSelfUninstall(answer *dns.Msg) {
 
 	p.selfUninstallMu.Lock()
 	defer p.selfUninstallMu.Unlock()
-	if p.checkingSelfUninstall {
+	if p.checkingSelfUninstall || p.deviceCheckEnded {
 		return
 	}
 
 	logger := mainLog.Load().With().Str("mode", "self-uninstall").Logger()
 	if p.refusedQueryCount > selfUninstallMaxQueries {
 		p.checkingSelfUninstall = true
-
-		req := &controld.ResolverConfigRequest{
-			RawUID:   cdUID,
-			Version:  rootCmd.Version,
-			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
-		}
-		_, err := fetchResolverConfig(context.Background(), req, cdDev)
-		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
-		selfUninstallCheck(err, p, logger)
-
-		if err != nil {
-			logResolverConfigFetchFailure(&logger, err)
-		}
-		// Cool-of period to prevent abusing the API.
-		go p.selfUninstallCoolOfPeriod()
+		p.reportDeviceStatus(p.fetchDeviceStatus(), logger)
 		return
 	}
 	p.refusedQueryCount++
 }
 
+// reportDeviceStatus acts on the answer of the device check. The caller holds
+// selfUninstallMu. A stop during the fetch or just after it ends the run of
+// this check. The app can then start the next run, so the answer must not
+// reach it.
+func (p *prog) reportDeviceStatus(err error, logger zerolog.Logger) {
+	if stopRequested(p.stopCh) || stopRequested(p.runAbortCh) {
+		logger.Debug().Msg("run stopped, dropping the device status check")
+		return
+	}
+	logger.Debug().Msg("maximum number of refused queries reached, checking device status")
+	selfUninstallCheck(err, p, logger)
+
+	if err != nil {
+		logResolverConfigFetchFailure(&logger, err)
+	}
+	// Cool-of period to prevent abusing the API.
+	go p.selfUninstallCoolOfPeriod()
+}
+
+// fetchDeviceStatus fetches the resolver config to learn whether the device
+// still exists. When the run stops first, it cancels the fetch and returns
+// context.Canceled. The fetch runs on its own goroutine, so a fetch that
+// ignores the cancel cannot keep the run from ending.
+func (p *prog) fetchDeviceStatus() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Read the globals here: the goroutine can outlive the run, and the next
+	// run writes them.
+	fetch, dev := fetchResolverConfig, cdDev
+	req := &controld.ResolverConfigRequest{RawUID: cdUID, Version: rootCmd.Version}
+	fetched := make(chan error, 1)
+	go func() {
+		req.Metadata = ctrld.SystemMetadataRuntime(ctx)
+		_, err := fetch(ctx, req, dev)
+		fetched <- err
+	}()
+	select {
+	case err := <-fetched:
+		return err
+	case <-p.stopCh:
+	case <-p.runAbortCh:
+	}
+	return context.Canceled
+}
+
+// deviceCheckWaitWarning is how long endDeviceCheck waits before it logs that
+// the stop waits for the device check.
+var deviceCheckWaitWarning = shutdownTimeout
+
+// endDeviceCheck waits for a device check in progress and stops new ones, so
+// that no Exit of this run reaches the app after the run ended. finishRun
+// closes runAbortCh first, so a check that reads the stop after this point
+// does not act. A check that already acts holds selfUninstallMu until it
+// returns, so taking the lock waits for it.
+//
+// Only mobile waits, because there the app can start the next run in the same
+// process. On desktop, finishRun ends the process, and a check that found a
+// deleted device is in the uninstall, which waits for this process to stop.
+func (p *prog) endDeviceCheck() {
+	if !isMobile() {
+		return
+	}
+	// The usual cause of a long wait is an app Exit callback that waits for
+	// the run to end. Without this line, the app sees only a slow stop.
+	slow := time.AfterFunc(deviceCheckWaitWarning, func() {
+		mainLog.Load().Warn().Msg("the stop waits for the device check: the Exit callback of the app must not wait for the run to end")
+	})
+	defer slow.Stop()
+	p.selfUninstallMu.Lock()
+	defer p.selfUninstallMu.Unlock()
+	p.deviceCheckEnded = true
+}
+
 // selfUninstallCoolOfPeriod waits for 30 minutes before
 // calling API again for checking ControlD device status.
+// It ends with the run, so the prog of an ended mobile run does not stay in
+// memory for that time.
 func (p *prog) selfUninstallCoolOfPeriod() {
 	t := time.NewTimer(time.Minute * 30)
 	defer t.Stop()
-	<-t.C
+	select {
+	case <-t.C:
+	case <-p.stopCh:
+		return
+	case <-p.runAbortCh:
+		return
+	}
 	p.selfUninstallMu.Lock()
 	p.checkingSelfUninstall = false
 	p.refusedQueryCount = 0

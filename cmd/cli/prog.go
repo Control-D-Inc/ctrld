@@ -170,6 +170,10 @@ type prog struct {
 	// fetch returns, because the reload receiver fetches again and can fail.
 	startedInAPIMaintenance atomic.Bool
 	checkingSelfUninstall   bool
+	// deviceCheckEnded stops device checks after finishRun. Only mobile sets
+	// it. Each mobile run has its own prog, so it never reaches the next run.
+	// Guarded by selfUninstallMu.
+	deviceCheckEnded bool
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -1370,6 +1374,7 @@ func (p *prog) finishRun() {
 	// than the per-run wait group. runDone closes after their final Add.
 	p.apiReloadWg.Wait()
 	p.listenerWg.Wait()
+	p.endDeviceCheck()
 	if p.waitNetworkJournal != nil {
 		p.waitNetworkJournal()
 	}

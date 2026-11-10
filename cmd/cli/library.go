@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git"
+	"github.com/Control-D-Inc/ctrld"
 )
 
 // AppCallback provides hooks for injecting certain functionalities
@@ -17,7 +17,11 @@ type AppCallback struct {
 	HostName   func() string
 	LanIp      func() string
 	MacAddress func() string
-	Exit       func(error string)
+	// Exit gets a failure line of the run. ctrld calls it before the run
+	// ends, and the run does not end until Exit returns. So Exit must not
+	// wait for the run to end: a wait with a timeout stalls the stop until
+	// the timeout, and a wait with no timeout never ends.
+	Exit func(error string)
 }
 
 // AppConfig allows overwriting ctrld cli flags from mobile platforms.

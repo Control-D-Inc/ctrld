@@ -128,6 +128,14 @@ line to `AppCallback.Exit`:
 - The line never contains the error text, the resolver UID, or the
   provisioning token. The API can echo these values in its error text.
 
+ctrld also sends this line with `API_DEVICE_INVALID` during a run, when the
+API answers that the device does not exist. Two checks can get this answer:
+the device check after more than 32 REFUSED answers, and the reload of the
+configuration, which runs every hour by default. The run continues until the
+app stops it. ctrld calls
+`Exit` before the run ends, so `Exit` must not wait for the run to end. The
+comment of `AppCallback.Exit` in `cmd/ctrld_library` gives the details.
+
 ## Where each code surfaces
 
 - **Every ctrld-native code** (every row above except `package`): the CLI

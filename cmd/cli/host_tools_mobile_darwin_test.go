@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/mobile"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 )
 
 func TestMobileStartsNoHostTools(t *testing.T) {
