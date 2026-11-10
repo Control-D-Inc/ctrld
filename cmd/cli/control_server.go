@@ -50,14 +50,22 @@ type controlServer struct {
 	server *http.Server
 	mux    *http.ServeMux
 	addr   string
+	// cancel ends the context of every request, so a handler that watches its
+	// context stops with the server. Shutdown does not end the context.
+	cancel context.CancelFunc
 }
 
 // newControlServer creates a new control server instance
 func newControlServer(addr string) (*controlServer, error) {
 	mux := http.NewServeMux()
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &controlServer{
-		server: &http.Server{Handler: mux},
+		server: &http.Server{
+			Handler:     mux,
+			BaseContext: func(net.Listener) context.Context { return ctx },
+		},
 		mux:    mux,
+		cancel: cancel,
 	}
 	s.addr = addr
 	return s, nil
@@ -83,6 +91,7 @@ func (s *controlServer) start() error {
 }
 
 func (s *controlServer) stop() error {
+	s.cancel()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
 	defer cancel()
 	return s.server.Shutdown(ctx)
@@ -90,6 +99,48 @@ func (s *controlServer) stop() error {
 
 func (s *controlServer) register(pattern string, handler http.Handler) {
 	s.mux.Handle(pattern, jsonResponse(handler))
+}
+
+// refreshDeactivationPin fetches the deactivation PIN from the API and stores
+// it. It does not store an answer that comes after ctx ended, and then returns
+// the error of ctx. ctx ends when the control server stops. On mobile, the next
+// run may already be active then, and the PIN globals belong to it.
+//
+// A client that gives up does not end ctx while the handler has not read the
+// request body, because net/http sees a closed connection only after the body.
+// That answer still belongs to the run that is active, so it can be stored.
+func (p *prog) refreshDeactivationPin(ctx context.Context) error {
+	rcReq := &controld.ResolverConfigRequest{
+		RawUID:   cdUID,
+		Version:  appVersion,
+		Metadata: ctrld.SystemMetadataRuntime(ctx),
+	}
+	rc, err := fetchResolverConfig(ctx, rcReq, cdDev)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		p.Warn().Err(ctxErr).Msg("Deactivation request ended before the pin code answer, not storing it")
+		return ctxErr
+	}
+	if rc == nil {
+		p.Warn().Err(err).Msg("Could not re-fetch deactivation pin code")
+		return nil
+	}
+	deactivationPinKnown.Store(true)
+	if rc.DeactivationPin != nil {
+		cdDeactivationPin.Store(*rc.DeactivationPin)
+	} else {
+		cdDeactivationPin.Store(defaultDeactivationPin)
+	}
+	// Every resolver-config response carries the organization's allowed
+	// destinations, including this one, so apply them rather than discarding
+	// a fresher list until the next scheduled refresh converges.
+	//
+	// Only the destinations: p.rc is deliberately left alone. The scheduled
+	// refresh decides whether to reload ctrld by comparing the response
+	// against p.rc, so storing this one here would let an exclude-list change
+	// be compared away and never reloaded. The destination set needs no
+	// reload - it is enforced directly and applying it is idempotent.
+	p.applyAllowedDestinations(p.firewallAllowList(), rc.DestinationIPs)
+	return nil
 }
 
 func (p *prog) registerControlServerHandler() {
@@ -231,39 +282,17 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 
-		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-
 		// Reject further attempts while locked out due to repeated wrong PINs.
 		if now := time.Now().Unix(); now < deactivationLockedUntil.Load() {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
 
-		// Re-fetch pin code from API.
-		rcReq := &controld.ResolverConfigRequest{
-			RawUID:   cdUID,
-			Version:  appVersion,
-			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
-		}
-		if rc, err := fetchResolverConfig(loggerCtx, rcReq, cdDev); rc != nil {
-			deactivationPinKnown.Store(true)
-			if rc.DeactivationPin != nil {
-				cdDeactivationPin.Store(*rc.DeactivationPin)
-			} else {
-				cdDeactivationPin.Store(defaultDeactivationPin)
-			}
-			// Every resolver-config response carries the organization's allowed
-			// destinations, including this one, so apply them rather than discarding
-			// a fresher list until the next scheduled refresh converges.
-			//
-			// Only the destinations: p.rc is deliberately left alone. The scheduled
-			// refresh decides whether to reload ctrld by comparing the response
-			// against p.rc, so storing this one here would let an exclude-list change
-			// be compared away and never reloaded. The destination set needs no
-			// reload - it is enforced directly and applying it is idempotent.
-			p.applyAllowedDestinations(p.firewallAllowList(), rc.DestinationIPs)
-		} else {
-			p.Warn().Err(err).Msg("Could not re-fetch deactivation pin code")
+		// A request that ended must not be checked: on mobile, the PIN and the
+		// lockout counters may belong to the next run already.
+		if err := p.refreshDeactivationPin(ctrld.LoggerCtx(request.Context(), p.logger.Load())); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
 		}
 
 		// If pin code not set, allowing deactivation - but only when the API
