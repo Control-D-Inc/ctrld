@@ -316,7 +316,7 @@ func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum stri
 
 	ctrld.Log(ctx, p.Debug(), "Processing DNS query from %s", w.RemoteAddr().String())
 
-	if !listenerConfig.AllowWanClients && isWanClient(w.RemoteAddr()) {
+	if refuseWanClient(listenerConfig.AllowWanClients, w.RemoteAddr(), w.LocalAddr()) {
 		ctrld.Log(ctx, p.Debug(), "Query refused, listener does not allow WAN clients: %s", w.RemoteAddr().String())
 		sendDNSResponse(w, m, dns.RcodeRefused)
 		return
@@ -2106,6 +2106,27 @@ func isWanClient(na net.Addr) bool {
 		!ip.IsLinkLocalMulticast() &&
 		!tsaddr.CGNATRange().Contains(ip) &&
 		!isServiceContinuityAddr(ip)
+}
+
+// refuseWanClient reports whether a query from remote, received on the
+// listener socket local, must be refused because it comes from a WAN address.
+func refuseWanClient(allowWanClients bool, remote, local net.Addr) bool {
+	return !allowWanClients && isWanClient(remote) && !isLoopbackListener(local)
+}
+
+// isLoopbackListener reports whether the query arrived on a loopback address
+// (127.0.0.0/8 or [::1]). Other hosts cannot send packets to a loopback
+// address, so a query there always comes from this machine. Its source can
+// still be a public address: pf on macOS keeps the original source IP when it
+// redirects intercepted DNS to the listener, so on a network that hands out
+// public IPv4 (some campus and enterprise networks) the machine's own lookups
+// arrive from that address. The WAN check is for listeners other hosts can
+// reach, so it does not apply here.
+func isLoopbackListener(na net.Addr) bool {
+	if ap, err := netip.ParseAddrPort(na.String()); err == nil {
+		return ap.Addr().Unmap().IsLoopback()
+	}
+	return false
 }
 
 // resolveInternalDomainTestQuery resolves internal test domain query, returning the answer to the caller.
