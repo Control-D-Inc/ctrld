@@ -36,6 +36,20 @@ type AppCallback interface {
 	Hostname() string
 	LanIp() string
 	MacAddress() string
+	// Exit gets a failure line of the run, or the error text of the fetch
+	// for an API preflight error at start. A deleted device can send the
+	// same line more than once in a run, until the app stops the run.
+	//
+	// ctrld calls Exit on the thread that called Start or on a Go thread,
+	// always before the run ends. The run
+	// does not end until Exit returns. So Exit must return without waiting
+	// for the run to end: it must not call Stop, wait for Start to return,
+	// or wait for a thread that can be in Stop. Otherwise Stop waits its
+	// full 15 seconds and returns while the run is still active.
+	//
+	// If Exit gives the line to another thread, it must also give the run
+	// that the line belongs to, because the next run can start before that
+	// thread reads the line.
 	Exit(error string)
 }
 

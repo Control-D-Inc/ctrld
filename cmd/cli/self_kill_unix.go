@@ -14,6 +14,12 @@ import (
 
 // selfUninstall performs self-uninstallation on Unix platforms
 func selfUninstall(p *prog, logger *ctrld.Logger) {
+	// On mobile ctrld runs inside the app: iOS does not let an app start a
+	// process, and an exit ends the app. selfUninstallCheck reports to the
+	// app instead.
+	if isMobile() {
+		return
+	}
 	if runtime.GOOS == "linux" {
 		selfUninstallLinux(p, logger)
 	}

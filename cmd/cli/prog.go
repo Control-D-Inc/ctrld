@@ -179,6 +179,10 @@ type prog struct {
 	// fetch returns, because the reload receiver fetches again and can fail.
 	startedInAPIMaintenance atomic.Bool
 	checkingSelfUninstall   bool
+	// deviceCheckEnded stops device checks after finishRun. Only mobile sets
+	// it. Each mobile run has its own prog, so it never reaches the next run.
+	// Guarded by selfUninstallMu.
+	deviceCheckEnded bool
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -1414,6 +1418,7 @@ func (p *prog) finishRun() {
 	// than the per-run wait group. runDone closes after their final Add.
 	p.apiReloadWg.Wait()
 	p.listenerWg.Wait()
+	p.endDeviceCheck()
 	if p.waitNetworkJournal != nil {
 		p.waitNetworkJournal()
 	}
@@ -2549,6 +2554,17 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger *ctrld.Logger) {
 	var uer *controld.ErrorResponse
 	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		p.stopDnsWatchers()
+		// On mobile ctrld runs inside the app. It cannot start an uninstall,
+		// and it must not end the process, so the app gets the code and
+		// stops the run.
+		if isMobile() {
+			line := newProvisionResult(provisionCodeAPIDeviceInvalid, "", nil).failureLine()
+			logger.Error().Msg(line)
+			if p.appCallback != nil && p.appCallback.Exit != nil {
+				p.appCallback.Exit(line)
+			}
+			return
+		}
 
 		// Perform self-uninstall now.
 		selfUninstallFn(p, logger)
@@ -2632,6 +2648,11 @@ func performUpgrade(vt string, logger *ctrld.Logger) bool {
 // The callers must ensure curVer and logger are non-nil.
 // Returns true if upgrade is allowed and should proceed, false otherwise.
 func selfUpgradeCheck(vt string, cv *semver.Version, logger *ctrld.Logger) bool {
+	// On mobile ctrld updates with the app, and the sandbox does not let it
+	// start the upgrade command.
+	if isMobile() {
+		return false
+	}
 	if shouldUpgrade(vt, cv, logger) {
 		return performUpgrade(vt, logger)
 	}

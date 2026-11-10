@@ -108,11 +108,34 @@ provision token, the resolver/device ID, or config contents.
   above quotes this line verbatim, because the script has no separate
   result file to carry it.
 
+## Mobile library
+
+The mobile library (`cmd/ctrld_library`) runs in the process of the app, so
+ctrld does not exit. When ctrld records a failure, it sends the output line
+to `AppCallback.Exit`. An error of the API preflight at start goes to `Exit`
+as the error text of the fetch, not as an output line.
+
+ctrld also sends
+`provisioning failed: stage=bootstrap code=API_DEVICE_INVALID (exit 32)` to
+`Exit` during a run, when the API answers that the device does not exist.
+Two checks can get this answer. One is the device check after more than 32
+REFUSED answers. The other is the reload of the configuration, which runs
+every hour by default. On mobile, ctrld does not uninstall and does not end
+the process. The run continues until the app stops it. Until then, each check
+sends the line again: the reload at each interval, and the device check after
+a pause of 30 minutes.
+
+ctrld calls `Exit` before the run ends, so `Exit` must not wait for the run
+to end. The comment of `AppCallback.Exit` in `cmd/ctrld_library` gives the
+details.
+
 ## Where each code surfaces
 
 - **Every ctrld-native code** (every row above except `package`): the CLI
   output / persisted `ctrld.log`, `provision_result.json`, and `ctrld-client diag`
   (which reads that same file).
+- **`API_DEVICE_INVALID` during a mobile run**: only `AppCallback.Exit` and
+  `ctrld.log`. ctrld writes no result file for it.
 - **Package-stage codes** (`PROFILE_PREFS_MISSING`, `SERVICE_RELOAD_FAILED`,
   `TEMP_FILE_UNAVAILABLE`, the package's own `INTERCEPT_MODE_INVALID` check
   on the managed-prefs value, and the package pre-flight's reused

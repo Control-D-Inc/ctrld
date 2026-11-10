@@ -14,7 +14,13 @@ type AppCallback struct {
 	HostName   func() string
 	LanIp      func() string
 	MacAddress func() string
-	Exit       func(error string)
+	// Exit gets a failure line of the run, or the error text of the fetch
+	// for an API preflight error at start. The same line can come more than
+	// once in a run. ctrld calls it before the run ends, and the run does
+	// not end until Exit returns. So Exit must not wait for the run to end:
+	// a wait with a timeout stalls the stop until the timeout, and a wait
+	// with no timeout never ends.
+	Exit func(error string)
 }
 
 // AppConfig allows overwriting ctrld cli flags from mobile platforms.

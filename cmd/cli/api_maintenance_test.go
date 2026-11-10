@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -237,6 +238,97 @@ func Test_selfUninstallCheckSkipsMaintenance(t *testing.T) {
 			t.Fatal("a network failure triggered a self-uninstall")
 		}
 	})
+}
+
+// deviceInvalidExitLine is the line that a deleted device sends to Exit on
+// mobile.
+const deviceInvalidExitLine = "provisioning failed: stage=bootstrap code=API_DEVICE_INVALID (exit 32)"
+
+// On mobile ctrld runs inside the app, so it cannot start an uninstall or end
+// the process. A deleted device must reach the app as one coded Exit.
+func Test_selfUninstallCheckOnMobileExitsToTheApp(t *testing.T) {
+	called := stubSelfUninstall(t)
+	oldIsMobile := isMobile
+	t.Cleanup(func() { isMobile = oldIsMobile })
+	isMobile = func() bool { return true }
+	logs := captureMainLog(t)
+	var exits []string
+	p := newSelfUninstallTestProg()
+	p.appCallback = &AppCallback{Exit: func(line string) { exits = append(exits, line) }}
+
+	selfUninstallCheck(deviceInvalidErr(), p, mainLog.Load())
+
+	if *called {
+		t.Fatal("a deleted device started a self-uninstall on mobile")
+	}
+	if len(exits) != 1 || exits[0] != deviceInvalidExitLine {
+		t.Fatalf("Exit lines = %q, want [%q]", exits, deviceInvalidExitLine)
+	}
+	// Support reads ctrld.log, and the app may not log the line.
+	if !strings.Contains(logs.String(), deviceInvalidExitLine) {
+		t.Errorf("the Exit line is not in the log: %s", logs.String())
+	}
+}
+
+// An app callback without Exit must not crash the run or start the uninstall.
+func Test_selfUninstallCheckOnMobileWithoutExit(t *testing.T) {
+	called := stubSelfUninstall(t)
+	oldIsMobile := isMobile
+	t.Cleanup(func() { isMobile = oldIsMobile })
+	isMobile = func() bool { return true }
+
+	selfUninstallCheck(deviceInvalidErr(), newSelfUninstallTestProg(), discardLogger())
+
+	if *called {
+		t.Fatal("a deleted device started a self-uninstall on mobile")
+	}
+}
+
+// The reload of the configuration can also find a deleted device. On mobile
+// it must reach the app as Exit and start no uninstall.
+func Test_apiConfigReloadOnMobileExitsForDeletedDevice(t *testing.T) {
+	called := stubSelfUninstall(t)
+	oldFetch, oldUID, oldIsMobile := fetchResolverConfigFn, cdUID, isMobile
+	t.Cleanup(func() { fetchResolverConfigFn, cdUID, isMobile = oldFetch, oldUID, oldIsMobile })
+	cdUID = "test-uid"
+	isMobile = func() bool { return true }
+	fetchResolverConfigFn = func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
+		return nil, deviceInvalidErr()
+	}
+	exits := &exitRecorder{}
+	p := &prog{
+		cfg:              &ctrld.Config{Service: ctrld.ServiceConfig{RefetchTime: ptrTo(3600)}},
+		stopCh:           make(chan struct{}),
+		runAbortCh:       make(chan struct{}),
+		apiForceReloadCh: make(chan struct{}),
+		dnsWatcherStopCh: make(chan struct{}),
+		appCallback:      exits.callback(),
+	}
+	p.logger.Store(discardLogger())
+
+	done := make(chan struct{})
+	go func() { defer close(done); p.apiConfigReload() }()
+	stopReload := func() {
+		close(p.stopCh)
+		<-done
+	}
+	select {
+	case p.apiForceReloadCh <- struct{}{}:
+	case <-time.After(2 * time.Second):
+		stopReload()
+		t.Fatal("the reload did not take the forced reload")
+	}
+	for deadline := time.Now().Add(2 * time.Second); len(exits.got()) == 0 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	stopReload()
+
+	if *called {
+		t.Fatal("the reload started a self-uninstall on mobile")
+	}
+	if lines := exits.got(); len(lines) != 1 || lines[0] != deviceInvalidExitLine {
+		t.Fatalf("Exit lines = %q, want [%q]", lines, deviceInvalidExitLine)
+	}
 }
 
 // Test_logResolverConfigFetchFailure covers what the reload paths say. The
