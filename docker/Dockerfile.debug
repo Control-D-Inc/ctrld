@@ -13,7 +13,7 @@
 # emulation. buildx sets BUILDPLATFORM and the TARGET* arguments from
 # --platform, e.g. linux/arm/v7 gives TARGETOS=linux, TARGETARCH=arm,
 # TARGETVARIANT=v7.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm AS base
+FROM --platform=$BUILDPLATFORM golang:1.27.4-bookworm AS base
 
 WORKDIR /app
 

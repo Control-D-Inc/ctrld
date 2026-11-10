@@ -2,7 +2,7 @@ module github.com/Control-D-Inc/ctrld
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.27.4
 
 require (
 	github.com/Masterminds/semver/v3 v3.2.1
