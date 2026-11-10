@@ -424,10 +424,8 @@ func (p *prog) initInternalLogging(externalCores []zapcore.Core) {
 	cores := make([]zapcore.Core, 0, len(externalCores)+2)
 	cores = append(cores, externalCores...)
 
-	// Run the internal logging at debug level, so we could
-	// have enough information for troubleshooting. The journal core keeps
-	// the lines that survive a restart.
-	cores = append(cores, newHumanReadableZapCore(lw, zapcore.DebugLevel), newJournalCore(jlw))
+	// The journal core keeps the lines that survive a restart.
+	cores = append(cores, newHumanReadableZapCore(mobileLogFile(lw), internalLogLevel(&p.cfg.Service)), newJournalCore(jlw))
 
 	// Create a multi-core logger
 	mainLog.Store(&ctrld.Logger{Logger: zap.New(zapcore.NewTee(cores...))})
@@ -443,6 +441,17 @@ func (p *prog) initInternalLogging(externalCores []zapcore.Core) {
 	// values. The files keep the header they already hold.
 	p.applyDebugLogBudget(debugLogBudget(&p.cfg.Service))
 	p.refreshLogHeader()
+}
+
+// internalLogLevel is the level of the internal debug file. It is debug, so
+// the file has enough detail for troubleshooting. A level below 0 is the
+// mobile library, which asks for no query names: the file then gets the level
+// of the log files.
+func internalLogLevel(svc *ctrld.ServiceConfig) zapcore.Level {
+	if verbose < 0 {
+		return logFileLevel(svc)
+	}
+	return zapcore.DebugLevel
 }
 
 // applyDebugLogBudget gives the open debug files the limits of the config that

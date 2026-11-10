@@ -636,9 +636,7 @@ func Test_logHeaderInputReadsTheConfigUnderTheLock(t *testing.T) {
 // header does not expect one. The header is the first line of every file and
 // of every upload, so it must pass the same redaction as every other line.
 func Test_renderLogHeaderPassesTheSink(t *testing.T) {
-	origUID := cdUID
-	cdUID = "abcd1234SECRETUID"
-	t.Cleanup(func() { cdUID = origUID })
+	setJournalSecrets(t, "abcd1234SECRETUID", cdOrg)
 
 	line := string(renderLogHeader(logHeaderInput{Version: "1.0", LogFiles: []string{"/var/log/" + cdUID + "/ctrld.log"}}))
 

@@ -35,6 +35,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
 	"github.com/Control-D-Inc/ctrld/internal/firewall"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 )
 
@@ -734,17 +735,23 @@ func (p *prog) preRun() {
 }
 
 func (p *prog) postRun() {
-	if !service.Interactive() {
+	if runningAsService() {
+		// The iOS app owns the DNS settings of the device. An iOS extension
+		// runs under launchd, so it also gets here. Android keeps the earlier
+		// behavior.
+		ownsDeviceDNS := !mobile.IsIOS()
 		// A Windows organization can install a GP-owned NRPT catch-all before
 		// starting ctrld. Detect that policy before resetDNS touches adapter DNS;
 		// startDNSIntercept will then prove the rule functionally before adopting it.
-		if !p.skipInitialDNSReset() {
-			p.resetDNS(false, false)
+		if ownsDeviceDNS && !p.skipInitialDNSReset() {
+			resetDNSFn(p, false, false)
 		}
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 		ns, systemNameservers := initializeOsResolverWithSystemNameserversFn(loggerCtx, false, osResolverReasonStart)
 		p.Debug().Msgf("Initialized os resolver with nameservers: %v", ns)
-		p.setDNS(systemNameservers)
+		if ownsDeviceDNS {
+			setDNSFn(p, systemNameservers)
+		}
 		if p.allowList != nil {
 			p.initPlatformFirewall()
 		}
@@ -1609,6 +1616,7 @@ var (
 	serveDNSFn                                  = (*prog).serveDNS
 	monitorNetworkChangesFn                     = (*prog).monitorNetworkChanges
 	postRunFn                                   = (*prog).postRun
+	setDNSFn                                    = (*prog).setDNS
 	startDNSInterceptFn                         = (*prog).startDNSIntercept
 	ensureInterceptDNSTargetFn                  = (*prog).ensureInterceptDNSTarget
 	removeInterceptDNSTargetFn                  = (*prog).removeInterceptDNSTarget
@@ -2558,7 +2566,7 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger *ctrld.Logger) {
 		// and it must not end the process, so the app gets the code and
 		// stops the run.
 		if isMobile() {
-			line := newProvisionResult(provisionCodeAPIDeviceInvalid, "", nil).failureLine()
+			line := mobileAPIFailureLine(uninstallErr)
 			logger.Error().Msg(line)
 			if p.appCallback != nil && p.appCallback.Exit != nil {
 				p.appCallback.Exit(line)

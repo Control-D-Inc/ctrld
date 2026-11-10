@@ -157,6 +157,9 @@ func readHardwarePorts() map[string]hardwarePortInfo {
 // networksetupOutput runs one networksetup list under a time bound and a size
 // bound.
 func networksetupOutput(arg string) ([]byte, error) {
+	if isMobile() {
+		return nil, errNoHostTools
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), networksetupTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "networksetup", arg)

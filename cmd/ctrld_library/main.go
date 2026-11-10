@@ -13,6 +13,7 @@ const stopTimeout = 15 * time.Second
 var (
 	runMobile            = cli.RunMobile
 	checkDeactivationPin = cli.CheckDeactivationPin
+	setNameservers       = cli.SetMobileNameservers
 )
 
 // Controller holds global state. Start, Stop and IsRunning are safe for
@@ -36,16 +37,19 @@ type AppCallback interface {
 	Hostname() string
 	LanIp() string
 	MacAddress() string
-	// Exit gets a failure line of the run, or the error text of the fetch
-	// for an API preflight error at start. A deleted device can send the
-	// same line more than once in a run, until the app stops the run.
+	// Exit gets a failure line of the run. An API preflight error at start,
+	// or a deleted device during the run, gives a line with stage=api and the
+	// HTTP status, for example
+	// "provisioning failed: stage=api code=API_DEVICE_INVALID (exit 32)
+	// http_status=404". A deleted device can send the same line more than
+	// once in a run, until the app stops the run.
 	//
 	// ctrld calls Exit on the thread that called Start or on a Go thread,
-	// always before the run ends. The run
-	// does not end until Exit returns. So Exit must return without waiting
-	// for the run to end: it must not call Stop, wait for Start to return,
-	// or wait for a thread that can be in Stop. Otherwise Stop waits its
-	// full 15 seconds and returns while the run is still active.
+	// always before the run ends. The run does not end until Exit returns.
+	// So Exit must return without waiting for the run to end: it must not
+	// call Stop, wait for Start to return, or wait for a thread that can be
+	// in Stop. Otherwise Stop waits its full 15 seconds and returns while the
+	// run is still active.
 	//
 	// If Exit gives the line to another thread, it must also give the run
 	// that the line belongs to, because the next run can start before that
@@ -53,19 +57,59 @@ type AppCallback interface {
 	Exit(error string)
 }
 
+// LogLevelNotice is the StartOptions.LogLevel that writes only notice, warn,
+// and error lines.
+const LogLevelNotice = -1
+
+// StartOptions configures StartWithOptions. gomobile exports only fields of
+// basic types.
+type StartOptions struct {
+	CdUID          string
+	CustomHostname string
+	HomeDir        string
+	UpstreamProto  string
+	// LogLevel is the level of the ctrld log, the same value as the -v flag of
+	// the CLI. When LogPath is empty, ctrld writes ctrld.log in HomeDir:
+	//
+	//   - LogLevelNotice (-1): notice, warn, and error lines, or the level of
+	//     the log_level in the custom configuration of the resolver.
+	//   - 0, 1, or 2: debug lines. Each DNS query writes its query name.
+	//
+	// When LogPath is set, ctrld writes that file instead: info lines for 1,
+	// and debug lines for 2. For -1 or 0, it uses the log_level of the custom
+	// configuration, or debug lines when the configuration has none.
+	//
+	// Thus LogLevelNotice with an empty LogPath keeps query names out of
+	// ctrld.log, unless the custom configuration sets log_level to info or
+	// debug. On mobile, ctrld also removes the resolver UID, the provision
+	// token, and the paths of URLs from the lines that it writes to its log
+	// files.
+	LogLevel int
+	LogPath  string
+	// Dev makes ctrld use the dev API, like the --dev flag of the CLI.
+	Dev bool
+	// MemoryLimitMiB, if more than 0, sets the Go memory limit of the process
+	// before the run starts. 0 keeps the current limit.
+	MemoryLimitMiB int
+	// Nameservers is a comma-separated list of the OS resolvers of the device.
+	// On iOS, ctrld cannot read them, so the app supplies them. ctrld uses them
+	// for the "os" upstream and for the exclude rules. SetNameservers changes
+	// them during the run. Each start replaces the list that an earlier
+	// SetNameservers set, so pass the current list here at every start.
+	Nameservers string
+}
+
+// NewStartOptions returns options with LogLevel set to LogLevelNotice.
+func NewStartOptions() *StartOptions {
+	return &StartOptions{LogLevel: LogLevelNotice}
+}
+
 // Start configures utility with config.toml from provided directory.
 // This function blocks until the run exits, including teardown after Stop.
 // A call made while a run is active or stopping returns immediately.
 // Check port availability prior to calling it.
 func (c *Controller) Start(CdUID string, ProvisionID string, CustomHostname string, HomeDir string, UpstreamProto string, logLevel int, logPath string) {
-	c.mu.Lock()
-	if c.stopCh != nil {
-		c.mu.Unlock()
-		return
-	}
-	stopCh, doneCh := make(chan struct{}), make(chan struct{})
-	c.stopCh, c.doneCh = stopCh, doneCh
-	c.Config = cli.AppConfig{
+	c.start(cli.AppConfig{
 		CdUID:          CdUID,
 		ProvisionID:    ProvisionID,
 		CustomHostname: CustomHostname,
@@ -73,7 +117,48 @@ func (c *Controller) Start(CdUID string, ProvisionID string, CustomHostname stri
 		UpstreamProto:  UpstreamProto,
 		Verbose:        logLevel,
 		LogPath:        logPath,
+	})
+}
+
+// StartWithOptions is Start with the configuration in o. It blocks and
+// ignores a call during a run, as Start does. A nil o is NewStartOptions().
+// It provisions by resolver UID only: StartOptions has no provision token.
+func (c *Controller) StartWithOptions(o *StartOptions) {
+	if o == nil {
+		o = NewStartOptions()
 	}
+	c.start(cli.AppConfig{
+		CdUID:          o.CdUID,
+		CustomHostname: o.CustomHostname,
+		HomeDir:        o.HomeDir,
+		UpstreamProto:  o.UpstreamProto,
+		Verbose:        o.LogLevel,
+		LogPath:        o.LogPath,
+		Dev:            o.Dev,
+		MemoryLimitMiB: o.MemoryLimitMiB,
+		Nameservers:    o.Nameservers,
+	})
+}
+
+// SetNameservers replaces the OS resolvers with the comma-separated list csv.
+// Call it when the network of the device changes. It is safe to call from
+// any thread, also during a run. A csv with no IP address keeps the current
+// OS resolvers. The next StartWithOptions replaces the list with
+// StartOptions.Nameservers. The next Start removes the list, because Start
+// has no nameservers, so call SetNameservers again after it.
+func (c *Controller) SetNameservers(csv string) {
+	setNameservers(csv)
+}
+
+func (c *Controller) start(config cli.AppConfig) {
+	c.mu.Lock()
+	if c.stopCh != nil {
+		c.mu.Unlock()
+		return
+	}
+	stopCh, doneCh := make(chan struct{}), make(chan struct{})
+	c.stopCh, c.doneCh = stopCh, doneCh
+	c.Config = config
 	appCallback := mapCallback(c.AppCallback)
 	c.mu.Unlock()
 	defer func() {

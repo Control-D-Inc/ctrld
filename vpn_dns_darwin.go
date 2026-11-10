@@ -15,6 +15,9 @@ import (
 // DiscoverVPNDNS discovers DNS servers and search domains from VPN interfaces on macOS.
 // Parses `scutil --dns` output to find VPN resolver configurations.
 func DiscoverVPNDNS(ctx context.Context) []VPNDNSConfig {
+	if isIOS() {
+		return nil
+	}
 	logger := LoggerFromCtx(ctx)
 
 	Log(ctx, logger.Debug(), "Discovering VPN DNS configurations on macOS")

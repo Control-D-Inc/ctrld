@@ -35,6 +35,9 @@ func getDNSFromScutil(ctx context.Context) []string {
 // getDNSFromScutilAttempts reads scutil --dns up to maxRetries times, until it
 // reports a nameserver that is not a local address.
 func getDNSFromScutilAttempts(ctx context.Context, maxRetries int) []string {
+	if isIOS() {
+		return nil
+	}
 	logger := LoggerFromCtx(ctx)
 
 	const retryInterval = 100 * time.Millisecond
@@ -70,6 +73,9 @@ func getDNSFromScutilAttempts(ctx context.Context, maxRetries int) []string {
 }
 
 func getDHCPNameservers(iface string) ([]string, error) {
+	if isIOS() {
+		return nil, errNoHostTools
+	}
 	return dhcpNameserversFromCommands(context.Background(), iface, func(_ context.Context, args ...string) ([]byte, error) {
 		return exec.Command("ipconfig", args...).Output()
 	})
@@ -78,6 +84,9 @@ func getDHCPNameservers(iface string) ([]string, error) {
 // DHCPNameserversForInterfaceContext bounds both commands with the caller's
 // context. Other system-discovery callers retain their existing behavior.
 func DHCPNameserversForInterfaceContext(ctx context.Context, iface string) ([]string, error) {
+	if isIOS() {
+		return nil, errNoHostTools
+	}
 	return dhcpNameserversFromCommands(ctx, iface, func(ctx context.Context, args ...string) ([]byte, error) {
 		return dhcpCommandOutput(ctx, "/usr/sbin/ipconfig", args...)
 	})
@@ -89,6 +98,9 @@ func DHCPNameserversForInterface(iface string) ([]string, error) {
 }
 
 func getAllDHCPNameservers(ctx context.Context) []string {
+	if isIOS() {
+		return nil
+	}
 	logger := LoggerFromCtx(ctx)
 
 	interfaces, err := net.Interfaces()
@@ -180,6 +192,9 @@ func getAllDHCPNameservers(ctx context.Context) []string {
 }
 
 func patchNetIfaceName(iface *net.Interface) (bool, error) {
+	if isIOS() {
+		return false, errNoHostTools
+	}
 	b, err := exec.Command("networksetup", "-listnetworkserviceorder").Output()
 	if err != nil {
 		return false, err

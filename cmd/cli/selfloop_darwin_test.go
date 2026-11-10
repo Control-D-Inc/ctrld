@@ -6,6 +6,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"go.uber.org/zap"
+
+	"gitlab.int.windscribe.com/controld/clients/ctrld.git"
 )
 
 // stubHostContextReads replaces every host read behind addHostContext, so the
@@ -89,5 +93,28 @@ func TestExemptionContextQuietWithoutDNSProxy(t *testing.T) {
 		if l, _ := got.([]any); len(l) != 0 {
 			t.Errorf("dns_proxies_enabled = %v, want empty", got)
 		}
+	}
+}
+
+// The pf and group reads start a process by absolute path, so the fake PATH
+// of the host tool tests cannot see them. On iOS, no read may run at all.
+func TestMobileHostContextRunsNoReads(t *testing.T) {
+	stubHostContextReads(t, nil)
+	stubIOS(t)
+	var ran []string
+	capturePFGroupRuleFn = func() pfGroupRuleSnapshot { ran = append(ran, "pfctl"); return pfGroupRuleSnapshot{} }
+	lookupCtrldGroupFn = func() ([]string, string) { ran = append(ran, "dscacheutil"); return nil, "ok" }
+	listSystemExtensionsFn = func() ([]string, []string, string) { ran = append(ran, "systemextensionsctl"); return nil, nil, "ok" }
+	listNEConfigurationsFn = func() ([]string, string) { ran = append(ran, "ne store"); return nil, "ok" }
+	listVPNServicesFn = func() ([]string, string) { ran = append(ran, "vpn services"); return nil, "ok" }
+	listThirdPartyKextsFn = func() ([]string, string) { ran = append(ran, "kmutil"); return nil, "ok" }
+	listPFAnchorsFn = func() ([]string, string) { ran = append(ran, "pf anchors"); return nil, "ok" }
+
+	logger := &ctrld.Logger{Logger: zap.NewNop()}
+	if proxies := addHostContext(logger.Info()); proxies != nil {
+		t.Errorf("addHostContext() = %v, want nil on mobile", proxies)
+	}
+	if len(ran) != 0 {
+		t.Errorf("addHostContext ran %v on mobile, want no reads", ran)
 	}
 }

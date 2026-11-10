@@ -43,6 +43,8 @@ The **Next action / evidence** column lists what to look at next.
 | `API_REJECTED` | bootstrap | 31 | The API answered and permanently rejected the configuration (4xx other than 408/429): bad or revoked token, malformed request. ctrld exits without burning service-manager restarts because retrying cannot change the answer. This is also the fallback for the four `TOKEN_*` codes below. Those codes need the API response to carry `error.metadata.reason`. An API deployment that does not yet populate that field reports every provisioning-code rejection as `API_REJECTED` instead. | Verify the provision token / org configuration in the Control D dashboard. Re-push after fixing credentials. Evidence: HTTP status in the result file `message`. |
 | `API_DEVICE_INVALID` | bootstrap | 32 | The API reports the device/resolver no longer exists (error code 40402). When the daemon's own bootstrap preflight discovers this, it self-uninstalls, because the identity is gone server-side. The direct `--cd <uid>` install path (`ctrld-client start --cd`) can also hit this code before the service exists. On that path there is nothing to uninstall yet. | Confirm the device was deleted or re-provisioned in the dashboard; re-provision with a current token. No local evidence needed beyond the code. |
 | `API_MAINTENANCE` | bootstrap | 37 | The API answered that it is in hard maintenance (HTTP 503, `error.code` 50302, or on older deployments the message `Maintenance is in progress.`), and this host had no previously working configuration on disk to fall back on. A host that does have one keeps serving DNS from it and never reaches this code. Maintenance is temporary and says nothing about the configuration, so ctrld does not self-uninstall and does not treat it as a permanent rejection. | Wait for the maintenance window to end and re-run. Nothing to fix on the device: the same request succeeds once the API returns. A device that was already provisioned keeps resolving throughout. |
+| `API_RATE_LIMITED` | bootstrap | 38 | Only the mobile library reports this code. The API answered the preflight with HTTP 429. A desktop install reports `API_UNREACHABLE` for the same answer. | Wait longer than for `API_UNAVAILABLE`, and then start again. Many devices that start at the same time can cause this answer. |
+| `API_UNAVAILABLE` | bootstrap | 39 | Only the mobile library reports this code. The API answered the preflight with HTTP 500 or higher, and the answer was not maintenance. A desktop install reports `API_UNREACHABLE` for the same answer. | Wait, and then start again. The HTTP status is in the `Exit` text. |
 | `TOKEN_INVALID` | bootstrap | 33 | The API rejected the `--cd-org` provisioning code with reason `token_invalid`: the code is not recognized. This code needs the deployed API to send `error.metadata.reason: "token_invalid"`. See `API_REJECTED` above for the fallback when it does not. | Make sure that the code is correct. Re-enter it exactly as given. |
 | `TOKEN_EXPIRED` | bootstrap | 34 | The API rejected the `--cd-org` provisioning code with reason `token_expired`. This has the same API-reason dependency as `TOKEN_INVALID`. | Get a new provisioning code from your administrator. |
 | `TOKEN_LIMIT_REACHED` | bootstrap | 35 | The API rejected the `--cd-org` provisioning code with reason `token_limit_reached`: it reached its device limit. This has the same API-reason dependency as `TOKEN_INVALID`. | Free up a device slot or use a different provisioning code. |
@@ -112,18 +114,42 @@ provision token, the resolver/device ID, or config contents.
 
 The mobile library (`cmd/ctrld_library`) runs in the process of the app, so
 ctrld does not exit. When ctrld records a failure, it sends the output line
-to `AppCallback.Exit`. An error of the API preflight at start goes to `Exit`
-as the error text of the fetch, not as an output line.
+to `AppCallback.Exit`.
 
-ctrld also sends
-`provisioning failed: stage=bootstrap code=API_DEVICE_INVALID (exit 32)` to
-`Exit` during a run, when the API answers that the device does not exist.
+For an error of the API preflight at start, and for a deleted device during
+a run, ctrld sends one line in this format to `Exit`:
+
+`provisioning failed: stage=api code=<CODE> (exit <N>) http_status=<status>`
+
+- The stage is `api`. This stage is only in the `Exit` text. The code and the
+  exit number are the bootstrap values from the table above.
+- `http_status` is the HTTP status of an API answer with a JSON error body.
+  The line has no `http_status` when no answer came, or when the body of the
+  answer was not JSON. ctrld reports such an answer as `API_UNREACHABLE`.
+- The code is `API_REJECTED` or `API_DEVICE_INVALID` for a permanent
+  rejection. It is `API_RATE_LIMITED` for HTTP 429, and
+  `API_MAINTENANCE` or `API_UNAVAILABLE` when the API is down. It is
+  `API_UNREACHABLE` for all other errors.
+- The line never contains the error text, the resolver UID, or the
+  provisioning token. The API can echo these values in its error text.
+
+ctrld sends this line when the API preflight at start gives an error. It
+also sends it during a run, when the API answers that the device does not
+exist:
+`provisioning failed: stage=api code=API_DEVICE_INVALID (exit 32) http_status=404`.
 Two checks can get this answer. One is the device check after more than 32
 REFUSED answers. The other is the reload of the configuration, which runs
 every hour by default. On mobile, ctrld does not uninstall and does not end
 the process. The run continues until the app stops it. Until then, each check
 sends the line again: the reload at each interval, and the device check after
 a pause of 30 minutes.
+
+An error of the token exchange does not use this format. The token exchange
+runs when the app starts ctrld with a provision token and no UID. Its error
+goes to `Exit` as the output line
+`provisioning failed: stage=bootstrap code=<CODE> (exit <N>)`, with no
+`http_status`. The code can be a `TOKEN_*` code, and it is never
+`API_RATE_LIMITED` or `API_UNAVAILABLE`: an HTTP 429 gives `API_UNREACHABLE`.
 
 ctrld calls `Exit` before the run ends, so `Exit` must not wait for the run
 to end. The comment of `AppCallback.Exit` in `cmd/ctrld_library` gives the
@@ -136,6 +162,9 @@ details.
   (which reads that same file).
 - **`API_DEVICE_INVALID` during a mobile run**: only `AppCallback.Exit` and
   `ctrld.log`. ctrld writes no result file for it.
+- **The two mobile codes** (`API_RATE_LIMITED` and `API_UNAVAILABLE`): only
+  the `Exit` text of the mobile library. ctrld does not write them to
+  `provision_result.json`, so `ctrld-client diag` does not show them.
 - **Package-stage codes** (`PROFILE_PREFS_MISSING`, `SERVICE_RELOAD_FAILED`,
   `TEMP_FILE_UNAVAILABLE`, the package's own `INTERCEPT_MODE_INVALID` check
   on the managed-prefs value, and the package pre-flight's reused

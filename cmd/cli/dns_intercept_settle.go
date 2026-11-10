@@ -22,6 +22,9 @@ const (
 	osResolverReasonVPNSettle      = "vpn_settle"
 	osResolverReasonDelayedRecheck = "delayed_recheck"
 	osResolverReasonNetworkChange  = "network_change"
+	// osResolverReasonAppNameservers is a read that the mobile app started
+	// with SetMobileNameservers.
+	osResolverReasonAppNameservers = "app_nameservers"
 )
 
 func (p *prog) refreshDNSAfterVPNSettle(reason string) (routes, domainlessServers, exemptions int) {

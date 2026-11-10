@@ -60,6 +60,9 @@ func discoverSessionUser(ctx context.Context) string {
 
 // getConsoleUser uses stat to find the owner of /dev/console
 func getConsoleUser(ctx context.Context) string {
+	if isIOS() {
+		return ""
+	}
 	cmd := exec.CommandContext(ctx, "stat", "-f", "%Su", "/dev/console")
 	out, err := cmd.Output()
 	if err != nil {
@@ -71,13 +74,16 @@ func getConsoleUser(ctx context.Context) string {
 
 // getScutilConsoleUser uses scutil to get the current console user
 func getScutilConsoleUser(ctx context.Context) string {
+	if isIOS() {
+		return ""
+	}
 	cmd := exec.CommandContext(ctx, "scutil", "-r", "ConsoleUser")
 	out, err := cmd.Output()
 	if err != nil {
 		LoggerFromCtx(ctx).Debug().Err(err).Msg("failed to get ConsoleUser via scutil")
 		return ""
 	}
-	
+
 	lines := strings.Split(string(out), "\n")
 	for _, line := range lines {
 		if strings.Contains(line, "Name :") {
@@ -92,6 +98,9 @@ func getScutilConsoleUser(ctx context.Context) string {
 
 // getLowestRegularUser finds the user with the lowest UID >= 501
 func getLowestRegularUser(ctx context.Context) string {
+	if isIOS() {
+		return ""
+	}
 	// Get list of all users with UID >= 501
 	cmd := exec.CommandContext(ctx, "dscl", ".", "list", "/Users", "UniqueID")
 	out, err := cmd.Output()
@@ -114,7 +123,7 @@ func getLowestRegularUser(ctx context.Context) string {
 
 		username := fields[0]
 		uidStr := fields[1]
-		
+
 		uid, err := strconv.Atoi(uidStr)
 		if err != nil {
 			continue
@@ -136,7 +145,7 @@ func getLowestRegularUser(ctx context.Context) string {
 	// Find the candidate with the lowest UID (deterministic choice)
 	lowestUID := candidates[0].uid
 	result := candidates[0].name
-	
+
 	for _, candidate := range candidates[1:] {
 		if candidate.uid < lowestUID {
 			lowestUID = candidate.uid

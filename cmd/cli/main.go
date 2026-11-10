@@ -149,7 +149,7 @@ func initInteractiveLogging() {
 func initLoggingWithBackup(doBackup bool) []zapcore.Core {
 	var writers []io.Writer
 	if rf := openLogPathWriter(doBackup); rf != nil {
-		writers = append(writers, rf)
+		writers = append(writers, mobileLogFile(rf))
 	}
 
 	// Create zap cores for different writers
@@ -157,38 +157,13 @@ func initLoggingWithBackup(doBackup bool) []zapcore.Core {
 	var cores []zapcore.Core
 	cores = append(cores, consoleWriter)
 
-	// Determine log level based on verbosity and configuration
-	// This provides flexible logging control for different use cases
-	logLevel := cfg.Service.LogLevel
-	switch {
-	case silent:
+	if silent {
 		// For silent mode, use a no-op logger to suppress all output
 		l := zap.NewNop()
 		mainLog.Store(&ctrld.Logger{Logger: l})
 		return cores
-	case verbose == 1:
-		logLevel = "info"
-	case verbose > 1:
-		logLevel = "debug"
 	}
-
-	// Parse log level string to zapcore.Level
-	// This provides human-readable log level configuration
-	var level zapcore.Level
-	switch logLevel {
-	case "debug":
-		level = zapcore.DebugLevel
-	case "info":
-		level = zapcore.InfoLevel
-	case "notice":
-		level = ctrld.NoticeLevel
-	case "warn":
-		level = zapcore.WarnLevel
-	case "error":
-		level = zapcore.ErrorLevel
-	default:
-		level = zapcore.InfoLevel // default level
-	}
+	level := logFileLevel(&cfg.Service)
 
 	consoleWriter.Enabled(level)
 	// Add cores for all writers
@@ -205,6 +180,34 @@ func initLoggingWithBackup(doBackup bool) []zapcore.Core {
 	mainLog.Store(&ctrld.Logger{Logger: logger})
 
 	return cores
+}
+
+// logFileLevel is the level of the log files: the -v flag first, then
+// log_level of svc, then info. The mobile library passes -1 (LogLevelNotice)
+// to keep query names out of the files, so -1 means notice when svc sets no
+// log_level. Only the mobile library can pass a level below 0.
+func logFileLevel(svc *ctrld.ServiceConfig) zapcore.Level {
+	logLevel := svc.LogLevel
+	switch {
+	case verbose == 1:
+		logLevel = "info"
+	case verbose > 1:
+		logLevel = "debug"
+	case verbose < 0 && logLevel == "":
+		logLevel = "notice"
+	}
+	switch logLevel {
+	case "debug":
+		return zapcore.DebugLevel
+	case "notice":
+		return ctrld.NoticeLevel
+	case "warn":
+		return zapcore.WarnLevel
+	case "error":
+		return zapcore.ErrorLevel
+	default:
+		return zapcore.InfoLevel
+	}
 }
 
 // initCache initializes DNS cache configuration

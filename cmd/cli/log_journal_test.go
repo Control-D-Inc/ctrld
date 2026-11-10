@@ -120,9 +120,7 @@ func Test_journalCoreRedactsAKeptLine(t *testing.T) {
 }
 
 func Test_journalCoreRedactsTheProvisionSecrets(t *testing.T) {
-	origCdUID := cdUID
-	t.Cleanup(func() { cdUID = origCdUID })
-	cdUID = "org-v1-uidofthisdevice"
+	setJournalSecrets(t, "org-v1-uidofthisdevice", cdOrg)
 	buf, logger := journalTestLogger(t)
 
 	logger.Warn().Str("detail", "device "+cdUID+" is gone").Msg("provision failed")
@@ -164,6 +162,12 @@ func Test_journalCoreRedactsAMarkedInfoLine(t *testing.T) {
 // and the directory that holds the debug file and the journal file.
 func startInternalLogging(t *testing.T) (*prog, string) {
 	t.Helper()
+	return startInternalLoggingAt(t, 0)
+}
+
+// startInternalLoggingAt is startInternalLogging with the given verbose level.
+func startInternalLoggingAt(t *testing.T, level int) (*prog, string) {
+	t.Helper()
 	origSilent, origCdUID, origHomedir, origVerbose := silent, cdUID, homedir, verbose
 	origMainLog := mainLog.Load()
 	t.Cleanup(func() {
@@ -178,7 +182,7 @@ func startInternalLogging(t *testing.T) (*prog, string) {
 	homedir = dir
 	cdUID = "test-uid"
 	silent = false
-	verbose = 0
+	verbose = level
 	stubHeaderSnapshotSources(t)
 
 	p := &prog{cfg: &ctrld.Config{}}
@@ -246,9 +250,7 @@ func Test_stopClosesTheInternalLogFiles(t *testing.T) {
 // the resolver UID. The keys of a JSON line hold the same letters, and a
 // redaction of the client ID would break the line.
 func Test_redactRetainedLineKeepsAShortClientID(t *testing.T) {
-	origCdUID := cdUID
-	t.Cleanup(func() { cdUID = origCdUID })
-	cdUID = "uid12345678/os"
+	setJournalSecrets(t, "uid12345678/os", cdOrg)
 
 	line := string(redactRetainedLine([]byte(`{"level":"info","os":"darwin","resolver":"uid12345678/os"}`)))
 
@@ -288,5 +290,37 @@ func Test_redactRetainedLineKeepsAShortResolverUID(t *testing.T) {
 	const in = `{"level":"info","os":"darwin","message":"loss of service"}`
 	if got := string(redactRetainedLine([]byte(in))); got != in {
 		t.Fatalf("redactRetainedLine(%q) = %q, want the line unchanged", in, got)
+	}
+}
+
+// setJournalSecrets sets cdUID and cdOrg the way a run does, with the copy
+// that the log writers read, and puts both back when the test ends.
+func setJournalSecrets(t *testing.T, uid, org string) {
+	t.Helper()
+	oldUID, oldOrg := cdUID, cdOrg
+	t.Cleanup(func() {
+		cdUID, cdOrg = oldUID, oldOrg
+		storeJournalSecrets()
+	})
+	cdUID, cdOrg = uid, org
+	storeJournalSecrets()
+}
+
+// The CLI flags set cdUID and cdOrg before any command runs, so the root
+// command must copy them for the log writers.
+func Test_rootPreRunStoresTheFlagSecrets(t *testing.T) {
+	const token = "org-v1-flagtoken"
+	setJournalSecrets(t, "", "")
+	origVerbose, origMainLog := verbose, mainLog.Load()
+	t.Cleanup(func() { verbose = origVerbose; mainLog.Store(origMainLog) })
+	// initCLI sets each flag variable to its default, so the token comes
+	// after it, as a flag value does.
+	rootCmd := initCLI()
+	cdOrg = token
+	rootCmd.PersistentPreRun(rootCmd, nil)
+
+	line := string(redactRetainedLine([]byte(`{"message":"token ` + token + `"}`)))
+	if strings.Contains(line, token) {
+		t.Errorf("line contains the flag token: %s", line)
 	}
 }

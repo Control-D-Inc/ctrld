@@ -563,3 +563,38 @@ func TestTryUpdateListenerConfigConfiguredAddrUnavailable(t *testing.T) {
 // The exhaustion path (exit 41) is not covered: forcing every fallback,
 // including a freshly randomized ip/port, to fail has no deterministic seam,
 // so a test would race whatever ports are free on the host.
+
+// On mobile in Control D mode the listener address is fixed. When another
+// process holds it, the app must get the listener code, not a crash of its
+// process.
+func TestTryUpdateListenerConfigMobileCdModeBindFailure(t *testing.T) {
+	stubProvisionGlobals(t)
+	oldIsMobile, oldIntercept, oldNextdns := isMobile, interceptMode, nextdns
+	t.Cleanup(func() {
+		isMobile, interceptMode, nextdns = oldIsMobile, oldIntercept, oldNextdns
+		pendingProvisionFailure.Store(nil)
+	})
+	isMobile = func() bool { return true }
+	cdUID, nextdns, interceptMode = "testuid", "", "off"
+	provisionExit = func(code int) { t.Fatalf("process exit %d on mobile", code) }
+	// Hold the fixed address. If the test cannot bind it, ctrld cannot
+	// either, so the bind fails in both cases.
+	addr := net.JoinHostPort(mobileListenerIp(), strconv.Itoa(mobileListenerPort()))
+	if udp, err := net.ListenPacket("udp", addr); err == nil {
+		t.Cleanup(func() { _ = udp.Close() })
+	}
+	if tcp, err := net.Listen("tcp", addr); err == nil {
+		t.Cleanup(func() { _ = tcp.Close() })
+	}
+	cfg := &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"0": {}}}
+
+	_, ok := tryUpdateListenerConfig(cfg, nil, true)
+
+	if ok {
+		t.Fatal("tryUpdateListenerConfig ok = true, want false")
+	}
+	r := pendingProvisionFailure.Load()
+	if r == nil || r.Code != string(provisionCodeListenerAddrUnavail) {
+		t.Fatalf("recorded failure = %+v, want %s", r, provisionCodeListenerAddrUnavail)
+	}
+}

@@ -3,6 +3,7 @@ package cli
 import (
 	"io"
 	"regexp"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -34,12 +35,56 @@ func redactRetainedLine(p []byte) []byte {
 	return []byte(redactSecrets(string(stripped), journalSecrets()...))
 }
 
-// journalSecrets names the values that no retained line may hold. The client
-// ID stays out: it is a device label, not a secret. redactSecrets drops the
-// values that are too short to redact.
-func journalSecrets() []string {
+// redactingWriter writes each line through redactRetainedLine.
+type redactingWriter struct {
+	w io.Writer
+}
+
+func (r redactingWriter) Write(p []byte) (int, error) {
+	if _, err := r.w.Write(redactRetainedLine(p)); err != nil {
+		return 0, err
+	}
+	// The redacted line is shorter than p, but all of p is written. A count
+	// below len(p) with no error breaks the contract of io.Writer.
+	return len(p), nil
+}
+
+// mobileLogFile redacts the lines of a log file on mobile. The app exports
+// the log files of ctrld, and the user of the device can share them.
+func mobileLogFile(w io.Writer) io.Writer {
+	if !isMobile() {
+		return w
+	}
+	return redactingWriter{w: w}
+}
+
+// journalSecretValues holds the values that no retained line may hold. The
+// log writers run on any thread, and a start writes cdUID and cdOrg on its
+// own thread, so the writers read this copy and never the globals.
+var journalSecretValues atomic.Pointer[[]string]
+
+// storeJournalSecrets copies cdUID and cdOrg into journalSecretValues. Call
+// it after each change of either value. The client ID stays out: it is a
+// device label, not a secret.
+func storeJournalSecrets() {
 	uid, _ := controld.ParseRawUID(cdUID)
-	return []string{cdUID, cdOrg, uid}
+	secrets := []string{cdUID, cdOrg, uid}
+	journalSecretValues.Store(&secrets)
+}
+
+// setCdUID sets cdUID and the copy that the log writers read.
+func setCdUID(uid string) {
+	cdUID = uid
+	storeJournalSecrets()
+}
+
+// journalSecrets returns the values that no retained line may hold.
+// redactSecrets drops the values that are too short to redact.
+func journalSecrets() []string {
+	if secrets := journalSecretValues.Load(); secrets != nil {
+		return *secrets
+	}
+	return nil
 }
 
 // journal marks an event for the retained journal stream. The event keeps

@@ -349,7 +349,7 @@ func (sc *ServiceCommand) Start(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 	} else if uid := cdUIDFromProvToken(); uid != "" {
-		cdUID = uid
+		setCdUID(uid)
 		logger.Debug().Msg("Using uid from provision token")
 		removeOrgFlagsFromArgs(svcConfig)
 		// Pass --cd flag to "ctrld run" command, so the provision token takes no effect.

@@ -10,12 +10,18 @@ type dnsFn func(ctx context.Context) []string
 
 // nameservers returns DNS nameservers from system settings.
 func nameservers(ctx context.Context) []string {
+	if nss := AppNameservers(); nss != nil {
+		return nss
+	}
 	return nameserversFrom(ctx, dnsFns())
 }
 
 // quickNameservers is nameservers without waiting for the system to publish
 // them: a source that finds none returns at once instead of retrying.
 func quickNameservers(ctx context.Context) []string {
+	if nss := AppNameservers(); nss != nil {
+		return nss
+	}
 	return nameserversFrom(ctx, quickDNSFns())
 }
 

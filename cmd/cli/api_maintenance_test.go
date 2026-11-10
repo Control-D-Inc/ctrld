@@ -242,7 +242,7 @@ func Test_selfUninstallCheckSkipsMaintenance(t *testing.T) {
 
 // deviceInvalidExitLine is the line that a deleted device sends to Exit on
 // mobile.
-const deviceInvalidExitLine = "provisioning failed: stage=bootstrap code=API_DEVICE_INVALID (exit 32)"
+const deviceInvalidExitLine = "provisioning failed: stage=api code=API_DEVICE_INVALID (exit 32) http_status=404"
 
 // On mobile ctrld runs inside the app, so it cannot start an uninstall or end
 // the process. A deleted device must reach the app as one coded Exit.

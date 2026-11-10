@@ -163,6 +163,9 @@ func bridgeHasVMMember(members []string) bool {
 
 // firewallFlushPlatform flushes the pf table on macOS.
 func (p *prog) firewallFlushPlatform() {
+	if isMobile() {
+		return
+	}
 	p.pfFirewallFlushTable()
 }
 
@@ -170,6 +173,9 @@ func (p *prog) firewallFlushPlatform() {
 // anchor itself is rebuilt by DNS intercept without firewall rules once
 // p.allowList is nil.
 func (p *prog) shutdownPlatformFirewall() {
+	if isMobile() {
+		return
+	}
 	p.pfFirewallFlushTable()
 	// The organization's allowed destinations live in their own persist table,
 	// which the dynamic flush does not touch. Clear it too so turning Firewall
@@ -198,7 +204,15 @@ func (p *prog) shutdownPlatformFirewall() {
 }
 
 // initPlatformFirewall initializes macOS-specific firewall enforcement (pf tables).
+//
+// On iOS the platform functions of firewall mode enforce nothing and report
+// success: pf enforcement starts pfctl, and the iOS sandbox does not let an
+// app start a process.
 func (p *prog) initPlatformFirewall() {
+	if isMobile() {
+		p.Warn().Msg("Firewall: platform enforcement is not available on iOS; firewall_mode fails open and only records allowlist stats")
+		return
+	}
 	if _, ok := p.platformFirewallState.(*pfFirewallState); ok {
 		return
 	}
@@ -404,6 +418,9 @@ func (p *prog) pfFirewallPopulateTable() {
 // declares the table has not been loaded and pfctl would fail - leaves the
 // caller's applied snapshot unadvanced, so the same delta is retried later.
 func (p *prog) firewallApplyExceptionsPlatform(added, removed []netip.Prefix) error {
+	if isMobile() {
+		return nil
+	}
 	if state, ok := p.platformFirewallState.(*pfFirewallState); !ok || state == nil {
 		return errors.New("pf firewall enforcement is not initialized")
 	}
@@ -533,6 +550,9 @@ func pfTableOpPastTense(op string) string {
 // leave that entry bypassing Firewall Mode for the life of the process, with
 // nothing pending to say so.
 func (p *prog) firewallReplaceExceptionsPlatform(desired []netip.Prefix) error {
+	if isMobile() {
+		return nil
+	}
 	if state, ok := p.platformFirewallState.(*pfFirewallState); !ok || state == nil {
 		return errors.New("pf firewall enforcement is not initialized")
 	}

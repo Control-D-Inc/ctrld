@@ -42,6 +42,9 @@ func (w *nativeTargetOutput) Write(p []byte) (int, error) {
 }
 
 func runNativeTargetCommand(ctx context.Context, input, path string, args ...string) ([]byte, error) {
+	if isMobile() {
+		return nil, errNoHostTools
+	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Stdin = strings.NewReader(input)
 	var out nativeTargetOutput

@@ -16,7 +16,7 @@ func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
 
 	readConfig(false)
 	v.Unmarshal(&cfg)
-	cdUID = curCdUID()
+	setCdUID(curCdUID())
 	cdMode := cdUID != ""
 
 	s, p, err := sc.initializeServiceManager()

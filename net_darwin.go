@@ -11,6 +11,9 @@ import (
 
 // ValidInterfaces returns a set of all valid hardware ports.
 func ValidInterfaces(_ context.Context) map[string]struct{} {
+	if isIOS() {
+		return nil
+	}
 	b, err := exec.Command("networksetup", "-listallhardwareports").Output()
 	if err != nil {
 		return nil

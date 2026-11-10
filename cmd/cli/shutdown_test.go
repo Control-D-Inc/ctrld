@@ -69,7 +69,7 @@ func TestRunMobilePreflightCleanup(t *testing.T) {
 	// Keep the real RunMobile -> run -> Start -> runWait path, but replace the
 	// platform cleanup and API boundaries before any host setup can happen.
 	isMobile = func() bool { return true }
-	networkUp = func() bool { return true }
+	networkUp = func(<-chan struct{}) bool { return true }
 	cleanupCalls := 0
 	cleanupStaleDNSInterceptStateFn = func() { cleanupCalls++ }
 	dir := t.TempDir()
@@ -91,7 +91,7 @@ func TestRunMobilePreflightCleanup(t *testing.T) {
 		}
 		callback := AppCallback{Exit: func(err string) {
 			exits++
-			require.Equal(t, want.Error(), err)
+			require.Equal(t, mobileAPIFailureLine(want), err)
 		}}
 		RunMobile(&AppConfig{CdUID: "testuid", HomeDir: dir, UpstreamProto: "doh", LogPath: filepath.Join(dir, "ctrld.log")}, &callback, stopCh)
 		require.Equal(t, 1, fetchCalls)
