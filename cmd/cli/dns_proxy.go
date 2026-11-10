@@ -198,7 +198,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 			_ = w.WriteMsg(answer)
 			return
 		}
-		if !listenerConfig.AllowWanClients && isWanClient(w.RemoteAddr()) && !isIPv6LoopbackListener(w.LocalAddr()) {
+		if refuseWanClient(listenerConfig.AllowWanClients, w.RemoteAddr(), w.LocalAddr()) {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "query refused, listener does not allow WAN clients: %s", w.RemoteAddr().String())
 			answer := new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeRefused)
@@ -1888,14 +1888,23 @@ func isWanClient(na net.Addr) bool {
 		!isServiceContinuityAddr(ip)
 }
 
-// isIPv6LoopbackListener reports whether the listener address is [::1].
-// The [::1] listener only serves locally-redirected traffic (via pf on macOS
-// or system DNS on Windows), so queries arriving on it are always from this
-// machine — even when the source IP is a global IPv6 address (pf preserves the
-// original source IP during rdr).
-func isIPv6LoopbackListener(na net.Addr) bool {
+// refuseWanClient reports whether a query from remote, received on the
+// listener socket local, must be refused because it comes from a WAN address.
+func refuseWanClient(allowWanClients bool, remote, local net.Addr) bool {
+	return !allowWanClients && isWanClient(remote) && !isLoopbackListener(local)
+}
+
+// isLoopbackListener reports whether the query arrived on a loopback address
+// (127.0.0.0/8 or [::1]). Other hosts cannot send packets to a loopback
+// address, so a query there always comes from this machine. Its source can
+// still be a public address: pf on macOS keeps the original source IP when it
+// redirects intercepted DNS to the listener, so on a network that hands out
+// public IPv4 (some campus and enterprise networks) the machine's own lookups
+// arrive from that address. The WAN check is for listeners other hosts can
+// reach, so it does not apply here.
+func isLoopbackListener(na net.Addr) bool {
 	if ap, err := netip.ParseAddrPort(na.String()); err == nil {
-		return ap.Addr() == netip.IPv6Loopback()
+		return ap.Addr().Unmap().IsLoopback()
 	}
 	return false
 }

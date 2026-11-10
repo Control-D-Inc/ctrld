@@ -21,8 +21,8 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/controld"
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/router/edgeos"
+	"github.com/Control-D-Inc/ctrld/internal/controld"
+	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
 )
 
 // The secrets of the no-leak tests. Each test puts them where they do not

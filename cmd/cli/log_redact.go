@@ -10,8 +10,8 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/controld"
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/router/edgeos"
+	"github.com/Control-D-Inc/ctrld/internal/controld"
+	"github.com/Control-D-Inc/ctrld/internal/router/edgeos"
 )
 
 // redactingLevelWriter is the one redaction step of the logger. Each line

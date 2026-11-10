@@ -885,6 +885,44 @@ func Test_isWanClient(t *testing.T) {
 	}
 }
 
+// A loopback listener only gets queries from this machine, so a public source
+// address there must not be refused. On macOS, pf keeps the source address when
+// it redirects intercepted DNS to the listener, so a Mac on a network that
+// hands out public IPv4 sends its own lookups from that address.
+func Test_refuseWanClient(t *testing.T) {
+	udp := func(ip string, port int) net.Addr { return &net.UDPAddr{IP: net.ParseIP(ip), Port: port} }
+	tcp := func(ip string, port int) net.Addr { return &net.TCPAddr{IP: net.ParseIP(ip), Port: port} }
+	tests := []struct {
+		name     string
+		allowWan bool
+		remote   net.Addr
+		local    net.Addr
+		refuse   bool
+	}{
+		{"public source on 127.0.0.1 listener (pf redirect)", false, udp("168.5.146.154", 11660), udp("127.0.0.1", 53), false},
+		{"public source on 127.0.0.1 listener over TCP", false, tcp("168.5.146.154", 11660), tcp("127.0.0.1", 53), false},
+		{"public source on other 127/8 listener", false, udp("168.5.146.154", 11660), udp("127.0.0.53", 53), false},
+		{"public source on [::1] listener", false, udp("2604:e283:38::1", 11660), udp("::1", 53), false},
+		{"public source on v4-mapped loopback listener", false, udp("168.5.146.154", 11660), udp("::ffff:127.0.0.1", 53), false},
+		{"public source on LAN listener", false, udp("8.8.8.8", 11660), udp("192.168.1.1", 53), true},
+		{"public source on public listener", false, udp("8.8.8.8", 11660), udp("203.0.113.10", 53), true},
+		{"public source on wildcard listener", false, udp("8.8.8.8", 11660), udp("0.0.0.0", 53), true},
+		{"public source on IPv6 wildcard listener", false, udp("8.8.8.8", 11660), udp("::", 53), true},
+		{"public source on LAN listener with allow_wan_clients", true, udp("8.8.8.8", 11660), udp("192.168.1.1", 53), false},
+		{"private source on LAN listener", false, udp("192.168.1.20", 11660), udp("192.168.1.1", 53), false},
+		{"loopback source on loopback listener", false, udp("127.0.0.1", 11660), udp("127.0.0.1", 53), false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := refuseWanClient(tc.allowWan, tc.remote, tc.local); got != tc.refuse {
+				t.Errorf("refuseWanClient(%v, %v, %v) = %v, want %v", tc.allowWan, tc.remote, tc.local, got, tc.refuse)
+			}
+		})
+	}
+}
+
 func Test_prog_queryFromSelf(t *testing.T) {
 	p := &prog{}
 	require.NotPanics(t, func() {
