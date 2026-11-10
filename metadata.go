@@ -2,6 +2,7 @@ package ctrld
 
 import (
 	"context"
+	"sync"
 
 	"github.com/Control-D-Inc/ctrld/internal/system"
 )
@@ -16,9 +17,14 @@ const (
 )
 
 var (
+	// chassisMu guards chassisType and chassisVendor. Read them with chassisValues.
+	chassisMu     sync.Mutex
 	chassisType   string
 	chassisVendor string
 )
+
+// getChassisInfoFn is system.GetChassisInfo. Tests replace it.
+var getChassisInfoFn = system.GetChassisInfo
 
 // username discovery modes for systemMetadata.
 const (
@@ -61,16 +67,7 @@ func systemMetadata(ctx context.Context, usernameMode int) map[string]string {
 	if isIOS() {
 		return mobileMetadata(m)
 	}
-	if chassisType == "" && chassisVendor == "" {
-		ci, err := system.GetChassisInfo()
-		if err != nil {
-			logger.Debug().Err(err).Msg("Failed to get chassis info")
-		} else {
-			chassisType, chassisVendor = ci.Type, ci.Vendor
-		}
-	}
-	m[metadataChassisTypeKey] = chassisType
-	m[metadataChassisVendorKey] = chassisVendor
+	m[metadataChassisTypeKey], m[metadataChassisVendorKey] = chassisValues(logger)
 	switch usernameMode {
 	case usernameFull:
 		m[metadataUsernameKey] = discoverMainUserFn(ctx)
@@ -87,6 +84,26 @@ func systemMetadata(ctx context.Context, usernameMode int) map[string]string {
 	m[metadataDomainKey] = domain
 
 	return m
+}
+
+// chassisValues returns the cached chassis type and vendor. It looks them up
+// while both are empty, so a failed lookup, or one that returns two empty
+// values, is tried again on the next call. A result with one empty value is
+// kept.
+// Several goroutines call systemMetadata, so the mutex guards the cache. It is
+// held during the lookup, so the lookup runs at most once at a time.
+func chassisValues(logger *Logger) (kind, vendor string) {
+	chassisMu.Lock()
+	defer chassisMu.Unlock()
+	if chassisType == "" && chassisVendor == "" {
+		ci, err := getChassisInfoFn()
+		if err != nil {
+			logger.Debug().Err(err).Msg("Failed to get chassis info")
+			return chassisType, chassisVendor
+		}
+		chassisType, chassisVendor = ci.Type, ci.Vendor
+	}
+	return chassisType, chassisVendor
 }
 
 // mobileMetadata completes m without the host values. Each of them starts a
