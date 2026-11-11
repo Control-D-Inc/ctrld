@@ -594,10 +594,8 @@ func TestDeviceCheckCountStartsAgainAfterTheCoolOff(t *testing.T) {
 		fetches.Add(1)
 		return nil, errors.New("the API is down")
 	})
-	oldCoolOff := deviceCheckCoolOff
-	t.Cleanup(func() { deviceCheckCoolOff = oldCoolOff })
-	deviceCheckCoolOff = 10 * time.Millisecond
 	run := newDeviceCheckRun(nil)
+	run.coolOff = 10 * time.Millisecond
 	t.Cleanup(func() { <-stopRun(run) })
 
 	run.countAnswerForDeviceCheck(refusedAnswer())
@@ -612,8 +610,6 @@ func TestDeviceCheckCountStartsAgainAfterTheCoolOff(t *testing.T) {
 		t.Fatalf("the second check started after %d REFUSED answers", selfUninstallMaxQueries+1)
 	}
 	run.countAnswerForDeviceCheck(refusedAnswer())
-	// The cleanup puts deviceCheckCoolOff back, so the second cool-off must end
-	// first.
 	waitForDeviceCheckState(t, "the end of the second cool-off", func() bool {
 		return fetches.Load() == 2 && !run.checkingSelfUninstall.Load()
 	})

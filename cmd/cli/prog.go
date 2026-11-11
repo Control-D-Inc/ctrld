@@ -194,6 +194,10 @@ type prog struct {
 	// it. Each mobile run has its own prog, so it never reaches the next run.
 	// Guarded by selfUninstallMu.
 	deviceCheckEnded bool
+	// coolOff replaces deviceCheckCoolOff for this prog when it is set. Only
+	// tests set it, before the run starts. A package variable would be read by
+	// the cool-off goroutine of an earlier test while the next test writes it.
+	coolOff time.Duration
 
 	loopMu sync.Mutex
 	loop   map[string]bool

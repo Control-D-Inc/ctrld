@@ -287,6 +287,15 @@ func (p *prog) startListeners(ctx context.Context, cfg *ctrld.ListenerConfig, ha
 	return g.Wait()
 }
 
+// listenerConfig returns the config of a listener as the handler of its DNS
+// server reads it for each query. A reload replaces p.cfg under p.mu while the
+// listener keeps serving, so the read takes p.mu too.
+func (p *prog) listenerConfig(listenerNum string) *ctrld.ListenerConfig {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.Listener[listenerNum]
+}
+
 // handleDNSQuery processes incoming DNS queries, validates client access, and routes the query to appropriate handlers.
 // This is the main entry point for all DNS query processing
 func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum string) {
@@ -302,7 +311,7 @@ func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum stri
 	// the listener starts: a reload replaces p.cfg.Listener while this
 	// listener keeps serving, and a captured copy would keep the old policy
 	// (rules, failover_rcodes) until restart.
-	listenerConfig := p.cfg.Listener[listenerNum]
+	listenerConfig := p.listenerConfig(listenerNum)
 	reqID := requestID()
 	ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqID)
 	ctx = ctrld.LoggerCtx(ctx, p.logger.Load())
@@ -1877,14 +1886,19 @@ func (p *prog) endDeviceCheck() {
 
 // deviceCheckCoolOff is how long the next device check waits after one ran,
 // so that ctrld does not flood the API.
-var deviceCheckCoolOff = 30 * time.Minute
+const deviceCheckCoolOff = 30 * time.Minute
 
-// selfUninstallCoolOfPeriod waits for deviceCheckCoolOff before
+// selfUninstallCoolOfPeriod waits for deviceCheckCoolOff, or for the
+// coolOff of the prog when a test set it, before
 // calling API again for checking ControlD device status.
 // It ends with the run, so the prog of an ended mobile run does not stay in
 // memory for that time.
 func (p *prog) selfUninstallCoolOfPeriod() {
-	t := time.NewTimer(deviceCheckCoolOff)
+	wait := deviceCheckCoolOff
+	if p.coolOff > 0 {
+		wait = p.coolOff
+	}
+	t := time.NewTimer(wait)
 	defer t.Stop()
 	select {
 	case <-t.C:
