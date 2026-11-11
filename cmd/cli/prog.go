@@ -1532,10 +1532,10 @@ func (p *prog) releaseResources() {
 //
 // It must not wait for the run to finish. A stopping process that still answers
 // on the socket answers for the service that replaces it: `ctrld upgrade` and
-// restart take any reply to /started as "the new binary is up", so an upgrade
-// to a build that never became ready was reported successful instead of rolled
-// back. Closing late also unlinks the socket path after the new process has
-// bound its own there.
+// restart take a 200 from /started as "the new binary is ready", and the old
+// process, which was ready, answers 200. So an upgrade to a build that never
+// became ready was reported successful instead of rolled back. Closing late
+// also unlinks the socket path after the new process has bound its own there.
 func (p *prog) stopControlServer() {
 	p.csStopOnce.Do(func() {
 		if p.cs == nil {

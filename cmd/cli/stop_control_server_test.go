@@ -16,10 +16,11 @@ import (
 )
 
 // A stopping process must not answer /started for the service that replaces
-// it. `ctrld upgrade` treats any reply as "the new binary is up", so a reply
-// from the old process, while it waits for its components to stop, turned an
-// upgrade to a never-ready build into "Upgrade successful" instead of a
-// rollback (ctrld-qa upgrade-readiness-rollback on v1.0).
+// it. `ctrld upgrade` treats a 200 as "the new binary is ready", and the old
+// process, which was ready, answers 200. Its reply, while it waits for its
+// components to stop, turned an upgrade to a never-ready build into "Upgrade
+// successful" instead of a rollback (ctrld-qa upgrade-readiness-rollback on
+// v1.0).
 func TestStopClosesControlServerBeforeRunFinishes(t *testing.T) {
 	// A short path, as the other control server tests use: t.TempDir() is
 	// longer than a Unix socket path may be.

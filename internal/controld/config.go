@@ -489,6 +489,10 @@ func doWithFallback(client *http.Client, req *http.Request, apiIp string) (*http
 	if err == nil {
 		return resp, nil
 	}
+	// A request that was cancelled fails at the direct IP too.
+	if req.Context().Err() != nil {
+		return nil, err
+	}
 	ctrld.ProxyLogger.Load().Warn().Err(err).Msgf("failed to send request, fallback to direct IP: %s", apiIp)
 	ipReq := req.Clone(req.Context())
 	ipReq.Host = apiIp

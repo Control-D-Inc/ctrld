@@ -1,6 +1,7 @@
 package controld
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -151,5 +152,38 @@ func TestDoWithFallbackComposesHostnameAttemptFirst(t *testing.T) {
 	// The tcp4/tcp6 split distinguishes the two attempts in the fake transport.
 	if opErr.Net != "tcp4" {
 		t.Errorf("first OpError is from the %s attempt, want tcp4 (hostname)", opErr.Net)
+	}
+}
+
+// cancelRoundTripper fails a request whose context ended, as the real
+// transport does, and counts the attempts.
+type cancelRoundTripper struct{ attempts int }
+
+func (rt *cancelRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.attempts++
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+}
+
+// A request whose context ended fails at the direct IP too. The fallback must
+// not send it again, and the error must say that the request was cancelled.
+func TestDoWithFallbackSkipsCancelledRequest(t *testing.T) {
+	rt := &cancelRoundTripper{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.controld.com/logs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = doWithFallback(&http.Client{Transport: rt}, req, "147.185.34.1")
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled in the chain", err)
+	}
+	if rt.attempts != 1 {
+		t.Errorf("attempts = %d, want 1: a cancelled request went to the direct IP", rt.attempts)
 	}
 }

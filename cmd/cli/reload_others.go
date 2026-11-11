@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +17,8 @@ func stopNotifyReloadSigCh(ch chan os.Signal) {
 	signal.Stop(ch)
 }
 
-func (p *prog) sendReloadSignal() error {
+// sendReloadSignal hands the reload to the run. The signal goes out at once,
+// so it needs no context.
+func (p *prog) sendReloadSignal(context.Context) error {
 	return syscall.Kill(syscall.Getpid(), syscall.SIGUSR1)
 }
