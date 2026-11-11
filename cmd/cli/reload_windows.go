@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"os"
 	"time"
@@ -11,12 +12,14 @@ func notifyReloadSigCh(ch chan os.Signal) {}
 
 func stopNotifyReloadSigCh(ch chan os.Signal) {}
 
-// sendReloadSignal sends a reload signal to the program
-func (p *prog) sendReloadSignal() error {
+// sendReloadSignal hands the reload to the run. It gives up when ctx ends.
+func (p *prog) sendReloadSignal(ctx context.Context) error {
 	select {
 	case p.reloadCh <- struct{}{}:
 		return nil
 	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	return errors.New("timeout while sending reload signal")
 }

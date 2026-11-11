@@ -670,6 +670,10 @@ func doWithFallback(ctx context.Context, client *http.Client, req *http.Request,
 	if err == nil {
 		return resp, nil
 	}
+	// A request that was cancelled fails at the direct IP too.
+	if req.Context().Err() != nil {
+		return nil, err
+	}
 	logger := ctrld.LoggerFromCtx(ctx)
 	logger.Warn().Err(err).Msgf("Failed to send request, fallback to direct ip: %s", apiIp)
 	ipReq := req.Clone(req.Context())

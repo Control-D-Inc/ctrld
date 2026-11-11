@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kardianos/service"
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -99,6 +98,15 @@ func (s *controlServer) stop() error {
 
 func (s *controlServer) register(pattern string, handler http.Handler) {
 	s.mux.Handle(pattern, jsonResponse(handler))
+}
+
+// abortStoppedRequest ends a request whose context ended with no answer. The
+// context ends when the control server stops or the client goes away. A
+// handler that only returns still sends 200, and a stopping process must not
+// answer /started: upgrade and restart take a 200 as "the new binary is
+// ready", and the start check takes any answer as "the service is up".
+func abortStoppedRequest() {
+	panic(http.ErrAbortHandler)
 }
 
 // refreshDeactivationPin fetches the deactivation PIN from the API and stores
@@ -225,12 +233,18 @@ func (p *prog) registerControlServerHandler() {
 			Msg("Successfully sent clients list response")
 	}))
 	p.cs.register(startedPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		status := http.StatusOK
 		select {
 		case <-p.onStartedDone:
-			w.WriteHeader(http.StatusOK)
 		case <-time.After(10 * time.Second):
-			w.WriteHeader(http.StatusRequestTimeout)
+			status = http.StatusRequestTimeout
+		case <-request.Context().Done():
 		}
+		// The wait can end as the server stops. The stop wins over any answer.
+		if request.Context().Err() != nil {
+			abortStoppedRequest()
+		}
+		w.WriteHeader(status)
 	}))
 	p.cs.register(reloadPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		listeners := make(map[string]*ctrld.ListenerConfig)
@@ -243,7 +257,10 @@ func (p *prog) registerControlServerHandler() {
 		}
 		oldSvc := p.cfg.Service
 		p.mu.Unlock()
-		if err := p.sendReloadSignal(); err != nil {
+		if err := p.sendReloadSignal(request.Context()); err != nil {
+			if request.Context().Err() != nil {
+				abortStoppedRequest()
+			}
 			p.Error().Err(err).Msg("Could not send reload signal")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -253,6 +270,8 @@ func (p *prog) registerControlServerHandler() {
 		case <-time.After(5 * time.Second):
 			http.Error(w, "Timeout waiting for ctrld reload", http.StatusInternalServerError)
 			return
+		case <-request.Context().Done():
+			abortStoppedRequest()
 		}
 
 		p.mu.Lock()
@@ -355,8 +374,12 @@ func (p *prog) registerControlServerHandler() {
 	p.cs.register(ifacePath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		res := &ifaceResponse{Name: iface}
 		// p.setDNS is only called when running as a service
-		if !service.Interactive() {
-			<-p.csSetDnsDone
+		if runningAsService() {
+			select {
+			case <-p.csSetDnsDone:
+			case <-request.Context().Done():
+				abortStoppedRequest()
+			}
 			if p.csSetDnsOk {
 				res.Name = p.runningIface
 				res.All = p.requiredMultiNICsConfig
@@ -400,7 +423,7 @@ func (p *prog) registerControlServerHandler() {
 		}
 		p.Debug().Msg("Sending log file to ControlD server")
 		resp := logSentResponse{}
-		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
+		loggerCtx := ctrld.LoggerCtx(request.Context(), p.logger.Load())
 		if err := sendLogsToAPI(loggerCtx, req, cdDev); err != nil {
 			p.Error().Msgf("Could not send log file to ControlD server: %v", err)
 			// The CLI prints the answer, and it may not know the secrets
