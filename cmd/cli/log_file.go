@@ -132,6 +132,8 @@ func (rf *rotatingFile) writeReporting(p []byte) (int, *logRotation, error) {
 
 // Write makes the file an io.Writer for the logger. It reports the rotation
 // after the lock is free, so the rotation event can go back into this file.
+// It writes p as it is: a caller other than the logger passes p through
+// redactLogLine first.
 func (rf *rotatingFile) Write(p []byte) (int, error) {
 	n, rotated, err := rf.writeReporting(p)
 	rf.reportRotation(rotated)

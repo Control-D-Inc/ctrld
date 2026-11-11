@@ -94,7 +94,7 @@ var rootCmd = &cobra.Command{
 	Short:   strings.TrimLeft(rootShortDesc, "\n"),
 	Version: curVersion(),
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		storeJournalSecrets()
+		storeLogSecrets()
 		initConsoleLogging()
 	},
 }

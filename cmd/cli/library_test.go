@@ -17,7 +17,7 @@ func stubAppConfigGlobals(t *testing.T) *[]int64 {
 		cdDev, setMemoryLimit = oldDev, oldLimit
 		cdUID, cdOrg, customHostname, homedir, cdUpstreamProto, verbose, logPath = oldUID, oldOrg, oldHost, oldHome, oldProto, oldVerbose, oldLogPath
 		ctrld.SetAppNameservers(nil)
-		storeJournalSecrets()
+		storeLogSecrets()
 	})
 	return &limits
 }

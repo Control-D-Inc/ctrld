@@ -14,8 +14,7 @@ import (
 // ctrld.log. The file must hold no query name, and no resolver UID or
 // provision token in any field.
 func Test_initInternalLogging_mobileNoticeLogKeepsSecretsOut(t *testing.T) {
-	const uid = "1e0rkx9a7tq"
-	const token = "org-v1-provisiontoken"
+	const uid, token = leakTestUID, leakTestToken
 	oldIsMobile, oldOrg := isMobile, cdOrg
 	t.Cleanup(func() { isMobile, cdOrg = oldIsMobile, oldOrg })
 	isMobile = func() bool { return true }
@@ -24,7 +23,7 @@ func Test_initInternalLogging_mobileNoticeLogKeepsSecretsOut(t *testing.T) {
 	verbose = -1
 	initConsoleLogging()
 	_, dir := startInternalLoggingAt(t, -1)
-	setJournalSecrets(t, uid, token)
+	setLogSecrets(t, uid, token)
 
 	mainLog.Load().Info().Msg("QUERY: 127.0.0.1:5353 -> 127.0.0.1:53: A private-name.example.")
 	mainLog.Load().Error().Str("hostname", uid).Str("note", "token "+token).
@@ -46,28 +45,31 @@ type errorString string
 
 func (e errorString) Error() string { return string(e) }
 
-// The app can pass a LogPath, and it exports that file too. The file must
-// hold no resolver UID or provision token in any field.
+// The app can pass a LogPath, and it exports that file too. On Android, the
+// console goes to logcat. Neither may hold the resolver UID or the provision
+// token in any field.
 func Test_initLoggingWithBackup_mobileLogPathKeepsSecretsOut(t *testing.T) {
-	const uid = "1e0rkx9a7tq"
-	const token = "org-v1-provisiontoken"
+	const uid, token = leakTestUID, leakTestToken
 	path := setupLogPathTest(t)
 	oldIsMobile := isMobile
 	t.Cleanup(func() { isMobile = oldIsMobile })
 	isMobile = func() bool { return true }
-	setJournalSecrets(t, uid, token)
+	setLogSecrets(t, uid, token)
+	stdout := captureStdout(t)
+	initConsoleLogging()
 	initLoggingWithBackup(false)
 
 	mainLog.Load().Error().Str("hostname", uid).Str("note", "token "+token).
 		Err(errorString(`Post "https://dns.controld.com/` + uid + `": dial tcp`)).Msg("failed to resolve query")
 
-	text := rotatingFileTestContent(t, path)
-	if !strings.Contains(text, "failed to resolve query") {
-		t.Fatalf("%s misses the error line: %s", path, text)
-	}
-	for _, secret := range []string{uid, token} {
-		if strings.Contains(text, secret) {
-			t.Errorf("%s contains %q: %s", path, secret, text)
+	for sink, text := range map[string]string{path: rotatingFileTestContent(t, path), "stdout": stdout()} {
+		if !strings.Contains(text, "failed to resolve query") {
+			t.Fatalf("%s misses the error line: %s", sink, text)
+		}
+		for _, secret := range []string{uid, token} {
+			if strings.Contains(text, secret) {
+				t.Errorf("%s contains %q: %s", sink, secret, text)
+			}
 		}
 	}
 }
@@ -75,12 +77,9 @@ func Test_initLoggingWithBackup_mobileLogPathKeepsSecretsOut(t *testing.T) {
 // The app can call SetNameservers, which logs, while a start applies its
 // configuration on another thread. The redaction of each log line must not
 // read the secrets while the start writes them. Run with -race.
-func Test_mobileLogFile_redactsWhileStartAppliesConfig(t *testing.T) {
+func Test_logOutput_redactsWhileStartAppliesConfig(t *testing.T) {
 	stubAppConfigGlobals(t)
-	oldIsMobile := isMobile
-	t.Cleanup(func() { isMobile = oldIsMobile })
-	isMobile = func() bool { return true }
-	w := mobileLogFile(io.Discard)
+	w := newLogOutput(io.Discard)
 
 	done := make(chan struct{})
 	go func() {
@@ -90,13 +89,13 @@ func Test_mobileLogFile_redactsWhileStartAppliesConfig(t *testing.T) {
 		}
 	}()
 	for range 200 {
-		applyAppConfig(&AppConfig{CdUID: "1e0rkx9a7tq", ProvisionID: "org-v1-provisiontoken"})
+		applyAppConfig(&AppConfig{CdUID: leakTestUID, ProvisionID: leakTestToken})
 	}
 	<-done
 
 	var line bytes.Buffer
-	_, _ = mobileLogFile(&line).Write([]byte(`{"message":"uid 1e0rkx9a7tq token org-v1-provisiontoken"}` + "\n"))
-	for _, secret := range []string{"1e0rkx9a7tq", "org-v1-provisiontoken"} {
+	_, _ = newLogOutput(&line).Write([]byte(`{"message":"uid ` + leakTestUID + ` token ` + leakTestToken + `"}` + "\n"))
+	for _, secret := range []string{leakTestUID, leakTestToken} {
 		if strings.Contains(line.String(), secret) {
 			t.Errorf("line after applyAppConfig contains %q: %s", secret, line.String())
 		}

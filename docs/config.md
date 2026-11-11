@@ -162,6 +162,8 @@ Relative or absolute path of the log file.
 
 Point `log_path` at a file that no other program rotates. ctrld renames `<log_path>.1` to `<log_path>.N` and uploads these files. A lower `log_max_backups` leaves the older numbered `log_path` files in place, but ctrld removes the extra numbered files of its internal logs.
 
+ctrld removes the secrets, the URL paths, and the resolver IDs from each line of this file, as [Redaction](runtime-internal-logging.md#redaction) describes.
+
 - Type: string
 - Required: no
 - Default: ""

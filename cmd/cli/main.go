@@ -103,8 +103,7 @@ func initConsoleLogging() {
 	consoleWriter = zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
 		w.TimeFormat = time.StampMilli
 	})
-	multi := zerolog.MultiLevelWriter(consoleWriter)
-	l := mainLog.Load().Output(multi).With().Timestamp().Logger()
+	l := mainLog.Load().Output(newLogOutput(consoleWriter)).With().Timestamp().Logger()
 	mainLog.Store(&l)
 
 	switch {
@@ -144,11 +143,10 @@ func initInteractiveLogging() {
 func initLoggingWithBackup(doBackup bool) []io.Writer {
 	var writers []io.Writer
 	if rf := openLogPathWriter(doBackup); rf != nil {
-		writers = append(writers, mobileLogFile(rf))
+		writers = append(writers, rf)
 	}
 	writers = append(writers, consoleWriter)
-	multi := zerolog.MultiLevelWriter(writers...)
-	l := mainLog.Load().Output(multi).With().Logger()
+	l := mainLog.Load().Output(newLogOutput(writers...)).With().Logger()
 	mainLog.Store(&l)
 	// TODO: find a better way.
 	ctrld.ProxyLogger.Store(&l)

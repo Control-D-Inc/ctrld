@@ -156,6 +156,8 @@ func (lw *logWriter) tailLastLines(n int) []byte {
 	return result
 }
 
+// Write takes a line of the logger, which newLogOutput redacted. A caller
+// other than the logger passes p through redactLogLine first.
 func (lw *logWriter) Write(p []byte) (int, error) {
 	// The file takes the line outside lw.mu: it holds its own lock, and it
 	// reports its rotation with an event that comes back through this writer.
@@ -302,7 +304,8 @@ func carriedLogLines(oldLogPath, newLogPath string) []byte {
 }
 
 // carryLogLines appends the lines of the old log_path file below the header of
-// the new one.
+// the new one. The lines skip the logger, and an older ctrld wrote them with
+// no redaction, so they pass the redaction here.
 func (p *prog) carryLogLines(lines []byte) {
 	if len(lines) == 0 {
 		return
@@ -311,7 +314,7 @@ func (p *prog) carryLogLines(lines []byte) {
 	if rf == nil {
 		return
 	}
-	if _, err := rf.Write(lines); err != nil {
+	if _, err := rf.Write(redactLogLine(lines)); err != nil {
 		mainLog.Load().Warn().Err(err).Msg("could not copy old log file")
 	}
 }
@@ -367,9 +370,8 @@ func (p *prog) initInternalLogging(writers []io.Writer) {
 		wrapConsoleWritersAtNotice(writers)
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	}
-	writers = append(writers, mobileLogFile(lw), newJournalLevelWriter(jlw))
-	multi := zerolog.MultiLevelWriter(writers...)
-	l := mainLog.Load().Output(multi).With().Logger()
+	writers = append(writers, lw, newJournalLevelWriter(jlw))
+	l := mainLog.Load().Output(newLogOutput(writers...)).With().Logger()
 	mainLog.Store(&l)
 	ctrld.ProxyLogger.Store(&l)
 	// A header that crossed the budget rotated its file before the logger
