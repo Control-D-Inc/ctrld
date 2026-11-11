@@ -89,8 +89,8 @@ func renderLogHeader(in logHeaderInput) []byte {
 	event.Msg(logHeaderMessage)
 
 	// The header is the first line of every file and of every upload, and it
-	// bypasses the writers, so it passes the journal redaction here.
-	return redactRetainedLine(buf.Bytes())
+	// skips the logger, so it passes the redaction here.
+	return redactLogLine(buf.Bytes())
 }
 
 // logHeaderInput collects every header value of the running program.

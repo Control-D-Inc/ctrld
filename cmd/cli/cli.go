@@ -153,7 +153,7 @@ func initCLI() *cobra.Command {
 		Short:   strings.TrimLeft(rootShortDesc, "\n"),
 		Version: appVersion,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			storeJournalSecrets()
+			storeLogSecrets()
 			initConsoleLogging()
 		},
 	}

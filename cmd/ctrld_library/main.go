@@ -81,9 +81,9 @@ type StartOptions struct {
 	//
 	// Thus LogLevelNotice with an empty LogPath keeps query names out of
 	// ctrld.log, unless the custom configuration sets log_level to info or
-	// debug. On mobile, ctrld also removes the resolver UID, the provision
-	// token, and the paths of URLs from the lines that it writes to its log
-	// files.
+	// debug. ctrld also removes the resolver UID, the provision token, and
+	// the paths of URLs from each line that it writes to its log files and
+	// to the console.
 	LogLevel int
 	LogPath  string
 	// Dev makes ctrld use the dev API, like the --dev flag of the CLI.

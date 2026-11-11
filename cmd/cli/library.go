@@ -66,7 +66,7 @@ func applyAppConfig(appConfig *AppConfig) {
 	if appConfig.CdUID != "" {
 		cdUID = appConfig.CdUID
 	}
-	storeJournalSecrets()
+	storeLogSecrets()
 	cdUpstreamProto = appConfig.UpstreamProto
 	logPath = appConfig.LogPath
 	cdDev = appConfig.Dev

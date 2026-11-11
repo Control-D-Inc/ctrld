@@ -120,7 +120,7 @@ func Test_journalCoreRedactsAKeptLine(t *testing.T) {
 }
 
 func Test_journalCoreRedactsTheProvisionSecrets(t *testing.T) {
-	setJournalSecrets(t, "org-v1-uidofthisdevice", cdOrg)
+	setLogSecrets(t, "org-v1-uidofthisdevice", cdOrg)
 	buf, logger := journalTestLogger(t)
 
 	logger.Warn().Str("detail", "device "+cdUID+" is gone").Msg("provision failed")
@@ -194,25 +194,22 @@ func startInternalLoggingAt(t *testing.T, level int) (*prog, string) {
 	return p, dir
 }
 
-// Test_initInternalLogging_redactsTheJournalFile drives a cd mode run: support
-// downloads the journal file, so it holds the redacted URL, while the debug
-// file stays raw for the developer who reads it on the host.
-func Test_initInternalLogging_redactsTheJournalFile(t *testing.T) {
+// Test_initInternalLogging_redactsBothFiles drives a cd mode run. Support
+// downloads both files, and the user can share them, so both hold the
+// redacted URL.
+func Test_initInternalLogging_redactsBothFiles(t *testing.T) {
 	_, dir := startInternalLogging(t)
 
 	mainLog.Load().Warn().Str("error", journalDoHError).Msg("upstream failed")
 
-	journalText := rotatingFileTestContent(t, filepath.Join(dir, journalLogFileName))
-	if !strings.Contains(journalText, journalRedactedURL) {
-		t.Fatalf("journal file misses the redacted URL: %s", journalText)
-	}
-	if strings.Contains(journalText, "SECRET0123") {
-		t.Fatalf("journal file kept the resolver path: %s", journalText)
-	}
-
-	debugText := rotatingFileTestContent(t, filepath.Join(dir, logFileName))
-	if !strings.Contains(debugText, "org-v1-SECRET0123?dns=pOgBAAAB") {
-		t.Fatalf("debug file lost the raw URL: %s", debugText)
+	for _, name := range []string{journalLogFileName, logFileName} {
+		text := rotatingFileTestContent(t, filepath.Join(dir, name))
+		if !strings.Contains(text, journalRedactedURL) {
+			t.Fatalf("%s misses the redacted URL: %s", name, text)
+		}
+		if strings.Contains(text, "SECRET0123") {
+			t.Fatalf("%s kept the resolver path: %s", name, text)
+		}
 	}
 }
 
@@ -246,71 +243,11 @@ func Test_stopClosesTheInternalLogFiles(t *testing.T) {
 	}
 }
 
-// Test_redactRetainedLineKeepsAShortClientID puts a two-letter client ID in
-// the resolver UID. The keys of a JSON line hold the same letters, and a
-// redaction of the client ID would break the line.
-func Test_redactRetainedLineKeepsAShortClientID(t *testing.T) {
-	setJournalSecrets(t, "uid12345678/os", cdOrg)
-
-	line := string(redactRetainedLine([]byte(`{"level":"info","os":"darwin","resolver":"uid12345678/os"}`)))
-
-	if !strings.Contains(line, `"os":"darwin"`) {
-		t.Fatalf("the redaction changed the os key: %s", line)
-	}
-	if strings.Contains(line, "uid12345678") {
-		t.Fatalf("the redaction kept the resolver uid: %s", line)
-	}
-}
-
-// Test_redactRetainedLineStripsEverySchemePath covers the endpoints that carry
-// a token in their path with a scheme other than https.
-func Test_redactRetainedLineStripsEverySchemePath(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{`Get "quic://dns.example/org-v1-SECRET0123?dns=pOgBAAAB": timeout`, `Get "quic://dns.example/[redacted]": timeout`},
-		{`h3://dns.example/SECRET0123 failed`, `h3://dns.example/[redacted] failed`},
-		{`tls://dns.example:853 failed`, `tls://dns.example:853 failed`},
-		{`tls://abcdef12.dns.controld.com:853 failed`, `tls://[redacted].dns.controld.com:853 failed`},
-		{`quic://abcdef12.dns.controld.dev failed`, `quic://[redacted].dns.controld.dev failed`},
-		{`https://freedns.controld.com/p1 failed`, `https://freedns.controld.com/[redacted] failed`},
-	} {
-		if got := string(redactRetainedLine([]byte(tc.in))); got != tc.want {
-			t.Errorf("redactRetainedLine(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
-// Test_redactRetainedLineKeepsAShortResolverUID puts a two-letter resolver UID
-// in place. The keys of a JSON line hold the same letters, and a redaction of
-// the UID would break every retained line and the header.
-func Test_redactRetainedLineKeepsAShortResolverUID(t *testing.T) {
-	origCdUID := cdUID
-	t.Cleanup(func() { cdUID = origCdUID })
-	cdUID = "os"
-
-	const in = `{"level":"info","os":"darwin","message":"loss of service"}`
-	if got := string(redactRetainedLine([]byte(in))); got != in {
-		t.Fatalf("redactRetainedLine(%q) = %q, want the line unchanged", in, got)
-	}
-}
-
-// setJournalSecrets sets cdUID and cdOrg the way a run does, with the copy
-// that the log writers read, and puts both back when the test ends.
-func setJournalSecrets(t *testing.T, uid, org string) {
-	t.Helper()
-	oldUID, oldOrg := cdUID, cdOrg
-	t.Cleanup(func() {
-		cdUID, cdOrg = oldUID, oldOrg
-		storeJournalSecrets()
-	})
-	cdUID, cdOrg = uid, org
-	storeJournalSecrets()
-}
-
 // The CLI flags set cdUID and cdOrg before any command runs, so the root
 // command must copy them for the log writers.
 func Test_rootPreRunStoresTheFlagSecrets(t *testing.T) {
 	const token = "org-v1-flagtoken"
-	setJournalSecrets(t, "", "")
+	setLogSecrets(t, "", "")
 	origVerbose, origMainLog := verbose, mainLog.Load()
 	t.Cleanup(func() { verbose = origVerbose; mainLog.Store(origMainLog) })
 	// initCLI sets each flag variable to its default, so the token comes
@@ -319,7 +256,7 @@ func Test_rootPreRunStoresTheFlagSecrets(t *testing.T) {
 	cdOrg = token
 	rootCmd.PersistentPreRun(rootCmd, nil)
 
-	line := string(redactRetainedLine([]byte(`{"message":"token ` + token + `"}`)))
+	line := string(redactLogLine([]byte(`{"message":"token ` + token + `"}`)))
 	if strings.Contains(line, token) {
 		t.Errorf("line contains the flag token: %s", line)
 	}

@@ -2,90 +2,16 @@ package cli
 
 import (
 	"io"
-	"regexp"
-	"sync/atomic"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
 	"github.com/Control-D-Inc/ctrld"
-	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
 
 // journalField marks an event for the retained journal stream. Both packages
 // share the name, so one core keeps the lines of both.
 const journalField = ctrld.JournalField
-
-// retainedURLPath matches the part of a URL that follows the host, for every
-// scheme: a DoH, DoH3, or DoQ endpoint carries its token in the path. The
-// class stops the match at the characters that end a value inside a log line.
-var retainedURLPath = regexp.MustCompile(`([a-z][a-z0-9+.-]*://[^/?"\\\s]+)[/?][^"\\\s]*`)
-
-// retainedControlDHost matches a Control D resolver host. The first label of
-// the host is the resolver ID, which a DoT or DoQ endpoint carries in place of
-// a path.
-var retainedControlDHost = regexp.MustCompile(`([A-Za-z0-9-]+)(\.dns\.controld\.(?:com|dev))`)
-
-// redactRetainedLine strips the secrets of one line that the journal keeps.
-// Support downloads the journal whole, and any error text can carry a DoH URL
-// with the resolver path and the packed query of the user.
-func redactRetainedLine(p []byte) []byte {
-	stripped := retainedURLPath.ReplaceAll(p, []byte(`${1}/[redacted]`))
-	stripped = retainedControlDHost.ReplaceAll(stripped, []byte(`[redacted]${2}`))
-	return []byte(redactSecrets(string(stripped), journalSecrets()...))
-}
-
-// redactingWriter writes each line through redactRetainedLine.
-type redactingWriter struct {
-	w io.Writer
-}
-
-func (r redactingWriter) Write(p []byte) (int, error) {
-	if _, err := r.w.Write(redactRetainedLine(p)); err != nil {
-		return 0, err
-	}
-	// The redacted line is shorter than p, but all of p is written. A count
-	// below len(p) with no error breaks the contract of io.Writer.
-	return len(p), nil
-}
-
-// mobileLogFile redacts the lines of a log file on mobile. The app exports
-// the log files of ctrld, and the user of the device can share them.
-func mobileLogFile(w io.Writer) io.Writer {
-	if !isMobile() {
-		return w
-	}
-	return redactingWriter{w: w}
-}
-
-// journalSecretValues holds the values that no retained line may hold. The
-// log writers run on any thread, and a start writes cdUID and cdOrg on its
-// own thread, so the writers read this copy and never the globals.
-var journalSecretValues atomic.Pointer[[]string]
-
-// storeJournalSecrets copies cdUID and cdOrg into journalSecretValues. Call
-// it after each change of either value. The client ID stays out: it is a
-// device label, not a secret.
-func storeJournalSecrets() {
-	uid, _ := controld.ParseRawUID(cdUID)
-	secrets := []string{cdUID, cdOrg, uid}
-	journalSecretValues.Store(&secrets)
-}
-
-// setCdUID sets cdUID and the copy that the log writers read.
-func setCdUID(uid string) {
-	cdUID = uid
-	storeJournalSecrets()
-}
-
-// journalSecrets returns the values that no retained line may hold.
-// redactSecrets drops the values that are too short to redact.
-func journalSecrets() []string {
-	if secrets := journalSecretValues.Load(); secrets != nil {
-		return *secrets
-	}
-	return nil
-}
 
 // journal marks an event for the retained journal stream. The event keeps
 // its own level, so an info event stays info on the console.
@@ -132,7 +58,7 @@ func newJournalCore(w io.Writer) *journalCore {
 	return &journalCore{
 		LevelEnabler: zapcore.DebugLevel,
 		encoder:      newJournalEncoder(),
-		out:          zapcore.AddSync(w),
+		out:          newLogSink(w),
 	}
 }
 
@@ -166,7 +92,8 @@ func (c *journalCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
 		return err
 	}
 	defer buf.Free()
-	_, err = c.out.Write(redactRetainedLine(buf.Bytes()))
+	// c.out is the redaction step of the logger.
+	_, err = c.out.Write(buf.Bytes())
 	return err
 }
 

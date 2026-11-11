@@ -20,7 +20,7 @@ ctrld writes three streams. The debug file and the journal file live in the ctrl
 
 | Stream | Level filter | File | Budget | Survives a restart |
 |---|---|---|---|---|
-| Console | Notice and above. The `-v` flag adds the lower levels | none | none | No |
+| Console | Notice and above. The `-v` flag adds the lower levels | stdout. The service manager can keep it, see [Redaction](#redaction) | none | Depends on the service manager |
 | Debug | Every level | `ctrld.log` | 10 MB, 4 backup files | Yes |
 | Journal | Warning and above, notice included, plus every event with `journal=true` | `ctrld-journal.log` | 2 MB, 2 backup files | Yes |
 
@@ -84,6 +84,26 @@ Two keys in the `[service]` section size the debug stream:
 Both keys also apply to the `log_path` file, which rotates the same way. The journal budget is fixed.
 
 A change to the keys takes effect with no restart. This includes the first start, when the keys come from the Control D API, and a managed configuration refresh. When the backup count decreases, ctrld deletes the extra backups of `ctrld.log`. ctrld does not delete backups of the `log_path` file, because that directory can hold files of other programs.
+
+## Redaction
+
+ctrld removes secrets from each log line before the line reaches a stream. This applies to the console, the `log_path` file, the debug stream, and the journal, on every platform.
+
+The service manager can keep the console output on disk. The launchd service definition sends it to `/usr/local/var/log/ctrld-client.out.log`. systemd sends it to the system journal. The sysv and OpenRC scripts write it to a file in `/var/log`.
+
+ctrld replaces these values with `[redacted]`:
+
+- The userinfo, the path, the query, and the fragment of each URL, for every scheme
+- The first label of a `*.dns.controld.com` or `*.dns.controld.dev` host, which is the resolver ID
+- The resolver UID, the UID part of a `--cd` value of the form `<uid>/<client ID>`, and the provisioning code
+
+The host and these values match in every letter case, because a resolver can change the letter case of a query name.
+
+A value with fewer than 6 characters stays, because it also matches the keys of a JSON line. The header shows only the first 4 characters of the resolver UID in `resolver_uid`. An upload sends the UID with its request, so support can match the upload to the device.
+
+The error text in the answer of `ctrld log send` gets the same redaction.
+
+ctrld does not change the lines that a file already holds. A file that an older ctrld wrote can still hold secrets. The logger does not write to stderr, and ctrld does not redact it. The Go runtime writes a panic there, and launchd keeps it in `/usr/local/var/log/ctrld-client.err.log`.
 
 ## Uploads
 

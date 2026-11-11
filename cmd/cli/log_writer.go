@@ -360,7 +360,8 @@ func carriedLogLines(oldLogPath, newLogPath string) []byte {
 }
 
 // carryLogLines appends the lines of the old log_path file below the header of
-// the new one.
+// the new one. The lines skip the logger, and an older ctrld wrote them with
+// no redaction, so they pass the redaction here.
 func (p *prog) carryLogLines(lines []byte) {
 	if len(lines) == 0 {
 		return
@@ -369,7 +370,7 @@ func (p *prog) carryLogLines(lines []byte) {
 	if rf == nil {
 		return
 	}
-	if _, err := rf.Write(lines); err != nil {
+	if _, err := rf.Write(redactLogLine(lines)); err != nil {
 		p.Warn().Err(err).Msg("Could not copy old log file")
 	}
 }
@@ -425,7 +426,7 @@ func (p *prog) initInternalLogging(externalCores []zapcore.Core) {
 	cores = append(cores, externalCores...)
 
 	// The journal core keeps the lines that survive a restart.
-	cores = append(cores, newHumanReadableZapCore(mobileLogFile(lw), internalLogLevel(&p.cfg.Service)), newJournalCore(jlw))
+	cores = append(cores, newHumanReadableZapCore(lw, internalLogLevel(&p.cfg.Service)), newJournalCore(jlw))
 
 	// Create a multi-core logger
 	mainLog.Store(&ctrld.Logger{Logger: zap.New(zapcore.NewTee(cores...))})
@@ -571,7 +572,7 @@ func newHumanReadableZapCore(w io.Writer, level zapcore.Level) zapcore.Core {
 	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.StampMilli)
 	encoderConfig.EncodeLevel = noticeColorLevelEncoder
 	encoder := zapcore.NewConsoleEncoder(encoderConfig)
-	return zapcore.NewCore(encoder, zapcore.AddSync(w), level)
+	return zapcore.NewCore(encoder, newLogSink(w), level)
 }
 
 // newMachineFriendlyZapCore creates a zap core optimized for machine processing and log aggregation.
@@ -594,7 +595,7 @@ func newMachineFriendlyZapCore(w io.Writer, level zapcore.Level) zapcore.Core {
 	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.StampMilli)
 	encoderConfig.EncodeLevel = noticeLevelEncoder
 	encoder := zapcore.NewConsoleEncoder(encoderConfig)
-	return zapcore.NewCore(encoder, zapcore.AddSync(w), level)
+	return zapcore.NewCore(encoder, newLogSink(w), level)
 }
 
 // ansiRegex is a regular expression to match ANSI color codes.

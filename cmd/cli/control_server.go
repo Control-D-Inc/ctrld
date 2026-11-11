@@ -143,6 +143,9 @@ func (p *prog) refreshDeactivationPin(ctx context.Context) error {
 	return nil
 }
 
+// sendLogsToAPI uploads a log. It is a variable so tests can hold an upload.
+var sendLogsToAPI = controld.SendLogs
+
 func (p *prog) registerControlServerHandler() {
 	p.cs.register(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		p.Debug().Msg("Handling list clients request")
@@ -398,9 +401,11 @@ func (p *prog) registerControlServerHandler() {
 		p.Debug().Msg("Sending log file to ControlD server")
 		resp := logSentResponse{}
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
-		if err := controld.SendLogs(loggerCtx, req, cdDev); err != nil {
+		if err := sendLogsToAPI(loggerCtx, req, cdDev); err != nil {
 			p.Error().Msgf("Could not send log file to ControlD server: %v", err)
-			resp.Error = err.Error()
+			// The CLI prints the answer, and it may not know the secrets
+			// that the service knows.
+			resp.Error = string(redactLogLine([]byte(err.Error())))
 			w.WriteHeader(http.StatusInternalServerError)
 		} else {
 			p.Debug().Msg("Sending log file successfully")
