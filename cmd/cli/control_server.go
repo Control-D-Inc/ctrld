@@ -233,7 +233,11 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 		select {
-		case <-p.reloadDoneCh:
+		case done := <-p.reloadDoneCh:
+			if done.restartNeeded {
+				w.WriteHeader(http.StatusCreated)
+				return
+			}
 		case <-time.After(5 * time.Second):
 			http.Error(w, "timeout waiting for ctrld reload", http.StatusInternalServerError)
 			return

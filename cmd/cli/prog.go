@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math/rand"
 	"net"
 	"net/netip"
@@ -104,7 +105,7 @@ type prog struct {
 	stopCh               chan struct{}
 	pinCodeValidCh       chan struct{}
 	reloadCh             chan struct{} // For Windows.
-	reloadDoneCh         chan struct{}
+	reloadDoneCh         chan reloadDone
 	apiReloadCh          chan *ctrld.Config
 	apiForceReloadCh     chan struct{}
 	apiForceReloadGroup  singleflight.Group
@@ -378,8 +379,11 @@ type prog struct {
 
 	started       chan struct{}
 	onStartedDone chan struct{}
-	onStarted     []func()
-	onStopped     []func()
+	// servedListeners holds the keys of the listeners that have a DNS
+	// server. A reload does not start or stop DNS servers.
+	servedListeners []string
+	onStarted       []func()
+	onStopped       []func()
 
 	netMonitorMu     sync.Mutex
 	netMonitor       networkChangeMonitor
@@ -613,6 +617,14 @@ func (p *prog) runWait() {
 			logger.Err(err).Msg("invalid config")
 			continue
 		}
+		if dropped := droppedListeners(p.servedListeners, newCfg); len(dropped) > 0 {
+			// The DNS server of a dropped listener keeps running, and its
+			// handler needs the config of that listener.
+			logger.Error().Msgf("reload refused: the new config has no %s, which is running; restart ctrld to apply the new config", strings.Join(dropped, ", "))
+			p.maintenanceConfigNeedsRestart(*logger)
+			p.reportReloadDone(reloadDone{restartNeeded: true})
+			continue
+		}
 
 		addExtraSplitDnsRule(newCfg)
 		persistManagedConfig(newCfg, logger)
@@ -623,7 +635,9 @@ func (p *prog) runWait() {
 		p.setupUpstream(newCfg)
 		// The configuration is in effect now. Every failure above continues the
 		// loop without applying anything, so a run that started in maintenance
-		// stays pending and keeps retrying until one gets this far.
+		// stays pending and keeps retrying until one gets this far. A config
+		// that drops a running listener is the exception: a retry gets the same
+		// config, so its refusal ends the pending state.
 		p.maintenanceConfigApplied(*logger)
 
 		p.mu.Lock()
@@ -650,12 +664,36 @@ func (p *prog) runWait() {
 		p.refreshLogHeader()
 
 		logger.Notice().Msg("reloading config successfully")
+		p.reportReloadDone(reloadDone{})
+	}
+}
 
-		select {
-		case p.reloadDoneCh <- struct{}{}:
-		default:
+// reloadDone is what runWait tells the reload handler of the control server.
+type reloadDone struct {
+	// restartNeeded is set when runWait refused the new config, because only
+	// a restart of ctrld can apply it.
+	restartNeeded bool
+}
+
+// reportReloadDone does not block, because a reload from a signal or from the
+// API has no control server request that waits for it.
+func (p *prog) reportReloadDone(done reloadDone) {
+	select {
+	case p.reloadDoneCh <- done:
+	default:
+	}
+}
+
+// droppedListeners returns, as "[listener.N]", each served listener that the
+// new config does not have.
+func droppedListeners(served []string, newCfg *ctrld.Config) []string {
+	var dropped []string
+	for _, key := range served {
+		if newCfg.Listener[key] == nil {
+			dropped = append(dropped, "[listener."+key+"]")
 		}
 	}
+	return dropped
 }
 
 // preserveBoundListeners overrides the IP/Port of each listener in newListeners with the
@@ -1172,6 +1210,9 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		}()
 	}
 
+	if !reload {
+		p.servedListeners = slices.Sorted(maps.Keys(p.cfg.Listener))
+	}
 	for listenerNum := range p.cfg.Listener {
 		p.cfg.Listener[listenerNum].Init()
 		if !reload {

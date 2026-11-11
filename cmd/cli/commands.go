@@ -1216,7 +1216,7 @@ func initReloadCmd(restartCmd *cobra.Command) *cobra.Command {
 					mainLog.Load().Error().Msg(err.Error())
 					return
 				}
-				mainLog.Load().Warn().Msg("Service was reloaded, but new config requires service restart.")
+				mainLog.Load().Warn().Msg("New config requires service restart.")
 				mainLog.Load().Warn().Msg("Restarting service")
 				if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
 					mainLog.Load().Warn().Msg("Service not installed")

@@ -189,6 +189,15 @@ func (p *prog) serveDNS(listenerNum string) error {
 		listenerConfig := p.cfg.Listener[listenerNum]
 		reqId := requestID()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
+		if listenerConfig == nil {
+			ctrld.Log(ctx, p.querySampler.event(sampleClassNoListenerConfig, ""), "no config for [listener.%s], answering SERVFAIL", listenerNum)
+			p.health.countQuery()
+			p.health.countFailedQuery()
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeServerFailure)
+			_ = w.WriteMsg(answer)
+			return
+		}
 		if !listenerConfig.AllowWanClients && isWanClient(w.RemoteAddr()) && !isIPv6LoopbackListener(w.LocalAddr()) {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "query refused, listener does not allow WAN clients: %s", w.RemoteAddr().String())
 			answer := new(dns.Msg)

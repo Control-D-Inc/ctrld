@@ -536,6 +536,8 @@ Specifies the network addresses that the `listener` will accept requests from. Y
 ## listener
 The `[listener]` section specifies the ip and port of the local DNS server. You can have multiple listeners, and attached policies.
 
+A reload does not start, stop, or move a listener. If the new configuration adds a listener, removes a listener, or changes the address of a listener, `ctrld reload` restarts the service. A reload from the Control D API or from the `SIGUSR1` signal refuses a configuration that removes a running listener. ctrld then keeps the running configuration and logs the listener that is missing.
+
 ```toml
 [listener.0]
   ip = "127.0.0.1"
