@@ -164,6 +164,15 @@ func (p *prog) cachedResponse(req *dns.Msg, upstream string, dns64Prefix netip.P
 	return nil, stale, false, false, false
 }
 
+// listenerConfig returns the config of a listener as the handler of its DNS
+// server reads it for each query. A reload replaces p.cfg under p.mu while the
+// listener keeps serving, so the read takes p.mu too.
+func (p *prog) listenerConfig(listenerNum string) *ctrld.ListenerConfig {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.Listener[listenerNum]
+}
+
 func (p *prog) serveDNS(listenerNum string) error {
 	listenerConfig := p.cfg.Listener[listenerNum]
 	// make sure ip is allocated
@@ -186,7 +195,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 			_ = w.WriteMsg(answer)
 			return
 		}
-		listenerConfig := p.cfg.Listener[listenerNum]
+		listenerConfig := p.listenerConfig(listenerNum)
 		reqId := requestID()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
 		if listenerConfig == nil {
@@ -1657,14 +1666,19 @@ func (p *prog) endDeviceCheck() {
 
 // deviceCheckCoolOff is how long the next device check waits after one ran,
 // so that ctrld does not flood the API.
-var deviceCheckCoolOff = 30 * time.Minute
+const deviceCheckCoolOff = 30 * time.Minute
 
-// selfUninstallCoolOfPeriod waits for deviceCheckCoolOff before
+// selfUninstallCoolOfPeriod waits for deviceCheckCoolOff, or for the
+// coolOff of the prog when a test set it, before
 // calling API again for checking ControlD device status.
 // It ends with the run, so the prog of an ended mobile run does not stay in
 // memory for that time.
 func (p *prog) selfUninstallCoolOfPeriod() {
-	t := time.NewTimer(deviceCheckCoolOff)
+	wait := deviceCheckCoolOff
+	if p.coolOff > 0 {
+		wait = p.coolOff
+	}
+	t := time.NewTimer(wait)
 	defer t.Stop()
 	select {
 	case <-t.C:
