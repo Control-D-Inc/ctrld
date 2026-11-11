@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git"
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/firewall"
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/mobile"
+	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/firewall"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 )
 
 func TestMobileStartsNoHostTools(t *testing.T) {

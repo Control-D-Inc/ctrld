@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git"
+	"github.com/Control-D-Inc/ctrld"
 )
 
 // AppCallback provides hooks for injecting certain functionalities

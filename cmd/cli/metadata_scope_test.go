@@ -15,12 +15,15 @@ import (
 )
 
 // requireRuntimeMetadata asserts the runtime half of the startup-versus-runtime
-// wire contract in docs/username-detection.md: no username discovery and no
-// hostname hints.
+// wire contract in docs/username-detection.md: the runtime metadata, with no
+// username discovery and no hostname hints.
 func requireRuntimeMetadata(t *testing.T, caller string, req *controld.ResolverConfigRequest) {
 	t.Helper()
 	if req == nil {
 		t.Fatalf("%s did not send a resolver config request", caller)
+	}
+	if _, ok := req.Metadata["os"]; !ok {
+		t.Errorf("%s request carried no runtime metadata: %v", caller, req.Metadata)
 	}
 	if _, ok := req.Metadata["username"]; ok {
 		t.Errorf("%s request included username", caller)

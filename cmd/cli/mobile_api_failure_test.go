@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/controld"
+	"github.com/Control-D-Inc/ctrld/internal/controld"
 )
 
 func apiErrorResponse(status, code int, message string) *controld.ErrorResponse {

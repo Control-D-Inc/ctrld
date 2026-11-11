@@ -267,12 +267,7 @@ func TestApiConfigReloadUsesRuntimeMetadata(t *testing.T) {
 
 	select {
 	case req := <-captured:
-		if _, ok := req.Metadata["username"]; ok {
-			t.Error("periodic/forced API refresh included username")
-		}
-		if req.IncludeHostnameHints {
-			t.Error("periodic/forced API refresh requested hostname hints")
-		}
+		requireRuntimeMetadata(t, "periodic/forced API refresh", req)
 	case <-time.After(5 * time.Second):
 		t.Fatal("periodic/forced API refresh did not fetch resolver config")
 	}

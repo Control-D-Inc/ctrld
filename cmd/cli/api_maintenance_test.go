@@ -195,13 +195,31 @@ func maintenanceWithDeviceCode() error {
 	return e
 }
 
-func stubSelfUninstall(t *testing.T) *bool {
+// stubSelfUninstall replaces the uninstall until the test ends. The returned
+// channel receives once for each uninstall that starts. On desktop the
+// uninstall runs on its own goroutine, so a test waits for the channel.
+func stubSelfUninstall(t *testing.T) <-chan struct{} {
 	t.Helper()
 	old := selfUninstallFn
 	t.Cleanup(func() { selfUninstallFn = old })
-	called := false
-	selfUninstallFn = func(*prog, *ctrld.Logger) { called = true }
-	return &called
+	started := make(chan struct{}, 1)
+	selfUninstallFn = func(*prog, *ctrld.Logger) { started <- struct{}{} }
+	return started
+}
+
+// uninstallStarted reports whether selfUninstallCheck started an uninstall.
+// The check sets the flag before it returns, and the flag clears only after
+// the stub has sent, so the answer is final once the check returned.
+func uninstallStarted(p *prog, started <-chan struct{}) bool {
+	if p.selfUninstalling.Load() {
+		return true
+	}
+	select {
+	case <-started:
+		return true
+	default:
+		return false
+	}
 }
 
 func newSelfUninstallTestProg() *prog {
@@ -210,10 +228,10 @@ func newSelfUninstallTestProg() *prog {
 
 func Test_selfUninstallCheckSkipsMaintenance(t *testing.T) {
 	t.Run("maintenance never uninstalls", func(t *testing.T) {
-		called := stubSelfUninstall(t)
+		started := stubSelfUninstall(t)
 		p := newSelfUninstallTestProg()
 		selfUninstallCheck(maintenanceWithDeviceCode(), p, discardLogger())
-		if *called {
+		if uninstallStarted(p, started) {
 			t.Fatal("maintenance triggered a self-uninstall")
 		}
 		select {
@@ -224,17 +242,20 @@ func Test_selfUninstallCheckSkipsMaintenance(t *testing.T) {
 	})
 
 	t.Run("a real device rejection still uninstalls", func(t *testing.T) {
-		called := stubSelfUninstall(t)
+		started := stubSelfUninstall(t)
 		selfUninstallCheck(deviceInvalidErr(), newSelfUninstallTestProg(), discardLogger())
-		if !*called {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
 			t.Fatal("a deleted device no longer self-uninstalls")
 		}
 	})
 
 	t.Run("an unrelated failure does nothing", func(t *testing.T) {
-		called := stubSelfUninstall(t)
-		selfUninstallCheck(retryableNetworkErr(), newSelfUninstallTestProg(), discardLogger())
-		if *called {
+		started := stubSelfUninstall(t)
+		p := newSelfUninstallTestProg()
+		selfUninstallCheck(retryableNetworkErr(), p, discardLogger())
+		if uninstallStarted(p, started) {
 			t.Fatal("a network failure triggered a self-uninstall")
 		}
 	})
@@ -247,7 +268,7 @@ const deviceInvalidExitLine = "provisioning failed: stage=api code=API_DEVICE_IN
 // On mobile ctrld runs inside the app, so it cannot start an uninstall or end
 // the process. A deleted device must reach the app as one coded Exit.
 func Test_selfUninstallCheckOnMobileExitsToTheApp(t *testing.T) {
-	called := stubSelfUninstall(t)
+	started := stubSelfUninstall(t)
 	oldIsMobile := isMobile
 	t.Cleanup(func() { isMobile = oldIsMobile })
 	isMobile = func() bool { return true }
@@ -258,7 +279,7 @@ func Test_selfUninstallCheckOnMobileExitsToTheApp(t *testing.T) {
 
 	selfUninstallCheck(deviceInvalidErr(), p, mainLog.Load())
 
-	if *called {
+	if uninstallStarted(p, started) {
 		t.Fatal("a deleted device started a self-uninstall on mobile")
 	}
 	if len(exits) != 1 || exits[0] != deviceInvalidExitLine {
@@ -272,14 +293,15 @@ func Test_selfUninstallCheckOnMobileExitsToTheApp(t *testing.T) {
 
 // An app callback without Exit must not crash the run or start the uninstall.
 func Test_selfUninstallCheckOnMobileWithoutExit(t *testing.T) {
-	called := stubSelfUninstall(t)
+	started := stubSelfUninstall(t)
 	oldIsMobile := isMobile
 	t.Cleanup(func() { isMobile = oldIsMobile })
 	isMobile = func() bool { return true }
+	p := newSelfUninstallTestProg()
 
-	selfUninstallCheck(deviceInvalidErr(), newSelfUninstallTestProg(), discardLogger())
+	selfUninstallCheck(deviceInvalidErr(), p, discardLogger())
 
-	if *called {
+	if uninstallStarted(p, started) {
 		t.Fatal("a deleted device started a self-uninstall on mobile")
 	}
 }
@@ -287,7 +309,7 @@ func Test_selfUninstallCheckOnMobileWithoutExit(t *testing.T) {
 // The reload of the configuration can also find a deleted device. On mobile
 // it must reach the app as Exit and start no uninstall.
 func Test_apiConfigReloadOnMobileExitsForDeletedDevice(t *testing.T) {
-	called := stubSelfUninstall(t)
+	started := stubSelfUninstall(t)
 	oldFetch, oldUID, oldIsMobile := fetchResolverConfigFn, cdUID, isMobile
 	t.Cleanup(func() { fetchResolverConfigFn, cdUID, isMobile = oldFetch, oldUID, oldIsMobile })
 	cdUID = "test-uid"
@@ -323,7 +345,7 @@ func Test_apiConfigReloadOnMobileExitsForDeletedDevice(t *testing.T) {
 	}
 	stopReload()
 
-	if *called {
+	if uninstallStarted(p, started) {
 		t.Fatal("the reload started a self-uninstall on mobile")
 	}
 	if lines := exits.got(); len(lines) != 1 || lines[0] != deviceInvalidExitLine {

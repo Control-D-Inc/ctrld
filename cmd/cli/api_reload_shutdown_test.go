@@ -63,7 +63,8 @@ endpoint = "127.0.0.1"
 		if strings.HasSuffix(mode, "fetch") {
 			<-ctx.Done()
 			close(canceled)
-			// A late successful response must not schedule a reload after stop.
+			// This answer comes after the stop, when the reload already
+			// returned at the cancel. It must change nothing.
 			return rc, nil
 		}
 		return rc, nil
@@ -101,7 +102,7 @@ endpoint = "127.0.0.1"
 	awaitShutdown(t, done)
 	if strings.HasSuffix(mode, "fetch") {
 		awaitShutdown(t, canceled)
-		require.Empty(t, p.rc.Exclude, "late fetch must not update run state")
+		require.Empty(t, p.rc.Exclude, "the answer after the stop changed the run state")
 	}
 }
 

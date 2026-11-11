@@ -5,7 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/mobile"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 )
 
 // isIOS reports whether ctrld runs in an iOS app, where the sandbox does not

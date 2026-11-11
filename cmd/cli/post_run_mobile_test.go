@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git"
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/mobile"
+	"github.com/Control-D-Inc/ctrld"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 )
 
 // On iOS the app owns the DNS settings of the device. postRun must only

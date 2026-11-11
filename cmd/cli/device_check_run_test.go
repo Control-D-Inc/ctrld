@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,18 +37,36 @@ func (r *exitRecorder) got() []string {
 }
 
 // stubDeviceCheck sets the platform to mobile or desktop and replaces the
-// device fetch with fetch until the test ends. The uninstall fails the test,
-// because the real one changes the host and ends the process.
+// device fetch with fetch until the test ends. An uninstall fails the test,
+// because the real one changes the host and ends the process. The uninstall
+// runs on its own goroutine, so the stub only records it, and the cleanup
+// fails the test. A test that must see every uninstall also calls
+// checkNoUninstall.
 func stubDeviceCheck(t *testing.T, mobile bool, fetch func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error)) {
 	t.Helper()
 	oldFetch, oldUID, oldIsMobile, oldUninstall := fetchResolverConfig, cdUID, isMobile, selfUninstallFn
+	var uninstalled atomic.Bool
 	t.Cleanup(func() {
 		fetchResolverConfig, cdUID, isMobile, selfUninstallFn = oldFetch, oldUID, oldIsMobile, oldUninstall
+		if uninstalled.Load() {
+			t.Error("the device check started the uninstall")
+		}
 	})
 	fetchResolverConfig = fetch
 	cdUID = "test-uid"
 	isMobile = func() bool { return mobile }
-	selfUninstallFn = func(*prog, *ctrld.Logger) { t.Error("the device check started the uninstall") }
+	selfUninstallFn = func(*prog, *ctrld.Logger) { uninstalled.Store(true) }
+}
+
+// checkNoUninstall fails the test when a check of p started the uninstall.
+// selfUninstallCheck sets the flag before it returns, and the flag clears only
+// after the stub of stubDeviceCheck recorded the uninstall. So once the check
+// returned, the flag here or the cleanup of stubDeviceCheck sees it.
+func checkNoUninstall(t *testing.T, p *prog) {
+	t.Helper()
+	if p.selfUninstalling.Load() {
+		t.Error("the device check started the uninstall")
+	}
 }
 
 // fetchDeviceInvalid is a device fetch that reports a deleted device.
@@ -113,8 +132,8 @@ func stopRun(p *prog) <-chan struct{} {
 }
 
 // platforms are the two kinds of run. Mobile sends a deleted device to Exit,
-// and desktop starts the uninstall, which the stub of stubDeviceCheck turns
-// into a test failure.
+// and desktop starts the uninstall, which checkNoUninstall and the stub of
+// stubDeviceCheck turn into a test failure.
 var platforms = []struct {
 	name   string
 	mobile bool
@@ -164,6 +183,7 @@ func TestDeviceCheckDoesNotActAfterItsRunStopped(t *testing.T) {
 			waitNetworkShutdownSignal(t, fetchReturned, "the held fetch to return")
 			waitNetworkShutdownSignal(t, checkDone, "the device check to return")
 
+			checkNoUninstall(t, runA)
 			if lines := exits.got(); len(lines) != 0 {
 				t.Fatalf("the device check of a stopped run called Exit: %q", lines)
 			}
@@ -223,6 +243,7 @@ func TestDeviceStatusAfterTheStopDoesNotAct(t *testing.T) {
 				run.reportDeviceStatus(deviceInvalidErr(), discardLogger())
 				run.selfUninstallMu.Unlock()
 
+				checkNoUninstall(t, run)
 				if lines := exits.got(); len(lines) != 0 {
 					t.Fatalf("the answer of a stopped run reached Exit: %q", lines)
 				}

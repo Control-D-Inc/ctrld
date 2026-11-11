@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/mobile"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 )
 
 // fakeHostTools puts fakes of the system tools that ctrld can start on macOS

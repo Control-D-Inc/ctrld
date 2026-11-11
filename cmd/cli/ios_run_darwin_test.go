@@ -14,7 +14,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git/internal/mobile"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 )
 
 // TestIOSRunStartsNoTools runs the library from start to stop as an iOS app

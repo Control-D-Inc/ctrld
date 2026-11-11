@@ -9,7 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"gitlab.int.windscribe.com/controld/clients/ctrld.git"
+	"github.com/Control-D-Inc/ctrld"
 )
 
 // stubHostContextReads replaces every host read behind addHostContext, so the
