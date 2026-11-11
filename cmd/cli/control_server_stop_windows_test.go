@@ -14,7 +14,7 @@ import (
 func TestControlServerStopEndsReloadSignalWait(t *testing.T) {
 	p := &prog{
 		cfg:          &ctrld.Config{},
-		reloadDoneCh: make(chan struct{}),
+		reloadDoneCh: make(chan reloadDone),
 		reloadCh:     make(chan struct{}),
 	}
 	requireStopEndsHandler(t, p, reloadPath, nil, 0)

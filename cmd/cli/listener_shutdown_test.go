@@ -129,7 +129,7 @@ func TestRunListenerShutdown(t *testing.T) {
 	p := &prog{
 		cfg: &cfg, waitCh: make(chan struct{}), stopCh: make(chan struct{}), runAbortCh: make(chan struct{}),
 		runDone: make(chan struct{}), dnsWatcherStopCh: make(chan struct{}), apiReloadCh: make(chan *ctrld.Config),
-		reloadDoneCh:     make(chan struct{}, 1),
+		reloadDoneCh:     make(chan reloadDone, 1),
 		apiForceReloadCh: make(chan struct{}),
 	}
 	p.logger.Store(mainLog.Load())

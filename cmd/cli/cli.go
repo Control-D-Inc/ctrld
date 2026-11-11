@@ -295,7 +295,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		stopCh:           stopCh,
 		pinCodeValidCh:   make(chan struct{}, 1),
 		reloadCh:         make(chan struct{}),
-		reloadDoneCh:     make(chan struct{}),
+		reloadDoneCh:     make(chan reloadDone),
 		dnsWatcherStopCh: make(chan struct{}),
 		apiReloadCh:      make(chan *ctrld.Config),
 		apiForceReloadCh: make(chan struct{}),

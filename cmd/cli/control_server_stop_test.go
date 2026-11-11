@@ -161,7 +161,7 @@ func holdReload(t *testing.T) (*prog, <-chan struct{}) {
 	t.Cleanup(func() { stopNotifyReloadSigCh(signals) })
 	p := &prog{
 		cfg:          &ctrld.Config{},
-		reloadDoneCh: make(chan struct{}),
+		reloadDoneCh: make(chan reloadDone),
 		reloadCh:     make(chan struct{}, 1),
 	}
 	waiting := make(chan struct{})

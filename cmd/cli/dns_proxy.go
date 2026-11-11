@@ -202,10 +202,7 @@ func (p *prog) serveDNS(ctx context.Context, listenerNum string) error {
 		if p.handleSelfQuery(w, m) {
 			return
 		}
-		// Read the listener config per query, not once above: a reload replaces
-		// p.cfg.Listener while this listener keeps serving, and the captured
-		// copy would keep the old policy (rules, failover_rcodes) until restart.
-		p.handleDNSQuery(w, m, listenerNum, p.cfg.Listener[listenerNum])
+		p.handleDNSQuery(w, m, listenerNum)
 	})
 
 	logger.Debug().Msg("DNS server setup completed")
@@ -292,7 +289,7 @@ func (p *prog) startListeners(ctx context.Context, cfg *ctrld.ListenerConfig, ha
 
 // handleDNSQuery processes incoming DNS queries, validates client access, and routes the query to appropriate handlers.
 // This is the main entry point for all DNS query processing
-func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum string, listenerConfig *ctrld.ListenerConfig) {
+func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum string) {
 	p.sema.acquire()
 	defer p.sema.release()
 
@@ -301,9 +298,21 @@ func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum stri
 		return
 	}
 
+	// Read the listener config per query, after the semaphore, not once when
+	// the listener starts: a reload replaces p.cfg.Listener while this
+	// listener keeps serving, and a captured copy would keep the old policy
+	// (rules, failover_rcodes) until restart.
+	listenerConfig := p.cfg.Listener[listenerNum]
 	reqID := requestID()
 	ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqID)
 	ctx = ctrld.LoggerCtx(ctx, p.logger.Load())
+	if listenerConfig == nil {
+		ctrld.Log(ctx, p.querySampler.event(sampleClassNoListenerConfig, ""), "No config for [listener.%s], answering SERVFAIL", listenerNum)
+		p.health.countQuery()
+		p.health.countFailedQuery()
+		sendDNSResponse(w, m, dns.RcodeServerFailure)
+		return
+	}
 
 	ctrld.Log(ctx, p.Debug(), "Processing DNS query from %s", w.RemoteAddr().String())
 

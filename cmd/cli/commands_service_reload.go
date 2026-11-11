@@ -47,7 +47,7 @@ func (sc *ServiceCommand) Reload(cmd *cobra.Command, args []string) error {
 	case http.StatusOK:
 		logger.Notice().Msg("Service reloaded")
 	case http.StatusCreated:
-		logger.Warn().Msg("Service was reloaded, but new config requires service restart.")
+		logger.Warn().Msg("New config requires service restart.")
 		logger.Warn().Msg("Restarting service")
 		if _, err := s.Status(); errors.Is(err, service.ErrNotInstalled) {
 			logger.Warn().Msg("Service not installed")
