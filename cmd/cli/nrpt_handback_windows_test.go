@@ -21,7 +21,12 @@ type fakeNRPTOps struct {
 	// probeResults is consumed in order; the last value repeats once exhausted.
 	probeResults []bool
 	probeCalls   int
-	flushCalls   int
+	// lateProbeCalls marks probe calls (1-based) whose success arrived after the normal
+	// timeout. Only probeWithGrace can report one; probe treats it as a miss, the way
+	// the production waiter has already given up by then.
+	lateProbeCalls map[int]bool
+	graceCalls     int
+	flushCalls     int
 
 	gpRule          string // rule name findGPRule reports, "" for none
 	gpConflict      bool   // whether an external catch-all targets another resolver
@@ -62,25 +67,37 @@ type fakeNRPTOps struct {
 	waitHook func() bool
 }
 
+// nextProbe consumes one scripted probe result and reports whether it is a late arrival.
+func (f *fakeNRPTOps) nextProbe() (result, late bool) {
+	f.mu.Lock()
+	f.probeCalls++
+	call := f.probeCalls
+	if len(f.probeResults) > 0 {
+		result = f.probeResults[0]
+		if len(f.probeResults) > 1 {
+			f.probeResults = f.probeResults[1:]
+		}
+	}
+	late = result && f.lateProbeCalls[call]
+	onProbe := f.onProbe
+	f.mu.Unlock()
+	if onProbe != nil {
+		onProbe(call)
+	}
+	return result, late
+}
+
 func (f *fakeNRPTOps) ops() *nrptOps {
 	return &nrptOps{
 		probe: func(*wfpState) bool {
+			result, late := f.nextProbe()
+			return result && !late
+		},
+		probeWithGrace: func(*wfpState) (bool, bool) {
 			f.mu.Lock()
-			f.probeCalls++
-			call := f.probeCalls
-			result := false
-			if len(f.probeResults) > 0 {
-				result = f.probeResults[0]
-				if len(f.probeResults) > 1 {
-					f.probeResults = f.probeResults[1:]
-				}
-			}
-			onProbe := f.onProbe
+			f.graceCalls++
 			f.mu.Unlock()
-			if onProbe != nil {
-				onProbe(call)
-			}
-			return result
+			return f.nextProbe()
 		},
 		ruleExists: func() bool {
 			f.mu.Lock()

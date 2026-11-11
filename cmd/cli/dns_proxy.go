@@ -170,6 +170,11 @@ func (p *prog) serveDNS(listenerNum string) error {
 	}
 
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
+		// Before the semaphore: a returned query of ctrld's own must be answered
+		// even when every slot is held by the queries waiting for it.
+		if p.handleSelfQuery(w, m) {
+			return
+		}
 		p.sema.acquire()
 		defer p.sema.release()
 		if len(m.Question) == 0 {
@@ -658,6 +663,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 	// 3. Try private resolver.
 	// 4. Try remote upstream.
 	isLanOrPtrQuery := false
+	// lanHostnameQuery marks a LAN hostname lookup that may take the NetBIOS/mDNS
+	// fallback when the OS resolver answers NXDOMAIN (issue #674).
+	lanHostnameQuery := false
 	if req.ufr.matched {
 		ctrld.Log(ctx, mainLog.Load().Debug(), "%s, %s, %s -> %v", req.ufr.matchedPolicy, req.ufr.matchedNetwork, req.ufr.matchedRule, upstreams)
 		// A rule sending an Active Directory name to the OS resolver (the
@@ -692,6 +700,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "private PTR lookup, using upstreams: %v", upstreams)
 		case isLanHostnameQuery(req.msg):
 			isLanOrPtrQuery = true
+			lanHostnameQuery = true
 			if answer := p.proxyLanHostnameQuery(ctx, req.msg); answer != nil {
 				res.answer = answer
 				res.clientInfo = true
@@ -995,6 +1004,14 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 					upstreams[n], dns.RcodeToString[answer.Rcode])
 				internalNegative = betterInternalDomainNegative(internalNegative, answer)
 				continue
+			}
+
+			// The NXDOMAIN is where Windows would have tried NetBIOS and mDNS,
+			// had Intercept mode's NRPT rule not stopped it (issue #674).
+			if lanHostnameQuery && answer.Rcode == dns.RcodeNameError && upstreams[n] == upstreamOS {
+				if fallback := p.lanNameFallbackAnswer(ctx, req.msg); fallback != nil {
+					answer = fallback
+				}
 			}
 
 			// set compression, as it is not set by default when unpacking
@@ -2588,7 +2605,7 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 				exemptions = append(exemptions, vpnDNSExemption{Server: host})
 			}
 			mainLog.Load().Info().Msgf("DNS intercept recovery: exempting DHCP nameservers from filters: %v", exemptions)
-			if err := p.exemptVPNDNSServers(exemptions); err != nil {
+			if err := p.exemptRecoveryNameservers(exemptions); err != nil {
 				mainLog.Load().Warn().Err(err).Msg("DNS intercept recovery: failed to exempt DHCP nameservers — recovery queries may fail")
 			}
 		}

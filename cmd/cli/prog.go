@@ -172,6 +172,10 @@ type prog struct {
 
 	loopMu sync.Mutex
 	loop   map[string]bool
+	// selfLoops reports ctrld's own DNS queries that came back to the listener.
+	selfLoops selfLoopReporter
+	// selfLoopSuspects reports copies that matched a question, not an ID.
+	selfLoopSuspects selfLoopReporter
 
 	recoveryCancelMu sync.Mutex
 	recoveryCancel   context.CancelFunc
@@ -255,6 +259,12 @@ type prog struct {
 	// DNS intercept mode state (platform-specific).
 	// On Windows: *wfpState, on macOS: *pfState, nil on other platforms.
 	dnsInterceptState any
+
+	// lanFallback answers LAN names from NetBIOS/mDNS in Windows Intercept
+	// mode when DNS has none (issue #674). Created on first use; nil on other
+	// platforms.
+	lanFallback     *lanNameFallback
+	lanFallbackOnce sync.Once
 
 	// dnsInterceptMu serializes DNS intercept lifecycle transitions - start, stop and
 	// the health monitor's rebuild - and guards every write to dnsInterceptState, so a
@@ -983,6 +993,9 @@ func (p *prog) closeLogConn() {
 // before the process exits.
 func (p *prog) reportServeDNSFailure(listenerNum string, err error) {
 	failRunUnclassified(mainLog.Load().Error().Err(err), fmt.Sprintf("unable to start dns proxy on listener.%s: %v", listenerNum, err), p.notifyExitToLogServer)
+	// On mobile the run is already up and waiting for the host app, so report
+	// now: the app stops the run, as it would have done for an exit.
+	abortOnProvisionFailure(p.appCallback)
 }
 
 // run runs the ctrld main components.

@@ -42,6 +42,7 @@ require (
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
 	golang.zx2c4.com/wireguard/windows v0.5.3
+	howett.net/plist v1.0.2-0.20250314012144-ee69052608d9
 	tailscale.com v1.74.0
 )
 
@@ -102,7 +103,6 @@ require (
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	howett.net/plist v1.0.2-0.20250314012144-ee69052608d9 // indirect
 )
 
 replace github.com/mr-karan/doggo => github.com/Windscribe/doggo v0.0.0-20220919152748-2c118fc391f8
