@@ -227,8 +227,10 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 	if appConfig == nil {
 		panic("appConfig is nil")
 	}
-	initConsoleLogging()
+	// initConsoleLogging reads verbose for the lines before the log files
+	// open, so the configuration of this start goes first.
 	applyAppConfig(appConfig)
+	initConsoleLogging()
 	run(appCallback, stopCh)
 }
 
@@ -2040,7 +2042,11 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 		if cdMode {
 			firstLn.IP = mobileListenerIp()
 			firstLn.Port = mobileListenerPort()
-			clear(lcc)
+			// The address is fixed, so a failed bind must not try another
+			// one. It fails with the listener code.
+			for k := range lcc {
+				lcc[k] = &listenerConfigCheck{}
+			}
 			updated = true
 		}
 	}

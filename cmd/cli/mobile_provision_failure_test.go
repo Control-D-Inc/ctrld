@@ -29,7 +29,7 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 	const childEnv = "CTRLD_TEST_MOBILE_PROVISION_FAILURE"
 	mode := os.Getenv(childEnv)
 	if mode == "" {
-		for _, mode := range []string{"token-shape", "listener-bind", "network-down", "network-stop", "proto-then-valid", "stale", "api-error-secret", "no-host-tools", "token-exchange-redacts"} {
+		for _, mode := range []string{"token-shape", "listener-bind", "network-down", "network-stop", "proto-then-valid", "stale", "api-error-secret", "no-host-tools", "token-exchange-redacts", "console-level", "cd-listener-bind"} {
 			t.Run(mode, func(t *testing.T) {
 				if mode == "no-host-tools" && runtime.GOOS != "darwin" {
 					t.Skip("the fake tools are the tools of macOS and iOS")
@@ -170,9 +170,63 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 		require.Contains(t, string(logText), "rejected for")
 		require.NotContains(t, string(logText), uid)
 		require.NotContains(t, string(logText), token)
+	case "console-level":
+		// Each start sets the console level from its own configuration, not
+		// from the start before it. The config file line comes before the
+		// log files open, so only the console level of the start decides if
+		// stdout gets it.
+		const configLine = "loading config file from"
+		out := consoleOutput(t, func() { runOnce(AppConfig{ProvisionID: "not a token", Verbose: 2}) })
+		wantExit(provisionCodeProvisionTokenMalformed)
+		require.Contains(t, out, configLine)
+		out = consoleOutput(t, func() { runOnce(AppConfig{ProvisionID: "not a token", Verbose: -1}) })
+		wantExit(provisionCodeProvisionTokenMalformed)
+		require.NotContains(t, out, configLine)
+	case "cd-listener-bind":
+		// In Control D mode the address is fixed. When another process
+		// holds it, the app gets the listener code, and ctrld does not move
+		// to another address.
+		interceptMode = "off"
+		addr := net.JoinHostPort(mobileListenerIp(), strconv.Itoa(mobileListenerPort()))
+		// If the test cannot bind the address, ctrld cannot either.
+		if udp, err := net.ListenPacket("udp", addr); err == nil {
+			defer udp.Close()
+		}
+		if tcp, err := net.Listen("tcp", addr); err == nil {
+			defer tcp.Close()
+		}
+		processCDFlagsFn = func(_ context.Context, c *ctrld.Config) (*controld.ResolverConfig, error) {
+			fetches++
+			*c = ctrld.Config{
+				Upstream: map[string]*ctrld.UpstreamConfig{"0": {Endpoint: "https://dns.controld.com/testuid", Type: "doh", Timeout: 5000}},
+				Listener: map[string]*ctrld.ListenerConfig{"0": {}},
+			}
+			setNetworkDefaultValue(c)
+			return &controld.ResolverConfig{}, nil
+		}
+		runOnce(AppConfig{CdUID: "testuid"})
+		require.Equal(t, 1, fetches)
+		wantExit(provisionCodeListenerAddrUnavail)
+		require.Equal(t, addr, net.JoinHostPort(cfg.Listener["0"].IP, strconv.Itoa(cfg.Listener["0"].Port)))
 	default:
 		t.Fatalf("unknown mode %q", mode)
 	}
+}
+
+// consoleOutput returns what start writes to stdout. The console writer takes
+// os.Stdout when a start builds it, so a file in its place gets the lines.
+func consoleOutput(t *testing.T, start func()) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stdout")
+	require.NoError(t, err)
+	defer f.Close()
+	oldStdout := os.Stdout
+	os.Stdout = f
+	defer func() { os.Stdout = oldStdout }()
+	start()
+	out, err := os.ReadFile(f.Name())
+	require.NoError(t, err)
+	return string(out)
 }
 
 // TestReportServeDNSFailureMobile covers the listener goroutine that fails

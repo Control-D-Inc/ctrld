@@ -102,6 +102,9 @@ func NewStartOptions() *StartOptions {
 // This function blocks until the run exits, including teardown after Stop.
 // A call made while a run is active or stopping returns immediately.
 // Check port availability prior to calling it.
+// In Control D mode the listener address is fixed. When another process
+// holds it, Exit gets a stage=listener line with the code
+// LISTENER_CONFIGURED_ADDR_UNAVAILABLE.
 func (c *Controller) Start(CdUID string, ProvisionID string, CustomHostname string, HomeDir string, UpstreamProto string, logLevel int, logPath string) {
 	c.start(cli.AppConfig{
 		CdUID:          CdUID,
