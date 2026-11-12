@@ -94,6 +94,29 @@ While the stall lasts, ctrld opens no connection to its upstream, although the n
 
 ---
 
+### WireGuard Full Tunnel Connected Before ctrld Starts Blocks DNS in DNS Mode
+
+**Issue**: On Windows in `dns` intercept mode, if a WireGuard full tunnel is already connected when ctrld starts, DNS queries never reach ctrld's loopback listener. `ctrld-client start` fails its self-check and rolls the install back (`SERVICE_SELFCHECK_FAILED`, exit 53).
+
+**Status**: Workaround available
+
+**Description**: The WireGuard for Windows client enables its kill switch when a tunnel has one peer with `AllowedIPs = 0.0.0.0/0` and a `DNS =` line. The kill switch adds WFP filters that block all port 53 traffic except to the tunnel's DNS server, including traffic to `127.0.0.1`. ctrld adds its own WFP permit filters for DNS to localhost (see the `block-outside-dns` entry above), but they sit in a sublayer with the same weight as WireGuard's, so they are not guaranteed to win. It depends on start order:
+
+- ctrld running first, WireGuard connected afterwards: DNS keeps working. Covered by the ctrld-qa scenario `vpn-wireguard-coexistence`.
+- WireGuard connected first, then ctrld installed or started: every query to the listener times out. Reproduced in the ctrld-qa lab on v1.5.10.
+
+ctrld normally starts at boot, before a VPN connects, so the common case is the working order.
+
+**Workarounds**:
+1. **Recommended**: Disconnect the WireGuard tunnel, start or install ctrld, then reconnect the tunnel.
+2. **Alternative**: Use split routes instead of `0.0.0.0/0` in the tunnel, for example `AllowedIPs = 0.0.0.0/1, 128.0.0.0/1`. WireGuard does not enable the kill switch then.
+
+**Affected Versions**: ctrld v1.5.x on Windows, `dns` intercept mode, with the WireGuard for Windows client on a full tunnel
+
+**Last Updated**: 11/12/2026
+
+---
+
 ## Contributing to Known Issues
 
 If you encounter an issue not listed here, please:
