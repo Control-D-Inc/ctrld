@@ -620,11 +620,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			}
 		}
 	})
-	p.onStopped = append(p.onStopped, func() {
-		// restore static DNS settings or DHCP
-		p.resetDNS(false, true)
-		restoreSavedStaticDNS("", false)
-	})
+	p.onStopped = append(p.onStopped, p.restoreDeviceDNSOnStop)
 
 	close(waitCh)
 	<-stopCh
@@ -1874,6 +1870,16 @@ func uninstall(p *prog, s service.Service) {
 		mainLog.Load().Notice().Msg("Service uninstalled")
 		return
 	}
+}
+
+// restoreDeviceDNSOnStop gives the device back its static DNS settings or
+// DHCP when the run stops.
+func (p *prog) restoreDeviceDNSOnStop() {
+	if !p.ownsDeviceDNS() {
+		return
+	}
+	resetDNSFn(p, false, true)
+	restoreSavedStaticDNS("", false)
 }
 
 var restoreSavedStaticDNSInterfacesFn = withEachPhysicalInterfaces

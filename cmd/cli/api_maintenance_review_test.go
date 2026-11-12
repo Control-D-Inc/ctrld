@@ -363,6 +363,9 @@ func TestMaintenanceRecoveryOutlivesAFailedApply(t *testing.T) {
 	t.Cleanup(func() {
 		close(p.stopCh)
 		<-done
+		// A fetch can outlive the reload, and it reads globals that a later
+		// test changes, such as mobile.IsIOS.
+		fetchGoroutines.Wait()
 	})
 
 	// A failed apply must leave the run pending and keep redelivering, even

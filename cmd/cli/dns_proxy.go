@@ -2834,6 +2834,11 @@ func interceptTargetAction(before, after string) string {
 	}
 }
 
+// handleRecovery performs a unified recovery by removing DNS settings,
+// canceling existing recovery checks for network changes, but coalescing duplicate
+// upstream failure recoveries, waiting for recovery to complete (using a cancellable context without timeout),
+// and then re-applying the DNS settings. On iOS the app owns the DNS settings,
+// so the recovery only waits for the upstream.
 func (p *prog) handleRecovery(reason RecoveryReason) {
 	p.handleRecoveryForTransition(reason, 0)
 }
@@ -2945,9 +2950,13 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 	// The reset ends the outage, so the down time is read before it. The name
 	// of the line is bounded, because an upstream key is operator text.
 	journalName := journalUpstreamName(recovered)
+	recoveredLine := "Upstream %q recovered; re-applying DNS settings"
+	if !p.ownsDeviceDNS() {
+		recoveredLine = "Upstream %q recovered"
+	}
 	journal(p.Info()).Str("upstream", journalName).
 		Int64("down_for_ms", p.um.downFor(recovered).Milliseconds()).
-		Msgf("Upstream %q recovered; re-applying DNS settings", journalName)
+		Msgf(recoveredLine, journalName)
 	if err := p.completeRecoveryWork(reason, recovered, interceptRecovery); err != nil {
 		p.Error().Err(err).Msg("Failed to complete recovery")
 		p.recoveryCanceledCleanup(gen)
@@ -3020,7 +3029,9 @@ func (p *prog) prepareForRecovery(reason RecoveryReason, interceptRecovery bool,
 	// we do not want to restore any static DNS settings
 	// we must try to get the DHCP values, any static DNS settings
 	// will be appended to nameservers from the saved interface values
-	recoveryResetDNSFn(p, false, false)
+	if p.ownsDeviceDNS() {
+		recoveryResetDNSFn(p, false, false)
+	}
 
 	// Read the exposed nameservers right away, for an OS failure and for a
 	// network change. After a network change the OS resolver still holds
@@ -3082,7 +3093,9 @@ func (p *prog) completeRecoveryWork(reason RecoveryReason, recovered string, int
 
 	// Apply our DNS settings back. The snapshot that follows the end event
 	// reports the interfaces.
-	recoverySetDNSFn(p, systemNameservers)
+	if p.ownsDeviceDNS() {
+		recoverySetDNSFn(p, systemNameservers)
+	}
 	return nil
 }
 
