@@ -33,6 +33,13 @@ var (
 	}
 )
 
+// mdnsConn is the part of an mdns socket that probing uses.
+type mdnsConn interface {
+	WriteTo(b []byte, addr net.Addr) (int, error)
+	SetWriteDeadline(t time.Time) error
+	Close() error
+}
+
 type mdns struct {
 	name sync.Map // ip => hostname
 }
@@ -96,8 +103,8 @@ func (m *mdns) init(quitCh chan struct{}) error {
 	ipv6 := ctrldnet.IPv6Available(context.Background())
 	ctrld.ProxyLogger.Load().Debug().Msgf("IPv6 is %v in mdns init", ipv6)
 
-	v4ConnList := make([]*net.UDPConn, 0, len(ifaces))
-	v6ConnList := make([]*net.UDPConn, 0, len(ifaces))
+	v4ConnList := make([]mdnsConn, 0, len(ifaces))
+	v6ConnList := make([]mdnsConn, 0, len(ifaces))
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagLoopback != 0 {
 			continue
@@ -107,7 +114,9 @@ func (m *mdns) init(quitCh chan struct{}) error {
 			go m.readLoop(conn)
 		}
 
-		if ipv6 {
+		// An interface without an IPv6 address (e.g. a bridge port with disable_ipv6=1)
+		// cannot send IPv6 multicast; skip it, the same way NDP discovery does.
+		if ipv6 && interfaceHasIPv6(&iface) {
 			if conn, err := net.ListenMulticastUDP("udp6", &iface, mdnsV6Addr); err == nil {
 				v6ConnList = append(v6ConnList, conn)
 				go m.readLoop(conn)
@@ -123,20 +132,21 @@ func (m *mdns) init(quitCh chan struct{}) error {
 }
 
 // probeLoop performs mdns probe actively to get hostname updates.
-func (m *mdns) probeLoop(conns []*net.UDPConn, remoteAddr net.Addr, quitCh chan struct{}) {
+func (m *mdns) probeLoop(conns []mdnsConn, remoteAddr net.Addr, quitCh chan struct{}) {
 	bo := backoff.NewBackoff("mdns probe", func(format string, args ...any) {}, time.Second*30)
+	active := conns
 	for {
-		err := m.probe(conns, remoteAddr)
-		if shouldStopProbing(err) {
+		var err error
+		active, err = m.probe(active, remoteAddr)
+		if err == nil {
+			break
+		}
+		if len(active) == 0 {
 			ctrld.ProxyLogger.Load().Warn().Msgf("stop probing %q: %v", remoteAddr, err)
 			break
 		}
-		if err != nil {
-			ctrld.ProxyLogger.Load().Warn().Err(err).Msg("error while probing mdns")
-			bo.BackOff(context.Background(), errors.New("mdns probe backoff"))
-			continue
-		}
-		break
+		ctrld.ProxyLogger.Load().Warn().Err(err).Msg("error while probing mdns")
+		bo.BackOff(context.Background(), errors.New("mdns probe backoff"))
 	}
 	<-quitCh
 	for _, conn := range conns {
@@ -198,7 +208,11 @@ func (m *mdns) readLoop(conn *net.UDPConn) {
 }
 
 // probe performs mdns queries with known services.
-func (m *mdns) probe(conns []*net.UDPConn, remoteAddr net.Addr) error {
+//
+// It returns the connections worth probing again, without those that failed with
+// a permanent error. The error is nil if at least one connection sent the query,
+// or if there was nothing to send on.
+func (m *mdns) probe(conns []mdnsConn, remoteAddr net.Addr) ([]mdnsConn, error) {
 	msg := new(dns.Msg)
 	msg.Question = make([]dns.Question, len(services))
 	msg.Compress = true
@@ -212,15 +226,28 @@ func (m *mdns) probe(conns []*net.UDPConn, remoteAddr net.Addr) error {
 
 	buf, err := msg.Pack()
 	if err != nil {
-		return err
+		return conns, err
 	}
+	active := make([]mdnsConn, 0, len(conns))
+	sent := false
+	var lastErr error
 	for _, conn := range conns {
 		_ = conn.SetWriteDeadline(time.Now().Add(time.Second * 30))
 		if _, werr := conn.WriteTo(buf, remoteAddr); werr != nil {
-			err = werr
+			lastErr = werr
+			if shouldStopProbing(werr) {
+				ctrld.ProxyLogger.Load().Debug().Err(werr).Msgf("stop probing %q on one socket", remoteAddr)
+				continue
+			}
+		} else {
+			sent = true
 		}
+		active = append(active, conn)
 	}
-	return err
+	if sent || lastErr == nil {
+		return active, nil
+	}
+	return active, lastErr
 }
 
 // getDataFromAvahiDaemonCache reads entries from avahi-daemon cache to update mdns data.
@@ -278,12 +305,36 @@ func multicastInterfaces() ([]net.Interface, error) {
 	return interfaces, nil
 }
 
-// shouldStopProbing reports whether ctrld should stop probing mdns.
+// interfaceHasIPv6 reports whether iface has an IPv6 address, so it can send IPv6 multicast.
+func interfaceHasIPv6(iface *net.Interface) bool {
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return false
+	}
+	return hasIPv6Addr(addrs)
+}
+
+// hasIPv6Addr reports whether addrs contains an IPv6 address (not an IPv4-mapped one).
+func hasIPv6Addr(addrs []net.Addr) bool {
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(ipNet.IP)
+		if ok && ip.Is6() && !ip.Is4In6() {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldStopProbing reports whether err is a permanent mdns send error.
 func shouldStopProbing(err error) bool {
 	var se *os.SyscallError
 	if errors.As(err, &se) {
 		switch se.Err {
-		case syscall.ENETUNREACH, syscall.EINVAL, syscall.EPERM:
+		case syscall.ENETUNREACH, syscall.EINVAL, syscall.EPERM, syscall.EACCES:
 			return true
 		}
 	}
