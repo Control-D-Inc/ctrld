@@ -423,8 +423,8 @@ func configWithInvalidFlushCacheDomain(t *testing.T) *ctrld.Config {
 	return cfg
 }
 
-// FirstListener reads the listener of the lowest number, with the key that
-// strconv.Itoa writes for it.
+// FirstListenerKey returns the key of the lowest number, as it is in the
+// config, so a key such as "01" finds its own listener.
 func TestConfigFirstListenerKey(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -433,7 +433,7 @@ func TestConfigFirstListenerKey(t *testing.T) {
 		wantOK bool
 	}{
 		{"lowest number", []string{"abc", "10", "2"}, "2", true},
-		{"leading zero", []string{"01", "2"}, "1", true},
+		{"leading zero", []string{"01", "2"}, "01", true},
 		{"negative number", []string{"0", "-1"}, "-1", true},
 		{"no number", []string{"abc"}, "", false},
 		{"no listener", nil, "", false},

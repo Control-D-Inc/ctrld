@@ -105,6 +105,11 @@ func NewStartOptions() *StartOptions {
 // In Control D mode the listener address is fixed. When another process
 // holds it, Exit gets a stage=listener line with the code
 // LISTENER_CONFIGURED_ADDR_UNAVAILABLE.
+// With a config.toml or ctrld.toml in HomeDir that ctrld cannot read or
+// parse, Exit gets a stage=service line with the code UNCLASSIFIED. The
+// message in provision_result.json in HomeDir names the file error. The
+// start fails before the log files open, and each later start fails the
+// same way until the app replaces or deletes the file.
 func (c *Controller) Start(CdUID string, ProvisionID string, CustomHostname string, HomeDir string, UpstreamProto string, logLevel int, logPath string) {
 	c.start(cli.AppConfig{
 		CdUID:          CdUID,
