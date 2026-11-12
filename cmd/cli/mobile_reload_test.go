@@ -29,7 +29,7 @@ func TestMobileReloadServesTheFirstListener(t *testing.T) {
 	const env = "CTRLD_TEST_MOBILE_RELOAD"
 	mode := os.Getenv(env)
 	if mode == "" {
-		for _, mode := range []string{"api-config", "api-refetch"} {
+		for _, mode := range []string{"api-config", "api-refetch", "api-refetch-default-file"} {
 			t.Run(mode, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
@@ -71,7 +71,7 @@ func TestMobileReloadServesTheFirstListener(t *testing.T) {
 			"[listener." + key + ".policy]\nname = \"policy of listener." + key + "\"\nfailover_rcodes = [\"SERVFAIL\"]\n"
 	}
 	startKey, newKey := "0", "1"
-	if mode == "api-refetch" {
+	if mode != "api-config" {
 		startKey, newKey = "1", "0"
 	}
 	// The new config names another port, as a custom config of the resolver
@@ -79,8 +79,15 @@ func TestMobileReloadServesTheFirstListener(t *testing.T) {
 	// running one.
 	newText := configText(newKey, freeLocalPort(t))
 	cfg = parseTestConfig(t, configText(startKey, runningPort))
-	configPath = filepath.Join(dir, "ctrld.toml")
-	require.NoError(t, os.WriteFile(configPath, []byte(configText(startKey, runningPort)), 0o600))
+	configFile := filepath.Join(dir, "ctrld.toml")
+	require.NoError(t, os.WriteFile(configFile, []byte(configText(startKey, runningPort)), 0o600))
+	configPath = configFile
+	if mode == "api-refetch-default-file" {
+		// A start that found no config file wrote the default one. The apps
+		// set no config path, and viper names no file then.
+		configPath = ""
+		defaultConfigFile = configFile
+	}
 
 	p := &prog{
 		cfg: &cfg, waitCh: make(chan struct{}), stopCh: make(chan struct{}), runAbortCh: make(chan struct{}),
@@ -137,7 +144,7 @@ func TestMobileReloadServesTheFirstListener(t *testing.T) {
 		startCfg := parseTestConfig(t, configText(startKey, runningPort))
 		require.False(t, reload(&startCfg).restartNeeded)
 		requireServes(startKey)
-	case "api-refetch":
+	case "api-refetch", "api-refetch-default-file":
 		// A change of the excludes or of the Internal Domains sends no config,
 		// and the reload reads the file and fetches the config again.
 		processCDFlagsRuntimeFn = func(_ context.Context, fetched *ctrld.Config) (*controld.ResolverConfig, error) {
