@@ -263,11 +263,35 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 	if appConfig == nil {
 		panic("appConfig is nil")
 	}
+	resetStartConfig()
+	closeStartLogFile()
 	// The console level comes from the verbose level of this start, so the
 	// configuration goes first.
 	applyAppConfig(appConfig)
 	initConsoleLogging()
 	run(appCallback, stopCh)
+}
+
+// resetStartConfig drops the configuration of the start before this one.
+// The run puts the [service] values in v with v.Set, and v.Set wins over a
+// new configuration file. v.Unmarshal also keeps each field of cfg that the
+// new values do not name. So both must start empty.
+func resetStartConfig() {
+	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
+	cfg = ctrld.Config{}
+	lastConfigLogValues.Store(nil)
+}
+
+// closeStartLogFile closes the log file of the start before this one. A
+// start with no log path must not write to it, and a start with the same log
+// path opens it again, in case the app removed it.
+func closeStartLogFile() {
+	if old := logPathFile.Swap(nil); old != nil {
+		if err := old.close(); err != nil {
+			mainLog.Load().Warn().Err(err).Msg("Could not close the log file of the earlier start")
+		}
+	}
+	pendingLogPathRotation.Store(nil)
 }
 
 // CheckDeactivationPin checks if deactivation pin is valid
@@ -645,6 +669,9 @@ func configFileForWrite() string {
 
 // renderConfigFile returns the exact bytes writeConfigFile writes for cfg.
 func renderConfigFile(cfg *ctrld.Config) ([]byte, error) {
+	if isMobile() {
+		cfg = withConfigLogValues(cfg)
+	}
 	var buf bytes.Buffer
 	if cdUID != "" {
 		buf.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n")
@@ -654,6 +681,22 @@ func renderConfigFile(cfg *ctrld.Config) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// withConfigLogValues returns a copy of cfg with the log values of its
+// configuration source. The mobile app passes its log path at each start, so
+// a log path in the file would carry into a later start that passes none.
+// The desktop service also passes it at each start, but other readers of the
+// file need it there.
+func withConfigLogValues(cfg *ctrld.Config) *ctrld.Config {
+	source := lastConfigLogValues.Load()
+	if source == nil {
+		return cfg
+	}
+	out := *cfg
+	out.Service.LogPath = source.logPath
+	out.Service.LogLevel = source.logLevel
+	return &out
 }
 
 // configFileDiffers reports whether the config file on disk is not what
@@ -729,6 +772,8 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		if err := v.Unmarshal(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("Failed to unmarshal default config: %v", err)
 		}
+		// The mobile viper has no defaults, so the config can have no listener.
+		setListenerDefaultValue(&cfg)
 		_, _ = tryUpdateListenerConfig(&cfg, func() {}, true)
 		addExtraSplitDnsRule(&cfg)
 		if err := writeConfigFile(&cfg); err != nil {
@@ -1464,9 +1509,18 @@ func processListenFlag() {
 	mainLog.Load().Debug().Str("host", host).Int("port", port).Msg("Listen flag processed successfully")
 }
 
+// configLogValues are the log values of the last configuration source,
+// before processLogAndCacheFlags puts the flag values over them.
+type configLogValues struct {
+	logPath, logLevel string
+}
+
+var lastConfigLogValues atomic.Pointer[configLogValues]
+
 // processLogAndCacheFlags processes log and cache related flags
 func processLogAndCacheFlags(v *viper.Viper, cfg *ctrld.Config) {
 	mainLog.Load().Debug().Msg("Processing log and cache flags")
+	lastConfigLogValues.Store(&configLogValues{logPath: cfg.Service.LogPath, logLevel: cfg.Service.LogLevel})
 
 	if logPath != "" {
 		cfg.Service.LogPath = logPath
