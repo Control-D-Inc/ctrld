@@ -795,6 +795,14 @@ func (p *prog) preRun() {
 	p.runningIface = iface
 }
 
+// ownsDeviceDNS reports whether ctrld may change the DNS settings of the
+// device. The iOS app owns them, and an iOS extension runs under launchd, so a
+// check for a service run does not exclude it. Android keeps the earlier
+// behavior.
+func (p *prog) ownsDeviceDNS() bool {
+	return !mobile.IsIOS()
+}
+
 func (p *prog) postRun() {
 	if runningAsService() {
 		if runtime.GOOS == "windows" {
@@ -802,10 +810,7 @@ func (p *prog) postRun() {
 			p.runningOnDomainController = isDC
 			mainLog.Load().Debug().Msgf("running on domain controller: %t, role: %d", p.runningOnDomainController, roleInt)
 		}
-		// The iOS app owns the DNS settings of the device. An iOS extension
-		// runs under launchd, so it also gets here. Android keeps the earlier
-		// behavior.
-		ownsDeviceDNS := !mobile.IsIOS()
+		ownsDeviceDNS := p.ownsDeviceDNS()
 		// A Windows organization can install a GP-owned NRPT catch-all before
 		// starting ctrld. Detect that policy before resetDNS touches adapter DNS;
 		// startDNSIntercept will then prove the rule functionally before adopting it.
@@ -846,13 +851,19 @@ func (p *prog) startAPIConfigReload() {
 // caller reads the globals into fetch, req and dev, because the goroutine can
 // outlive the run, and the next run writes them. The goroutine touches
 // nothing else of the run.
+// fetchGoroutines counts the goroutines of fetchUntilDone. A test waits for
+// them before another test changes a global that they read.
+var fetchGoroutines sync.WaitGroup
+
 func fetchUntilDone(ctx context.Context, fetch resolverConfigFetch, req *controld.ResolverConfigRequest, dev bool) (*controld.ResolverConfig, error) {
 	type answer struct {
 		rc  *controld.ResolverConfig
 		err error
 	}
 	fetched := make(chan answer, 1)
+	fetchGoroutines.Add(1)
 	go func() {
+		defer fetchGoroutines.Done()
 		req.Metadata = ctrld.SystemMetadataRuntime(ctx)
 		rc, err := fetch(ctx, req, dev)
 		fetched <- answer{rc, err}
@@ -1764,6 +1775,9 @@ func (p *prog) setDNS(systemNameservers []string) {
 	defer func() {
 		p.csSetDnsOk = setDnsOK
 	}()
+	if !p.ownsDeviceDNS() {
+		return
+	}
 
 	// Validate and resolve intercept mode: --intercept-mode, then
 	// service.intercept_mode, then the platform default (resolveInterceptMode).
@@ -2118,6 +2132,9 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 // resetDNS performs a DNS reset for all interfaces.
 // In DNS intercept mode, this tears down the WFP/pf filters instead.
 func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
+	if !p.ownsDeviceDNS() {
+		return
+	}
 	// A previous crash can leave a persisted macOS intercept target even when
 	// no live interceptor state exists. Cleanup must run for stop/uninstall and
 	// traditional-mode startup as well as the normal intercept shutdown path.
