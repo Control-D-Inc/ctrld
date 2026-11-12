@@ -176,8 +176,22 @@ func (p *prog) listenerConfig(listenerNum string) (string, *ctrld.ListenerConfig
 	return key, p.cfg.Listener[key]
 }
 
+// clientIDPref returns the client ID preference of the service config. The
+// DNS handler reads it for each query while a reload can replace p.cfg, so the
+// read takes p.mu.
+func (p *prog) clientIDPref() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.Service.ClientIDPref
+}
+
 func (p *prog) serveDNS(listenerNum string) error {
+	// A reload can replace p.cfg while the listeners start, so read the config
+	// that the listeners use under p.mu, once.
+	p.mu.Lock()
 	listenerConfig := p.cfg.Listener[listenerNum]
+	interceptMode := p.cfg.Service.InterceptMode
+	p.mu.Unlock()
 	// make sure ip is allocated
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
 		mainLog.Load().Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: failed to allocate listen ip")
@@ -249,7 +263,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 		}
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 		ci := p.getClientInfo(remoteIP, m)
-		ci.ClientIDPref = p.cfg.Service.ClientIDPref
+		ci.ClientIDPref = p.clientIDPref()
 		stripClientSubnet(m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
 		fmtSrcToDest := fmtRemoteToLocal(listenerKey, ci.Hostname, remoteAddr.String())
@@ -315,7 +329,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 	g, ctx := errgroup.WithContext(context.Background())
 	for _, proto := range []string{"udp", "tcp"} {
 		proto := proto
-		if needLocalIPv6Listener(p.cfg.Service.InterceptMode) {
+		if needLocalIPv6Listener(interceptMode) {
 			g.Go(func() error {
 				s, errCh := runDNSServer(net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)), proto, handler)
 				defer s.Shutdown()
