@@ -66,8 +66,11 @@ const LogLevelNotice = -1
 type StartOptions struct {
 	CdUID          string
 	CustomHostname string
-	HomeDir        string
-	UpstreamProto  string
+	// HomeDir is the folder of ctrld. It must exist, and ctrld must be able
+	// to write to it. ctrld reads config.toml, then ctrld.toml, there, and
+	// writes ctrld.toml when it finds neither.
+	HomeDir       string
+	UpstreamProto string
 	// LogLevel is the level of the ctrld log, the same value as the -v flag of
 	// the CLI. When LogPath is empty, ctrld writes ctrld.log in HomeDir:
 	//
@@ -113,6 +116,12 @@ func NewStartOptions() *StartOptions {
 // message in provision_result.json in HomeDir names the file error. The
 // start fails before the log files open, and each later start fails the
 // same way until the app replaces or deletes the file.
+// With no config file in HomeDir, the start writes a default ctrld.toml
+// there, with one listener, and goes on. If it cannot write that file, or
+// if the listener config is one that ctrld cannot use (no listener, or a
+// key that is not a number), Exit gets a stage=service line with the code
+// UNCLASSIFIED. If ctrld can write to HomeDir, the message in
+// provision_result.json there names the reason.
 func (c *Controller) Start(CdUID string, ProvisionID string, CustomHostname string, HomeDir string, UpstreamProto string, logLevel int, logPath string) {
 	c.start(cli.AppConfig{
 		CdUID:          CdUID,

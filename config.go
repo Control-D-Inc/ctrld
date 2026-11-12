@@ -170,7 +170,7 @@ func InitConfig(v *viper.Viper, name string) {
 // Config represents ctrld supported configuration.
 type Config struct {
 	Service  ServiceConfig              `mapstructure:"service" toml:"service,omitempty"`
-	Listener map[string]*ListenerConfig `mapstructure:"listener" toml:"listener" validate:"min=1,dive"`
+	Listener map[string]*ListenerConfig `mapstructure:"listener" toml:"listener" validate:"min=1,dive,keys,listenerkey,endkeys,required"`
 	Network  map[string]*NetworkConfig  `mapstructure:"network" toml:"network" validate:"min=1,dive"`
 	Upstream map[string]*UpstreamConfig `mapstructure:"upstream" toml:"upstream" validate:"min=1,dive"`
 }
@@ -1167,6 +1167,7 @@ func ValidateConfig(validate *validator.Validate, cfg *Config) error {
 	_ = validate.RegisterValidation("dnsrcode", validateDnsRcode)
 	_ = validate.RegisterValidation("ipstack", validateIpStack)
 	_ = validate.RegisterValidation("iporempty", validateIpOrEmpty)
+	_ = validate.RegisterValidation("listenerkey", validateListenerKey)
 	validate.RegisterStructValidation(upstreamConfigStructLevelValidation, UpstreamConfig{})
 	return validate.Struct(cfg)
 }
@@ -1182,6 +1183,21 @@ func validateIpStack(fl validator.FieldLevel) bool {
 	default:
 		return false
 	}
+}
+
+func validateListenerKey(fl validator.FieldLevel) bool {
+	return IsListenerKey(fl.Field().String())
+}
+
+// ListenerKeyRule says which keys IsListenerKey accepts, for error messages.
+const ListenerKeyRule = "a number such as 0 or 1, with no sign or leading zero"
+
+// IsListenerKey reports whether key can name a listener: a decimal number
+// with no sign and no leading zero. Code finds a listener by the number that
+// it parses from the key, so for a key such as "01" or "main" it finds none.
+func IsListenerKey(key string) bool {
+	n, err := strconv.Atoi(key)
+	return err == nil && n >= 0 && strconv.Itoa(n) == key
 }
 
 func validateIpOrEmpty(fl validator.FieldLevel) bool {

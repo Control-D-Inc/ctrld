@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net"
 	"os"
@@ -29,12 +30,12 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 	const childEnv = "CTRLD_TEST_MOBILE_PROVISION_FAILURE"
 	mode := os.Getenv(childEnv)
 	if mode == "" {
-		for _, mode := range []string{"token-shape", "listener-bind", "network-down", "network-stop", "proto-then-valid", "stale", "api-error-secret", "no-host-tools", "token-exchange-redacts", "start-nameservers-logged", "console-level", "service-reset", "no-config-file", "file-carry", "old-log-file", "bad-config-file", "bad-legacy-config-file"} {
+		for _, mode := range []string{"token-shape", "listener-bind", "network-down", "network-stop", "proto-then-valid", "stale", "api-error-secret", "no-host-tools", "token-exchange-redacts", "start-nameservers-logged", "console-level", "service-reset", "no-config-file", "file-carry", "old-log-file", "bad-config-file", "bad-legacy-config-file", "cd-no-listener", "app-config-file", "missing-home-dir"} {
 			t.Run(mode, func(t *testing.T) {
 				if mode == "no-host-tools" && runtime.GOOS != "darwin" {
 					t.Skip("the fake tools are the tools of macOS and iOS")
 				}
-				if (mode == "bad-config-file" || mode == "bad-legacy-config-file") && runtime.GOOS == "windows" {
+				if configSearchModes[mode] && runtime.GOOS == "windows" {
 					t.Skip("on Windows, ctrld looks for the config file next to its binary, not in HomeDir")
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -64,7 +65,9 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 	var exits []string
 	callback := AppCallback{Exit: func(err string) { exits = append(exits, err) }}
 	appConfig := func(c AppConfig) *AppConfig {
-		c.HomeDir = dir
+		if c.HomeDir == "" {
+			c.HomeDir = dir
+		}
 		c.LogPath = filepath.Join(dir, "ctrld.log")
 		if c.UpstreamProto == "" {
 			c.UpstreamProto = "doh"
@@ -82,6 +85,25 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 		r := newProvisionResult(code, "", nil)
 		require.Equal(t, []string{r.failureLine()}, exits)
 		exits = nil
+	}
+	// On mobile an API failure names the api stage.
+	const apiExitLine = "provisioning failed: stage=api code=API_UNREACHABLE (exit 30)"
+	wantAPIExit := func() {
+		t.Helper()
+		require.Equal(t, []string{apiExitLine}, exits)
+		exits = nil
+	}
+	// fetchCustomConfig is a processCDFlagsFn that answers with a custom
+	// config and then fails. Like processCDFlags, it puts that config into
+	// a new viper, which names no file. It records the config file that the
+	// start read, and the file that a write of the answer goes to.
+	var readFile, writeTarget string
+	fetchCustomConfig := func(context.Context, *ctrld.Config) (*controld.ResolverConfig, error) {
+		fetches++
+		readFile = v.ConfigFileUsed()
+		require.NoError(t, readBase64Config(base64.StdEncoding.EncodeToString([]byte("[listener.0]\n"))))
+		writeTarget = configFileForWrite()
+		return nil, errors.New("preflight rejected")
 	}
 
 	switch mode {
@@ -118,13 +140,13 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 		// The next start must reach the API instead of replaying that failure.
 		runOnce(AppConfig{CdUID: "testuid"})
 		require.Equal(t, 1, fetches)
-		require.Equal(t, []string{"provisioning failed: stage=api code=API_UNREACHABLE (exit 30)"}, exits)
+		wantAPIExit()
 	case "stale":
 		// A failure recorded outside any run must not abort the next one.
 		pendingProvisionFailure.Store(newProvisionResult(provisionCodeUnclassified, "stale", nil))
 		runOnce(AppConfig{CdUID: "testuid"})
 		require.Equal(t, 1, fetches)
-		require.Equal(t, []string{"provisioning failed: stage=api code=API_UNREACHABLE (exit 30)"}, exits)
+		wantAPIExit()
 	case "api-error-secret":
 		// The API can echo the request back, so its error text reaches the
 		// app only as a code.
@@ -154,7 +176,7 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 		}
 		runOnce(AppConfig{CdUID: "testuid"})
 		require.Equal(t, 1, fetches)
-		require.Equal(t, []string{"provisioning failed: stage=api code=API_UNREACHABLE (exit 30)"}, exits)
+		wantAPIExit()
 		requireNoHostTools(t, marker)
 	case "token-exchange-redacts":
 		// On iOS the UID exists only after the token exchange, so the
@@ -237,24 +259,116 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 		require.NoError(t, err)
 		require.NotContains(t, string(internalLog), appLog)
 	case "no-config-file":
-		// A start can find no configuration file, for example after the
-		// app removed it. Its new viper has no defaults, so the default
-		// file it writes must still get a listener. The default file name
-		// is relative to the working directory.
-		t.Chdir(dir)
+		// A fresh install of an app that makes no config file. The mobile
+		// viper has no defaults, and the working directory of an app is not
+		// writable. So the start must write the default config, with a
+		// listener, into HomeDir, and go on to the API.
+		interceptMode = "off"
 		configPath = ""
-		require.NoError(t, os.Remove(filepath.Join(dir, "ctrld.toml")))
-		// The start then fails at the API, or at the listener when the host
-		// holds its address. Either way it reports one failure, no panic.
-		for range 2 {
-			runOnce(AppConfig{CdUID: "testuid"})
-			require.Len(t, exits, 1)
-			exits = nil
-			written, err := os.ReadFile(filepath.Join(dir, "ctrld.toml"))
+		homeConfig := filepath.Join(dir, "ctrld.toml")
+		workDir := readOnlyWorkDir(t)
+		useFreeMobileListenerPort(t)
+		exchanges := 0
+		fetchResolverUIDFn = func(context.Context, *controld.UtilityOrgRequest, string, bool) (*controld.ResolverConfig, error) {
+			exchanges++
+			return &controld.ResolverConfig{UID: "testuid"}, nil
+		}
+		processCDFlagsFn = fetchCustomConfig
+		requireFreshInstallFile := func() {
+			t.Helper()
+			written, err := os.ReadFile(homeConfig)
 			require.NoError(t, err)
 			require.Contains(t, string(written), "[listener.0]")
-			require.NoError(t, os.Remove(filepath.Join(dir, "ctrld.toml")))
+			entries, err := os.ReadDir(workDir)
+			require.NoError(t, err)
+			require.Empty(t, entries)
 		}
+
+		// The token start goes first, because a Control D start leaves its
+		// UID for the next start. Before it knows the UID, its default write
+		// probes port 53 for the listener, and no seam moves that port. A
+		// host that holds port 53, or keeps it for root, stops the start
+		// there, before the API.
+		require.NoError(t, os.Remove(homeConfig))
+		runOnce(AppConfig{ProvisionID: "org-v1-provisiontoken"})
+		require.Len(t, exits, 1)
+		if exits[0] == apiExitLine {
+			exits = nil
+			require.Equal(t, 1, exchanges)
+			require.Equal(t, 1, fetches)
+			require.Equal(t, homeConfig, writeTarget, "the config from the API must go to the same file")
+		} else {
+			wantExit(provisionCodeListenerBindFailed)
+			require.Zero(t, exchanges)
+		}
+		requireFreshInstallFile()
+
+		// The fixed address of a Control D start is on a free port here, so
+		// this start reaches the API on any host.
+		require.NoError(t, os.Remove(homeConfig))
+		fetches, writeTarget = 0, ""
+		runOnce(AppConfig{CdUID: "testuid"})
+		require.Equal(t, 1, fetches)
+		wantAPIExit()
+		require.Equal(t, homeConfig, writeTarget, "the config from the API must go to the same file")
+		requireFreshInstallFile()
+
+		// The next start reads that file.
+		fetches = 0
+		runOnce(AppConfig{CdUID: "testuid"})
+		require.Equal(t, 1, fetches)
+		wantAPIExit()
+		require.Equal(t, homeConfig, readFile)
+		require.Equal(t, homeConfig, writeTarget)
+		requireFreshInstallFile()
+	case "app-config-file":
+		// The consumer app makes an empty config.toml in HomeDir before each
+		// start. The start reads it, writes to it, and makes no ctrld.toml.
+		interceptMode = "off"
+		configPath = ""
+		require.NoError(t, os.Remove(filepath.Join(dir, "ctrld.toml")))
+		appConfigFile := filepath.Join(dir, "config.toml")
+		require.NoError(t, os.WriteFile(appConfigFile, nil, 0600))
+		workDir := readOnlyWorkDir(t)
+		processCDFlagsFn = fetchCustomConfig
+		runOnce(AppConfig{CdUID: "testuid"})
+		require.Equal(t, 1, fetches)
+		wantAPIExit()
+		require.Equal(t, appConfigFile, readFile)
+		require.Equal(t, appConfigFile, writeTarget)
+		require.NoFileExists(t, filepath.Join(dir, "ctrld.toml"))
+		entries, err := os.ReadDir(workDir)
+		require.NoError(t, err)
+		require.Empty(t, entries)
+	case "missing-home-dir":
+		// The app can pass a HomeDir that it could not make. The start then
+		// cannot write the default config there. It must fail with a code
+		// before the API, and the app must keep running.
+		interceptMode = "off"
+		configPath = ""
+		missing := filepath.Join(dir, "missing")
+		workDir := readOnlyWorkDir(t)
+		useFreeMobileListenerPort(t)
+		exchanges := 0
+		fetchResolverUIDFn = func(context.Context, *controld.UtilityOrgRequest, string, bool) (*controld.ResolverConfig, error) {
+			exchanges++
+			return nil, errors.New("exchange rejected")
+		}
+		// The token start goes first, because a Control D start leaves its
+		// UID for the next start. Its probe of port 53 can fail first on a
+		// host that holds that port. The failed write is recorded last, so
+		// the start gets UNCLASSIFIED either way.
+		for _, c := range []AppConfig{{ProvisionID: "org-v1-provisiontoken"}, {CdUID: "testuid"}} {
+			c.HomeDir = missing
+			runOnce(c)
+			wantExit(provisionCodeUnclassified)
+		}
+		require.Zero(t, exchanges)
+		require.Zero(t, fetches)
+		require.NoDirExists(t, missing)
+		entries, err := os.ReadDir(workDir)
+		require.NoError(t, err)
+		require.Empty(t, entries)
 	case "bad-config-file":
 		// The app can end during a write of the config file. A file that is
 		// not TOML must fail the start, and the app must keep running.
@@ -279,9 +393,7 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 		configPath = ""
 		require.NoError(t, os.Remove(filepath.Join(dir, "ctrld.toml")))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"), []byte("[listener.0"), 0600))
-		workDir := t.TempDir()
-		require.NoError(t, os.Chmod(workDir, 0500))
-		t.Chdir(workDir)
+		workDir := readOnlyWorkDir(t)
 		// The token start goes first, because a Control D start leaves its
 		// UID for the next start.
 		for _, c := range []AppConfig{{ProvisionID: "org-v1-provisiontoken"}, {CdUID: "testuid"}} {
@@ -295,9 +407,46 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 		for _, d := range []string{dir, workDir} {
 			require.NoFileExists(t, filepath.Join(d, "ctrld.toml"))
 		}
+	case "cd-no-listener":
+		interceptMode = "off"
+		require.NoError(t, os.Remove(configPath))
+		processCDFlagsFn = func(_ context.Context, c *ctrld.Config) (*controld.ResolverConfig, error) {
+			fetches++
+			*c = ctrld.Config{
+				Upstream: map[string]*ctrld.UpstreamConfig{"0": {Endpoint: "https://dns.controld.com/testuid", Type: "doh", Timeout: 5000}},
+			}
+			setNetworkDefaultValue(c)
+			return &controld.ResolverConfig{}, nil
+		}
+		runOnce(AppConfig{CdUID: "testuid"})
+		require.Equal(t, 1, fetches)
+		wantExit(provisionCodeUnclassified)
 	default:
 		t.Fatalf("unknown mode %q", mode)
 	}
+}
+
+// configSearchModes are the modes that need ctrld to look for the config
+// file in HomeDir.
+var configSearchModes = map[string]bool{"bad-config-file": true, "bad-legacy-config-file": true, "no-config-file": true, "app-config-file": true, "missing-home-dir": true}
+
+// useFreeMobileListenerPort moves the fixed listener address of a Control D
+// start on mobile to a free port, because a host can hold port 53.
+func useFreeMobileListenerPort(t *testing.T) {
+	port := freeLocalPort(t)
+	old := mobileListenerPort
+	t.Cleanup(func() { mobileListenerPort = old })
+	mobileListenerPort = func() int { return port }
+}
+
+// readOnlyWorkDir makes the working directory a new directory that the test
+// cannot write, as on a device.
+func readOnlyWorkDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0500))
+	t.Chdir(dir)
+	return dir
 }
 
 func freeUDPPort(t *testing.T) int {

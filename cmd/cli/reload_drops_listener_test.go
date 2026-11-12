@@ -247,15 +247,16 @@ func TestKeepMobileListener(t *testing.T) {
 	require.Equal(t, map[string]string{"1": "2"}, p.keepMobileListener(newCfg, logger))
 	require.Equal(t, map[string]*ctrld.ListenerConfig{"2": {IP: "127.0.0.1", Port: 53, Policy: policy("2")}}, newCfg.Listener)
 
-	// Of the keys "01" and "1", the plain number wins, whatever the order of
-	// the map.
+	// A reload rejects a key with a leading zero before this step. If one
+	// gets here, of the keys "01" and "1" the plain number wins, whatever
+	// the order of the map.
 	for range 20 {
 		newCfg = &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"01": {Policy: policy("01")}, "1": {Policy: policy("1")}}}
 		newRun([]string{"0"}, map[string]*ctrld.ListenerConfig{"0": runningAt53()}, nil).keepMobileListener(newCfg, logger)
 		require.Equal(t, "1", newCfg.Listener["1"].Policy.Name)
 	}
 
-	// A key with a leading zero is the first listener, as at a start.
+	// If a key with a leading zero gets here, it is the first listener.
 	newCfg = &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"01": {Policy: policy("01")}, "2": {Policy: policy("2")}}}
 	p = newRun([]string{"0"}, map[string]*ctrld.ListenerConfig{"0": runningAt53()}, nil)
 	require.Equal(t, map[string]string{"0": "01"}, p.keepMobileListener(newCfg, logger))

@@ -610,12 +610,11 @@ func (p *prog) runWait() {
 
 		if newCfg == nil {
 			newCfg = &ctrld.Config{}
-			confFile := v.ConfigFileUsed()
+			// After a start that wrote the default config, viper names no
+			// file, so only configFileForWrite finds it.
+			confFile := configFileForWrite()
 			v := viper.NewWithOptions(viper.KeyDelimiter("::"))
 			ctrld.InitConfig(v, "ctrld")
-			if configPath != "" {
-				confFile = configPath
-			}
 			v.SetConfigFile(confFile)
 			if err := v.ReadInConfig(); err != nil {
 				p.Error().Err(err).Msg("Could not read new config")

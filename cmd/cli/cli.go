@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -20,6 +21,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,9 +63,13 @@ var (
 	commit  = "none"
 )
 
+// defaultConfigFileName is the name of the config file that a start writes
+// when it finds none.
+const defaultConfigFileName = "ctrld.toml"
+
 var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
-	defaultConfigFile    = "ctrld.toml"
+	defaultConfigFile    = defaultConfigFileName
 	rootCertPool         *x509.CertPool
 	errSelfCheckNoAnswer = errors.New("no response from ctrld listener. You can try to re-launch with flag --skip_self_checks")
 	// Store version once during init to avoid repeated calls to curVersion()
@@ -770,7 +776,14 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		_, _ = tryUpdateListenerConfig(&cfg, func() {}, true)
 		addExtraSplitDnsRule(&cfg)
 		if err := writeConfigFile(&cfg); err != nil {
-			mainLog.Load().Fatal().Msgf("Failed to write default config file: %v", err)
+			msg := fmt.Sprintf("Failed to write default config file: %v", err)
+			// On mobile, the process is the app, so a failed write must fail
+			// the start, not end the process.
+			if isMobile() {
+				failRunUnclassified(mainLog.Load().Error().Err(err), msg, nil)
+				return false
+			}
+			mainLog.Load().Fatal().Msg(msg)
 		} else {
 			fp, err := filepath.Abs(defaultConfigFile)
 			if err != nil {
@@ -1385,6 +1398,9 @@ func processCDFlagsWithMetadata(
 		// nil on every path that reaches here, so logging it said nothing about why the
 		// custom config was rejected.
 		mainLog.Load().Warn().Err(cfgErr).Msg("Disregarding invalid custom config")
+		// The generated config below sets only some sections, so the others
+		// would keep the values of the rejected config.
+		*cfg = ctrld.Config{}
 	}
 
 	bootstrapIP := func(endpoint string) string {
@@ -1983,6 +1999,8 @@ func fieldErrorMsg(fe validator.FieldError) string {
 	case "ipstack":
 		ipStacks := []string{ctrld.IpStackV4, ctrld.IpStackV6, ctrld.IpStackSplit, ctrld.IpStackBoth}
 		return fmt.Sprintf("must be one of: %q", strings.Join(ipStacks, " "))
+	case "listenerkey":
+		return fmt.Sprintf("listener key must be %s: %q", ctrld.ListenerKeyRule, fe.Value())
 	case "iporempty":
 		return fmt.Sprintf("invalid IP format: %s", fe.Value())
 	case "file":
@@ -2014,8 +2032,9 @@ type listenerConfigCheck struct {
 	Port bool
 }
 
-// mobileListenerPort returns hardcoded port for mobile platforms.
-func mobileListenerPort() int {
+// mobileListenerPort returns hardcoded port for mobile platforms. Tests
+// replace it, because a host can hold port 53.
+var mobileListenerPort = func() int {
 	if isAndroid() {
 		return 5354
 	}
@@ -2150,10 +2169,33 @@ func listenerInterceptMode(cfg *ctrld.Config) string {
 	return mode
 }
 
+// unusableListenerConfig returns why the listener code cannot use the
+// listeners of cfg, or nil. validateConfig rejects the same config, but a
+// start runs it only after the listeners are set up.
+func unusableListenerConfig(cfg *ctrld.Config) error {
+	if len(cfg.Listener) == 0 {
+		return errors.New("no listener is configured")
+	}
+	for _, key := range slices.Sorted(maps.Keys(cfg.Listener)) {
+		if !ctrld.IsListenerKey(key) {
+			return fmt.Errorf("listener key %q must be %s", key, ctrld.ListenerKeyRule)
+		}
+		if cfg.Listener[key] == nil {
+			return fmt.Errorf("listener.%s has no settings", key)
+		}
+	}
+	return nil
+}
+
 // tryUpdateListenerConfig tries updating listener config with a working one.
 // If fatal is true, and there's listen address conflicted, the function do
-// fatal error.
+// fatal error. A listener config that it cannot use fails the start for any
+// value of fatal.
 func tryUpdateListenerConfig(cfg *ctrld.Config, notifyFunc func(), fatal bool) (updated, ok bool) {
+	if err := unusableListenerConfig(cfg); err != nil {
+		failRunUnclassified(mainLog.Load().Error(), fmt.Sprintf("invalid listener config: %v", err), notifyFunc)
+		return false, false
+	}
 	// In intercept mode (macOS), pf redirects all port-53 traffic to ctrld's listener,
 	// so ctrld can safely listen on a non-standard port. Use a simple two-attempt flow:
 	// 1. If config has explicit non-default IP:port, use exactly that

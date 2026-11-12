@@ -118,6 +118,12 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid upstream missing endpoint", invalidUpstreamMissingEndpoind(t), true},
 		{"invalid listener ip", invalidListenerIP(t), true},
 		{"invalid listener port", invalidListenerPort(t), true},
+		{"listener key with a leading zero", configWithListenerKey(t, "01"), true},
+		{"listener key that is a name", configWithListenerKey(t, "main"), true},
+		{"listener key with a sign", configWithListenerKey(t, "+1"), true},
+		{"negative listener key", configWithListenerKey(t, "-1"), true},
+		{"listener key with two digits", configWithListenerKey(t, "10"), false},
+		{"listener with no settings", configWithNilListener(t), true},
 		{"os upstream", configWithOsUpstream(t), false},
 		{"invalid rules", configWithInvalidRules(t), true},
 		{"invalid dns rcodes", configWithInvalidRcodes(t), true},
@@ -321,6 +327,19 @@ func invalidUpstreamMissingEndpoind(t *testing.T) *ctrld.Config {
 func invalidListenerIP(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Listener["0"].IP = "invalid ip"
+	return cfg
+}
+
+// configWithListenerKey moves the default listener to the given key.
+func configWithListenerKey(t *testing.T, key string) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Listener = map[string]*ctrld.ListenerConfig{key: cfg.Listener["0"]}
+	return cfg
+}
+
+func configWithNilListener(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Listener["0"] = nil
 	return cfg
 }
 

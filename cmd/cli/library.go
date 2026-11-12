@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -60,6 +61,9 @@ var setMemoryLimit = debug.SetMemoryLimit
 func applyAppConfig(appConfig *AppConfig) {
 	noConfigStart = false
 	homedir = appConfig.HomeDir
+	// The working directory of an app is not writable. HomeDir is, and the
+	// next start looks for the file there.
+	defaultConfigFile = filepath.Join(appConfig.HomeDir, defaultConfigFileName)
 	verbose = appConfig.Verbose
 	cdOrg = appConfig.ProvisionID
 	customHostname = appConfig.CustomHostname

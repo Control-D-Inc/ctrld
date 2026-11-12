@@ -598,3 +598,53 @@ func TestTryUpdateListenerConfigMobileCdModeBindFailure(t *testing.T) {
 		t.Fatalf("recorded failure = %+v, want %s", r, provisionCodeListenerAddrUnavail)
 	}
 }
+
+// A listener config that the listener code cannot read must fail the start
+// with a code, on every platform. Before, a key such as "01" or "main", or no
+// listener at all, crashed the process, and on mobile that is the app.
+func TestTryUpdateListenerConfigRejectsUnusableListener(t *testing.T) {
+	tests := []struct {
+		name      string
+		mobile    bool
+		cdUID     string
+		listeners map[string]*ctrld.ListenerConfig
+	}{
+		{"leading zero on mobile", true, "", map[string]*ctrld.ListenerConfig{"01": {IP: "127.0.0.1", Port: 5399}}},
+		{"leading zero on mobile in Control D mode", true, "testuid", map[string]*ctrld.ListenerConfig{"01": {IP: "127.0.0.1", Port: 5399}}},
+		{"leading zero on desktop", false, "", map[string]*ctrld.ListenerConfig{"01": {IP: "127.0.0.1", Port: 5399}}},
+		{"name on mobile", true, "", map[string]*ctrld.ListenerConfig{"main": {IP: "127.0.0.1", Port: 5399}}},
+		{"name next to a number on desktop", false, "", map[string]*ctrld.ListenerConfig{"0": {IP: "127.0.0.1", Port: 5399}, "main": {IP: "127.0.0.1", Port: 5400}}},
+		{"no listener on mobile", true, "", nil},
+		{"no listener on desktop", false, "", nil},
+		{"no settings on mobile", true, "", map[string]*ctrld.ListenerConfig{"0": nil}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exitCode, _ := stubProvisionGlobals(t)
+			oldIsMobile, oldIntercept, oldNextdns := isMobile, interceptMode, nextdns
+			t.Cleanup(func() {
+				isMobile, interceptMode, nextdns = oldIsMobile, oldIntercept, oldNextdns
+				pendingProvisionFailure.Store(nil)
+			})
+			isMobile = func() bool { return tc.mobile }
+			cdUID, nextdns, interceptMode = tc.cdUID, "", "off"
+			cfg := &ctrld.Config{Listener: tc.listeners}
+
+			_, ok := tryUpdateListenerConfig(cfg, nil, true)
+
+			if ok {
+				t.Fatal("tryUpdateListenerConfig ok = true, want false")
+			}
+			if tc.mobile {
+				r := pendingProvisionFailure.Load()
+				if r == nil || r.Code != string(provisionCodeUnclassified) {
+					t.Fatalf("recorded failure = %+v, want %s", r, provisionCodeUnclassified)
+				}
+				return
+			}
+			if want := provisionExitCodeForCode[provisionCodeUnclassified]; *exitCode != want {
+				t.Fatalf("exit code = %d, want %d", *exitCode, want)
+			}
+		})
+	}
+}

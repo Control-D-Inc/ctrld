@@ -13,11 +13,13 @@ func stubAppConfigGlobals(t *testing.T) *[]int64 {
 	t.Helper()
 	oldDev, oldLimit := cdDev, setMemoryLimit
 	oldUID, oldOrg, oldHost, oldHome, oldProto, oldVerbose, oldLogPath := cdUID, cdOrg, customHostname, homedir, cdUpstreamProto, verbose, logPath
+	oldConfigFile := defaultConfigFile
 	var limits []int64
 	setMemoryLimit = func(limit int64) int64 { limits = append(limits, limit); return 0 }
 	t.Cleanup(func() {
 		cdDev, setMemoryLimit = oldDev, oldLimit
 		cdUID, cdOrg, customHostname, homedir, cdUpstreamProto, verbose, logPath = oldUID, oldOrg, oldHost, oldHome, oldProto, oldVerbose, oldLogPath
+		defaultConfigFile = oldConfigFile
 		ctrld.SetAppNameservers(context.Background(), nil)
 		storeLogSecrets()
 	})
