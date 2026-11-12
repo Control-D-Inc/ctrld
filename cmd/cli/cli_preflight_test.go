@@ -346,6 +346,10 @@ func TestPermanentAPIRejectionNarrowsToClientErrors(t *testing.T) {
 
 		// Not an API answer at all: the incident's denied socket reaches Fatal.
 		{"network failure", retryableNetworkErr(), false},
+
+		// A 4xx whose body is not a JSON error did not come from the API: a captive
+		// portal can answer 403 with its own page. Only the status is known.
+		{"non-JSON 403 page", &controld.HTTPStatusError{StatusCode: http.StatusForbidden, Err: errors.New("invalid character '<'")}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

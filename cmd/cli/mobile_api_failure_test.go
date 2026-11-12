@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,6 +17,12 @@ func apiErrorResponse(status, code int, message string) *controld.ErrorResponse 
 	r.ErrorField.Code = code
 	r.ErrorField.Message = message
 	return r
+}
+
+// apiStatusError is an answer whose body is not a JSON error, as
+// controld returns it for an HTML page of a proxy or an empty body.
+func apiStatusError(status int, decodeErr error) error {
+	return fmt.Errorf("postUtilityAPI: %w", &controld.HTTPStatusError{StatusCode: status, Err: decodeErr})
 }
 
 func TestMobileAPIFailureLine(t *testing.T) {
@@ -32,6 +39,9 @@ func TestMobileAPIFailureLine(t *testing.T) {
 		{"internal server error", apiErrorResponse(http.StatusInternalServerError, 0, "oops"), "provisioning failed: stage=api code=API_UNAVAILABLE (exit 39) http_status=500"},
 		{"maintenance", apiErrorResponse(http.StatusServiceUnavailable, controld.MaintenanceCode, controld.MaintenanceMessage), "provisioning failed: stage=api code=API_MAINTENANCE (exit 37) http_status=503"},
 		{"request timeout", apiErrorResponse(http.StatusRequestTimeout, 0, "timeout"), "provisioning failed: stage=api code=API_UNREACHABLE (exit 30) http_status=408"},
+		{"non-JSON 429", apiStatusError(http.StatusTooManyRequests, errors.New("invalid character '<' looking for beginning of value")), "provisioning failed: stage=api code=API_RATE_LIMITED (exit 38) http_status=429"},
+		{"empty-body 503", apiStatusError(http.StatusServiceUnavailable, io.EOF), "provisioning failed: stage=api code=API_UNAVAILABLE (exit 39) http_status=503"},
+		{"non-JSON 403 of a captive portal", apiStatusError(http.StatusForbidden, errors.New("invalid character '<' looking for beginning of value")), "provisioning failed: stage=api code=API_UNREACHABLE (exit 30) http_status=403"},
 		{"network", fmt.Errorf("postUtilityAPI client.Do: %w", networkErr), "provisioning failed: stage=api code=API_UNREACHABLE (exit 30)"},
 		{"no error", nil, "provisioning failed: stage=api code=UNCLASSIFIED (exit 59)"},
 	}
@@ -53,6 +63,7 @@ func TestMobileAPIFailureLineOmitsSecrets(t *testing.T) {
 		apiErrorResponse(http.StatusNotFound, 0, "resolver "+uid+" not found for "+token),
 		&url.Error{Op: "Post", URL: "https://dns.controld.com/" + uid, Err: errors.New(token)},
 		errors.New("failed to fetch resolver config for " + uid),
+		apiStatusError(http.StatusForbidden, errors.New("page for "+uid+" "+token)),
 	}
 	for _, err := range errs {
 		line := mobileAPIFailureLine(err)

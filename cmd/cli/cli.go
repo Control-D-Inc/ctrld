@@ -1057,11 +1057,7 @@ func mobileAPIFailureLine(err error) string {
 	if !ok {
 		code = provisionCodeUnclassified
 	}
-	var uer *controld.ErrorResponse
-	status := 0
-	if errors.As(err, &uer) {
-		status = uer.StatusCode
-	}
+	status := apiHTTPStatus(err)
 	// On a desktop the service manager retries all of these alike. The app
 	// waits longer for a rate limit than for an API that is down.
 	if code == provisionCodeAPIUnreachable {
@@ -1077,6 +1073,21 @@ func mobileAPIFailureLine(err error) string {
 		return r.failureLine()
 	}
 	return fmt.Sprintf("%s http_status=%d", r.failureLine(), status)
+}
+
+// apiHTTPStatus returns the HTTP status of the API answer in err, or 0 when no
+// answer came. An answer whose body does not decode, such as a proxy page, still
+// has a status.
+func apiHTTPStatus(err error) int {
+	var uer *controld.ErrorResponse
+	if errors.As(err, &uer) {
+		return uer.StatusCode
+	}
+	var statusErr *controld.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode
+	}
+	return 0
 }
 
 // tokenFailureCodeForReason maps error.metadata.reason on a provisioning-token

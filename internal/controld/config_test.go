@@ -2,6 +2,8 @@ package controld
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -89,11 +91,55 @@ func TestAPIErrorRecordsHTTPStatus(t *testing.T) {
 			}
 		})
 	}
+}
 
-	t.Run("an undecodable body is reported as a decode failure", func(t *testing.T) {
-		d := json.NewDecoder(strings.NewReader("<html>502 Bad Gateway</html>"))
-		if _, err := apiErrorFromResponse(http.StatusBadGateway, d); err == nil {
-			t.Error("expected a decode error for a non-JSON body")
+// TestAPIErrorKeepsHTTPStatusOfUndecodableBody covers an answer that did not
+// come from the API itself: an HTML page of an edge proxy, or an empty body.
+// The status must survive, so that the mobile app can back off on a 429 or a
+// 5xx. The error must not be an *ErrorResponse, so that the desktop never
+// reads such an answer as a permanent rejection.
+func TestAPIErrorKeepsHTTPStatusOfUndecodableBody(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+	}{
+		{"html rate limit", http.StatusTooManyRequests, "<html>Too Many Requests</html>"},
+		{"empty service unavailable", http.StatusServiceUnavailable, ""},
+		{"html bad gateway", http.StatusBadGateway, "<html>502 Bad Gateway</html>"},
+		{"captive portal page", http.StatusForbidden, "<html>Sign in to Wi-Fi</html>"},
+		{"json that is not an object", http.StatusInternalServerError, `["error"]`},
+		{"json string", http.StatusForbidden, `"Forbidden"`},
+		{"truncated json", http.StatusBadGateway, `{"error":{"message":"x"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := json.NewDecoder(strings.NewReader(tc.body))
+			errResp, err := apiErrorFromResponse(tc.statusCode, d)
+			if errResp != nil {
+				t.Fatalf("errResp = %+v, want nil for a body that does not decode", errResp)
+			}
+			var statusErr *HTTPStatusError
+			if !errors.As(err, &statusErr) {
+				t.Fatalf("err = %v (%T), want an *HTTPStatusError", err, err)
+			}
+			if statusErr.StatusCode != tc.statusCode {
+				t.Errorf("StatusCode = %d, want %d", statusErr.StatusCode, tc.statusCode)
+			}
+			if errors.Unwrap(err) == nil {
+				t.Error("the decode error must stay reachable through Unwrap")
+			}
+			var uer *ErrorResponse
+			if errors.As(err, &uer) {
+				t.Error("an undecodable body must not become an *ErrorResponse")
+			}
+		})
+	}
+
+	t.Run("an empty body unwraps to io.EOF", func(t *testing.T) {
+		_, err := apiErrorFromResponse(http.StatusServiceUnavailable, json.NewDecoder(strings.NewReader("")))
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("err = %v, want it to wrap io.EOF", err)
 		}
 	})
 }
