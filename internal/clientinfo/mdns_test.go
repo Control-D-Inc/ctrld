@@ -1,8 +1,13 @@
 package clientinfo
 
 import (
+	"errors"
+	"net"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Control-D-Inc/ctrld"
 )
@@ -25,5 +30,131 @@ func Test_mdns_storeDataFromAvahiBrowseOutput(t *testing.T) {
 	hostname := val.(string)
 	if hostname != wantHostname {
 		t.Fatalf("unexpected hostname, want: %q, got: %q", wantHostname, hostname)
+	}
+}
+
+type fakeMdnsConn struct {
+	err    error
+	writes int
+}
+
+func (c *fakeMdnsConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	c.writes++
+	if c.err != nil {
+		return 0, c.err
+	}
+	return len(b), nil
+}
+
+func (c *fakeMdnsConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *fakeMdnsConn) Close() error                     { return nil }
+
+func sendtoErr(errno syscall.Errno) error {
+	return &net.OpError{Op: "write", Net: "udp6", Addr: mdnsV6Addr, Err: os.NewSyscallError("sendto", errno)}
+}
+
+func Test_mdns_probe(t *testing.T) {
+	eacces := sendtoErr(syscall.EACCES)
+	transient := sendtoErr(syscall.ENOBUFS)
+
+	tests := []struct {
+		name       string
+		conns      []*fakeMdnsConn
+		wantErr    error
+		wantActive []int // indexes into conns
+	}{
+		{"no sockets", nil, nil, nil},
+		{"all sent", []*fakeMdnsConn{{}, {}}, nil, []int{0, 1}},
+		// Bridge ports with IPv6 disabled fail with EACCES; the bridge itself sends.
+		{"one sent, others permanent", []*fakeMdnsConn{{err: eacces}, {}, {err: eacces}}, nil, []int{1}},
+		{"one sent, other transient", []*fakeMdnsConn{{err: transient}, {}}, nil, []int{0, 1}},
+		{"all permanent", []*fakeMdnsConn{{err: eacces}, {err: eacces}}, eacces, nil},
+		{"permanent and transient", []*fakeMdnsConn{{err: eacces}, {err: transient}}, transient, []int{1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conns := make([]mdnsConn, len(tc.conns))
+			for i, c := range tc.conns {
+				conns[i] = c
+			}
+			active, err := (&mdns{logger: ctrld.NopLogger}).probe(conns, mdnsV6Addr)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("unexpected error, want: %v, got: %v", tc.wantErr, err)
+			}
+			if len(active) != len(tc.wantActive) {
+				t.Fatalf("unexpected active sockets, want: %d, got: %d", len(tc.wantActive), len(active))
+			}
+			for i, idx := range tc.wantActive {
+				if active[i] != mdnsConn(tc.conns[idx]) {
+					t.Fatalf("active socket %d: want conns[%d]", i, idx)
+				}
+			}
+			for i, c := range tc.conns {
+				if c.writes != 1 {
+					t.Fatalf("conns[%d]: want 1 write, got %d", i, c.writes)
+				}
+			}
+		})
+	}
+}
+
+func Test_mdns_probeLoop_stopsOnPermanentErrors(t *testing.T) {
+	bad := &fakeMdnsConn{err: sendtoErr(syscall.EACCES)}
+	quitCh := make(chan struct{})
+	close(quitCh)
+	done := make(chan struct{})
+	go func() {
+		(&mdns{logger: ctrld.NopLogger}).probeLoop([]mdnsConn{bad}, mdnsV6Addr, quitCh)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probeLoop kept retrying a permanent EACCES error")
+	}
+	if bad.writes != 1 {
+		t.Fatalf("want 1 write, got %d", bad.writes)
+	}
+}
+
+func Test_shouldStopProbing(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.ENETUNREACH, syscall.EINVAL, syscall.EPERM, syscall.EACCES} {
+		if !shouldStopProbing(sendtoErr(errno)) {
+			t.Errorf("%v: want permanent", errno)
+		}
+	}
+	for _, err := range []error{nil, sendtoErr(syscall.ENOBUFS), errors.New("other")} {
+		if shouldStopProbing(err) {
+			t.Errorf("%v: want not permanent", err)
+		}
+	}
+}
+
+func Test_hasIPv6Addr(t *testing.T) {
+	ipNet := func(s string) net.Addr {
+		_, n, err := net.ParseCIDR(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	tests := []struct {
+		name  string
+		addrs []net.Addr
+		want  bool
+	}{
+		{"none", nil, false},
+		{"ipv4 only", []net.Addr{ipNet("192.168.8.1/24")}, false},
+		{"ipv4-mapped only", []net.Addr{&net.IPNet{IP: net.ParseIP("::ffff:192.168.8.1"), Mask: net.CIDRMask(128, 128)}}, false},
+		{"link-local", []net.Addr{ipNet("192.168.8.1/24"), ipNet("fe80::1/64")}, true},
+		{"global", []net.Addr{ipNet("2001:db8::1/64")}, true},
+		{"non-IPNet", []net.Addr{&net.IPAddr{IP: net.ParseIP("fe80::1")}}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasIPv6Addr(tc.addrs); got != tc.want {
+				t.Fatalf("want: %v, got: %v", tc.want, got)
+			}
+		})
 	}
 }
