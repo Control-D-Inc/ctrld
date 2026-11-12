@@ -164,13 +164,16 @@ func (p *prog) cachedResponse(req *dns.Msg, upstream string, dns64Prefix netip.P
 	return nil, stale, false, false, false
 }
 
-// listenerConfig returns the config of a listener as the handler of its DNS
-// server reads it for each query. A reload replaces p.cfg under p.mu while the
-// listener keeps serving, so the read takes p.mu too.
-func (p *prog) listenerConfig(listenerNum string) *ctrld.ListenerConfig {
+// listenerConfig returns the key and the config of the listener that the DNS
+// server of listenerNum serves, as its handler reads them for each query. A
+// reload replaces p.cfg under p.mu while the listener keeps serving, so the
+// read takes p.mu too. On mobile, a reload can give the server the listener
+// of another key, and the key selects the default upstream.
+func (p *prog) listenerConfig(listenerNum string) (string, *ctrld.ListenerConfig) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.cfg.Listener[listenerNum]
+	key := configKey(listenerNum, p.servedAs)
+	return key, p.cfg.Listener[key]
 }
 
 func (p *prog) serveDNS(listenerNum string) error {
@@ -195,11 +198,11 @@ func (p *prog) serveDNS(listenerNum string) error {
 			_ = w.WriteMsg(answer)
 			return
 		}
-		listenerConfig := p.listenerConfig(listenerNum)
+		listenerKey, listenerConfig := p.listenerConfig(listenerNum)
 		reqId := requestID()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
 		if listenerConfig == nil {
-			ctrld.Log(ctx, p.querySampler.event(sampleClassNoListenerConfig, ""), "no config for [listener.%s], answering SERVFAIL", listenerNum)
+			ctrld.Log(ctx, p.querySampler.event(sampleClassNoListenerConfig, ""), "no config for [listener.%s], answering SERVFAIL", listenerKey)
 			p.health.countQuery()
 			p.health.countFailedQuery()
 			answer := new(dns.Msg)
@@ -249,10 +252,10 @@ func (p *prog) serveDNS(listenerNum string) error {
 		ci.ClientIDPref = p.cfg.Service.ClientIDPref
 		stripClientSubnet(m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
-		fmtSrcToDest := fmtRemoteToLocal(listenerNum, ci.Hostname, remoteAddr.String())
+		fmtSrcToDest := fmtRemoteToLocal(listenerKey, ci.Hostname, remoteAddr.String())
 		t := time.Now()
 		ctrld.Log(ctx, mainLog.Load().Info(), "QUERY: %s: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
-		ur := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, ci.Mac, domain)
+		ur := p.upstreamFor(ctx, listenerKey, listenerConfig, remoteAddr, ci.Mac, domain)
 
 		labelValues := make([]string, 0, len(statsQueriesCountLabels))
 		labelValues = append(labelValues, net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port)))

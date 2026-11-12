@@ -2957,11 +2957,11 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 				}
 			}
 		} else {
-			mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
+			mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", cfgErr)
 		}
 	}
 	if cfgErr != nil {
-		mainLog.Load().Warn().Msg("disregarding invalid custom config")
+		mainLog.Load().Warn().Err(cfgErr).Msg("disregarding invalid custom config")
 	}
 	v = oldV
 	return nil

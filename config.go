@@ -185,19 +185,31 @@ func (c *Config) HasUpstreamSendClientInfo() bool {
 //
 // It panics if Config has no listeners configured.
 func (c *Config) FirstListener() *ListenerConfig {
-	listeners := make([]int, 0, len(c.Listener))
+	key, ok := c.FirstListenerKey()
+	if !ok {
+		panic("missing listener config")
+	}
+	return c.Listener[key]
+}
+
+// FirstListenerKey returns the key that FirstListener reads: the lowest
+// listener number, as strconv.Itoa writes it. ok is false when no key is a
+// number.
+func (c *Config) FirstListenerKey() (key string, ok bool) {
+	first := 0
 	for k := range c.Listener {
 		n, err := strconv.Atoi(k)
 		if err != nil {
 			continue
 		}
-		listeners = append(listeners, n)
+		if !ok || n < first {
+			first, ok = n, true
+		}
 	}
-	if len(listeners) == 0 {
-		panic("missing listener config")
+	if !ok {
+		return "", false
 	}
-	sort.Ints(listeners)
-	return c.Listener[strconv.Itoa(listeners[0])]
+	return strconv.Itoa(first), true
 }
 
 // FirstUpstream returns the first upstream of current config. Upstreams are sorted numerically.

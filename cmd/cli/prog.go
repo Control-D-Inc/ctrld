@@ -386,8 +386,12 @@ type prog struct {
 	// servedListeners holds the keys of the listeners that have a DNS
 	// server. A reload does not start or stop DNS servers.
 	servedListeners []string
-	onStarted       []func()
-	onStopped       []func()
+	// servedAs maps the key of a served listener to the key of the listener
+	// config that its DNS server serves, when a reload on mobile changed it.
+	// It is guarded by mu.
+	servedAs  map[string]string
+	onStarted []func()
+	onStopped []func()
 
 	netMonitorMu     sync.Mutex
 	netMonitor       networkChangeMonitor
@@ -621,7 +625,13 @@ func (p *prog) runWait() {
 			logger.Err(err).Msg("invalid config")
 			continue
 		}
-		if dropped := droppedListeners(p.servedListeners, newCfg); len(dropped) > 0 {
+		// As at a start, the whole config must be valid before the mobile
+		// rule drops all listeners but the first.
+		var servedAs map[string]string
+		if isMobile() && cdUID != "" {
+			servedAs = p.keepMobileListener(newCfg, logger)
+		}
+		if dropped := droppedListeners(p.servedListeners, servedAs, newCfg); len(dropped) > 0 {
 			// The DNS server of a dropped listener keeps running, and its
 			// handler needs the config of that listener.
 			logger.Error().Msgf("reload refused: the new config has no %s, which is running; restart ctrld to apply the new config", strings.Join(dropped, ", "))
@@ -644,9 +654,15 @@ func (p *prog) runWait() {
 		// config, so its refusal ends the pending state.
 		p.maintenanceConfigApplied(*logger)
 
+		// The DNS handlers read the listener configs without a lock once they
+		// are published, so they are complete before that.
+		for _, lc := range newCfg.Listener {
+			lc.Init()
+		}
 		p.mu.Lock()
 		oldUpstreams := p.cfg.Upstream
 		*p.cfg = *newCfg
+		p.servedAs = servedAs
 		// In DNS-intercept mode on macOS, the DNS listener is bound once at startup and is
 		// NOT re-bound on reload (see prog.run: serveDNS is started only when !reload). When
 		// the configured/generated port (e.g. 127.0.0.1:53) is unavailable at startup because
@@ -688,12 +704,50 @@ func (p *prog) reportReloadDone(done reloadDone) {
 	}
 }
 
-// droppedListeners returns, as "[listener.N]", each served listener that the
-// new config does not have.
-func droppedListeners(served []string, newCfg *ctrld.Config) []string {
+// keepMobileListener gives a reload on mobile in Control D mode the listener
+// of a start. A start serves only the first listener of the config, at a
+// fixed address. So the DNS server of the run keeps its address and serves
+// the first listener of newCfg, with the settings and the default upstream
+// of that listener. newCfg loses its other listeners, as at a start. The
+// result maps the served key to the key of that listener. It is nil when the
+// run does not serve one listener or newCfg has no first listener.
+func (p *prog) keepMobileListener(newCfg *ctrld.Config, logger *zerolog.Logger) map[string]string {
+	if len(p.servedListeners) != 1 {
+		return nil
+	}
+	servedKey := p.servedListeners[0]
+	curKey, running := p.listenerConfig(servedKey)
+	if running == nil {
+		return nil
+	}
+	firstKey, ok := newCfg.FirstListenerKey()
+	lc := newCfg.Listener[firstKey]
+	if !ok || lc == nil {
+		return nil
+	}
+	lc.IP, lc.Port = running.IP, running.Port
+	newCfg.Listener = map[string]*ctrld.ListenerConfig{firstKey: lc}
+	if firstKey != curKey {
+		logger.Notice().Msgf("reload: the DNS server of [listener.%s] serves [listener.%s] of the new config from now on, at the same address", servedKey, firstKey)
+	}
+	return map[string]string{servedKey: firstKey}
+}
+
+// configKey returns the key of the listener config that the DNS server of
+// the served listener key serves.
+func configKey(served string, servedAs map[string]string) string {
+	if key, ok := servedAs[served]; ok {
+		return key
+	}
+	return served
+}
+
+// droppedListeners returns, as "[listener.N]", each served listener whose
+// config the new config does not have. servedAs is as in configKey.
+func droppedListeners(served []string, servedAs map[string]string, newCfg *ctrld.Config) []string {
 	var dropped []string
 	for _, key := range served {
-		if newCfg.Listener[key] == nil {
+		if newCfg.Listener[configKey(key, servedAs)] == nil {
 			dropped = append(dropped, "[listener."+key+"]")
 		}
 	}
@@ -771,6 +825,10 @@ func (p *prog) postRun() {
 type resolverConfigFetch = func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error)
 
 var fetchResolverConfigForReload = controld.FetchResolverConfig
+
+// updateCustomLastFailed tells the API that the custom config is invalid.
+// Tests replace it.
+var updateCustomLastFailed = controld.UpdateCustomLastFailed
 
 // startAPIConfigReload starts one program-lifetime worker, not one per reload.
 func (p *prog) startAPIConfigReload() {
@@ -940,8 +998,8 @@ func (p *prog) apiConfigReload() {
 				cfgErr = validateConfig(cfg)
 			}
 			if cfgErr != nil {
-				logger.Warn().Err(err).Msg("skipping invalid custom config")
-				if _, err := controld.UpdateCustomLastFailed(ctx, cdUID, rootCmd.Version, cdDev, true); err != nil {
+				logger.Warn().Err(cfgErr).Msg("skipping invalid custom config")
+				if _, err := updateCustomLastFailed(ctx, cdUID, rootCmd.Version, cdDev, true); err != nil {
 					logger.Error().Err(err).Msg("could not mark custom last update failed")
 				}
 				return
@@ -1218,8 +1276,9 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		p.servedListeners = slices.Sorted(maps.Keys(p.cfg.Listener))
 	}
 	for listenerNum := range p.cfg.Listener {
-		p.cfg.Listener[listenerNum].Init()
+		// A reload initializes its listener configs before it publishes them.
 		if !reload {
+			p.cfg.Listener[listenerNum].Init()
 			p.listenerWg.Add(1)
 			go func(listenerNum string) {
 				defer p.listenerWg.Done()

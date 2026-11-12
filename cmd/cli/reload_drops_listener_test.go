@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 
@@ -31,7 +33,7 @@ func TestReloadThatDropsARunningListener(t *testing.T) {
 	const env = "CTRLD_TEST_RELOAD_DROPS_LISTENER"
 	mode := os.Getenv(env)
 	if mode == "" {
-		for _, mode := range []string{"api-reload", "control-server-reload", "control-server-accepted", "unserved-listener-dropped", "no-listener-config"} {
+		for _, mode := range []string{"api-reload", "control-server-reload", "control-server-accepted", "unserved-listener-dropped", "no-listener-config", "desktop-cd-api-reload"} {
 			t.Run(mode, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
@@ -49,8 +51,16 @@ func TestReloadThatDropsARunningListener(t *testing.T) {
 		}
 	}()
 
-	isMobile = func() bool { return true }
+	// The run starts as mobile, which starts no host tools. Outside Control D
+	// mode a mobile start does not fix the listener address, so these runs
+	// refuse a dropped listener, as desktop does.
+	var mobile atomic.Bool
+	mobile.Store(true)
+	isMobile = func() bool { return mobile.Load() }
 	cdUID = ""
+	if mode == "desktop-cd-api-reload" {
+		cdUID = "uid715"
+	}
 	iface = ""
 	monitorNetworkChangesFn = func(*prog) error { return nil }
 	var postCalls atomic.Int32
@@ -65,6 +75,11 @@ func TestReloadThatDropsARunningListener(t *testing.T) {
 	}
 
 	dir := t.TempDir()
+	// An applied reload in Control D mode records the marker of the managed
+	// config. Its default place is the home dir, which is the package dir.
+	managedConfigMarkerPath = func() string { return filepath.Join(dir, managedConfigMarkerFile) }
+	// A listener that cannot start writes its result file to the home dir too.
+	provisionResultPath = func() string { return filepath.Join(dir, provisionResultFileName) }
 	ports := map[string]int{"0": freeLocalPort(t), "1": freeLocalPort(t)}
 	// configText gives the same service, network, and upstream sections for
 	// each set of listeners, so a reload changes only the listeners.
@@ -146,6 +161,11 @@ func TestReloadThatDropsARunningListener(t *testing.T) {
 		require.Equal(t, http.StatusCreated, controlServerReload(), "the reload dropped a running listener, so only a restart can apply it")
 	case "control-server-accepted":
 		require.Equal(t, http.StatusOK, controlServerReload())
+	case "desktop-cd-api-reload":
+		// On desktop in Control D mode, the address of a listener is not
+		// fixed, so only a restart can apply the config.
+		mobile.Store(false)
+		require.True(t, apiReloadText(configText("1")).restartNeeded, "the reload dropped a running listener, so only a restart can apply it")
 	case "unserved-listener-dropped":
 		// listener.1 gets no DNS server, so a reload may drop it again.
 		require.False(t, apiReloadText(configText("0", "1")).restartNeeded)
@@ -176,7 +196,7 @@ func TestReloadThatDropsARunningListener(t *testing.T) {
 		failedQueries := p.health.failedQueries
 		p.health.mu.Unlock()
 		require.EqualValues(t, querySampleLimit+1, failedQueries, "each SERVFAIL is a failed query for the query health grade")
-	case "api-reload", "control-server-reload":
+	case "api-reload", "control-server-reload", "desktop-cd-api-reload":
 		require.Equal(t, dns.RcodeSuccess, answer.Rcode, "the refused reload must keep the running listener config")
 		require.Contains(t, logOutput.String(), "reload refused: the new config has no [listener.0]")
 	default:
@@ -195,8 +215,70 @@ func TestReloadThatDropsARunningListener(t *testing.T) {
 // gets no DNS server, and a later reload may drop it again.
 func TestDroppedListeners(t *testing.T) {
 	newCfg := &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"1": {}}}
-	require.Empty(t, droppedListeners([]string{"1"}, newCfg))
-	require.Equal(t, []string{"[listener.0]", "[listener.2]"}, droppedListeners([]string{"0", "1", "2"}, newCfg))
+	require.Empty(t, droppedListeners([]string{"1"}, nil, newCfg))
+	require.Equal(t, []string{"[listener.0]", "[listener.2]"}, droppedListeners([]string{"0", "1", "2"}, nil, newCfg))
+	// A DNS server that serves the config of another key needs that key.
+	require.Empty(t, droppedListeners([]string{"0"}, map[string]string{"0": "1"}, newCfg))
+	require.Equal(t, []string{"[listener.1]"}, droppedListeners([]string{"1"}, map[string]string{"1": "0"}, newCfg))
+}
+
+// A start on mobile picks the listener with the lowest number, also when the
+// served key is still in the new config.
+func TestKeepMobileListener(t *testing.T) {
+	logger := zerolog.Nop()
+	runningAt53 := func() *ctrld.ListenerConfig { return &ctrld.ListenerConfig{IP: "127.0.0.1", Port: 53} }
+	newRun := func(served []string, running map[string]*ctrld.ListenerConfig, servedAs map[string]string) *prog {
+		return &prog{cfg: &ctrld.Config{Listener: running}, servedListeners: served, servedAs: servedAs}
+	}
+	policy := func(name string) *ctrld.ListenerPolicyConfig { return &ctrld.ListenerPolicyConfig{Name: name} }
+
+	newCfg := &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{
+		"abc": {Policy: policy("abc")},
+		"2":   {Policy: policy("2")},
+		"1":   {Policy: policy("1")},
+		"0":   {IP: "0.0.0.0", Port: 5353, Policy: policy("0")},
+	}}
+	p := newRun([]string{"1"}, map[string]*ctrld.ListenerConfig{"1": runningAt53()}, nil)
+	require.Equal(t, map[string]string{"1": "0"}, p.keepMobileListener(newCfg, &logger))
+	require.Equal(t, map[string]*ctrld.ListenerConfig{"0": {IP: "127.0.0.1", Port: 53, Policy: policy("0")}}, newCfg.Listener)
+
+	// After an earlier reload, the running config is under the key that the
+	// DNS server serves.
+	newCfg = &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"2": {Policy: policy("2")}}}
+	p = newRun([]string{"1"}, map[string]*ctrld.ListenerConfig{"0": runningAt53()}, map[string]string{"1": "0"})
+	require.Equal(t, map[string]string{"1": "2"}, p.keepMobileListener(newCfg, &logger))
+	require.Equal(t, map[string]*ctrld.ListenerConfig{"2": {IP: "127.0.0.1", Port: 53, Policy: policy("2")}}, newCfg.Listener)
+
+	// FirstListener reads the key "1" for the number 1, so the key "01" never
+	// wins, whatever the order of the map.
+	for range 20 {
+		newCfg = &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"01": {Policy: policy("01")}, "1": {Policy: policy("1")}}}
+		newRun([]string{"0"}, map[string]*ctrld.ListenerConfig{"0": runningAt53()}, nil).keepMobileListener(newCfg, &logger)
+		require.Equal(t, "1", newCfg.Listener["1"].Policy.Name)
+	}
+
+	// In these cases the reload keeps the new listeners, and the check for a
+	// dropped listener decides.
+	tests := []struct {
+		name      string
+		served    []string
+		running   map[string]*ctrld.ListenerConfig
+		listeners map[string]*ctrld.ListenerConfig
+	}{
+		{"two served listeners", []string{"0", "1"}, map[string]*ctrld.ListenerConfig{"0": runningAt53(), "1": runningAt53()}, map[string]*ctrld.ListenerConfig{"2": {}}},
+		{"no running config", []string{"0"}, map[string]*ctrld.ListenerConfig{"1": runningAt53()}, map[string]*ctrld.ListenerConfig{"2": {}}},
+		// FirstListener panics here.
+		{"no listener number", []string{"0"}, map[string]*ctrld.ListenerConfig{"0": runningAt53()}, map[string]*ctrld.ListenerConfig{"abc": {}}},
+		// FirstListener returns nil here, because it reads the key "1".
+		{"only a key with a leading zero", []string{"0"}, map[string]*ctrld.ListenerConfig{"0": runningAt53()}, map[string]*ctrld.ListenerConfig{"01": {}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			newCfg := &ctrld.Config{Listener: maps.Clone(tc.listeners)}
+			require.Nil(t, newRun(tc.served, tc.running, nil).keepMobileListener(newCfg, &logger))
+			require.Equal(t, tc.listeners, newCfg.Listener)
+		})
+	}
 }
 
 // countErrorLines counts the JSON log lines at error level that hold text.
@@ -222,12 +304,24 @@ func parseTestConfig(t *testing.T, text string) ctrld.Config {
 	return parsed
 }
 
+// freeLocalPort returns a port of 127.0.0.1 that is free for UDP and for TCP,
+// because a DNS listener binds both.
 func freeLocalPort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	for range 20 {
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		require.NoError(t, err)
+		port := pc.LocalAddr().(*net.UDPAddr).Port
+		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		_ = pc.Close()
+		if err != nil {
+			continue
+		}
+		_ = ln.Close()
+		return port
+	}
+	t.Fatal("found no port that is free for UDP and for TCP")
+	return 0
 }
 
 func queryListener(t *testing.T, port int) *dns.Msg {
