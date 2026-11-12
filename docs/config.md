@@ -536,6 +536,8 @@ The `[listener]` section specifies the ip and port of the local DNS server. You 
 
 A reload does not start, stop, or move a listener. If the new configuration adds a listener, removes a listener, or changes the address of a listener, `ctrld reload` restarts the service. A reload from the Control D API or from the `SIGUSR1` signal refuses a configuration that removes a running listener. ctrld then keeps the running configuration and logs the listener that is missing.
 
+On iOS and Android in Control D mode, ctrld serves only the first listener of the configuration, which is the listener with the lowest number, at a fixed address. A reload there keeps that address and serves the first listener of the new configuration, with its settings and its default upstream. For example, if the new configuration has only `listener.1`, the running DNS server serves `listener.1`, and requests that match no policy rule go to `upstream.1`. So a reload on mobile gives the same listener as a restart, and it does not refuse a configuration for a missing listener.
+
 ```toml
 [listener.0]
   ip = "127.0.0.1"

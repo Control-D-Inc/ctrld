@@ -287,13 +287,16 @@ func (p *prog) startListeners(ctx context.Context, cfg *ctrld.ListenerConfig, ha
 	return g.Wait()
 }
 
-// listenerConfig returns the config of a listener as the handler of its DNS
-// server reads it for each query. A reload replaces p.cfg under p.mu while the
-// listener keeps serving, so the read takes p.mu too.
-func (p *prog) listenerConfig(listenerNum string) *ctrld.ListenerConfig {
+// listenerConfig returns the key and the config of the listener that the DNS
+// server of listenerNum serves, as its handler reads them for each query. A
+// reload replaces p.cfg under p.mu while the listener keeps serving, so the
+// read takes p.mu too. On mobile, a reload can give the server the listener
+// of another key, and the key selects the default upstream.
+func (p *prog) listenerConfig(listenerNum string) (string, *ctrld.ListenerConfig) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.cfg.Listener[listenerNum]
+	key := configKey(listenerNum, p.servedAs)
+	return key, p.cfg.Listener[key]
 }
 
 // handleDNSQuery processes incoming DNS queries, validates client access, and routes the query to appropriate handlers.
@@ -311,12 +314,12 @@ func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum stri
 	// the listener starts: a reload replaces p.cfg.Listener while this
 	// listener keeps serving, and a captured copy would keep the old policy
 	// (rules, failover_rcodes) until restart.
-	listenerConfig := p.listenerConfig(listenerNum)
+	listenerKey, listenerConfig := p.listenerConfig(listenerNum)
 	reqID := requestID()
 	ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqID)
 	ctx = ctrld.LoggerCtx(ctx, p.logger.Load())
 	if listenerConfig == nil {
-		ctrld.Log(ctx, p.querySampler.event(sampleClassNoListenerConfig, ""), "No config for [listener.%s], answering SERVFAIL", listenerNum)
+		ctrld.Log(ctx, p.querySampler.event(sampleClassNoListenerConfig, ""), "No config for [listener.%s], answering SERVFAIL", listenerKey)
 		p.health.countQuery()
 		p.health.countFailedQuery()
 		sendDNSResponse(w, m, dns.RcodeServerFailure)
@@ -346,7 +349,7 @@ func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum stri
 		ctx:            ctx,
 		writer:         w,
 		msg:            m,
-		listenerNum:    listenerNum,
+		listenerNum:    listenerKey,
 		listenerConfig: listenerConfig,
 		domain:         domain,
 	})
