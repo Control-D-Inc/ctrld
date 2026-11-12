@@ -99,11 +99,13 @@ func normalizeLogFilePath(logFilePath string) string {
 }
 
 // initConsoleLogging initializes console logging, then storing to mainLog.
+// It builds a new logger, because a mobile app runs many starts in one
+// process, and a logger built on the one before it repeats its time field.
 func initConsoleLogging() {
 	consoleWriter = zerolog.NewConsoleWriter(func(w *zerolog.ConsoleWriter) {
 		w.TimeFormat = time.StampMilli
 	})
-	l := mainLog.Load().Output(newLogOutput(consoleWriter)).With().Timestamp().Logger()
+	l := zerolog.New(newLogOutput(consoleWriter)).With().Timestamp().Logger()
 	mainLog.Store(&l)
 
 	switch {

@@ -144,6 +144,29 @@ func Test_switchLogPath_carriesTheOldFileBelowOneHeader(t *testing.T) {
 	}
 }
 
+// Test_switchLogPath_keepsOneTimeField drives the switch after a start whose
+// console logger adds the time field. Each line after the switch must still
+// have one time field.
+func Test_switchLogPath_keepsOneTimeField(t *testing.T) {
+	dir := setupLogSetupTest(t)
+	cdUID = "test-uid"
+	timed := zerolog.New(io.Discard).With().Timestamp().Logger()
+	mainLog.Store(&timed)
+	p := &prog{cfg: &cfg}
+	p.initLogging(true)
+	t.Cleanup(p.closeInternalLogs)
+
+	newPath := filepath.Join(dir, "logs", "ctrld.log")
+	cfg.Service.LogPath = newPath
+	p.switchLogPath("", newPath)
+	mainLog.Load().Warn().Msg("line after the switch")
+
+	line := lastLineContaining(t, rotatingFileTestContent(t, newPath), "line after the switch")
+	if n := strings.Count(line, `"time":`); n != 1 {
+		t.Fatalf("the line has %d time fields, want 1: %s", n, line)
+	}
+}
+
 // Test_initLoggingAfterProvisioning_skipsTheGuardedRuns covers the two runs
 // that keep no internal files: a run with a local log_path, and a silent run.
 // Neither may gain a journal when the provisioning step learns the UID.

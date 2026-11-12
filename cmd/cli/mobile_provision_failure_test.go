@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -29,7 +31,7 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 	const childEnv = "CTRLD_TEST_MOBILE_PROVISION_FAILURE"
 	mode := os.Getenv(childEnv)
 	if mode == "" {
-		for _, mode := range []string{"token-shape", "listener-bind", "network-down", "network-stop", "proto-then-valid", "stale", "api-error-secret", "no-host-tools", "token-exchange-redacts", "console-level", "cd-listener-bind"} {
+		for _, mode := range []string{"token-shape", "listener-bind", "network-down", "network-stop", "proto-then-valid", "stale", "api-error-secret", "no-host-tools", "token-exchange-redacts", "console-level", "cd-listener-bind", "service-reset", "one-time-field", "no-config-file", "file-carry", "old-log-file"} {
 			t.Run(mode, func(t *testing.T) {
 				if mode == "no-host-tools" && runtime.GOOS != "darwin" {
 					t.Skip("the fake tools are the tools of macOS and iOS")
@@ -182,6 +184,78 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 		out = consoleOutput(t, func() { runOnce(AppConfig{ProvisionID: "not a token", Verbose: -1}) })
 		wantExit(provisionCodeProvisionTokenMalformed)
 		require.NotContains(t, out, configLine)
+	case "service-reset":
+		// Each start takes its [service] values from its own AppConfig and
+		// configuration file. A log path of the start before it must not
+		// keep the next start at debug level.
+		runOnce(AppConfig{CdUID: "testuid", Verbose: -1})
+		require.Equal(t, filepath.Join(dir, "ctrld.log"), cfg.Service.LogPath)
+		exits = nil
+		RunMobile(&AppConfig{CdUID: "testuid", HomeDir: dir, UpstreamProto: "doh", Verbose: -1}, &callback, make(chan struct{}))
+		require.Empty(t, cfg.Service.LogPath)
+		require.Empty(t, cfg.Service.LogLevel)
+		require.Equal(t, zerolog.NoticeLevel, zerolog.GlobalLevel())
+	case "one-time-field":
+		// Each start builds its logger again, so a line has one time field
+		// after any number of starts.
+		for range 3 {
+			runOnce(AppConfig{CdUID: "testuid"})
+		}
+		logText, err := os.ReadFile(filepath.Join(dir, "ctrld.log"))
+		require.NoError(t, err)
+		line := lastLineContaining(t, string(logText), "starting ctrld")
+		require.Equal(t, 1, strings.Count(line, `"time":`), line)
+	case "file-carry":
+		// Start 1 writes the configuration file before it fails. Its
+		// AppConfig log values must not reach that file, or the next start
+		// reads them back as its own configuration.
+		const badUpstream = "[upstream.0]\ntype = \"bogus\"\nendpoint = \"https://example.invalid/x\"\n"
+		require.NoError(t, os.WriteFile(configPath, []byte("[service]\n[listener.0]\nport = "+strconv.Itoa(freeUDPPort(t))+"\n[network.0]\ncidrs = [\"0.0.0.0/0\"]\n"+badUpstream), 0600))
+		runOnce(AppConfig{Verbose: -1})
+		require.Equal(t, filepath.Join(dir, "ctrld.log"), cfg.Service.LogPath)
+		written, err := os.ReadFile(configPath)
+		require.NoError(t, err)
+		require.Contains(t, string(written), "[listener", "start 1 must write the file")
+		require.NotContains(t, string(written), "log_path")
+		require.NotContains(t, string(written), "log_level")
+		exits = nil
+		RunMobile(&AppConfig{HomeDir: dir, Verbose: -1}, &callback, make(chan struct{}))
+		require.Empty(t, cfg.Service.LogPath)
+		require.Empty(t, cfg.Service.LogLevel)
+		require.Equal(t, zerolog.NoticeLevel, zerolog.GlobalLevel())
+	case "old-log-file":
+		// A start with no log path must not write to the log file of the
+		// start before it, or list that file in its log header.
+		appLog := filepath.Join(dir, "app.log")
+		RunMobile(&AppConfig{CdUID: "testuid", HomeDir: dir, UpstreamProto: "doh", Verbose: -1, LogPath: appLog}, &callback, make(chan struct{}))
+		before, err := os.ReadFile(appLog)
+		require.NoError(t, err)
+		RunMobile(&AppConfig{CdUID: "testuid", HomeDir: dir, UpstreamProto: "doh", Verbose: -1, Nameservers: "not-an-ip"}, &callback, make(chan struct{}))
+		after, err := os.ReadFile(appLog)
+		require.NoError(t, err)
+		require.Equal(t, string(before), string(after))
+		internalLog, err := os.ReadFile(filepath.Join(dir, "ctrld.log"))
+		require.NoError(t, err)
+		require.NotContains(t, string(internalLog), appLog)
+	case "no-config-file":
+		// A start can find no configuration file, for example after the
+		// app removed it. Its new viper has no defaults, so the default
+		// file it writes must still get a listener. The default file name
+		// is relative to the working directory.
+		t.Chdir(dir)
+		configPath = ""
+		require.NoError(t, os.Remove(filepath.Join(dir, "ctrld.toml")))
+		// The start then fails at the API, or at the listener when the host
+		// holds its address. Either way it reports one failure, no panic.
+		for range 2 {
+			runOnce(AppConfig{CdUID: "testuid"})
+			require.Len(t, exits, 1)
+			exits = nil
+			written, err := os.ReadFile(filepath.Join(dir, "ctrld.toml"))
+			require.NoError(t, err)
+			require.Contains(t, string(written), "[listener.0]")
+			require.NoError(t, os.Remove(filepath.Join(dir, "ctrld.toml")))
+		}
 	case "cd-listener-bind":
 		// In Control D mode the address is fixed. When another process
 		// holds it, the app gets the listener code, and ctrld does not move
@@ -211,6 +285,26 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 	default:
 		t.Fatalf("unknown mode %q", mode)
 	}
+}
+
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).Port
+}
+
+func lastLineContaining(t *testing.T, text, substr string) string {
+	t.Helper()
+	lines := strings.Split(text, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.Contains(lines[i], substr) {
+			return lines[i]
+		}
+	}
+	t.Fatalf("no line contains %q in:\n%s", substr, text)
+	return ""
 }
 
 // consoleOutput returns what start writes to stdout. The console writer takes

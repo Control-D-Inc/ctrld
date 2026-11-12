@@ -280,7 +280,8 @@ func (p *prog) initLoggingAfterProvisioning() {
 // which this call closes.
 func (p *prog) switchLogPath(oldLogPath, newLogPath string) {
 	// After processCDFlags, log config may change, so reset mainLog and re-init logging.
-	discard := zerolog.New(io.Discard)
+	// The new logger builds on this one, so this one adds the time field.
+	discard := zerolog.New(io.Discard).With().Timestamp().Logger()
 	mainLog.Store(&discard)
 
 	carried := carriedLogLines(oldLogPath, newLogPath)

@@ -80,7 +80,7 @@ func checkLogRedactionNode(t *testing.T, fset *token.FileSet, funcName string, n
 		if isLoggerOutputCall(node) && !isCallTo(node.Args[0], "newLogOutput") {
 			t.Errorf("%s: %s sets a logger output that skips newLogOutput", fset.Position(node.Pos()), funcName)
 		}
-		if isZerologNew(node) && !isDiscard(node.Args[0]) && funcName != "renderLogHeader" {
+		if isZerologNew(node) && !isDiscard(node.Args[0]) && !isCallTo(node.Args[0], "newLogOutput") && funcName != "renderLogHeader" {
 			t.Errorf("%s: %s builds a zerolog logger that skips newLogOutput", fset.Position(node.Pos()), funcName)
 		}
 	case *ast.AssignStmt:
