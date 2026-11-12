@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/netip"
@@ -388,6 +389,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 	writeDefaultConfig := !noConfigStart && configBase64 == ""
 	tryReadingConfig(writeDefaultConfig)
+	if abortOnProvisionFailure(appCallback) {
+		return
+	}
 
 	if err := readBase64Config(configBase64); err != nil {
 		failRunUnclassified(p.Error().Err(err), fmt.Sprintf("failed to read base64 config: %v", err), p.notifyExitToLogServer)
@@ -718,24 +722,10 @@ func writeConfigFile(cfg *ctrld.Config) error {
 	if err != nil {
 		return err
 	}
-
-	mainLog.Load().Debug().Str("config_file", defaultConfigFile).Msg("Opening configuration file for writing")
-
-	f, err := os.OpenFile(defaultConfigFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(0o644))
-	if err != nil {
-		mainLog.Load().Error().Err(err).Str("config_file", defaultConfigFile).Msg("Failed to open configuration file")
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(data); err != nil {
+	if err := replaceFile(defaultConfigFile, data, 0o644); err != nil {
 		mainLog.Load().Error().Err(err).Str("config_file", defaultConfigFile).Msg("Failed to write configuration file")
 		return err
 	}
-	if err := f.Close(); err != nil {
-		mainLog.Load().Error().Err(err).Str("config_file", defaultConfigFile).Msg("Failed to close configuration file")
-		return err
-	}
-
 	mainLog.Load().Debug().Str("config_file", defaultConfigFile).Msg("Configuration file written successfully")
 	return nil
 }
@@ -757,6 +747,13 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		mainLog.Load().Info().Msg("Loading config file from: " + v.ConfigFileUsed())
 		defaultConfigFile = v.ConfigFileUsed()
 		return true
+	}
+
+	// On mobile, the process is the app, so a config file that ctrld cannot
+	// read must fail the start, not end the process.
+	if isMobile() && !configFileMissing(err) {
+		failRunUnclassified(mainLog.Load().Error().Err(err), configFileErrorMessage(err), nil)
+		return false
 	}
 
 	if !writeDefaultConfig {
@@ -787,17 +784,27 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		return false
 	}
 
-	// If error is viper.ConfigParseError, emit details line and column number.
+	mainLog.Load().Fatal().Msg(configFileErrorMessage(err))
+	return false
+}
+
+// configFileMissing reports whether err of v.ReadInConfig says that there is
+// no config file. A path set with SetConfigFile gives an error of the file
+// system, not viper.ConfigFileNotFoundError.
+func configFileMissing(err error) bool {
+	return errors.As(err, &viper.ConfigFileNotFoundError{}) || errors.Is(err, fs.ErrNotExist)
+}
+
+// configFileErrorMessage describes err of v.ReadInConfig. For a TOML error,
+// it gives the line and column.
+func configFileErrorMessage(err error) string {
 	if errors.As(err, &viper.ConfigParseError{}) {
 		if de := decoderErrorFromTomlFile(v.ConfigFileUsed()); de != nil {
 			row, col := de.Position()
-			mainLog.Load().Fatal().Msgf("Failed to decode config file at line: %d, column: %d, error: %v", row, col, err)
+			return fmt.Sprintf("Failed to decode config file at line: %d, column: %d, error: %v", row, col, err)
 		}
 	}
-
-	// Otherwise, report fatal error and exit.
-	mainLog.Load().Fatal().Msgf("Failed to decode config file: %v", err)
-	return false
+	return fmt.Sprintf("Failed to decode config file: %v", err)
 }
 
 // decoderErrorFromTomlFile parses the invalid toml file, returning the details decoder error.
@@ -1651,8 +1658,8 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 		return false, status, err
 	}
 
-	selfCheckExternalDomain := cfg.FirstUpstream().VerifyDomain()
-	if selfCheckExternalDomain == "" {
+	externalDomain := selfCheckExternalDomain(&cfg)
+	if externalDomain == "" {
 		// Nothing to do, return the status as-is.
 		return true, status, nil
 	}
@@ -1660,6 +1667,9 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 	mainLog.Load().Debug().Msg("Ctrld listener is ready")
 
 	lc := cfg.FirstListener()
+	if lc == nil {
+		return false, status, errors.New("no listener key in the config is a number")
+	}
 	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
 
 	mainLog.Load().Debug().Msgf("Performing listener test, sending queries to %s", addr)
@@ -1667,10 +1677,20 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 	if err := selfCheckResolveDomain(context.TODO(), addr, "internal", selfCheckInternalTestDomain); err != nil {
 		return false, status, err
 	}
-	if err := selfCheckResolveDomain(context.TODO(), addr, "external", selfCheckExternalDomain); err != nil {
+	if err := selfCheckResolveDomain(context.TODO(), addr, "external", externalDomain); err != nil {
 		return false, status, err
 	}
 	return true, status, nil
+}
+
+// selfCheckExternalDomain returns the domain that the self-check resolves
+// through the first upstream, or "" if there is nothing to check.
+func selfCheckExternalDomain(cfg *ctrld.Config) string {
+	uc := cfg.FirstUpstream()
+	if uc == nil {
+		return ""
+	}
+	return uc.VerifyDomain()
 }
 
 // selfCheckResolveDomain performs DNS test query against ctrld listener.
@@ -1845,7 +1865,9 @@ func readConfigWithNotice(writeDefaultConfig, notice bool) {
 	for _, config := range configs {
 		ctrld.SetConfigNameWithPath(v, config.name, dir)
 		v.SetConfigFile(configPath)
-		if readConfigFile(config.written, notice) {
+		// A failure recorded on mobile ends the search. The next name would
+		// find no file and write a default config in place of the bad file.
+		if readConfigFile(config.written, notice) || pendingProvisionFailure.Load() != nil {
 			break
 		}
 	}

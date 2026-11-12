@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -187,54 +186,60 @@ func (c *Config) HasUpstreamSendClientInfo() bool {
 	return false
 }
 
-// FirstListener returns the first listener config of current config. Listeners are sorted numerically.
-//
-// It panics if Config has no listeners configured.
+// FirstListener returns the listener with the lowest numeric key, or nil if
+// no listener key is a number.
 func (c *Config) FirstListener() *ListenerConfig {
 	key, ok := c.FirstListenerKey()
 	if !ok {
-		panic("missing listener config")
+		return nil
 	}
 	return c.Listener[key]
 }
 
-// FirstListenerKey returns the key that FirstListener reads: the lowest
-// listener number, as strconv.Itoa writes it. ok is false when no key is a
-// number.
+// FirstListenerKey returns the key that FirstListener reads. ok is false when
+// no key is a number.
 func (c *Config) FirstListenerKey() (key string, ok bool) {
-	first := 0
-	for k := range c.Listener {
-		n, err := strconv.Atoi(k)
-		if err != nil {
-			continue
-		}
-		if !ok || n < first {
-			first, ok = n, true
-		}
-	}
-	if !ok {
-		return "", false
-	}
-	return strconv.Itoa(first), true
+	return lowestNumberedKey(c.Listener)
 }
 
-// FirstUpstream returns the first upstream of current config. Upstreams are sorted numerically.
-//
-// It panics if Config has no upstreams configured.
+// FirstUpstream returns the upstream with the lowest numeric key, or nil if
+// no upstream key is a number. It skips the internal_N upstreams that ctrld
+// adds itself.
 func (c *Config) FirstUpstream() *UpstreamConfig {
-	upstreams := make([]int, 0, len(c.Upstream))
-	for k := range c.Upstream {
+	key, ok := lowestNumberedKey(c.Upstream)
+	if !ok {
+		return nil
+	}
+	return c.Upstream[key]
+}
+
+// lowestNumberedKey returns the key with the lowest number. ok is false when
+// no key is a number. It returns the key itself, so a key such as "01" finds
+// its own value. Of keys with the same number, such as "1" and "01", the
+// plain number wins, as other code looks a key up by its number. Then string
+// order decides, so the result is the same each time.
+func lowestNumberedKey[V any](m map[string]*V) (key string, ok bool) {
+	firstNum := 0
+	for k := range m {
 		n, err := strconv.Atoi(k)
 		if err != nil {
 			continue
 		}
-		upstreams = append(upstreams, n)
+		if !ok || n < firstNum || (n == firstNum && keyBefore(k, key, n)) {
+			key, firstNum, ok = k, n, true
+		}
 	}
-	if len(upstreams) == 0 {
-		panic("missing listener config")
+	return key, ok
+}
+
+// keyBefore reports whether key a goes before key b, for two keys with the
+// number n.
+func keyBefore(a, b string, n int) bool {
+	canonical := strconv.Itoa(n)
+	if a == canonical || b == canonical {
+		return a == canonical
 	}
-	sort.Ints(upstreams)
-	return c.Upstream[strconv.Itoa(upstreams[0])]
+	return a < b
 }
 
 // ServiceConfig specifies the general ctrld config.

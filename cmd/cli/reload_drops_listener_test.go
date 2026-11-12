@@ -247,13 +247,19 @@ func TestKeepMobileListener(t *testing.T) {
 	require.Equal(t, map[string]string{"1": "2"}, p.keepMobileListener(newCfg, logger))
 	require.Equal(t, map[string]*ctrld.ListenerConfig{"2": {IP: "127.0.0.1", Port: 53, Policy: policy("2")}}, newCfg.Listener)
 
-	// FirstListener reads the key "1" for the number 1, so the key "01" never
-	// wins, whatever the order of the map.
+	// Of the keys "01" and "1", the plain number wins, whatever the order of
+	// the map.
 	for range 20 {
 		newCfg = &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"01": {Policy: policy("01")}, "1": {Policy: policy("1")}}}
 		newRun([]string{"0"}, map[string]*ctrld.ListenerConfig{"0": runningAt53()}, nil).keepMobileListener(newCfg, logger)
 		require.Equal(t, "1", newCfg.Listener["1"].Policy.Name)
 	}
+
+	// A key with a leading zero is the first listener, as at a start.
+	newCfg = &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{"01": {Policy: policy("01")}, "2": {Policy: policy("2")}}}
+	p = newRun([]string{"0"}, map[string]*ctrld.ListenerConfig{"0": runningAt53()}, nil)
+	require.Equal(t, map[string]string{"0": "01"}, p.keepMobileListener(newCfg, logger))
+	require.Equal(t, map[string]*ctrld.ListenerConfig{"01": {IP: "127.0.0.1", Port: 53, Policy: policy("01")}}, newCfg.Listener)
 
 	// In these cases the reload keeps the new listeners, and the check for a
 	// dropped listener decides.
@@ -265,10 +271,7 @@ func TestKeepMobileListener(t *testing.T) {
 	}{
 		{"two served listeners", []string{"0", "1"}, map[string]*ctrld.ListenerConfig{"0": runningAt53(), "1": runningAt53()}, map[string]*ctrld.ListenerConfig{"2": {}}},
 		{"no running config", []string{"0"}, map[string]*ctrld.ListenerConfig{"1": runningAt53()}, map[string]*ctrld.ListenerConfig{"2": {}}},
-		// FirstListener panics here.
 		{"no listener number", []string{"0"}, map[string]*ctrld.ListenerConfig{"0": runningAt53()}, map[string]*ctrld.ListenerConfig{"abc": {}}},
-		// FirstListener returns nil here, because it reads the key "1".
-		{"only a key with a leading zero", []string{"0"}, map[string]*ctrld.ListenerConfig{"0": runningAt53()}, map[string]*ctrld.ListenerConfig{"01": {}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

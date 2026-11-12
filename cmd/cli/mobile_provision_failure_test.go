@@ -29,10 +29,13 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 	const childEnv = "CTRLD_TEST_MOBILE_PROVISION_FAILURE"
 	mode := os.Getenv(childEnv)
 	if mode == "" {
-		for _, mode := range []string{"token-shape", "listener-bind", "network-down", "network-stop", "proto-then-valid", "stale", "api-error-secret", "no-host-tools", "token-exchange-redacts", "start-nameservers-logged", "console-level", "service-reset", "no-config-file", "file-carry", "old-log-file"} {
+		for _, mode := range []string{"token-shape", "listener-bind", "network-down", "network-stop", "proto-then-valid", "stale", "api-error-secret", "no-host-tools", "token-exchange-redacts", "start-nameservers-logged", "console-level", "service-reset", "no-config-file", "file-carry", "old-log-file", "bad-config-file", "bad-legacy-config-file"} {
 			t.Run(mode, func(t *testing.T) {
 				if mode == "no-host-tools" && runtime.GOOS != "darwin" {
 					t.Skip("the fake tools are the tools of macOS and iOS")
+				}
+				if (mode == "bad-config-file" || mode == "bad-legacy-config-file") && runtime.GOOS == "windows" {
+					t.Skip("on Windows, ctrld looks for the config file next to its binary, not in HomeDir")
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 				defer cancel()
@@ -251,6 +254,46 @@ func TestRunMobileReportsProvisionFailure(t *testing.T) {
 			require.NoError(t, err)
 			require.Contains(t, string(written), "[listener.0]")
 			require.NoError(t, os.Remove(filepath.Join(dir, "ctrld.toml")))
+		}
+	case "bad-config-file":
+		// The app can end during a write of the config file. A file that is
+		// not TOML must fail the start, and the app must keep running.
+		configPath = ""
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "ctrld.toml"), []byte("[listener.0"), 0600))
+		// The start must stop before the wait for the network. A failure
+		// there replaces the config error.
+		networkWaits := 0
+		networkUp = func(<-chan struct{}) bool { networkWaits++; return true }
+		runOnce(AppConfig{CdUID: "testuid"})
+		wantExit(provisionCodeUnclassified)
+		require.Zero(t, networkWaits)
+		require.Zero(t, fetches)
+		r, err := readProvisionResultAt(filepath.Join(dir, provisionResultFileName))
+		require.NoError(t, err)
+		require.Contains(t, r.Message, "Failed to decode config file at line: 1")
+	case "bad-legacy-config-file":
+		// ctrld reads config.toml before ctrld.toml. A bad config.toml must
+		// fail the start, and must not lead to a default ctrld.toml. The
+		// working directory of an app is not writable.
+		interceptMode = "off"
+		configPath = ""
+		require.NoError(t, os.Remove(filepath.Join(dir, "ctrld.toml")))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"), []byte("[listener.0"), 0600))
+		workDir := t.TempDir()
+		require.NoError(t, os.Chmod(workDir, 0500))
+		t.Chdir(workDir)
+		// The token start goes first, because a Control D start leaves its
+		// UID for the next start.
+		for _, c := range []AppConfig{{ProvisionID: "org-v1-provisiontoken"}, {CdUID: "testuid"}} {
+			runOnce(c)
+			wantExit(provisionCodeUnclassified)
+			r, err := readProvisionResultAt(filepath.Join(dir, provisionResultFileName))
+			require.NoError(t, err)
+			require.Contains(t, r.Message, "Failed to decode config file at line: 1")
+		}
+		require.Zero(t, fetches)
+		for _, d := range []string{dir, workDir} {
+			require.NoFileExists(t, filepath.Join(d, "ctrld.toml"))
 		}
 	default:
 		t.Fatalf("unknown mode %q", mode)
