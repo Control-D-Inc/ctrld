@@ -190,7 +190,9 @@ func (p *prog) serveDNS(ctx context.Context, listenerNum string) error {
 	logger := p.logger.Load()
 	logger.Debug().Msg("DNS server setup started")
 
-	listenerConfig := p.cfg.Listener[listenerNum]
+	// A reload can replace p.cfg while the listeners start, so read the config
+	// that the listeners use under p.mu, once.
+	_, listenerConfig := p.listenerConfig(listenerNum)
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
 		p.Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: Failed to allocate listen IP")
 		return allocErr
@@ -299,6 +301,15 @@ func (p *prog) listenerConfig(listenerNum string) (string, *ctrld.ListenerConfig
 	return key, p.cfg.Listener[key]
 }
 
+// clientIDPref returns the client ID preference of the service config. The
+// DNS handler reads it for each query while a reload can replace p.cfg, so the
+// read takes p.mu.
+func (p *prog) clientIDPref() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.Service.ClientIDPref
+}
+
 // handleDNSQuery processes incoming DNS queries, validates client access, and routes the query to appropriate handlers.
 // This is the main entry point for all DNS query processing
 func (p *prog) handleDNSQuery(w dns.ResponseWriter, m *dns.Msg, listenerNum string) {
@@ -405,7 +416,7 @@ func (p *prog) processStandardQuery(req *standardQueryRequest) {
 
 	remoteIP, _, _ := net.SplitHostPort(req.writer.RemoteAddr().String())
 	ci := p.getClientInfo(remoteIP, req.msg)
-	ci.ClientIDPref = p.cfg.Service.ClientIDPref
+	ci.ClientIDPref = p.clientIDPref()
 
 	stripClientSubnet(req.msg)
 	remoteAddr := spoofRemoteAddr(req.writer.RemoteAddr(), ci)
