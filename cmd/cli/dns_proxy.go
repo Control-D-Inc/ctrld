@@ -1133,6 +1133,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 		if negative = betterInternalDomainNegative(internalNegative, negative); negative != nil {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "no resolver resolved the internal domain; returning %s", dns.RcodeToString[negative.Rcode])
+			// See capInternalDomainNegativeTTL: the host must not keep this
+			// answer once the organization resolver is reachable again.
+			capInternalDomainNegativeTTL(negative)
 			negative.Compress = true
 			res.answer = negative
 			return res
