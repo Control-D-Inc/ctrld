@@ -1164,6 +1164,9 @@ func (p *prog) internalDomainNetworkFallback(ctx context.Context, req *proxyRequ
 	}
 	if negative = betterInternalDomainNegative(req.internalNegative, negative); negative != nil {
 		ctrld.Log(ctx, p.Debug(), "No resolver resolved the internal domain; returning %s", dns.RcodeToString[negative.Rcode])
+		// See capInternalDomainNegativeTTL: the host must not keep this
+		// answer once the organization resolver is reachable again.
+		capInternalDomainNegativeTTL(negative)
 		negative.Compress = true
 		return &proxyResponse{answer: negative}
 	}

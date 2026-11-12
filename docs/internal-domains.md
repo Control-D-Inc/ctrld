@@ -163,6 +163,14 @@ skip it and get the network's answer, usually NXDOMAIN for a VPN-only name,
 which the host then caches. A resolver that is still unreachable costs the next
 lookup one timeout before the monitor marks it down again.
 
+When no resolver resolves the name, the query ends with the best negative
+answer the configured and network resolvers gave. Its negative-cache lifetime
+(the SOA record's TTL and MINIMUM) is capped at 5 seconds. That answer usually
+comes from the network's own DNS while the organization resolver is out of
+reach, for example with the VPN off, and it carries that network's lifetime,
+often an hour. Uncapped, the host's resolver cache (mDNSResponder on macOS)
+would keep the name broken for that long after the VPN is back.
+
 The first NOERROR answer wins. NXDOMAIN triggers the fallback because the
 configured resolver may be reachable but not know a name that the local
 network's resolver does, for example on another subnet. REFUSED and NOTIMP
