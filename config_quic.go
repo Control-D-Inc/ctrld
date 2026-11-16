@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"runtime"
 	"sync"
 
 	"github.com/quic-go/quic-go"
@@ -61,9 +60,9 @@ func (uc *UpstreamConfig) newDOH3Transport(ctx context.Context, addrs []string) 
 		// from; returning it would make http3 drop the connection.
 		return conn, nil
 	}
-	runtime.SetFinalizer(rt, func(rt *http3.Transport) {
-		rt.CloseIdleConnections()
-	})
+	// No finalizer here: it keeps a transport that is in a reference cycle
+	// alive forever (see newDOHTransport). retireTransports closes a transport
+	// that is replaced.
 	return rt
 }
 

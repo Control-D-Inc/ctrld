@@ -14,7 +14,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -884,9 +883,10 @@ func (uc *UpstreamConfig) newDOHTransport(ctx context.Context, addrs []string) *
 		Log(ctx, logger.Debug(), "Sending doh request to: %s", conn.RemoteAddr())
 		return conn, nil
 	}
-	runtime.SetFinalizer(transport, func(transport *http.Transport) {
-		transport.CloseIdleConnections()
-	})
+	// No finalizer here: once a transport has spoken HTTP/2 it is in a reference
+	// cycle with its HTTP/2 transport, and a cycle with a finalizer is never
+	// collected. retireTransports closes the idle connections of a transport
+	// that is replaced, and IdleConnTimeout closes the rest.
 	return transport
 }
 
