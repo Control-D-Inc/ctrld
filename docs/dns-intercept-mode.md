@@ -241,6 +241,10 @@ In Interface DNS mode Windows does its own fallback, so ctrld does not. On macOS
 | Requires admin/root | Yes | Yes |
 | Additional OS requirements | None | WFP (Windows), pf (macOS) |
 
+At startup in DNS intercept mode, ctrld resets an adapter's DNS to DHCP only when its static DNS still names a loopback listener, which is the setting an earlier interface DNS mode run (or a crash in that mode) leaves behind. DNS that a VPN client pushed to its adapter, or static DNS an administrator set on a physical adapter, is left as it is. If an adapter's DNS cannot be read, ctrld resets it, because a leftover listener cannot be ruled out.
+
+The same applies to `ctrld restart` and to upgrades, which stop the service and clean up DNS before starting it again: when the stopped service reported an intercept mode, only a leftover listener is cleared.
+
 ## Logging
 
 DNS intercept mode produces detailed logs for troubleshooting:

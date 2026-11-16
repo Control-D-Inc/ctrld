@@ -13,10 +13,10 @@ import (
 // On iOS the app owns the DNS settings of the device. postRun must only
 // build the OS resolver, from the nameservers of the app.
 func TestPostRunMobileLeavesDeviceDNSAlone(t *testing.T) {
-	oldService, oldReset, oldInit := runningAsService, resetDNSFn, initializeOsResolverWithSystemNameserversFn
+	oldService, oldReset, oldAtStart, oldInit := runningAsService, resetDNSFn, resetDNSAtStartFn, initializeOsResolverWithSystemNameserversFn
 	oldMode, oldSource := interceptMode, interceptModeSource
 	t.Cleanup(func() {
-		runningAsService, resetDNSFn, initializeOsResolverWithSystemNameserversFn = oldService, oldReset, oldInit
+		runningAsService, resetDNSFn, resetDNSAtStartFn, initializeOsResolverWithSystemNameserversFn = oldService, oldReset, oldAtStart, oldInit
 		interceptMode, interceptModeSource = oldMode, oldSource
 		ctrld.SetAppNameservers(context.Background(), nil)
 	})
@@ -24,6 +24,7 @@ func TestPostRunMobileLeavesDeviceDNSAlone(t *testing.T) {
 	runningAsService = func() bool { return true }
 	interceptMode, interceptModeSource = "", ""
 	resetDNSFn = func(*prog, bool, bool) { t.Error("postRun reset the DNS settings of the device") }
+	resetDNSAtStartFn = func(*prog) { t.Error("postRun reset the DNS settings of the device") }
 	initializeOsResolverWithSystemNameserversFn = ctrld.InitializeOsResolverWithSystemNameserversReason
 	ctrld.SetAppNameservers(context.Background(), []string{"192.168.255.53"})
 
@@ -47,16 +48,18 @@ func TestPostRunMobileLeavesDeviceDNSAlone(t *testing.T) {
 // Outside iOS, postRun still owns the DNS of the device: it resets the DNS
 // and then points it at ctrld.
 func TestPostRunDesktopSetsDeviceDNS(t *testing.T) {
-	oldService, oldReset, oldSet, oldInit := runningAsService, resetDNSFn, setDNSFn, initializeOsResolverWithSystemNameserversFn
+	oldService, oldReset, oldSet, oldInit := runningAsService, resetDNSAtStartFn, setDNSFn, initializeOsResolverWithSystemNameserversFn
 	oldIsIOS := mobile.IsIOS
 	t.Cleanup(func() {
-		runningAsService, resetDNSFn, setDNSFn, initializeOsResolverWithSystemNameserversFn = oldService, oldReset, oldSet, oldInit
+		runningAsService, resetDNSAtStartFn, setDNSFn, initializeOsResolverWithSystemNameserversFn = oldService, oldReset, oldSet, oldInit
 		mobile.IsIOS = oldIsIOS
 	})
 	mobile.IsIOS = func() bool { return false }
 	runningAsService = func() bool { return true }
 	var steps []string
-	resetDNSFn = func(*prog, bool, bool) { steps = append(steps, "reset") }
+	// postRun resets through resetDNSAtStart, which picks the blanket or the
+	// leftover-only reset by intercept mode (dns_reset_start_test.go).
+	resetDNSAtStartFn = func(*prog) { steps = append(steps, "reset") }
 	setDNSFn = func(_ *prog, nss []string) { steps = append(steps, "set "+strings.Join(nss, ",")) }
 	initializeOsResolverWithSystemNameserversFn = func(context.Context, bool, string) ([]string, []string) {
 		return []string{"192.0.2.53:53"}, []string{"192.0.2.53"}

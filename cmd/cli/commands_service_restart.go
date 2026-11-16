@@ -36,8 +36,7 @@ func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
 	}
 	p.preRun()
 	if ir := runningIface(s); ir != nil {
-		p.runningIface = ir.Name
-		p.requiredMultiNICsConfig = ir.All
+		p.setRunningIfaceFromService(ir)
 	}
 
 	initInteractiveLogging()
@@ -61,8 +60,9 @@ func (sc *ServiceCommand) Restart(cmd *cobra.Command, args []string) error {
 		tasks := []task{
 			{s.Stop, true, "Stop"},
 			{func() error {
-				// restore static DNS settings or DHCP
-				p.resetDNS(false, true)
+				// Restore static DNS settings or DHCP, leaving adapter DNS
+				// ctrld did not set alone when the service intercepts.
+				p.resetDNSAfterServiceStop()
 				return nil
 			}, false, "Cleanup"},
 			{func() error {

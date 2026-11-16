@@ -158,6 +158,11 @@ type prog struct {
 	logSend                   *logSendServer
 	runningIface              string
 	requiredMultiNICsConfig   bool
+	// serviceInterceptMode is the intercept mode the running service reported
+	// ("dns", "hard" or "") when a CLI command read its interface over the
+	// control socket. Commands that stop the service use it to pick their DNS
+	// cleanup; the CLI process has no intercept state of its own.
+	serviceInterceptMode string
 
 	// The network journal state. The value fields here hold a mutex, so no
 	// code may copy a prog. Every user of a prog holds a pointer to it.
@@ -853,7 +858,7 @@ func (p *prog) postRun() {
 		// starting ctrld. Detect that policy before resetDNS touches adapter DNS;
 		// startDNSIntercept will then prove the rule functionally before adopting it.
 		if ownsDeviceDNS && !p.skipInitialDNSReset() {
-			resetDNSFn(p, false, false)
+			resetDNSAtStartFn(p)
 		}
 		loggerCtx := ctrld.LoggerCtx(context.Background(), p.logger.Load())
 		ns, systemNameservers := initializeOsResolverWithSystemNameserversFn(loggerCtx, false, osResolverReasonStart)
@@ -1795,6 +1800,7 @@ var (
 	newResolverFn                               = ctrld.NewResolver
 	setDnsForRunningIfaceFn                     = (*prog).setDnsForRunningIface
 	resetDNSFn                                  = (*prog).resetDNS
+	resetDNSAtStartFn                           = (*prog).resetDNSAtStart
 	// refuseFallbackFatal reports a startup failure the interface-DNS fallback
 	// cannot safely paper over, then exits. No dedicated code exists for this,
 	// so it falls back to UNCLASSIFIED.
@@ -2198,7 +2204,150 @@ var (
 	setIfaceDNSFn            = setDNS
 	resetIfaceDNSFn          = resetDNS
 	savedStaticNameserversFn = ctrld.SavedStaticNameservers
+	currentStaticDNSFn       = currentStaticDNS
 )
+
+// resetDNSAtStart clears adapter DNS settings left by an earlier run before
+// this run takes over DNS.
+//
+// Interface DNS mode ("off") resets the running interface and every physical
+// one, as before: setDNS points them at the listener right after, so nothing a
+// reset removes is lost.
+//
+// The intercept modes ("dns" and "hard") never write adapter DNS, so a blanket
+// reset there only destroys settings ctrld does not own: the DNS a VPN client
+// pushed to its own adapter (the running interface while the tunnel holds the
+// default route), or static DNS an administrator put on a physical adapter. The
+// only adapter setting an earlier run can have left behind is its own listener,
+// from an interface DNS mode run or a crash, so only an adapter whose static DNS
+// is a loopback address is reset.
+func (p *prog) resetDNSAtStart() {
+	if !interceptModeKeepsAdapterDNS(startResetGOOS, p.configuredInterceptMode()) {
+		resetDNSFn(p, false, false)
+		return
+	}
+	p.resetLeftoverDNS(false)
+}
+
+// resetDNSAfterServiceStop is the DNS cleanup ctrld restart and the upgrade
+// binary switch run in the CLI process, between stopping the service and
+// starting it again (or rolling back).
+//
+// The CLI process has no intercept state, so a plain resetDNS there always
+// takes the interface DNS mode branch: it reset the running interface and every
+// physical adapter even when the stopped service ran in an intercept mode,
+// which clears a full-tunnel VPN's adapter DNS on every restart and every
+// self-upgrade, the same damage resetDNSAtStart avoids at the service start.
+// When the service reported an intercept mode, only a leftover listener is
+// cleared, restoring saved static DNS on the running interface as before. A
+// service in interface DNS mode, or one that could not report its mode, keeps
+// the full reset.
+func (p *prog) resetDNSAfterServiceStop() {
+	// The iOS app owns the DNS settings of the device (see postRun).
+	if mobile.IsIOS() {
+		return
+	}
+	if !interceptModeKeepsAdapterDNS(startResetGOOS, p.serviceInterceptMode) {
+		resetDNSFn(p, false, true)
+		return
+	}
+	p.resetLeftoverDNS(true)
+}
+
+// setRunningIfaceFromService records what the running service reported over
+// the control socket: its interface, whether it manages every physical
+// adapter, and its intercept mode.
+func (p *prog) setRunningIfaceFromService(ir *ifaceResponse) {
+	p.runningIface = ir.Name
+	p.requiredMultiNICsConfig = ir.All
+	p.serviceInterceptMode = ir.InterceptMode
+}
+
+// resetLeftoverDNS is the intercept-mode reset shared by resetDNSAtStart and
+// resetDNSAfterServiceStop: it clears only adapter DNS an earlier interface DNS
+// mode run left behind. restoreStatic restores the running interface's saved
+// static DNS instead of DHCP, as resetDNS(_, true) does.
+func (p *prog) resetLeftoverDNS(restoreStatic bool) {
+	// A previous crash can leave a persisted macOS intercept target; resetDNS
+	// removes it on this path too.
+	removeInterceptDNSTargetFn(p, "DNS reset")
+	runningName := ""
+	if p.runningIface != "" {
+		logger := p.logger.Load().With().Str("iface", p.runningIface)
+		netIface, err := netInterfaceFn(p.runningIface)
+		switch {
+		case err != nil:
+			logIfaceLookupFailure(logger, "leftover DNS check", err)
+		default:
+			runningName = netIface.Name
+			if hasLeftoverListenerDNS(netIface) {
+				p.resetDNSForRunningIface(false, restoreStatic)
+			}
+		}
+	}
+	if p.requiredMultiNICsConfig {
+		withEachPhysicalInterfacesFn(runningName, "", resetLeftoverListenerDNS)
+	}
+}
+
+// startResetGOOS is the platform resetDNSAtStart and resetDNSAfterServiceStop
+// decide for; tests set it so the Windows and macOS path runs on every CI
+// platform.
+var startResetGOOS = runtime.GOOS
+
+// interceptModeKeepsAdapterDNS reports whether a start in mode on goos leaves
+// adapter DNS it did not set alone. Only Windows and macOS implement intercept
+// mode; elsewhere an intercept mode falls back to interface DNS mode, which
+// keeps the blanket reset.
+func interceptModeKeepsAdapterDNS(goos, mode string) bool {
+	if goos != "windows" && goos != "darwin" {
+		return false
+	}
+	return mode == "dns" || mode == "hard"
+}
+
+// resetLeftoverListenerDNS resets iface to DHCP DNS only when its static DNS
+// still names a loopback listener.
+func resetLeftoverListenerDNS(iface *net.Interface) error {
+	if !hasLeftoverListenerDNS(iface) {
+		return nil
+	}
+	if err := resetDnsIgnoreUnusableInterfaceFn(iface); err != nil {
+		return err
+	}
+	mainLog.Load().Debug().Msgf("Ran reset DNS for interface %q successfully", iface.Name)
+	return nil
+}
+
+// resetDnsIgnoreUnusableInterfaceFn is the reset used by resetLeftoverListenerDNS,
+// so tests can observe it without changing the host's DNS.
+var resetDnsIgnoreUnusableInterfaceFn = resetDnsIgnoreUnusableInterface
+
+// withEachPhysicalInterfacesFn walks the physical adapters for resetDNSAtStart;
+// the real walk reads the host's adapter list, so tests replace it.
+var withEachPhysicalInterfacesFn = withEachPhysicalInterfaces
+
+// hasLeftoverListenerDNS reports whether iface's static DNS contains a loopback
+// address, the only adapter setting an earlier ctrld run leaves behind. When the
+// settings cannot be read it reports true, keeping the reset every start ran
+// before intercept modes stopped resetting other adapters' DNS.
+func hasLeftoverListenerDNS(iface *net.Interface) bool {
+	logger := mainLog.Load().With().Str("iface", iface.Name)
+	ns, err := currentStaticDNSFn(iface)
+	if err != nil {
+		logger.Debug().Err(err).Msg("Could not read static DNS; resetting it as a possible leftover listener")
+		return true
+	}
+	if slices.ContainsFunc(ns, func(s string) bool {
+		ip := net.ParseIP(s)
+		return ip != nil && ip.IsLoopback()
+	}) {
+		logger.Info().Strs("static_dns", ns).Msg("Interface DNS still names a loopback listener left by an earlier run; resetting it to DHCP")
+		return true
+	}
+	logger.Debug().Int("static_dns_count", len(ns)).Msg("Interface DNS was not set by ctrld; leaving it unchanged in intercept mode")
+	return false
+}
 
 // logIfaceLookupFailure reports a failed lookup of the interface the caller was
 // about to work on, naming that work in skipping, e.g. "DNS restoration". An

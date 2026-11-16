@@ -137,8 +137,7 @@ func newBinarySwitch() (*binarySwitch, error) {
 	}
 	p.preRun()
 	if ir := runningIface(s); ir != nil {
-		p.runningIface = ir.Name
-		p.requiredMultiNICsConfig = ir.All
+		p.setRunningIfaceFromService(ir)
 	}
 
 	svcInstalled := true
@@ -168,8 +167,9 @@ func (t *binarySwitch) install(action string, data []byte) error {
 		tasks := []task{
 			{s.Stop, true, "Stop"},
 			{func() error {
-				// restore static DNS settings or DHCP
-				p.resetDNS(false, true)
+				// Restore static DNS settings or DHCP, leaving adapter DNS
+				// ctrld did not set alone when the service intercepts.
+				p.resetDNSAfterServiceStop()
 				return nil
 			}, false, "Cleanup"},
 			{func() error {
@@ -220,7 +220,7 @@ func (t *binarySwitch) install(action string, data []byte) error {
 		}
 		// Mirror the Cleanup task in doRestart: leave DNS settings as the OS had them,
 		// not as a half-started ctrld left them.
-		p.resetDNS(false, true)
+		p.resetDNSAfterServiceStop()
 		return nil
 	}
 	return rollbackToPreviousBinary(t.bin, t.oldBin, stop, doRestart)
