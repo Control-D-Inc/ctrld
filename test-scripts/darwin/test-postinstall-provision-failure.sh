@@ -151,6 +151,21 @@ exit "$FAKE_CTRLD_EXIT"
 EOF
 chmod +x "$bin/ctrld-client"
 
+cat >"$bin/profiles" <<'EOF'
+#!/bin/sh
+# Stand-in for 'profiles status -type enrollment'. FAKE_MDM_ENROLLMENT picks
+# the answer: unset or "yes" is an enrolled Mac, "no" is a Mac with no MDM,
+# "fail" is profiles(1) failing, "other" is output the script does not know.
+[ -n "${CALLS:-}" ] && printf 'profiles %s\n' "$*" >>"$CALLS"
+case "${FAKE_MDM_ENROLLMENT:-yes}" in
+    yes) printf 'Enrolled via DEP: No\nMDM enrollment: Yes\n' ;;
+    no) printf 'Enrolled via DEP: No\nMDM enrollment: No\n' ;;
+    other) printf 'Enrolled via DEP: No\nMDM enrollment: No (User Approved)\n' ;;
+    fail) echo "profiles: error" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$bin/profiles"
+
 cat >"$bin/mktemp" <<'EOF'
 #!/bin/sh
 # Stand-in for mktemp: forces the postinstall script's own mktemp failure
@@ -210,21 +225,22 @@ make_postinstall_copy() {
         -e "s|^PLIST=\"/Library/LaunchDaemons/ctrld-client.plist\"\$|PLIST=\"$plist_override\"|" \
         -e "s|^CTRLD=\"/usr/local/bin/ctrld-client\"\$|CTRLD=\"$ctrld_override\"|" \
         -e "s|^PREFS=\"/Library/Managed Preferences/com.controld.ctrld\"\$|PREFS=\"$prefs_override\"|" \
+        -e "s|^PROFILES=\"/usr/bin/profiles\"\$|PROFILES=\"$bin/profiles\"|" \
         -e "s|^        sleep 10\$|        sleep 0|" \
         "$postinstall_source" >"$dest"
     chmod +x "$dest"
     # A substitution that stops matching is silent: the copy keeps the real
     # system paths and the case runs against the installed machine. Check
     # that each redirection landed.
-    for expected in "PLIST=\"$plist_override\"" "CTRLD=\"$ctrld_override\"" "PREFS=\"$prefs_override\""; do
+    for expected in "PLIST=\"$plist_override\"" "CTRLD=\"$ctrld_override\"" "PREFS=\"$prefs_override\"" "PROFILES=\"$bin/profiles\""; do
         if ! grep -Fq -- "$expected" "$dest"; then
             printf 'FAIL: fixture substitution did not apply (%s); postinstall paths changed?\n' "$expected" >&2
             exit 1
         fi
     done
-    if grep -Eq '^(PLIST|CTRLD|PREFS)="(/Library|/usr/local)' "$dest"; then
+    if grep -Eq '^(PLIST|CTRLD|PREFS|PROFILES)="(/Library|/usr/local|/usr/bin)' "$dest"; then
         printf 'FAIL: a real system path survived substitution\n' >&2
-        grep -E '^(PLIST|CTRLD|PREFS)=' "$dest" >&2
+        grep -E '^(PLIST|CTRLD|PREFS|PROFILES)=' "$dest" >&2
         exit 1
     fi
 }
@@ -236,7 +252,7 @@ reset_fakes() {
         FAKE_MODE_PRESENT FAKE_MODE FAKE_DEVENV_PRESENT FAKE_DEVENV \
         FAKE_CTRLD_EXIT FAKE_CTRLD_IDENTIFIER FAKE_CTRLD_CREATE_PLIST \
         FAKE_DIAG_WORKS FAKE_DIAG_LEAK_LINE FAKE_DIAG_TRAPS_TERM \
-        FAKE_LAUNCHCTL_EXIT FAKE_MKTEMP_FAIL CALLS 2>/dev/null || true
+        FAKE_LAUNCHCTL_EXIT FAKE_MKTEMP_FAIL FAKE_MDM_ENROLLMENT CALLS 2>/dev/null || true
 }
 
 # run_case sets up a fresh fixture dir (plist, prefs, private TMPDIR, a
@@ -273,8 +289,8 @@ run_case() {
 }
 
 # --- Case: missing prefs -> PROFILE_PREFS_MISSING -----------------------
-# Runs postinstall's real wait loop to exhaustion (~110s): no seam shortens
-# it, since that timing is untouched by this change.
+# An MDM-enrolled Mac waits for the profile: every attempt runs (the sleep
+# between them is shortened to 0 in the copy), then the install fails.
 
 reset_fakes
 run_case missing-prefs
@@ -283,6 +299,52 @@ assert_eq "$exit_code" "1" "missing-prefs: exit code"
 assert_contains "$output" "stage=package code=PROFILE_PREFS_MISSING (exit 1)" "missing-prefs: identifier line"
 assert_contains "$output" "Scope the com.controld.ctrld configuration profile" "missing-prefs: remediation hint kept"
 assert_not_contains "$calls_out" "ctrld-client start" "missing-prefs: ctrld start never invoked"
+assert_eq "$(printf '%s\n' "$output" | grep -c 'waiting for com.controld.ctrld configuration profile')" "11" "missing-prefs: enrolled Mac waits through every attempt"
+assert_not_contains "$output" "not enrolled in an MDM" "missing-prefs: enrolled Mac is not reported as unenrolled"
+
+# --- Case: missing prefs, Mac not enrolled in an MDM -> fails at once -----
+# No MDM can deliver the profile later, so the package (installed by hand or
+# by a script) fails after one look instead of after 2 minutes.
+
+reset_fakes
+export FAKE_MDM_ENROLLMENT=no
+run_case missing-prefs-no-mdm
+
+assert_eq "$exit_code" "1" "missing-prefs-no-mdm: exit code"
+assert_contains "$output" "not enrolled in an MDM, so no configuration profile can arrive; not waiting for one" "missing-prefs-no-mdm: says why it does not wait"
+assert_contains "$output" "stage=package code=PROFILE_PREFS_MISSING (exit 1)" "missing-prefs-no-mdm: identifier line"
+assert_contains "$output" "Scope the com.controld.ctrld configuration profile" "missing-prefs-no-mdm: remediation hint kept"
+assert_not_contains "$output" "waiting for com.controld.ctrld configuration profile" "missing-prefs-no-mdm: no wait"
+assert_contains "$calls_out" "profiles status -type enrollment" "missing-prefs-no-mdm: enrollment checked with profiles(1)"
+assert_not_contains "$calls_out" "ctrld-client start" "missing-prefs-no-mdm: ctrld start never invoked"
+
+# --- Case: enrollment unknown -> keeps waiting -----------------------------
+# Only a plain "MDM enrollment: No" skips the wait. A failing profiles(1) or
+# an answer the script does not know keeps the wait, so an enrolled Mac whose
+# profile is late is never failed early.
+
+for answer in fail other; do
+    reset_fakes
+    export FAKE_MDM_ENROLLMENT="$answer"
+    run_case "missing-prefs-enrollment-$answer"
+    assert_eq "$exit_code" "1" "missing-prefs-enrollment-$answer: exit code"
+    assert_eq "$(printf '%s\n' "$output" | grep -c 'waiting for com.controld.ctrld configuration profile')" "11" "missing-prefs-enrollment-$answer: still waits through every attempt"
+    assert_not_contains "$output" "not enrolled in an MDM" "missing-prefs-enrollment-$answer: not reported as unenrolled"
+done
+
+# --- Case: Mac not enrolled, profile installed by hand -> installs --------
+# A profile installed by hand is in place before the package, so the one
+# look finds it and provisioning goes ahead.
+
+reset_fakes
+export FAKE_MDM_ENROLLMENT=no
+export FAKE_TOKEN_PRESENT=1 FAKE_TOKEN_VALUE="$GOOD_TOKEN"
+export FAKE_CTRLD_EXIT=0
+run_case no-mdm-profile-present
+
+assert_eq "$exit_code" "0" "no-mdm-profile-present: exit code"
+assert_contains "$calls_out" "ctrld-client start --cd-org=$GOOD_TOKEN" "no-mdm-profile-present: provisions with the profile's token"
+assert_not_contains "$output" "$GOOD_TOKEN" "no-mdm-profile-present: token value must not leak"
 
 # --- Case: malformed token -> PROVISION_TOKEN_MALFORMED -----------------
 

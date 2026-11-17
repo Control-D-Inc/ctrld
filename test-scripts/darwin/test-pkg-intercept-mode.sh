@@ -51,7 +51,14 @@ fi
 exit "${FAKE_CTRLD_EXIT:-0}"
 EOF
 
-chmod +x "$bin/defaults" "$bin/launchctl" "$bin/ctrld-client"
+# Every case here has a profile, so enrollment never changes the outcome; the
+# stub only keeps the copy from running the machine's own profiles(1).
+cat >"$bin/profiles" <<'EOF'
+#!/bin/sh
+printf 'Enrolled via DEP: No\nMDM enrollment: Yes\n'
+EOF
+
+chmod +x "$bin/defaults" "$bin/launchctl" "$bin/ctrld-client" "$bin/profiles"
 
 assert_contains() {
     expected=$1
@@ -96,6 +103,7 @@ run_case() {
         -e "s|^PLIST=\"/Library/LaunchDaemons/ctrld-client.plist\"$|PLIST=\"$plist\"|" \
         -e "s|^CTRLD=\"/usr/local/bin/ctrld-client\"$|CTRLD=\"$bin/ctrld-client\"|" \
         -e "s|^PREFS=\"/Library/Managed Preferences/com.controld.ctrld\"$|PREFS=\"$prefs\"|" \
+        -e "s|^PROFILES=\"/usr/bin/profiles\"$|PROFILES=\"$bin/profiles\"|" \
         "$postinstall_source" >"$postinstall"
     chmod +x "$postinstall"
 
