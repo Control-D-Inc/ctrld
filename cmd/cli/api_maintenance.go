@@ -206,6 +206,16 @@ func (p *prog) maintenanceConfigApplied(logger zerolog.Logger) {
 	}
 }
 
+// maintenanceConfigNeedsRestart ends the fast retry of a maintenance start
+// when the API answered with a configuration that only a restart can apply.
+// A retry would get the same answer and be refused again.
+func (p *prog) maintenanceConfigNeedsRestart(logger zerolog.Logger) {
+	if p.startedInAPIMaintenance.CompareAndSwap(true, false) {
+		journal(logger.Warn()).Str("reason", "api_maintenance").
+			Msg("Control D API answered again; its configuration needs a restart of ctrld")
+	}
+}
+
 // persistManagedConfig writes cfg and, on a run the API manages, records that
 // the file it just wrote came from there.
 //

@@ -174,22 +174,11 @@ func TestMaintenanceRecoveryDeliversReload(t *testing.T) {
 // says there is none"; a run that never asked must not present that as
 // permission to deactivate.
 func TestDeactivationPinUnknownDuringMaintenance(t *testing.T) {
-	oldUID, oldPin, oldKnown := cdUID, cdDeactivationPin.Load(), deactivationPinKnown.Load()
-	t.Cleanup(func() {
-		cdUID = oldUID
-		cdDeactivationPin.Store(oldPin)
-		deactivationPinKnown.Store(oldKnown)
-		deactivationLockedUntil.Store(0)
-	})
-	cdUID = "test-uid"
-	deactivationLockedUntil.Store(0)
-
-	// The handler re-fetches before it checks the PIN. Without this the test
+	// The handler re-fetches before it checks the PIN. Without a stub the test
 	// reaches the production API with a made-up uid, and the statuses below
 	// would depend on that call failing rather than on the maintenance answer
 	// the case is about.
-	oldFetch := fetchResolverConfig
-	t.Cleanup(func() { fetchResolverConfig = oldFetch })
+	isolateDeactivationPinState(t)
 	var fetches atomic.Int64
 	fetchResolverConfig = func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error) {
 		fetches.Add(1)
@@ -372,6 +361,9 @@ func TestMaintenanceRecoveryOutlivesAFailedApply(t *testing.T) {
 	t.Cleanup(func() {
 		close(p.stopCh)
 		<-done
+		// A fetch can outlive the reload, and it reads globals that a later
+		// test changes, such as mobile.IsIOS.
+		fetchGoroutines.Wait()
 	})
 
 	// A failed apply must leave the run pending and keep redelivering, even

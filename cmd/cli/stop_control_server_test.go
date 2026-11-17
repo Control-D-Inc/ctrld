@@ -16,10 +16,11 @@ import (
 )
 
 // A stopping process must not answer /started for the service that replaces
-// it. `ctrld upgrade` treats any reply as "the new binary is up", so a reply
-// from the old process, while it waits for its components to stop, turned an
-// upgrade to a never-ready build into "Upgrade successful" instead of a
-// rollback (ctrld-qa upgrade-readiness-rollback on v1.0).
+// it. `ctrld upgrade` treats a 200 as "the new binary is ready", and the old
+// process, which was ready, answers 200. Its reply, while it waits for its
+// components to stop, turned an upgrade to a never-ready build into "Upgrade
+// successful" instead of a rollback (ctrld-qa upgrade-readiness-rollback on
+// v1.0).
 func TestStopClosesControlServerBeforeRunFinishes(t *testing.T) {
 	// A short path, as the other control server tests use: t.TempDir() is
 	// longer than a Unix socket path may be.
@@ -56,23 +57,30 @@ func TestStopClosesControlServerBeforeRunFinishes(t *testing.T) {
 	p.stopControlServer() // the later releaseResources call is harmless
 }
 
-// startTestControlServer starts a control server on a short socket path in a
-// directory of its own, as the socket client expects, answering /started with
-// whatever started returns.
-func startTestControlServer(t *testing.T, started func() int) (dir, sock string, cs *controlServer) {
+// newTestControlServer makes a control server, not started, on a short socket
+// path in a directory of its own, as the socket client expects. t.TempDir() is
+// longer than a Unix socket path may be. The server stops when the test ends.
+func newTestControlServer(t *testing.T) (dir, sock string, cs *controlServer) {
 	t.Helper()
-	// A short path, as the other control server tests use: t.TempDir() is
-	// longer than a Unix socket path may be.
 	dir, err := os.MkdirTemp("", "cs")
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock = filepath.Join(dir, ctrldControlUnixSock)
 	cs, err = newControlServer(sock)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = cs.stop() })
+	return dir, sock, cs
+}
+
+// startTestControlServer starts a control server on a short socket path in a
+// directory of its own, as the socket client expects, answering /started with
+// whatever started returns.
+func startTestControlServer(t *testing.T, started func() int) (dir, sock string, cs *controlServer) {
+	t.Helper()
+	dir, sock, cs = newTestControlServer(t)
 	cs.register(startedPath, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(started()) }))
 	cs.register(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 	require.NoError(t, cs.start())
-	t.Cleanup(func() { _ = cs.stop() })
 	// start serves on a goroutine, and the server tracks the listener only
 	// once that runs: a Shutdown before then leaves the listener, and its
 	// unlink, to Serve's own deferred close. Wait until it answers, as a

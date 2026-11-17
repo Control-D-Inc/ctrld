@@ -32,6 +32,8 @@ ctrld run --config /path/to/myconfig.toml
 
 If no configuration files found, a default `ctrld.toml` file will be created in the current directory.
 
+The mobile library (iOS and Android) looks for the configuration file in `HomeDir`, the folder that the app gives at start. If it finds no file, it creates the default `ctrld.toml` in `HomeDir`.
+
 In pre v1.1.0, `config.toml` file was used, so for compatibility, `ctrld` will still read `config.toml`
 if it's existed.
 
@@ -161,6 +163,8 @@ Logging level you wish to enable.
 Relative or absolute path of the log file. 
 
 Point `log_path` at a file that no other program rotates. ctrld renames `<log_path>.1` to `<log_path>.N` and uploads these files. A lower `log_max_backups` leaves the older numbered `log_path` files in place, but ctrld removes the extra numbered files of its internal logs.
+
+ctrld removes the secrets, the URL paths, and the resolver IDs from each line of this file, as [Redaction](runtime-internal-logging.md#redaction) describes.
 
 - Type: string
 - Required: no
@@ -536,6 +540,10 @@ Specifies the network addresses that the `listener` will accept requests from. Y
 ## listener
 The `[listener]` section specifies the ip and port of the local DNS server. You can have multiple listeners, and attached policies.
 
+A reload does not start, stop, or move a listener. If the new configuration adds a listener, removes a listener, or changes the address of a listener, `ctrld reload` restarts the service. A reload from the Control D API or from the `SIGUSR1` signal refuses a configuration that removes a running listener. ctrld then keeps the running configuration and logs the listener that is missing.
+
+On iOS and Android in Control D mode, ctrld serves only the first listener of the configuration, which is the listener with the lowest number, at a fixed address. A reload there keeps that address and serves the first listener of the new configuration, with its settings and its default upstream. For example, if the new configuration has only `listener.1`, the running DNS server serves `listener.1`, and requests that match no policy rule go to `upstream.1`. So a reload on mobile gives the same listener as a restart, and it does not refuse a configuration for a missing listener.
+
 ```toml
 [listener.0]
   ip = "127.0.0.1"
@@ -546,6 +554,21 @@ The `[listener]` section specifies the ip and port of the local DNS server. You 
   port = 53
   restricted = true
 ```
+
+Each listener key is a number: `0`, `1`, `2`, and so on. A key has no sign and no leading zero. The number also selects the default upstream of the listener. For example, `listener.1` sends a request that matches no policy rule to `upstream.1`.
+
+ctrld rejects a configuration that has any other listener key, such as `[listener.main]`, `[listener.01]`, or `[listener.-1]`. A valid key such as `[listener.0]` next to the bad key does not change this. Earlier versions of ctrld started with some of these configurations. Now a bad key has these results:
+
+- On desktop and routers, ctrld does not start. It exits with code 59 (`UNCLASSIFIED`). The log and `provision_result.json` in the home directory of ctrld name the bad key. See [Provisioning failure codes](provisioning-failure-codes.md).
+- A reload of the configuration file does not apply it. ctrld keeps the running configuration, and the log names the bad key.
+- A custom configuration from the Control D API with a bad key does not apply. At start, and at a reload from `ctrld reload` or the `SIGUSR1` signal, ctrld uses the configuration that it generates for the resolver. The periodic check of the API keeps the running configuration.
+
+To fix the configuration file:
+
+1. Change each listener key that is not a number to a number that no other listener uses. For example, change `[listener.main]` to `[listener.1]`.
+2. Change the tables of that listener too. For example, change `[listener.main.policy]` to `[listener.1.policy]`.
+3. Make sure that an upstream with the same number exists, for example `[upstream.1]`. A policy rule can also send the requests of the listener to other upstreams.
+4. Start ctrld again, for example with `ctrld start`.
 
 ### ip
 IP address that serves the incoming requests. If `ip` is empty, ctrld will listen on all available addresses.

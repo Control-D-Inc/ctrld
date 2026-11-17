@@ -118,6 +118,12 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid upstream missing endpoint", invalidUpstreamMissingEndpoind(t), true},
 		{"invalid listener ip", invalidListenerIP(t), true},
 		{"invalid listener port", invalidListenerPort(t), true},
+		{"listener key with a leading zero", configWithListenerKey(t, "01"), true},
+		{"listener key that is a name", configWithListenerKey(t, "main"), true},
+		{"listener key with a sign", configWithListenerKey(t, "+1"), true},
+		{"negative listener key", configWithListenerKey(t, "-1"), true},
+		{"listener key with two digits", configWithListenerKey(t, "10"), false},
+		{"listener with no settings", configWithNilListener(t), true},
 		{"os upstream", configWithOsUpstream(t), false},
 		{"invalid rules", configWithInvalidRules(t), true},
 		{"invalid dns rcodes", configWithInvalidRcodes(t), true},
@@ -324,6 +330,19 @@ func invalidListenerIP(t *testing.T) *ctrld.Config {
 	return cfg
 }
 
+// configWithListenerKey moves the default listener to the given key.
+func configWithListenerKey(t *testing.T, key string) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Listener = map[string]*ctrld.ListenerConfig{key: cfg.Listener["0"]}
+	return cfg
+}
+
+func configWithNilListener(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Listener["0"] = nil
+	return cfg
+}
+
 func emptyListenerIP(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Listener["0"].IP = ""
@@ -421,4 +440,32 @@ func configWithInvalidFlushCacheDomain(t *testing.T) *ctrld.Config {
 		cfg.Service.CacheFlushDomains[i] = fmt.Sprintf("%d.com", i)
 	}
 	return cfg
+}
+
+// FirstListenerKey returns the key of the lowest number, as it is in the
+// config, so a key such as "01" finds its own listener.
+func TestConfigFirstListenerKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		keys   []string
+		want   string
+		wantOK bool
+	}{
+		{"lowest number", []string{"abc", "10", "2"}, "2", true},
+		{"leading zero", []string{"01", "2"}, "01", true},
+		{"negative number", []string{"0", "-1"}, "-1", true},
+		{"no number", []string{"abc"}, "", false},
+		{"no listener", nil, "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{}}
+			for _, key := range tc.keys {
+				cfg.Listener[key] = &ctrld.ListenerConfig{}
+			}
+			key, ok := cfg.FirstListenerKey()
+			require.Equal(t, tc.wantOK, ok)
+			require.Equal(t, tc.want, key)
+		})
+	}
 }

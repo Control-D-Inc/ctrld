@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math/rand"
 	"net"
 	"net/netip"
@@ -34,6 +35,7 @@ import (
 	"github.com/Control-D-Inc/ctrld/internal/clientinfo"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
 	"github.com/Control-D-Inc/ctrld/internal/dnscache"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 	"github.com/Control-D-Inc/ctrld/internal/router/dnsmasq"
@@ -103,7 +105,7 @@ type prog struct {
 	stopCh               chan struct{}
 	pinCodeValidCh       chan struct{}
 	reloadCh             chan struct{} // For Windows.
-	reloadDoneCh         chan struct{}
+	reloadDoneCh         chan reloadDone
 	apiReloadCh          chan *ctrld.Config
 	apiForceReloadCh     chan struct{}
 	apiForceReloadGroup  singleflight.Group
@@ -143,6 +145,11 @@ type prog struct {
 	logSend                   *logSendServer
 	runningIface              string
 	requiredMultiNICsConfig   bool
+	// serviceInterceptMode is the intercept mode the running service reported
+	// ("dns", "hard" or "") when a CLI command read its interface over the
+	// control socket. Commands that stop the service use it to pick their DNS
+	// cleanup; the CLI process has no intercept state of its own.
+	serviceInterceptMode      string
 	adDomain                  string
 	hasLocalDNS               bool
 	runningOnDomainController bool
@@ -158,9 +165,15 @@ type prog struct {
 	lastNAT64Mu     sync.Mutex
 	lastNAT64Logged string
 
+	// selfUninstallMu is held for the whole device check, so endDeviceCheck
+	// waits for a check in progress. The answers of the DNS handler never take
+	// it.
 	selfUninstallMu   sync.Mutex
-	refusedQueryCount int
+	refusedQueryCount atomic.Int64
 	canSelfUninstall  atomic.Bool
+	// selfUninstalling is set while a desktop uninstall runs, so a second one
+	// does not start next to it.
+	selfUninstalling atomic.Bool
 
 	// startedInAPIMaintenance records that this run began on the configuration
 	// already on disk because the API was in maintenance, so it holds no answer
@@ -168,7 +181,18 @@ type prog struct {
 	// clears it once a recovered configuration has been applied - not when a
 	// fetch returns, because the reload receiver fetches again and can fail.
 	startedInAPIMaintenance atomic.Bool
-	checkingSelfUninstall   bool
+	// checkingSelfUninstall is set by the answer that starts a device check,
+	// and the end of the cool-off clears it. A check that ends with its run
+	// leaves it set, so late answers start no other check.
+	checkingSelfUninstall atomic.Bool
+	// deviceCheckEnded stops device checks after finishRun. Only mobile sets
+	// it. Each mobile run has its own prog, so it never reaches the next run.
+	// Guarded by selfUninstallMu.
+	deviceCheckEnded bool
+	// coolOff replaces deviceCheckCoolOff for this prog when it is set. Only
+	// tests set it, before the run starts. A package variable would be read by
+	// the cool-off goroutine of an earlier test while the next test writes it.
+	coolOff time.Duration
 
 	loopMu sync.Mutex
 	loop   map[string]bool
@@ -364,8 +388,15 @@ type prog struct {
 
 	started       chan struct{}
 	onStartedDone chan struct{}
-	onStarted     []func()
-	onStopped     []func()
+	// servedListeners holds the keys of the listeners that have a DNS
+	// server. A reload does not start or stop DNS servers.
+	servedListeners []string
+	// servedAs maps the key of a served listener to the key of the listener
+	// config that its DNS server serves, when a reload on mobile changed it.
+	// It is guarded by mu.
+	servedAs  map[string]string
+	onStarted []func()
+	onStopped []func()
 
 	netMonitorMu     sync.Mutex
 	netMonitor       networkChangeMonitor
@@ -542,12 +573,11 @@ func (p *prog) runWait() {
 
 		if newCfg == nil {
 			newCfg = &ctrld.Config{}
-			confFile := v.ConfigFileUsed()
+			// After a start that wrote the default config, viper names no
+			// file, so only configFileForWrite finds it.
+			confFile := configFileForWrite()
 			v := viper.NewWithOptions(viper.KeyDelimiter("::"))
 			ctrld.InitConfig(v, "ctrld")
-			if configPath != "" {
-				confFile = configPath
-			}
 			v.SetConfigFile(confFile)
 			if err := v.ReadInConfig(); err != nil {
 				logger.Err(err).Msg("could not read new config")
@@ -599,6 +629,20 @@ func (p *prog) runWait() {
 			logger.Err(err).Msg("invalid config")
 			continue
 		}
+		// As at a start, the whole config must be valid before the mobile
+		// rule drops all listeners but the first.
+		var servedAs map[string]string
+		if isMobile() && cdUID != "" {
+			servedAs = p.keepMobileListener(newCfg, logger)
+		}
+		if dropped := droppedListeners(p.servedListeners, servedAs, newCfg); len(dropped) > 0 {
+			// The DNS server of a dropped listener keeps running, and its
+			// handler needs the config of that listener.
+			logger.Error().Msgf("reload refused: the new config has no %s, which is running; restart ctrld to apply the new config", strings.Join(dropped, ", "))
+			p.maintenanceConfigNeedsRestart(*logger)
+			p.reportReloadDone(reloadDone{restartNeeded: true})
+			continue
+		}
 
 		addExtraSplitDnsRule(newCfg)
 		persistManagedConfig(newCfg, logger)
@@ -609,12 +653,20 @@ func (p *prog) runWait() {
 		p.setupUpstream(newCfg)
 		// The configuration is in effect now. Every failure above continues the
 		// loop without applying anything, so a run that started in maintenance
-		// stays pending and keeps retrying until one gets this far.
+		// stays pending and keeps retrying until one gets this far. A config
+		// that drops a running listener is the exception: a retry gets the same
+		// config, so its refusal ends the pending state.
 		p.maintenanceConfigApplied(*logger)
 
+		// The DNS handlers read the listener configs without a lock once they
+		// are published, so they are complete before that.
+		for _, lc := range newCfg.Listener {
+			lc.Init()
+		}
 		p.mu.Lock()
 		oldUpstreams := p.cfg.Upstream
 		*p.cfg = *newCfg
+		p.servedAs = servedAs
 		// In DNS-intercept mode on macOS, the DNS listener is bound once at startup and is
 		// NOT re-bound on reload (see prog.run: serveDNS is started only when !reload). When
 		// the configured/generated port (e.g. 127.0.0.1:53) is unavailable at startup because
@@ -636,12 +688,74 @@ func (p *prog) runWait() {
 		p.refreshLogHeader()
 
 		logger.Notice().Msg("reloading config successfully")
+		p.reportReloadDone(reloadDone{})
+	}
+}
 
-		select {
-		case p.reloadDoneCh <- struct{}{}:
-		default:
+// reloadDone is what runWait tells the reload handler of the control server.
+type reloadDone struct {
+	// restartNeeded is set when runWait refused the new config, because only
+	// a restart of ctrld can apply it.
+	restartNeeded bool
+}
+
+// reportReloadDone does not block, because a reload from a signal or from the
+// API has no control server request that waits for it.
+func (p *prog) reportReloadDone(done reloadDone) {
+	select {
+	case p.reloadDoneCh <- done:
+	default:
+	}
+}
+
+// keepMobileListener gives a reload on mobile in Control D mode the listener
+// of a start. A start serves only the first listener of the config, at a
+// fixed address. So the DNS server of the run keeps its address and serves
+// the first listener of newCfg, with the settings and the default upstream
+// of that listener. newCfg loses its other listeners, as at a start. The
+// result maps the served key to the key of that listener. It is nil when the
+// run does not serve one listener or newCfg has no first listener.
+func (p *prog) keepMobileListener(newCfg *ctrld.Config, logger *zerolog.Logger) map[string]string {
+	if len(p.servedListeners) != 1 {
+		return nil
+	}
+	servedKey := p.servedListeners[0]
+	curKey, running := p.listenerConfig(servedKey)
+	if running == nil {
+		return nil
+	}
+	firstKey, ok := newCfg.FirstListenerKey()
+	lc := newCfg.Listener[firstKey]
+	if !ok || lc == nil {
+		return nil
+	}
+	lc.IP, lc.Port = running.IP, running.Port
+	newCfg.Listener = map[string]*ctrld.ListenerConfig{firstKey: lc}
+	if firstKey != curKey {
+		logger.Notice().Msgf("reload: the DNS server of [listener.%s] serves [listener.%s] of the new config from now on, at the same address", servedKey, firstKey)
+	}
+	return map[string]string{servedKey: firstKey}
+}
+
+// configKey returns the key of the listener config that the DNS server of
+// the served listener key serves.
+func configKey(served string, servedAs map[string]string) string {
+	if key, ok := servedAs[served]; ok {
+		return key
+	}
+	return served
+}
+
+// droppedListeners returns, as "[listener.N]", each served listener whose
+// config the new config does not have. servedAs is as in configKey.
+func droppedListeners(served []string, servedAs map[string]string, newCfg *ctrld.Config) []string {
+	var dropped []string
+	for _, key := range served {
+		if newCfg.Listener[configKey(key, servedAs)] == nil {
+			dropped = append(dropped, "[listener."+key+"]")
 		}
 	}
+	return dropped
 }
 
 // preserveBoundListeners overrides the IP/Port of each listener in newListeners with the
@@ -685,28 +799,45 @@ func (p *prog) preRun() {
 	p.runningIface = iface
 }
 
+// ownsDeviceDNS reports whether ctrld may change the DNS settings of the
+// device. The iOS app owns them, and an iOS extension runs under launchd, so a
+// check for a service run does not exclude it. Android keeps the earlier
+// behavior.
+func (p *prog) ownsDeviceDNS() bool {
+	return !mobile.IsIOS()
+}
+
 func (p *prog) postRun() {
-	if !service.Interactive() {
+	if runningAsService() {
 		if runtime.GOOS == "windows" {
 			isDC, roleInt := isRunningOnDomainController()
 			p.runningOnDomainController = isDC
 			mainLog.Load().Debug().Msgf("running on domain controller: %t, role: %d", p.runningOnDomainController, roleInt)
 		}
+		ownsDeviceDNS := p.ownsDeviceDNS()
 		// A Windows organization can install a GP-owned NRPT catch-all before
 		// starting ctrld. Detect that policy before resetDNS touches adapter DNS;
 		// startDNSIntercept will then prove the rule functionally before adopting it.
-		if !p.skipInitialDNSReset() {
-			p.resetDNS(false, false)
+		if ownsDeviceDNS && !p.skipInitialDNSReset() {
+			resetDNSAtStartFn(p)
 		}
 		ns, systemNameservers := initializeOsResolverWithSystemNameserversFn(false, osResolverReasonStart)
 		mainLog.Load().Debug().Msgf("initialized OS resolver with nameservers: %v", ns)
-		p.setDNS(systemNameservers)
+		if ownsDeviceDNS {
+			p.setDNS(systemNameservers)
+		}
 		p.csSetDnsDone <- struct{}{}
 		close(p.csSetDnsDone)
 	}
 }
 
+type resolverConfigFetch = func(context.Context, *controld.ResolverConfigRequest, bool) (*controld.ResolverConfig, error)
+
 var fetchResolverConfigForReload = controld.FetchResolverConfig
+
+// updateCustomLastFailed tells the API that the custom config is invalid.
+// Tests replace it.
+var updateCustomLastFailed = controld.UpdateCustomLastFailed
 
 // startAPIConfigReload starts one program-lifetime worker, not one per reload.
 func (p *prog) startAPIConfigReload() {
@@ -715,6 +846,38 @@ func (p *prog) startAPIConfigReload() {
 		defer p.apiReloadWg.Done()
 		p.apiConfigReload()
 	}()
+}
+
+// fetchUntilDone fills req.Metadata and runs the fetch on its own goroutine.
+// It returns the answer, or ctx.Err() when ctx ends first. The metadata
+// collection queries the system (WMI, system_profiler) without the context,
+// so it does not stop at the cancel, and the stop must not wait for it. The
+// caller reads the globals into fetch, req and dev, because the goroutine can
+// outlive the run, and the next run writes them. The goroutine touches
+// nothing else of the run.
+// fetchGoroutines counts the goroutines of fetchUntilDone. A test waits for
+// them before another test changes a global that they read.
+var fetchGoroutines sync.WaitGroup
+
+func fetchUntilDone(ctx context.Context, fetch resolverConfigFetch, req *controld.ResolverConfigRequest, dev bool) (*controld.ResolverConfig, error) {
+	type answer struct {
+		rc  *controld.ResolverConfig
+		err error
+	}
+	fetched := make(chan answer, 1)
+	fetchGoroutines.Add(1)
+	go func() {
+		defer fetchGoroutines.Done()
+		req.Metadata = ctrld.SystemMetadataRuntime(ctx)
+		rc, err := fetch(ctx, req, dev)
+		fetched <- answer{rc, err}
+	}()
+	select {
+	case a := <-fetched:
+		return a.rc, a.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // apiConfigReload calls API to check for latest config update then reload ctrld if necessary.
@@ -762,12 +925,8 @@ func (p *prog) apiConfigReload() {
 		if ctx.Err() != nil {
 			return
 		}
-		req := &controld.ResolverConfigRequest{
-			RawUID:   cdUID,
-			Version:  rootCmd.Version,
-			Metadata: ctrld.SystemMetadataRuntime(ctx),
-		}
-		resolverConfig, err := fetchResolverConfigForReload(ctx, req, cdDev)
+		req := &controld.ResolverConfigRequest{RawUID: cdUID, Version: rootCmd.Version}
+		resolverConfig, err := fetchUntilDone(ctx, fetchResolverConfigForReload, req, cdDev)
 		if ctx.Err() != nil {
 			return
 		}
@@ -777,6 +936,8 @@ func (p *prog) apiConfigReload() {
 			return
 		}
 
+		vt := resolverConfig.Ctrld.VersionTarget
+		cdVersionTarget.Store(&vt)
 		// Performing self-upgrade check for production version.
 		if isStable {
 			_ = selfUpgradeCheck(resolverConfig.Ctrld.VersionTarget, curVer, &logger)
@@ -852,8 +1013,8 @@ func (p *prog) apiConfigReload() {
 				cfgErr = validateConfig(cfg)
 			}
 			if cfgErr != nil {
-				logger.Warn().Err(err).Msg("skipping invalid custom config")
-				if _, err := controld.UpdateCustomLastFailed(ctx, cdUID, rootCmd.Version, cdDev, true); err != nil {
+				logger.Warn().Err(cfgErr).Msg("skipping invalid custom config")
+				if _, err := updateCustomLastFailed(ctx, cdUID, rootCmd.Version, cdDev, true); err != nil {
 					logger.Error().Err(err).Msg("could not mark custom last update failed")
 				}
 				return
@@ -1126,9 +1287,13 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 		}()
 	}
 
+	if !reload {
+		p.servedListeners = slices.Sorted(maps.Keys(p.cfg.Listener))
+	}
 	for listenerNum := range p.cfg.Listener {
-		p.cfg.Listener[listenerNum].Init()
+		// A reload initializes its listener configs before it publishes them.
 		if !reload {
+			p.cfg.Listener[listenerNum].Init()
 			p.listenerWg.Add(1)
 			go func(listenerNum string) {
 				defer p.listenerWg.Done()
@@ -1342,6 +1507,10 @@ func (p *prog) metricsEnabled() bool {
 	return p.cfg.Service.MetricsQueryStats || p.cfg.Service.MetricsListener != ""
 }
 
+// reloadWaitWarning is how long a mobile stop waits for the reload worker
+// before it logs that it waits.
+var reloadWaitWarning = shutdownTimeout
+
 // finishRun also cancels workers waiting for startup when preflight returns early.
 // The caller's stop channel belongs to the mobile controller, not to this cleanup.
 func (p *prog) finishRun() {
@@ -1359,14 +1528,29 @@ func (p *prog) finishRun() {
 	}
 	// Listeners live across config reloads, so they belong to prog rather
 	// than the per-run wait group. runDone closes after their final Add.
-	p.apiReloadWg.Wait()
+	p.waitAPIReload()
 	p.listenerWg.Wait()
+	p.endDeviceCheck()
 	if p.waitNetworkJournal != nil {
 		p.waitNetworkJournal()
 	}
 	if err := p.shutdown(); err != nil {
 		mainLog.Load().Warn().Err(err).Msg("error during shutdown")
 	}
+}
+
+// waitAPIReload waits for the reload worker. On mobile, a reload that found
+// a deleted device waits in the Exit callback of the app. The usual cause of
+// a long wait is an Exit that waits for the run to end. Without the warning,
+// the app sees only a slow stop.
+func (p *prog) waitAPIReload() {
+	if isMobile() {
+		slow := time.AfterFunc(reloadWaitWarning, func() {
+			mainLog.Load().Warn().Msg("the stop waits for the configuration reload: the Exit callback of the app must not wait for the run to end")
+		})
+		defer slow.Stop()
+	}
+	p.apiReloadWg.Wait()
 }
 
 // startOSState serializes startup's OS mutations with restoration. A stop
@@ -1426,10 +1610,10 @@ func (p *prog) releaseResources() {
 //
 // It must not wait for the run to finish. A stopping process that still answers
 // on the socket answers for the service that replaces it: `ctrld upgrade` and
-// restart take any reply to /started as "the new binary is up", so an upgrade
-// to a build that never became ready was reported successful instead of rolled
-// back. Closing late also unlinks the socket path after the new process has
-// bound its own there.
+// restart take a 200 from /started as "the new binary is ready", and the old
+// process, which was ready, answers 200. So an upgrade to a build that never
+// became ready was reported successful instead of rolled back. Closing late
+// also unlinks the socket path after the new process has bound its own there.
 func (p *prog) stopControlServer() {
 	p.csStopOnce.Do(func() {
 		if p.cs == nil {
@@ -1560,6 +1744,7 @@ var (
 	newResolverFn                               = ctrld.NewResolver
 	setDnsForRunningIfaceFn                     = (*prog).setDnsForRunningIface
 	resetDNSFn                                  = (*prog).resetDNS
+	resetDNSAtStartFn                           = (*prog).resetDNSAtStart
 	// refuseFallbackFatal reports a startup failure the interface-DNS fallback
 	// cannot safely paper over, then exits. No dedicated code exists for this,
 	// so it falls back to UNCLASSIFIED.
@@ -1595,6 +1780,9 @@ func (p *prog) setDNS(systemNameservers []string) {
 	defer func() {
 		p.csSetDnsOk = setDnsOK
 	}()
+	if !p.ownsDeviceDNS() {
+		return
+	}
 
 	// Validate and resolve intercept mode: --intercept-mode, then
 	// service.intercept_mode, then the platform default (resolveInterceptMode).
@@ -1949,6 +2137,9 @@ func (p *prog) dnsWatchdog(iface *net.Interface, nameservers []string) {
 // resetDNS performs a DNS reset for all interfaces.
 // In DNS intercept mode, this tears down the WFP/pf filters instead.
 func (p *prog) resetDNS(isStart bool, restoreStatic bool) {
+	if !p.ownsDeviceDNS() {
+		return
+	}
 	// A previous crash can leave a persisted macOS intercept target even when
 	// no live interceptor state exists. Cleanup must run for stop/uninstall and
 	// traditional-mode startup as well as the normal intercept shutdown path.
@@ -1983,7 +2174,158 @@ var (
 	restoreNetworkManagerFn = restoreNetworkManager
 	setIfaceDNSFn           = setDNS
 	resetIfaceDNSFn         = resetDNS
+	currentStaticDNSFn      = currentStaticDNS
 )
+
+// resetDNSAtStart clears adapter DNS settings left by an earlier run before
+// this run takes over DNS.
+//
+// Interface DNS mode ("off") resets the running interface and every physical
+// one, as before: setDNS points them at the listener right after, so nothing a
+// reset removes is lost.
+//
+// The intercept modes ("dns" and "hard") never write adapter DNS, so a blanket
+// reset there only destroys settings ctrld does not own: the DNS a VPN client
+// pushed to its own adapter (the running interface while the tunnel holds the
+// default route), or static DNS an administrator put on a physical adapter. The
+// only adapter setting an earlier run can have left behind is its own listener,
+// from an interface DNS mode run or a crash, so only an adapter whose static DNS
+// is a loopback address is reset. The Windows DNS Server forwarders that
+// interface DNS mode writes on a domain controller are removed separately,
+// because they do not depend on any adapter still holding the listener.
+func (p *prog) resetDNSAtStart() {
+	if !interceptModeKeepsAdapterDNS(startResetGOOS, p.configuredInterceptMode()) {
+		resetDNSFn(p, false, false)
+		return
+	}
+	p.resetLeftoverDNS(false)
+}
+
+// resetDNSAfterServiceStop is the DNS cleanup ctrld restart and the upgrade
+// binary switch run in the CLI process, between stopping the service and
+// starting it again (or rolling back).
+//
+// The CLI process has no intercept state, so a plain resetDNS there always
+// takes the interface DNS mode branch: it reset the running interface and every
+// physical adapter even when the stopped service ran in an intercept mode,
+// which clears a full-tunnel VPN's adapter DNS on every restart and every
+// self-upgrade, the same damage resetDNSAtStart avoids at the service start.
+// When the service reported an intercept mode, only a leftover listener is
+// cleared, restoring saved static DNS on the running interface as before. A
+// service in interface DNS mode, or one that could not report its mode, keeps
+// the full reset.
+func (p *prog) resetDNSAfterServiceStop() {
+	if !p.ownsDeviceDNS() {
+		return
+	}
+	if !interceptModeKeepsAdapterDNS(startResetGOOS, p.serviceInterceptMode) {
+		resetDNSFn(p, false, true)
+		return
+	}
+	p.resetLeftoverDNS(true)
+}
+
+// setRunningIfaceFromService records what the running service reported over
+// the control socket: its interface, whether it manages every physical
+// adapter, and its intercept mode.
+func (p *prog) setRunningIfaceFromService(ir *ifaceResponse) {
+	p.runningIface = ir.Name
+	p.requiredMultiNICsConfig = ir.All
+	p.serviceInterceptMode = ir.InterceptMode
+}
+
+// resetLeftoverDNS is the intercept-mode reset shared by resetDNSAtStart and
+// resetDNSAfterServiceStop: it clears only adapter DNS an earlier interface DNS
+// mode run left behind. restoreStatic restores the running interface's saved
+// static DNS instead of DHCP, as resetDNS(_, true) does.
+func (p *prog) resetLeftoverDNS(restoreStatic bool) {
+	// A previous crash can leave a persisted macOS intercept target; resetDNS
+	// removes it on this path too.
+	removeInterceptDNSTargetFn(p, "DNS reset")
+	// Domain controller forwarders from an interface DNS mode run are removed
+	// whether or not any adapter still has the listener.
+	removeSavedDnsServerForwardersFn()
+	runningName := ""
+	if p.runningIface != "" {
+		logger := mainLog.Load().With().Str("iface", p.runningIface).Logger()
+		netIface, err := netInterfaceFn(p.runningIface)
+		switch {
+		case err != nil:
+			logIfaceLookupFailure(&logger, "leftover DNS check", err)
+		default:
+			runningName = netIface.Name
+			if hasLeftoverListenerDNS(netIface) {
+				p.resetDNSForRunningIface(false, restoreStatic)
+			}
+		}
+	}
+	if p.requiredMultiNICsConfig {
+		withEachPhysicalInterfacesFn(runningName, "", resetLeftoverListenerDNS)
+	}
+}
+
+// startResetGOOS is the platform resetDNSAtStart and resetDNSAfterServiceStop
+// decide for; tests set it so the Windows and macOS path runs on every CI
+// platform.
+var startResetGOOS = runtime.GOOS
+
+// interceptModeKeepsAdapterDNS reports whether a start in mode on goos leaves
+// adapter DNS it did not set alone. Only Windows and macOS implement intercept
+// mode; elsewhere an intercept mode falls back to interface DNS mode, which
+// keeps the blanket reset.
+func interceptModeKeepsAdapterDNS(goos, mode string) bool {
+	if goos != "windows" && goos != "darwin" {
+		return false
+	}
+	return mode == "dns" || mode == "hard"
+}
+
+// resetLeftoverListenerDNS resets iface to DHCP DNS only when its static DNS
+// still names a loopback listener.
+func resetLeftoverListenerDNS(iface *net.Interface) error {
+	if !hasLeftoverListenerDNS(iface) {
+		return nil
+	}
+	if err := resetDnsIgnoreUnusableInterfaceFn(iface); err != nil {
+		return err
+	}
+	mainLog.Load().Debug().Msgf("Ran reset DNS for interface %q successfully", iface.Name)
+	return nil
+}
+
+// resetDnsIgnoreUnusableInterfaceFn is the reset used by resetLeftoverListenerDNS,
+// so tests can observe it without changing the host's DNS.
+var resetDnsIgnoreUnusableInterfaceFn = resetDnsIgnoreUnusableInterface
+
+// removeSavedDnsServerForwardersFn is the domain controller forwarder cleanup
+// used by resetDNSAtStart.
+var removeSavedDnsServerForwardersFn = removeSavedDnsServerForwarders
+
+// withEachPhysicalInterfacesFn walks the physical adapters for resetDNSAtStart;
+// the real walk reads the host's adapter list, so tests replace it.
+var withEachPhysicalInterfacesFn = withEachPhysicalInterfaces
+
+// hasLeftoverListenerDNS reports whether iface's static DNS contains a loopback
+// address, the only adapter setting an earlier ctrld run leaves behind. When the
+// settings cannot be read it reports true, keeping the reset every start ran
+// before intercept modes stopped resetting other adapters' DNS.
+func hasLeftoverListenerDNS(iface *net.Interface) bool {
+	logger := mainLog.Load().With().Str("iface", iface.Name).Logger()
+	ns, err := currentStaticDNSFn(iface)
+	if err != nil {
+		logger.Debug().Err(err).Msg("could not read static DNS; resetting it as a possible leftover listener")
+		return true
+	}
+	if slices.ContainsFunc(ns, func(s string) bool {
+		ip := net.ParseIP(s)
+		return ip != nil && ip.IsLoopback()
+	}) {
+		logger.Info().Strs("static_dns", ns).Msg("Interface DNS still names a loopback listener left by an earlier run; resetting it to DHCP")
+		return true
+	}
+	logger.Debug().Int("static_dns_count", len(ns)).Msg("Interface DNS was not set by ctrld; leaving it unchanged in intercept mode")
+	return false
+}
 
 // logIfaceLookupFailure reports a failed lookup of the interface the caller was
 // about to work on, naming that work in skipping, e.g. "DNS restoration". An
@@ -2536,12 +2878,15 @@ func dnsChanged(iface *net.Interface, nameservers []string) bool {
 	return false
 }
 
-// selfUninstallCheck checks if the error dues to controld.InvalidConfigCode, perform self-uninstall then.
 // selfUninstallFn is the uninstall itself, indirected so a test can prove what
 // does and does not reach it. The real one ends in os.Exit, which a test cannot
 // survive to make an assertion about.
 var selfUninstallFn = selfUninstall
 
+// selfUninstallCheck acts when the error says that the device was deleted
+// (controld.InvalidConfigCode). On mobile it calls the Exit callback of the
+// app and returns when Exit returns. On desktop it starts the uninstall and
+// does not wait for it.
 func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 	// Maintenance is the API being away; it establishes nothing about whether
 	// this device still exists. Guarded here rather than at each caller because
@@ -2554,10 +2899,34 @@ func selfUninstallCheck(uninstallErr error, p *prog, logger zerolog.Logger) {
 	var uer *controld.ErrorResponse
 	if errors.As(uninstallErr, &uer) && uer.ErrorField.Code == controld.InvalidConfigCode {
 		p.stopDnsWatchers()
-
-		// Perform self-uninstall now.
-		selfUninstallFn(p, logger)
+		// On mobile ctrld runs inside the app. It cannot start an uninstall,
+		// and it must not end the process, so the app gets the code and
+		// stops the run.
+		if isMobile() {
+			if p.appCallback != nil && p.appCallback.Exit != nil {
+				p.appCallback.Exit(mobileAPIFailureLine(uninstallErr))
+			}
+			return
+		}
+		p.startSelfUninstall(logger)
 	}
+}
+
+// startSelfUninstall starts the desktop uninstall and does not wait for it.
+// The uninstall stops the service, and that stop waits for this process to
+// exit. The caller can be work that the stop waits for, such as the
+// configuration reload, so a wait here would hang the stop until the service
+// manager kills the process. The flag lets one uninstall run at a time. It
+// clears when the uninstall returns, so a failed uninstall can run again.
+func (p *prog) startSelfUninstall(logger zerolog.Logger) {
+	if !p.selfUninstalling.CompareAndSwap(false, true) {
+		return
+	}
+	uninstall := selfUninstallFn
+	go func() {
+		defer p.selfUninstalling.Store(false)
+		uninstall(p, logger)
+	}()
 }
 
 // shouldUpgrade checks if the version target vt is greater than the current one cv.
@@ -2637,6 +3006,11 @@ func performUpgrade(vt string) bool {
 // The callers must ensure curVer and logger are non-nil.
 // Returns true if upgrade is allowed and should proceed, false otherwise.
 func selfUpgradeCheck(vt string, cv *semver.Version, logger *zerolog.Logger) bool {
+	// On mobile ctrld updates with the app, and the sandbox does not let it
+	// start the upgrade command.
+	if isMobile() {
+		return false
+	}
 	if shouldUpgrade(vt, cv, logger) {
 		return performUpgrade(vt)
 	}

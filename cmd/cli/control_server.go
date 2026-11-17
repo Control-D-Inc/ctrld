@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/kardianos/service"
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -21,16 +20,17 @@ import (
 )
 
 const (
-	contentTypeJson  = "application/json"
-	listClientsPath  = "/clients"
-	startedPath      = "/started"
-	reloadPath       = "/reload"
-	deactivationPath = "/deactivation"
-	cdPath           = "/cd"
-	ifacePath        = "/iface"
-	viewLogsPath     = "/log/view"
-	sendLogsPath     = "/log/send"
-	tailLogsPath     = "/log/tail"
+	contentTypeJson   = "application/json"
+	listClientsPath   = "/clients"
+	startedPath       = "/started"
+	reloadPath        = "/reload"
+	deactivationPath  = "/deactivation"
+	cdPath            = "/cd"
+	versionTargetPath = "/version_target"
+	ifacePath         = "/iface"
+	viewLogsPath      = "/log/view"
+	sendLogsPath      = "/log/send"
+	tailLogsPath      = "/log/tail"
 )
 
 type ifaceResponse struct {
@@ -47,13 +47,21 @@ type controlServer struct {
 	server *http.Server
 	mux    *http.ServeMux
 	addr   string
+	// cancel ends the context of every request, so a handler that watches its
+	// context stops with the server. Shutdown does not end the context.
+	cancel context.CancelFunc
 }
 
 func newControlServer(addr string) (*controlServer, error) {
 	mux := http.NewServeMux()
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &controlServer{
-		server: &http.Server{Handler: mux},
+		server: &http.Server{
+			Handler:     mux,
+			BaseContext: func(net.Listener) context.Context { return ctx },
+		},
 		mux:    mux,
+		cancel: cancel,
 	}
 	s.addr = addr
 	return s, nil
@@ -79,6 +87,7 @@ func (s *controlServer) start() error {
 }
 
 func (s *controlServer) stop() error {
+	s.cancel()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
 	defer cancel()
 	return s.server.Shutdown(ctx)
@@ -87,6 +96,50 @@ func (s *controlServer) stop() error {
 func (s *controlServer) register(pattern string, handler http.Handler) {
 	s.mux.Handle(pattern, jsonResponse(handler))
 }
+
+// abortStoppedRequest ends a request whose context ended with no answer. The
+// context ends when the control server stops or the client goes away. A
+// handler that only returns still sends 200, and a stopping process must not
+// answer /started: upgrade and restart take a 200 as "the new binary is
+// ready", and the start check takes any answer as "the service is up".
+func abortStoppedRequest() {
+	panic(http.ErrAbortHandler)
+}
+
+// refreshDeactivationPin fetches the deactivation PIN from the API and stores
+// it. It does not store an answer that comes after ctx ended, and then returns
+// the error of ctx. ctx ends when the control server stops. On mobile, the next
+// run may already be active then, and the PIN globals belong to it.
+//
+// A client that gives up does not end ctx while the handler has not read the
+// request body, because net/http sees a closed connection only after the body.
+// That answer still belongs to the run that is active, so it can be stored.
+func refreshDeactivationPin(ctx context.Context) error {
+	rcReq := &controld.ResolverConfigRequest{
+		RawUID:   cdUID,
+		Version:  rootCmd.Version,
+		Metadata: ctrld.SystemMetadataRuntime(ctx),
+	}
+	rc, err := fetchResolverConfig(ctx, rcReq, cdDev)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		mainLog.Load().Warn().Err(ctxErr).Msg("deactivation request ended before the pin code answer, not storing it")
+		return ctxErr
+	}
+	if rc == nil {
+		mainLog.Load().Warn().Err(err).Msg("could not re-fetch deactivation pin code")
+		return nil
+	}
+	deactivationPinKnown.Store(true)
+	if rc.DeactivationPin != nil {
+		cdDeactivationPin.Store(*rc.DeactivationPin)
+	} else {
+		cdDeactivationPin.Store(defaultDeactivationPin)
+	}
+	return nil
+}
+
+// sendLogsToAPI uploads a log. It is a variable so tests can hold an upload.
+var sendLogsToAPI = controld.SendLogs
 
 func (p *prog) registerControlServerHandler() {
 	p.cs.register(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -167,12 +220,18 @@ func (p *prog) registerControlServerHandler() {
 			Msg("successfully sent clients list response")
 	}))
 	p.cs.register(startedPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		status := http.StatusOK
 		select {
 		case <-p.onStartedDone:
-			w.WriteHeader(http.StatusOK)
 		case <-time.After(10 * time.Second):
-			w.WriteHeader(http.StatusRequestTimeout)
+			status = http.StatusRequestTimeout
+		case <-request.Context().Done():
 		}
+		// The wait can end as the server stops. The stop wins over any answer.
+		if request.Context().Err() != nil {
+			abortStoppedRequest()
+		}
+		w.WriteHeader(status)
 	}))
 	p.cs.register(reloadPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		listeners := make(map[string]*ctrld.ListenerConfig)
@@ -185,16 +244,25 @@ func (p *prog) registerControlServerHandler() {
 		}
 		oldSvc := p.cfg.Service
 		p.mu.Unlock()
-		if err := p.sendReloadSignal(); err != nil {
+		if err := p.sendReloadSignal(request.Context()); err != nil {
+			if request.Context().Err() != nil {
+				abortStoppedRequest()
+			}
 			mainLog.Load().Err(err).Msg("could not send reload signal")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		select {
-		case <-p.reloadDoneCh:
+		case done := <-p.reloadDoneCh:
+			if done.restartNeeded {
+				w.WriteHeader(http.StatusCreated)
+				return
+			}
 		case <-time.After(5 * time.Second):
 			http.Error(w, "timeout waiting for ctrld reload", http.StatusInternalServerError)
 			return
+		case <-request.Context().Done():
+			abortStoppedRequest()
 		}
 
 		p.mu.Lock()
@@ -233,21 +301,11 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 
-		// Re-fetch pin code from API.
-		rcReq := &controld.ResolverConfigRequest{
-			RawUID:   cdUID,
-			Version:  rootCmd.Version,
-			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
-		}
-		if rc, err := fetchResolverConfig(context.Background(), rcReq, cdDev); rc != nil {
-			deactivationPinKnown.Store(true)
-			if rc.DeactivationPin != nil {
-				cdDeactivationPin.Store(*rc.DeactivationPin)
-			} else {
-				cdDeactivationPin.Store(defaultDeactivationPin)
-			}
-		} else {
-			mainLog.Load().Warn().Err(err).Msg("could not re-fetch deactivation pin code")
+		// A request that ended must not be checked: on mobile, the PIN and the
+		// lockout counters may belong to the next run already.
+		if err := refreshDeactivationPin(request.Context()); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
 		}
 
 		// If pin code not set, allowing deactivation - but only when the API
@@ -300,11 +358,19 @@ func (p *prog) registerControlServerHandler() {
 		}
 		w.WriteHeader(http.StatusBadRequest)
 	}))
+	p.cs.register(versionTargetPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(versionTarget()))
+	}))
 	p.cs.register(ifacePath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		res := &ifaceResponse{Name: iface}
 		// p.setDNS is only called when running as a service
-		if !service.Interactive() {
-			<-p.csSetDnsDone
+		if runningAsService() {
+			select {
+			case <-p.csSetDnsDone:
+			case <-request.Context().Done():
+				abortStoppedRequest()
+			}
 			if p.csSetDnsOk {
 				res.Name = p.runningIface
 				res.All = p.requiredMultiNICsConfig
@@ -345,9 +411,11 @@ func (p *prog) registerControlServerHandler() {
 		}
 		mainLog.Load().Debug().Msg("sending log file to ControlD server")
 		resp := logSentResponse{Size: r.size}
-		if err := controld.SendLogs(context.Background(), req, cdDev); err != nil {
+		if err := sendLogsToAPI(request.Context(), req, cdDev); err != nil {
 			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
-			resp.Error = err.Error()
+			// The CLI prints the answer, and it may not know the secrets
+			// that the service knows.
+			resp.Error = string(redactLogLine([]byte(err.Error())))
 			w.WriteHeader(http.StatusInternalServerError)
 		} else {
 			mainLog.Load().Debug().Msg("sending log file successfully")

@@ -4,12 +4,18 @@ type dnsFn func() []string
 
 // nameservers returns DNS nameservers from system settings.
 func nameservers() []string {
+	if nss := AppNameservers(); nss != nil {
+		return nss
+	}
 	return nameserversFrom(dnsFns())
 }
 
 // quickNameservers is nameservers without waiting for the system to publish
 // them: a source that finds none returns at once instead of retrying.
 func quickNameservers() []string {
+	if nss := AppNameservers(); nss != nil {
+		return nss
+	}
 	return nameserversFrom(quickDNSFns())
 }
 

@@ -13,6 +13,11 @@ import (
 )
 
 func selfUninstall(p *prog, logger zerolog.Logger) {
+	// The iOS sandbox does not let an app start a process, and an exit ends
+	// the app. selfUninstallCheck reports to the app instead.
+	if isMobile() {
+		return
+	}
 	if runtime.GOOS == "linux" {
 		selfUninstallLinux(p, logger)
 	}

@@ -109,9 +109,9 @@ Provisioning runs the full `DiscoverMainUser` chain. Each managed daemon start r
 
 A `--cd-org` install therefore sends two full snapshots: the token exchange (`cdUIDFromProvToken`), then the first check-in of the daemon that `start` launches with `--cd=<uid>`. Full discovery runs for the first and session discovery for the second. The API merges metadata objects, so the second snapshot does not erase fields from the first.
 
-The mobile library starts through `processCDFlags` too. iOS builds use `GOOS=darwin`, but the `stat` and `scutil` commands that macOS session discovery runs are not available, and Android has no `loginctl` session. Session discovery on mobile finds no user, so the mobile start omits `username`.
+The mobile library starts through `processCDFlags` too. On iOS, ctrld runs no discovery at all, because the iOS sandbox does not let an app start a process. The iOS metadata has empty chassis values, `domain_or_workgroup` `"false"`, and an empty `domain`. It has no `username` key on any request, and that includes the token exchange. The `os` value comes from `kern.osproductversion`, and the only hostname hint is `hostname_os.Hostname`. Android has no `loginctl` session, so session discovery finds no user there, and the Android start omits `username`.
 
-### Host metadata wire contract (version 1)
+### Host metadata wire contract (version 2)
 
 Every managed `/utility` request body carries `uid`, an optional `client_id`, and `metadata`. `metadata` is a JSON object of string values, or `null` when the caller supplies none. `UpdateCustomLastFailed` sends `null`, which the API treats as metadata omitted. All resolver-config callers supply metadata.
 
@@ -119,10 +119,10 @@ Columns: **Provisioning** is the `--cd-org` token exchange; **Start** is the fir
 
 | Key | Source | Platforms | Provisioning | Start | Runtime | Value when the source is unavailable |
 |---|---|---|---|---|---|---|
-| `os` | `osinfo` | All | ✅ | ✅ | ✅ | Always present |
-| `chassis_type` | `system.GetChassisInfo` (macOS model identifier) | All | ✅ | ✅ | ✅ | `""` |
-| `chassis_vendor` | `system.GetChassisInfo` (`Apple Inc.` on macOS) | All | ✅ | ✅ | ✅ | `""` |
-| `username` | Provisioning: `DiscoverMainUser`. Start: active login session only | All | ✅ | ⚠️ Session user only | ❌ | Provisioning: `"unknown"`. Start: key omitted |
+| `os` | `osinfo` (`kern.osproductversion` on iOS) | All | ✅ | ✅ | ✅ | Always present |
+| `chassis_type` | `system.GetChassisInfo` (macOS model identifier) | All (always `""` on iOS) | ✅ | ✅ | ✅ | `""` |
+| `chassis_vendor` | `system.GetChassisInfo` (`Apple Inc.` on macOS) | All (always `""` on iOS) | ✅ | ✅ | ✅ | `""` |
+| `username` | Provisioning: `DiscoverMainUser`. Start: active login session only | All except iOS | ✅ | ⚠️ Session user only | ❌ | Provisioning: `"unknown"`. Start: key omitted. iOS: key omitted on every request |
 | `domain_or_workgroup` | Windows domain-join status | Windows; `"false"` elsewhere | ✅ | ✅ | ✅ | `"false"` |
 | `domain` | Active Directory domain | Windows; `""` elsewhere | ✅ | ✅ | ✅ | `""` |
 | `hostname_ComputerName` | `scutil --get ComputerName` | macOS only | ✅ | ✅ | ❌ | Key omitted |
@@ -130,7 +130,7 @@ Columns: **Provisioning** is the `--cd-org` token exchange; **Start** is the fir
 | `hostname_HostName` | `scutil --get HostName` | macOS only | ✅ | ✅ | ❌ | Key omitted |
 | `hostname_os.Hostname` | `os.Hostname()` | All | ✅ | ✅ | ❌ | Key omitted |
 
-The API accepts only these ten keys. It ignores unknown keys, non-string values, and any value longer than 255 bytes, field by field, without failing the request. An omitted key keeps the stored value and a present empty string clears it. The server side of this contract is [`docs/ctrld-utility-host-metadata.md` in controld-api](https://gitlab.int.windscribe.com/controld/backend/api/-/blob/master/docs/ctrld-utility-host-metadata.md). Bump the version above when a key, its platforms, or its unavailable value changes.
+The API accepts only these ten keys. It ignores unknown keys, non-string values, and any value longer than 255 bytes, field by field, without failing the request. An omitted key keeps the stored value and a present empty string clears it. The server side of this contract is [`docs/ctrld-utility-host-metadata.md` in controld-api](https://gitlab.int.windscribe.com/controld/backend/api/-/blob/master/docs/ctrld-utility-host-metadata.md). Bump the version above when a key, its platforms, or its unavailable value changes. Version 2 changed the iOS values: no `username` key on any request, always empty chassis values, and the `os` version from `kern.osproductversion`.
 
 ### Runtime metadata (`SystemMetadataRuntime`)
 

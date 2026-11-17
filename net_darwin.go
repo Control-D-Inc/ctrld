@@ -11,6 +11,9 @@ import (
 // validInterfaces returns a set of all valid hardware ports.
 // TODO: deduplicated with cmd/cli/net_darwin.go in v2.
 func validInterfaces() map[string]struct{} {
+	if isMobile() {
+		return nil
+	}
 	b, err := exec.Command("networksetup", "-listallhardwareports").Output()
 	if err != nil {
 		return nil

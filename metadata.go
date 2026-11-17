@@ -2,8 +2,7 @@ package ctrld
 
 import (
 	"context"
-
-	"github.com/cuonglm/osinfo"
+	"sync"
 
 	"github.com/Control-D-Inc/ctrld/internal/system"
 )
@@ -18,9 +17,14 @@ const (
 )
 
 var (
+	// chassisMu guards chassisType and chassisVendor. Read them with chassisValues.
+	chassisMu     sync.Mutex
 	chassisType   string
 	chassisVendor string
 )
+
+// getChassisInfoFn is system.GetChassisInfo. Tests replace it.
+var getChassisInfoFn = system.GetChassisInfo
 
 // username discovery modes for systemMetadata.
 const (
@@ -58,15 +62,11 @@ func SystemMetadataRuntime(ctx context.Context) map[string]string {
 
 func systemMetadata(ctx context.Context, usernameMode int) map[string]string {
 	m := make(map[string]string)
-	oi := osinfo.New()
-	m[metadataOsKey] = oi.String()
-	if chassisType == "" && chassisVendor == "" {
-		if ci, err := system.GetChassisInfo(); err == nil {
-			chassisType, chassisVendor = ci.Type, ci.Vendor
-		}
+	m[metadataOsKey] = OSVersion()
+	if isMobile() {
+		return mobileMetadata(m)
 	}
-	m[metadataChassisTypeKey] = chassisType
-	m[metadataChassisVendorKey] = chassisVendor
+	m[metadataChassisTypeKey], m[metadataChassisVendorKey] = chassisValues()
 	switch usernameMode {
 	case usernameFull:
 		m[metadataUsernameKey] = discoverMainUserFn(ctx)
@@ -82,5 +82,36 @@ func systemMetadata(ctx context.Context, usernameMode int) map[string]string {
 	}
 	m[metadataDomainKey] = domain
 
+	return m
+}
+
+// chassisValues returns the cached chassis type and vendor. It looks them up
+// while both are empty, so a failed lookup, or one that returns two empty
+// values, is tried again on the next call. A result with one empty value is
+// kept.
+// Several goroutines call systemMetadata, so the mutex guards the cache. It is
+// held during the lookup, so the lookup runs at most once at a time.
+func chassisValues() (kind, vendor string) {
+	chassisMu.Lock()
+	defer chassisMu.Unlock()
+	if chassisType == "" && chassisVendor == "" {
+		ci, err := getChassisInfoFn()
+		if err != nil {
+			ProxyLogger.Load().Debug().Err(err).Msg("Failed to get chassis info")
+			return chassisType, chassisVendor
+		}
+		chassisType, chassisVendor = ci.Type, ci.Vendor
+	}
+	return chassisType, chassisVendor
+}
+
+// mobileMetadata completes m without the host values. Each of them starts a
+// system tool on iOS, and an iOS app has no login user. With no username key,
+// the API keeps the value that it has.
+func mobileMetadata(m map[string]string) map[string]string {
+	m[metadataChassisTypeKey] = ""
+	m[metadataChassisVendorKey] = ""
+	m[metadataDomainOrWorkgroupKey] = "false"
+	m[metadataDomainKey] = ""
 	return m
 }

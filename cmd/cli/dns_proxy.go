@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
@@ -47,7 +48,9 @@ const (
 	// This is also dns.EDNS0LOCALSTART, but define our own constant here for clarification.
 	EDNS0_OPTION_MAC = 0xFDE9
 
-	// selfUninstallMaxQueries is number of REFUSED queries seen before checking for self-uninstallation.
+	// selfUninstallMaxQueries is the number of REFUSED answers that the device
+	// check lets pass. It starts on the first REFUSED answer after more than
+	// this number.
 	selfUninstallMaxQueries = 32
 )
 
@@ -161,8 +164,34 @@ func (p *prog) cachedResponse(req *dns.Msg, upstream string, dns64Prefix netip.P
 	return nil, stale, false, false, false
 }
 
+// listenerConfig returns the key and the config of the listener that the DNS
+// server of listenerNum serves, as its handler reads them for each query. A
+// reload replaces p.cfg under p.mu while the listener keeps serving, so the
+// read takes p.mu too. On mobile, a reload can give the server the listener
+// of another key, and the key selects the default upstream.
+func (p *prog) listenerConfig(listenerNum string) (string, *ctrld.ListenerConfig) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := configKey(listenerNum, p.servedAs)
+	return key, p.cfg.Listener[key]
+}
+
+// clientIDPref returns the client ID preference of the service config. The
+// DNS handler reads it for each query while a reload can replace p.cfg, so the
+// read takes p.mu.
+func (p *prog) clientIDPref() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.Service.ClientIDPref
+}
+
 func (p *prog) serveDNS(listenerNum string) error {
+	// A reload can replace p.cfg while the listeners start, so read the config
+	// that the listeners use under p.mu, once.
+	p.mu.Lock()
 	listenerConfig := p.cfg.Listener[listenerNum]
+	interceptMode := p.cfg.Service.InterceptMode
+	p.mu.Unlock()
 	// make sure ip is allocated
 	if allocErr := p.allocateIP(listenerConfig.IP); allocErr != nil {
 		mainLog.Load().Error().Err(allocErr).Str("ip", listenerConfig.IP).Msg("serveUDP: failed to allocate listen ip")
@@ -183,10 +212,19 @@ func (p *prog) serveDNS(listenerNum string) error {
 			_ = w.WriteMsg(answer)
 			return
 		}
-		listenerConfig := p.cfg.Listener[listenerNum]
+		listenerKey, listenerConfig := p.listenerConfig(listenerNum)
 		reqId := requestID()
 		ctx := context.WithValue(context.Background(), ctrld.ReqIdCtxKey{}, reqId)
-		if !listenerConfig.AllowWanClients && isWanClient(w.RemoteAddr()) && !isIPv6LoopbackListener(w.LocalAddr()) {
+		if listenerConfig == nil {
+			ctrld.Log(ctx, p.querySampler.event(sampleClassNoListenerConfig, ""), "no config for [listener.%s], answering SERVFAIL", listenerKey)
+			p.health.countQuery()
+			p.health.countFailedQuery()
+			answer := new(dns.Msg)
+			answer.SetRcode(m, dns.RcodeServerFailure)
+			_ = w.WriteMsg(answer)
+			return
+		}
+		if refuseWanClient(listenerConfig.AllowWanClients, w.RemoteAddr(), w.LocalAddr()) {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "query refused, listener does not allow WAN clients: %s", w.RemoteAddr().String())
 			answer := new(dns.Msg)
 			answer.SetRcode(m, dns.RcodeRefused)
@@ -225,13 +263,13 @@ func (p *prog) serveDNS(listenerNum string) error {
 		}
 		remoteIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
 		ci := p.getClientInfo(remoteIP, m)
-		ci.ClientIDPref = p.cfg.Service.ClientIDPref
+		ci.ClientIDPref = p.clientIDPref()
 		stripClientSubnet(m)
 		remoteAddr := spoofRemoteAddr(w.RemoteAddr(), ci)
-		fmtSrcToDest := fmtRemoteToLocal(listenerNum, ci.Hostname, remoteAddr.String())
+		fmtSrcToDest := fmtRemoteToLocal(listenerKey, ci.Hostname, remoteAddr.String())
 		t := time.Now()
 		ctrld.Log(ctx, mainLog.Load().Info(), "QUERY: %s: %s %s", fmtSrcToDest, dns.TypeToString[q.Qtype], domain)
-		ur := p.upstreamFor(ctx, listenerNum, listenerConfig, remoteAddr, ci.Mac, domain)
+		ur := p.upstreamFor(ctx, listenerKey, listenerConfig, remoteAddr, ci.Mac, domain)
 
 		labelValues := make([]string, 0, len(statsQueriesCountLabels))
 		labelValues = append(labelValues, net.JoinHostPort(listenerConfig.IP, strconv.Itoa(listenerConfig.Port)))
@@ -260,7 +298,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 				p.health.countQuery()
 				return
 			}
-			go p.doSelfUninstall(pr.answer)
+			p.countAnswerForDeviceCheck(pr.answer)
 
 			answer = pr.answer
 			rtt := time.Since(t)
@@ -291,7 +329,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 	g, ctx := errgroup.WithContext(context.Background())
 	for _, proto := range []string{"udp", "tcp"} {
 		proto := proto
-		if needLocalIPv6Listener(p.cfg.Service.InterceptMode) {
+		if needLocalIPv6Listener(interceptMode) {
 			g.Go(func() error {
 				s, errCh := runDNSServer(net.JoinHostPort("::1", strconv.Itoa(listenerConfig.Port)), proto, handler)
 				defer s.Shutdown()
@@ -1095,6 +1133,9 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		}
 		if negative = betterInternalDomainNegative(internalNegative, negative); negative != nil {
 			ctrld.Log(ctx, mainLog.Load().Debug(), "no resolver resolved the internal domain; returning %s", dns.RcodeToString[negative.Rcode])
+			// See capInternalDomainNegativeTTL: the host must not keep this
+			// answer once the organization resolver is reachable again.
+			capInternalDomainNegativeTTL(negative)
 			negative.Compress = true
 			res.answer = negative
 			return res
@@ -1529,55 +1570,147 @@ func (p *prog) spoofLoopbackIpInClientInfo(ci *ctrld.ClientInfo) {
 	}
 }
 
-// doSelfUninstall performs self-uninstall if these condition met:
+// countAnswerForDeviceCheck counts a REFUSED answer for the device check
+// after refused lookups. The check asks the API whether the device was
+// deleted, and it starts only when all of these are true:
 //
 // - There is only 1 ControlD upstream in-use.
-// - Number of refused queries seen so far equals to selfUninstallMaxQueries.
-// - The cdUID is deleted.
-func (p *prog) doSelfUninstall(answer *dns.Msg) {
+// - More than selfUninstallMaxQueries REFUSED answers came before this one.
+// - No other check runs or waits for its cool-off.
+//
+// The DNS handler calls this for each answer, so it must never wait. A check
+// holds selfUninstallMu for its whole fetch, so this does not take the lock.
+func (p *prog) countAnswerForDeviceCheck(answer *dns.Msg) {
 	if !p.canSelfUninstall.Load() || answer == nil || answer.Rcode != dns.RcodeRefused {
 		return
 	}
-
-	p.selfUninstallMu.Lock()
-	defer p.selfUninstallMu.Unlock()
-	if p.checkingSelfUninstall {
+	if p.checkingSelfUninstall.Load() {
 		return
 	}
-
-	logger := mainLog.Load().With().Str("mode", "self-uninstall").Logger()
-	if p.refusedQueryCount > selfUninstallMaxQueries {
-		p.checkingSelfUninstall = true
-
-		req := &controld.ResolverConfigRequest{
-			RawUID:   cdUID,
-			Version:  rootCmd.Version,
-			Metadata: ctrld.SystemMetadataRuntime(context.Background()),
-		}
-		_, err := fetchResolverConfig(context.Background(), req, cdDev)
-		logger.Debug().Msg("maximum number of refused queries reached, checking device status")
-		selfUninstallCheck(err, p, logger)
-
-		if err != nil {
-			logResolverConfigFetchFailure(&logger, err)
-		}
-		// Cool-of period to prevent abusing the API.
-		go p.selfUninstallCoolOfPeriod()
+	refusedBefore := p.refusedQueryCount.Add(1) - 1
+	if refusedBefore <= selfUninstallMaxQueries {
 		return
 	}
-	p.refusedQueryCount++
+	// Many answers can pass the count at the same time. Only one starts
+	// the check.
+	if !p.checkingSelfUninstall.CompareAndSwap(false, true) {
+		return
+	}
+	go p.checkDeviceStatus()
 }
 
-// selfUninstallCoolOfPeriod waits for 30 minutes before
-// calling API again for checking ControlD device status.
-func (p *prog) selfUninstallCoolOfPeriod() {
-	t := time.NewTimer(time.Minute * 30)
-	defer t.Stop()
-	<-t.C
+// checkDeviceStatus is the device check. It holds selfUninstallMu from start
+// to end, so endDeviceCheck waits for it.
+func (p *prog) checkDeviceStatus() {
 	p.selfUninstallMu.Lock()
-	p.checkingSelfUninstall = false
-	p.refusedQueryCount = 0
-	p.selfUninstallMu.Unlock()
+	defer p.selfUninstallMu.Unlock()
+	if p.deviceCheckEnded {
+		return
+	}
+	logger := mainLog.Load().With().Str("mode", "self-uninstall").Logger()
+	p.reportDeviceStatus(p.fetchDeviceStatus(), logger)
+}
+
+// reportDeviceStatus acts on the answer of the device check. The caller holds
+// selfUninstallMu. A stop during the fetch or just after it ends the run of
+// this check. The app can then start the next run, so the answer must not
+// reach it.
+func (p *prog) reportDeviceStatus(err error, logger zerolog.Logger) {
+	if stopRequested(p.stopCh) || stopRequested(p.runAbortCh) {
+		logger.Debug().Msg("run stopped, dropping the device status check")
+		return
+	}
+	logger.Debug().Msg("maximum number of refused queries reached, checking device status")
+	selfUninstallCheck(err, p, logger)
+
+	if err != nil {
+		logResolverConfigFetchFailure(&logger, err)
+	}
+	// Cool-of period to prevent abusing the API.
+	go p.selfUninstallCoolOfPeriod()
+}
+
+// fetchDeviceStatus fetches the resolver config to learn whether the device
+// still exists. When the run stops first, it cancels the fetch and returns
+// context.Canceled. The fetch runs on its own goroutine, so a fetch that
+// ignores the cancel cannot keep the run from ending.
+func (p *prog) fetchDeviceStatus() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Read the globals here: the goroutine can outlive the run, and the next
+	// run writes them.
+	fetch, dev := fetchResolverConfig, cdDev
+	req := &controld.ResolverConfigRequest{RawUID: cdUID, Version: rootCmd.Version}
+	fetched := make(chan error, 1)
+	go func() {
+		req.Metadata = ctrld.SystemMetadataRuntime(ctx)
+		_, err := fetch(ctx, req, dev)
+		fetched <- err
+	}()
+	select {
+	case err := <-fetched:
+		return err
+	case <-p.stopCh:
+	case <-p.runAbortCh:
+	}
+	return context.Canceled
+}
+
+// deviceCheckWaitWarning is how long endDeviceCheck waits before it logs that
+// the stop waits for the device check.
+var deviceCheckWaitWarning = shutdownTimeout
+
+// endDeviceCheck waits for a device check in progress and stops new ones, so
+// that no Exit of this run reaches the app after the run ended. finishRun
+// closes runAbortCh first, so a check that reads the stop after this point
+// does not act. A check that already acts holds selfUninstallMu until it
+// returns, so taking the lock waits for it.
+//
+// Only mobile waits, because there the app can start the next run in the same
+// process. On desktop, finishRun ends the process, so nothing has to wait. A
+// check that found a deleted device only starts the uninstall and returns.
+func (p *prog) endDeviceCheck() {
+	if !isMobile() {
+		return
+	}
+	// The usual cause of a long wait is an app Exit callback that waits for
+	// the run to end. Without this line, the app sees only a slow stop.
+	slow := time.AfterFunc(deviceCheckWaitWarning, func() {
+		mainLog.Load().Warn().Msg("the stop waits for the device check: the Exit callback of the app must not wait for the run to end")
+	})
+	defer slow.Stop()
+	p.selfUninstallMu.Lock()
+	defer p.selfUninstallMu.Unlock()
+	p.deviceCheckEnded = true
+}
+
+// deviceCheckCoolOff is how long the next device check waits after one ran,
+// so that ctrld does not flood the API.
+const deviceCheckCoolOff = 30 * time.Minute
+
+// selfUninstallCoolOfPeriod waits for deviceCheckCoolOff, or for the
+// coolOff of the prog when a test set it, before
+// calling API again for checking ControlD device status.
+// It ends with the run, so the prog of an ended mobile run does not stay in
+// memory for that time.
+func (p *prog) selfUninstallCoolOfPeriod() {
+	wait := deviceCheckCoolOff
+	if p.coolOff > 0 {
+		wait = p.coolOff
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-p.stopCh:
+		return
+	case <-p.runAbortCh:
+		return
+	}
+	// Reset the count first, so that no answer counts toward the next check
+	// before the reset.
+	p.refusedQueryCount.Store(0)
+	p.checkingSelfUninstall.Store(false)
 }
 
 // forceFetchingAPI sends signal to force syncing API config if run in cd mode,
@@ -1789,14 +1922,23 @@ func isWanClient(na net.Addr) bool {
 		!isServiceContinuityAddr(ip)
 }
 
-// isIPv6LoopbackListener reports whether the listener address is [::1].
-// The [::1] listener only serves locally-redirected traffic (via pf on macOS
-// or system DNS on Windows), so queries arriving on it are always from this
-// machine — even when the source IP is a global IPv6 address (pf preserves the
-// original source IP during rdr).
-func isIPv6LoopbackListener(na net.Addr) bool {
+// refuseWanClient reports whether a query from remote, received on the
+// listener socket local, must be refused because it comes from a WAN address.
+func refuseWanClient(allowWanClients bool, remote, local net.Addr) bool {
+	return !allowWanClients && isWanClient(remote) && !isLoopbackListener(local)
+}
+
+// isLoopbackListener reports whether the query arrived on a loopback address
+// (127.0.0.0/8 or [::1]). Other hosts cannot send packets to a loopback
+// address, so a query there always comes from this machine. Its source can
+// still be a public address: pf on macOS keeps the original source IP when it
+// redirects intercepted DNS to the listener, so on a network that hands out
+// public IPv4 (some campus and enterprise networks) the machine's own lookups
+// arrive from that address. The WAN check is for listeners other hosts can
+// reach, so it does not apply here.
+func isLoopbackListener(na net.Addr) bool {
 	if ap, err := netip.ParseAddrPort(na.String()); err == nil {
-		return ap.Addr() == netip.IPv6Loopback()
+		return ap.Addr().Unmap().IsLoopback()
 	}
 	return false
 }
@@ -2481,7 +2623,8 @@ func interceptTargetAction(before, after string) string {
 // handleRecovery performs a unified recovery by removing DNS settings,
 // canceling existing recovery checks for network changes, but coalescing duplicate
 // upstream failure recoveries, waiting for recovery to complete (using a cancellable context without timeout),
-// and then re-applying the DNS settings.
+// and then re-applying the DNS settings. On iOS the app owns the DNS settings,
+// so the recovery only waits for the upstream.
 func (p *prog) handleRecovery(reason RecoveryReason) {
 	p.handleRecoveryForTransition(reason, 0)
 }
@@ -2611,7 +2754,9 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 		}
 	} else {
 		// Traditional flow: remove DNS settings to expose DHCP nameservers
-		recoveryResetDNSFn(p, false, false)
+		if p.ownsDeviceDNS() {
+			recoveryResetDNSFn(p, false, false)
+		}
 
 		// Read the exposed nameservers right away, for an OS failure and for a
 		// network change. After a network change the OS resolver still holds
@@ -2653,9 +2798,13 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 	// The reset ends the outage, so the down time is read before it. The name
 	// of the line is bounded, because an upstream key is operator text.
 	journalName := journalUpstreamName(recovered)
+	recoveredLine := "Upstream %q recovered; re-applying DNS settings"
+	if !p.ownsDeviceDNS() {
+		recoveredLine = "Upstream %q recovered"
+	}
 	journal(mainLog.Load().Info()).Str("upstream", journalName).
 		Int64("down_for_ms", p.um.downFor(recovered).Milliseconds()).
-		Msgf("Upstream %q recovered; re-applying DNS settings", journalName)
+		Msgf(recoveredLine, journalName)
 
 	// Reset the upstream failure count and down state while this generation
 	// still owns recovery completion.
@@ -2697,7 +2846,9 @@ func (p *prog) handleRecoveryForTransition(reason RecoveryReason, transitionID u
 
 		// Apply our DNS settings back. The snapshot that follows the end event
 		// reports the interfaces.
-		recoverySetDNSFn(p, systemNameservers)
+		if p.ownsDeviceDNS() {
+			recoverySetDNSFn(p, systemNameservers)
+		}
 	}
 
 	if !p.completeRecovery(gen) {

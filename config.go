@@ -14,8 +14,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -165,7 +163,7 @@ func InitConfig(v *viper.Viper, name string) {
 // Config represents ctrld supported configuration.
 type Config struct {
 	Service  ServiceConfig              `mapstructure:"service" toml:"service,omitempty"`
-	Listener map[string]*ListenerConfig `mapstructure:"listener" toml:"listener" validate:"min=1,dive"`
+	Listener map[string]*ListenerConfig `mapstructure:"listener" toml:"listener" validate:"min=1,dive,keys,listenerkey,endkeys,required"`
 	Network  map[string]*NetworkConfig  `mapstructure:"network" toml:"network" validate:"min=1,dive"`
 	Upstream map[string]*UpstreamConfig `mapstructure:"upstream" toml:"upstream" validate:"min=1,dive"`
 }
@@ -181,42 +179,60 @@ func (c *Config) HasUpstreamSendClientInfo() bool {
 	return false
 }
 
-// FirstListener returns the first listener config of current config. Listeners are sorted numerically.
-//
-// It panics if Config has no listeners configured.
+// FirstListener returns the listener with the lowest numeric key, or nil if
+// no listener key is a number.
 func (c *Config) FirstListener() *ListenerConfig {
-	listeners := make([]int, 0, len(c.Listener))
-	for k := range c.Listener {
-		n, err := strconv.Atoi(k)
-		if err != nil {
-			continue
-		}
-		listeners = append(listeners, n)
+	key, ok := c.FirstListenerKey()
+	if !ok {
+		return nil
 	}
-	if len(listeners) == 0 {
-		panic("missing listener config")
-	}
-	sort.Ints(listeners)
-	return c.Listener[strconv.Itoa(listeners[0])]
+	return c.Listener[key]
 }
 
-// FirstUpstream returns the first upstream of current config. Upstreams are sorted numerically.
-//
-// It panics if Config has no upstreams configured.
+// FirstListenerKey returns the key that FirstListener reads. ok is false when
+// no key is a number.
+func (c *Config) FirstListenerKey() (key string, ok bool) {
+	return lowestNumberedKey(c.Listener)
+}
+
+// FirstUpstream returns the upstream with the lowest numeric key, or nil if
+// no upstream key is a number. It skips the internal_N upstreams that ctrld
+// adds itself.
 func (c *Config) FirstUpstream() *UpstreamConfig {
-	upstreams := make([]int, 0, len(c.Upstream))
-	for k := range c.Upstream {
+	key, ok := lowestNumberedKey(c.Upstream)
+	if !ok {
+		return nil
+	}
+	return c.Upstream[key]
+}
+
+// lowestNumberedKey returns the key with the lowest number. ok is false when
+// no key is a number. It returns the key itself, so a key such as "01" finds
+// its own value. Of keys with the same number, such as "1" and "01", the
+// plain number wins, as other code looks a key up by its number. Then string
+// order decides, so the result is the same each time.
+func lowestNumberedKey[V any](m map[string]*V) (key string, ok bool) {
+	firstNum := 0
+	for k := range m {
 		n, err := strconv.Atoi(k)
 		if err != nil {
 			continue
 		}
-		upstreams = append(upstreams, n)
+		if !ok || n < firstNum || (n == firstNum && keyBefore(k, key, n)) {
+			key, firstNum, ok = k, n, true
+		}
 	}
-	if len(upstreams) == 0 {
-		panic("missing listener config")
+	return key, ok
+}
+
+// keyBefore reports whether key a goes before key b, for two keys with the
+// number n.
+func keyBefore(a, b string, n int) bool {
+	canonical := strconv.Itoa(n)
+	if a == canonical || b == canonical {
+		return a == canonical
 	}
-	sort.Ints(upstreams)
-	return c.Upstream[strconv.Itoa(upstreams[0])]
+	return a < b
 }
 
 // ServiceConfig specifies the general ctrld config.
@@ -836,9 +852,10 @@ func (uc *UpstreamConfig) newDOHTransport(addrs []string) *http.Transport {
 		Log(ctx, ProxyLogger.Load().Debug(), "sending doh request to: %s", conn.RemoteAddr())
 		return conn, nil
 	}
-	runtime.SetFinalizer(transport, func(transport *http.Transport) {
-		transport.CloseIdleConnections()
-	})
+	// No finalizer here: once a transport has spoken HTTP/2 it is in a reference
+	// cycle with its HTTP/2 transport, and a cycle with a finalizer is never
+	// collected. retireTransports closes the idle connections of a transport
+	// that is replaced, and IdleConnTimeout closes the rest.
 	return transport
 }
 
@@ -1102,6 +1119,7 @@ func ValidateConfig(validate *validator.Validate, cfg *Config) error {
 	_ = validate.RegisterValidation("dnsrcode", validateDnsRcode)
 	_ = validate.RegisterValidation("ipstack", validateIpStack)
 	_ = validate.RegisterValidation("iporempty", validateIpOrEmpty)
+	_ = validate.RegisterValidation("listenerkey", validateListenerKey)
 	validate.RegisterStructValidation(upstreamConfigStructLevelValidation, UpstreamConfig{})
 	return validate.Struct(cfg)
 }
@@ -1117,6 +1135,21 @@ func validateIpStack(fl validator.FieldLevel) bool {
 	default:
 		return false
 	}
+}
+
+func validateListenerKey(fl validator.FieldLevel) bool {
+	return IsListenerKey(fl.Field().String())
+}
+
+// ListenerKeyRule says which keys IsListenerKey accepts, for error messages.
+const ListenerKeyRule = "a number such as 0 or 1, with no sign or leading zero"
+
+// IsListenerKey reports whether key can name a listener: a decimal number
+// with no sign and no leading zero. Code finds a listener by the number that
+// it parses from the key, so for a key such as "01" or "main" it finds none.
+func IsListenerKey(key string) bool {
+	n, err := strconv.Atoi(key)
+	return err == nil && n >= 0 && strconv.Itoa(n) == key
 }
 
 func validateIpOrEmpty(fl validator.FieldLevel) bool {

@@ -12,6 +12,9 @@ import (
 const scutilDNSTimeout = 5 * time.Second
 
 func runSCUtilDNS() ([]dnsResolverEntry, error) {
+	if isMobile() {
+		return nil, errNoHostTools
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), scutilDNSTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "scutil", "--dns").Output()

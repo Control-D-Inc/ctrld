@@ -273,3 +273,93 @@ func TestControllerRunReturnReleasesGuard(t *testing.T) {
 		t.Fatalf("runs = %d, want 2", runs)
 	}
 }
+
+func TestStartWithOptionsConfig(t *testing.T) {
+	full := &StartOptions{
+		CdUID: "uid", CustomHostname: "hostname", HomeDir: "home", UpstreamProto: "doh",
+		LogLevel: 2, LogPath: "log", Dev: true, MemoryLimitMiB: 48, Nameservers: "192.168.1.1",
+	}
+	tests := []struct {
+		name string
+		opts *StartOptions
+		want cli.AppConfig
+	}{
+		{"all fields", full, cli.AppConfig{
+			CdUID: "uid", CustomHostname: "hostname", HomeDir: "home", UpstreamProto: "doh",
+			Verbose: 2, LogPath: "log", Dev: true, MemoryLimitMiB: 48, Nameservers: "192.168.1.1",
+		}},
+		{"defaults", NewStartOptions(), cli.AppConfig{Verbose: LogLevelNotice}},
+		{"nil", nil, cli.AppConfig{Verbose: LogLevelNotice}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got cli.AppConfig
+			stubMobile(t, func(config *cli.AppConfig, _ *cli.AppCallback, _ chan struct{}) { got = *config },
+				func(int64, chan struct{}) int { return 0 })
+			NewController(nil).StartWithOptions(tc.opts)
+			if got != tc.want {
+				t.Errorf("config = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStartWithOptionsSharesStartGuard(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := NewController(nil)
+		var runs int
+		stubMobile(t, func(_ *cli.AppConfig, _ *cli.AppCallback, stop chan struct{}) {
+			runs++
+			<-stop
+		}, func(int64, chan struct{}) int { return 0 })
+		started := startController(c)
+		synctest.Wait()
+		c.StartWithOptions(NewStartOptions())
+		if runs != 1 || !c.IsRunning() {
+			t.Fatalf("StartWithOptions during a run: runs = %d, running = %v", runs, c.IsRunning())
+		}
+		c.Stop(true, 0)
+		<-started
+
+		done := make(chan struct{})
+		go func() { c.StartWithOptions(NewStartOptions()); close(done) }()
+		synctest.Wait()
+		c.Start("", "", "", "", "", 0, "")
+		if runs != 2 {
+			t.Fatalf("Start during a StartWithOptions run: runs = %d, want 2", runs)
+		}
+		c.Stop(true, 0)
+		<-done
+		if c.IsRunning() {
+			t.Fatal("a completed run kept the guard")
+		}
+	})
+}
+
+func TestSetNameserversWhileRunning(t *testing.T) {
+	c := NewController(nil)
+	var mu sync.Mutex
+	var got []string
+	old := setNameservers
+	setNameservers = func(csv string) { mu.Lock(); got = append(got, csv); mu.Unlock() }
+	t.Cleanup(func() { setNameservers = old })
+	running := make(chan struct{})
+	stubMobile(t, func(_ *cli.AppConfig, _ *cli.AppCallback, stop chan struct{}) {
+		close(running)
+		<-stop
+	}, func(int64, chan struct{}) int { return 0 })
+	done := make(chan struct{})
+	go func() { c.StartWithOptions(NewStartOptions()); close(done) }()
+	<-running
+	var callers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		callers.Add(1)
+		go func() { defer callers.Done(); c.SetNameservers("192.168.1.1") }()
+	}
+	callers.Wait()
+	c.Stop(true, 0)
+	<-done
+	if len(got) != 8 || got[0] != "192.168.1.1" {
+		t.Fatalf("SetNameservers calls = %v", got)
+	}
+}

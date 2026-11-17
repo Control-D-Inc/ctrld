@@ -588,6 +588,45 @@ func betterInternalDomainNegative(current, candidate *dns.Msg) *dns.Msg {
 	return current
 }
 
+// internalDomainNegativeTTL is the longest time, in seconds, that a negative
+// answer to a fallback-mode Internal Domain query tells the client to keep it.
+const internalDomainNegativeTTL uint32 = 5
+
+// capInternalDomainNegativeTTL limits how long a client may cache a negative
+// answer that a fallback-mode Internal Domain query ends with.
+//
+// That answer usually comes from the network's own DNS, which does not know a
+// VPN-only name, while the organization resolver could not be reached: the VPN
+// is off, still connecting, or the resolver was briefly down. The network's
+// NXDOMAIN carries its own negative lifetime, often an hour from the root
+// zone's SOA, and the host's resolver cache (mDNSResponder on macOS) keeps the
+// name broken for that long, after the organization resolver is reachable
+// again and long after ctrld would answer it. A short lifetime makes the host
+// ask again within seconds.
+//
+// The negative lifetime of an answer is the smaller of the SOA record's TTL and
+// its MINIMUM field (RFC 2308 section 5), so both are capped, along with any
+// record TTL in the answer section. A positive answer is never changed, and a
+// negative answer without an SOA record is not cached by RFC 2308 resolvers.
+func capInternalDomainNegativeTTL(m *dns.Msg) {
+	if m == nil {
+		return
+	}
+	for _, rr := range m.Answer {
+		if rr.Header().Ttl > internalDomainNegativeTTL {
+			rr.Header().Ttl = internalDomainNegativeTTL
+		}
+	}
+	for _, rr := range m.Ns {
+		if rr.Header().Ttl > internalDomainNegativeTTL {
+			rr.Header().Ttl = internalDomainNegativeTTL
+		}
+		if soa, ok := rr.(*dns.SOA); ok && soa.Minttl > internalDomainNegativeTTL {
+			soa.Minttl = internalDomainNegativeTTL
+		}
+	}
+}
+
 // internalDomainVPNUpstream returns the upstream the network fallback uses for
 // a VPN DNS server. A seam: VPN DNS servers are dialed on port 53, which a test
 // fixture cannot listen on.
@@ -690,6 +729,47 @@ func (p *prog) resolveInternalDomainOnNetwork(ctx context.Context, msg *dns.Msg)
 		return m, nil
 	}
 	return nil, negative
+}
+
+// resetDownInternalDomainFallbackUpstreams marks every down fallback-mode
+// Internal Domain resolver up again, and returns how many it changed.
+//
+// proxy() skips a down fallback-mode resolver and goes straight to the network
+// fallback, so an endpoint away from the organization network does not wait on
+// it. That shortcut is right while the endpoint stays off the network, but a
+// resolver that is reachable only through a VPN goes down every time the VPN is
+// off, and nothing marks it up again when the VPN comes back: only an answer to
+// a background re-check does, and that runs at most every
+// internalDomainProbeInterval and only after a lookup has already skipped it.
+// The first lookups after the VPN connects then get the network's answer,
+// usually NXDOMAIN for a VPN-only name, and the host caches it.
+//
+// The caller runs this once the VPN has settled. A resolver that is still
+// unreachable costs the next lookup one timeout before the monitor marks it
+// down again, the same cost the first lookup paid when it went down.
+// Explicit-only resolvers are never skipped, so they are left alone, as is
+// every other upstream.
+func (p *prog) resetDownInternalDomainFallbackUpstreams() int {
+	if p.um == nil || p.cfg == nil {
+		return 0
+	}
+	reset := 0
+	for key, uc := range p.cfg.Upstream {
+		if uc == nil || uc.InternalDomain != internalDomainUpstreamFallback {
+			continue
+		}
+		upstream := upstreamPrefix + key
+		if !p.um.isDown(upstream) {
+			continue
+		}
+		p.um.reset(upstream)
+		reset++
+	}
+	if reset > 0 {
+		journal(mainLog.Load().Info()).Int("resolvers", reset).
+			Msg("Internal Domain resolvers marked up after the VPN settled")
+	}
+	return reset
 }
 
 // internalDomainProbeInterval is how often, at most, a down fallback-mode

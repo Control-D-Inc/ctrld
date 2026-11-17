@@ -127,6 +127,27 @@ func resetDnsIgnoreUnusableInterface(iface *net.Interface) error {
 
 // TODO(cuonglm): should we use system API?
 func resetDNS(iface *net.Interface) error {
+	removeSavedDnsServerForwarders()
+
+	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
+	if err != nil {
+		return fmt.Errorf("resetDNS: %w", err)
+	}
+	// Restoring DHCP settings.
+	if err := luid.SetDNS(windows.AF_INET, nil, nil); err != nil {
+		return fmt.Errorf("could not reset DNS ipv4: %w", err)
+	}
+	if err := luid.SetDNS(windows.AF_INET6, nil, nil); err != nil {
+		return fmt.Errorf("could not reset DNS ipv6: %w", err)
+	}
+	return nil
+}
+
+// removeSavedDnsServerForwarders removes, once per process, the Windows DNS
+// Server forwarders setDNS pointed at ctrld on a domain controller. Intercept
+// mode calls it at start even when no adapter is reset, since it never sets
+// those forwarders itself.
+func removeSavedDnsServerForwarders() {
 	resetDNSOnce.Do(func() {
 		// See corresponding comment in setDNS.
 		if hasLocalDnsServerRunning() {
@@ -143,19 +164,6 @@ func resetDNS(iface *net.Interface) error {
 			}
 		}
 	})
-
-	luid, err := winipcfg.LUIDFromIndex(uint32(iface.Index))
-	if err != nil {
-		return fmt.Errorf("resetDNS: %w", err)
-	}
-	// Restoring DHCP settings.
-	if err := luid.SetDNS(windows.AF_INET, nil, nil); err != nil {
-		return fmt.Errorf("could not reset DNS ipv4: %w", err)
-	}
-	if err := luid.SetDNS(windows.AF_INET6, nil, nil); err != nil {
-		return fmt.Errorf("could not reset DNS ipv6: %w", err)
-	}
-	return nil
 }
 
 // restoreDNS restores the DNS settings of the given interface.

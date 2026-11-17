@@ -20,15 +20,17 @@ const (
 	edgeOSDNSMasqConfigPath    = "/etc/dnsmasq.d/dnsmasq-zzz-ctrld.conf"
 	usgDNSMasqConfigPath       = "/etc/dnsmasq.conf"
 	usgDNSMasqBackupConfigPath = "/etc/dnsmasq.conf.bak"
-	toggleContentFilteringLink = "https://community.ui.com/questions/UDM-Pro-disable-enable-DNS-filtering/e2cc4060-e56a-4139-b200-62d7f773ff8f"
-	toggleDnsShieldLink        = "https://community.ui.com/questions/UniFi-OS-3-2-7-DNS-Shield-Missing/d3a85905-4ce0-4fe4-8bf0-6cb04f21371d"
+	// ToggleContentFilteringLink and ToggleDnsShieldLink are help pages for
+	// the user. The log redaction keeps them whole.
+	ToggleContentFilteringLink = "https://community.ui.com/questions/UDM-Pro-disable-enable-DNS-filtering/e2cc4060-e56a-4139-b200-62d7f773ff8f"
+	ToggleDnsShieldLink        = "https://community.ui.com/questions/UniFi-OS-3-2-7-DNS-Shield-Missing/d3a85905-4ce0-4fe4-8bf0-6cb04f21371d"
 )
 
 var ErrContentFilteringEnabled = fmt.Errorf(`the "Content Filtering" feature" is enabled, which is conflicted with ctrld.\n
-To disable it, folowing instruction here: %s`, toggleContentFilteringLink)
+To disable it, folowing instruction here: %s`, ToggleContentFilteringLink)
 
 var ErrDnsShieldEnabled = fmt.Errorf(`the "DNS Shield" feature" is enabled, which is conflicted with ctrld.\n
-To disable it, folowing screenshot here: %s`, toggleDnsShieldLink)
+To disable it, folowing screenshot here: %s`, ToggleDnsShieldLink)
 
 type EdgeOS struct {
 	cfg   *ctrld.Config

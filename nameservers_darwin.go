@@ -6,11 +6,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"os/exec"
-	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -37,6 +35,9 @@ func getDNSFromScutil() []string {
 // getDNSFromScutilAttempts reads scutil --dns up to maxRetries times, until it
 // reports a nameserver that is not a local address.
 func getDNSFromScutilAttempts(maxRetries int) []string {
+	if isMobile() {
+		return nil
+	}
 	logger := *ProxyLogger.Load()
 
 	// Skip scutil on mobile platforms - not available in sandbox
@@ -78,11 +79,9 @@ func getDNSFromScutilAttempts(maxRetries int) []string {
 }
 
 func getDHCPNameservers(iface string) ([]string, error) {
-	// Skip ipconfig on mobile platforms - not available in sandbox
 	if isMobile() {
-		return nil, fmt.Errorf("ipconfig not available on mobile")
+		return nil, errNoHostTools
 	}
-
 	return dhcpNameserversFromCommands(context.Background(), iface, func(_ context.Context, args ...string) ([]byte, error) {
 		return exec.Command("ipconfig", args...).Output()
 	})
@@ -91,6 +90,9 @@ func getDHCPNameservers(iface string) ([]string, error) {
 // DHCPNameserversForInterfaceContext bounds both commands with the caller's
 // context. Other system-discovery callers retain their existing behavior.
 func DHCPNameserversForInterfaceContext(ctx context.Context, iface string) ([]string, error) {
+	if isMobile() {
+		return nil, errNoHostTools
+	}
 	return dhcpNameserversFromCommands(ctx, iface, func(ctx context.Context, args ...string) ([]byte, error) {
 		return dhcpCommandOutput(ctx, "/usr/sbin/ipconfig", args...)
 	})
@@ -102,6 +104,9 @@ func DHCPNameserversForInterface(iface string) ([]string, error) {
 }
 
 func getAllDHCPNameservers() []string {
+	if isMobile() {
+		return nil
+	}
 	logger := *ProxyLogger.Load()
 
 	interfaces, err := net.Interfaces()
@@ -193,11 +198,9 @@ func getAllDHCPNameservers() []string {
 }
 
 func patchNetIfaceName(iface *net.Interface) (bool, error) {
-	// Skip networksetup on mobile platforms - not available in sandbox
 	if isMobile() {
-		return false, nil
+		return false, errNoHostTools
 	}
-
 	b, err := exec.Command("networksetup", "-listnetworkserviceorder").Output()
 	if err != nil {
 		return false, err
@@ -230,9 +233,4 @@ func networkServiceName(ifaceName string, r io.Reader) string {
 		}
 	}
 	return ""
-}
-
-// isMobile reports whether the current OS is a mobile platform.
-func isMobile() bool {
-	return runtime.GOOS == "ios"
 }

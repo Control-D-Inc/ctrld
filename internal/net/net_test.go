@@ -2,6 +2,7 @@ package net
 
 import (
 	"context"
+	"errors"
 	"net"
 	"syscall"
 	"testing"
@@ -92,5 +93,47 @@ func TestProbeStackTimeout(t *testing.T) {
 	case <-time.After(probeStackTimeout + time.Second):
 		t.Error("probeStack timeout is not enforce")
 	case <-done:
+	}
+}
+
+// stubProbeDial replaces the network probe and forgets an earlier probe.
+func stubProbeDial(t *testing.T, dial func(context.Context, string, string) (net.Conn, error)) {
+	t.Helper()
+	reset := func() {
+		stackMu.Lock()
+		stackProbed, hasNetworkUp, canListenIPv6Local = false, false, false
+		stackMu.Unlock()
+	}
+	oldDial := probeStackDial
+	probeStackDial = dial
+	reset()
+	t.Cleanup(func() { probeStackDial = oldDial; reset() })
+}
+
+func TestUpUntilStopsWithoutNetwork(t *testing.T) {
+	stubProbeDial(t, func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("network is down")
+	})
+	stopCh := make(chan struct{})
+	result := make(chan bool, 1)
+	go func() { result <- UpUntil(stopCh) }()
+	close(stopCh)
+	select {
+	case up := <-result:
+		if up {
+			t.Fatal("UpUntil reported the network up while it was down")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("UpUntil did not stop after the stop channel closed")
+	}
+
+	// A probe that a stop cut short must not become the cached answer.
+	stubProbeDial(t, func(context.Context, string, string) (net.Conn, error) {
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	})
+	if !UpUntil(nil) || !Up() {
+		t.Fatal("a stopped probe was kept as the network state")
 	}
 }

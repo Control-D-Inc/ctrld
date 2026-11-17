@@ -16,6 +16,9 @@ const (
 	// It stays apart from the other classes, because an endpoint away from the
 	// organization network cannot reach such a resolver.
 	sampleClassInternalDomain = "internal_domain"
+	// sampleClassNoListenerConfig names a query on a listener that has no
+	// config.
+	sampleClassNoListenerConfig = "no_listener_config"
 )
 
 const (

@@ -47,6 +47,9 @@ var lookupCtrldGroupFn = func() ([]string, string) {
 // readHostContext runs one bounded read for the host context. Each read has
 // its own timeout and the output cap of the pf diagnostic.
 func readHostContext(timeout time.Duration, name string, args ...string) (string, string) {
+	if isMobile() {
+		return "", "read_failed"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	out, code := readPFDiagnosticOutput(ctx, exec.CommandContext(ctx, name, args...))
@@ -136,7 +139,13 @@ func addSelfLoopHostContext(e *zerolog.Event) {
 // addHostContext adds the host context to e and returns the enabled DNS
 // proxies of other products (see enabledDNSProxies), which are also logged
 // as dns_proxies_enabled.
+//
+// On mobile it adds nothing. Each read starts a system tool, and the iOS
+// sandbox does not let an app start a process.
 func addHostContext(e *zerolog.Event) []string {
+	if isMobile() {
+		return nil
+	}
 	rule := capturePFGroupRuleFn()
 	e.Str("pf_group_rule_status", rule.Code)
 	if rule.GID != "" {

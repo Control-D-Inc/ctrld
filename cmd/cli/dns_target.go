@@ -26,9 +26,7 @@ const interceptDNSRdrTarget = "127.0.0.53"
 func (p *prog) interceptDNSTargetValue() string {
 	listenerIP := "127.0.0.1"
 	listenerPort := 53
-	// FirstListener panics when no listener is configured; guard like the
-	// startup paths do.
-	if p.cfg != nil && len(p.cfg.Listener) > 0 {
+	if p.cfg != nil {
 		if lc := p.cfg.FirstListener(); lc != nil {
 			if lc.IP != "" && lc.IP != "0.0.0.0" && lc.IP != "::" {
 				listenerIP = lc.IP

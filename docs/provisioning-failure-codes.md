@@ -42,16 +42,18 @@ The **Next action / evidence** column lists what to look at next.
 | `API_REJECTED` | bootstrap | 31 | The API answered and permanently rejected the configuration (4xx other than 408/429): bad or revoked token, malformed request. ctrld exits without burning service-manager restarts because retrying cannot change the answer. This is also the fallback for the four `TOKEN_*` codes below. Those codes need the API response to carry `error.metadata.reason`. An API deployment that does not yet populate that field reports every provisioning-code rejection as `API_REJECTED` instead. | Verify the provision token / org configuration in the Control D dashboard. Re-push after fixing credentials. Evidence: HTTP status in the result file `message`. |
 | `API_DEVICE_INVALID` | bootstrap | 32 | The API reports the device/resolver no longer exists (error code 40402). When the daemon's own bootstrap preflight discovers this, it self-uninstalls, because the identity is gone server-side. A direct install-time config fetch can also hit this code before the service exists. On that path there is nothing to uninstall yet. | Confirm the device was deleted or re-provisioned in the dashboard; re-provision with a current token. No local evidence needed beyond the code. |
 | `API_MAINTENANCE` | bootstrap | 37 | The API answered that it is in hard maintenance (HTTP 503, `error.code` 50302, or on older deployments the message `Maintenance is in progress.`), and this host had no previously working configuration on disk to fall back on. A host that does have one keeps serving DNS from it and never reaches this code. Maintenance is temporary and says nothing about the configuration, so ctrld does not self-uninstall and does not treat it as a permanent rejection. | Wait for the maintenance window to end and re-run. Nothing to fix on the device: the same request succeeds once the API returns. A device that was already provisioned keeps resolving throughout. |
+| `API_RATE_LIMITED` | bootstrap | 38 | Only the mobile library reports this code. The API, or a proxy in front of it, answered the preflight with HTTP 429. A desktop install reports `API_UNREACHABLE` for the same answer. | Wait longer than for `API_UNAVAILABLE`, and then start again. Many devices that start at the same time can cause this answer. If the wait does not help, check the network path (proxy, captive portal). |
+| `API_UNAVAILABLE` | bootstrap | 39 | Only the mobile library reports this code. The API, or a proxy in front of it, answered the preflight with HTTP 500 or higher, and the answer was not maintenance. A desktop install reports `API_UNREACHABLE` for the same answer. | Wait, and then start again. The HTTP status is in the `Exit` text. If the wait does not help, check the network path (proxy, captive portal). |
 | `TOKEN_INVALID` | bootstrap | 33 | The API rejected the `--cd-org` provisioning code with reason `token_invalid`: the code is not recognized. This code needs the deployed API to send `error.metadata.reason: "token_invalid"`. See `API_REJECTED` above for the fallback when it does not. | Make sure that the code is correct. Re-enter it exactly as given. |
 | `TOKEN_EXPIRED` | bootstrap | 34 | The API rejected the `--cd-org` provisioning code with reason `token_expired`. This has the same API-reason dependency as `TOKEN_INVALID`. | Get a new provisioning code from your administrator. |
 | `TOKEN_LIMIT_REACHED` | bootstrap | 35 | The API rejected the `--cd-org` provisioning code with reason `token_limit_reached`: it reached its device limit. This has the same API-reason dependency as `TOKEN_INVALID`. | Free up a device slot or use a different provisioning code. |
 | `TOKEN_DISABLED` | bootstrap | 36 | The API rejected the `--cd-org` provisioning code with reason `token_disabled`: the code was invalidated. This has the same API-reason dependency as `TOKEN_INVALID`. | Download a profile from an active provisioning code. |
 | `LISTENER_BIND_FAILED` | listener | 41 | No listen address could be bound after all fallbacks (configured address, 0.0.0.0:53, localhost:53, random) were exhausted. `detail.attempts` records each tried address with the UDP/TCP OS error, e.g. `address already in use` (another DNS service owns the port) or `can't assign requested address` (address not on any interface). | Read `detail.attempts`: `address already in use` → find the process owning the port (`sudo lsof -i :53 -nP`); `can't assign requested address` → the configured IP is not present on the device. Then fix the conflict or the listener config. |
-| `LISTENER_CONFIGURED_ADDR_UNAVAILABLE` | listener | 42 | An explicitly configured listener address could not be bound and configuration checks forbid falling back to another address, or (macOS intercept mode) the required explicit address is unavailable. | The configured `ip:port` in the listener config is wrong for this device or occupied. Verify the address exists on an interface and nothing else binds it; correct the config rather than expecting fallback. |
+| `LISTENER_CONFIGURED_ADDR_UNAVAILABLE` | listener | 42 | An explicitly configured listener address could not be bound and configuration checks forbid falling back to another address, or (macOS intercept mode) the required explicit address is unavailable. The mobile library in Control D mode uses a fixed address (`127.0.0.1:53` on iOS, `0.0.0.0:5354` on Android), so this code means that another process holds that address. The app gets the `stage=listener` line in `AppCallback.Exit`. | The configured `ip:port` in the listener config is wrong for this device or occupied. Verify the address exists on an interface and nothing else binds it; correct the config rather than expecting fallback. On mobile, there is no config to correct: stop the other process that uses the fixed address. |
 | `SERVICE_INSTALL_FAILED` | service | 51 | The OS service manager refused to install the service (launchd/systemd/SCM registration failed). | Check OS-level constraints: permissions/elevation, MDM policy blocking daemon installation, corrupted previous install. Evidence: result file `message` (service manager error), plus `launchctl print system/ctrld` / `systemctl status ctrld` / SCM state. |
 | `SERVICE_START_FAILED` | service | 52 | The service installed but the service manager could not start it. | Check the service manager's own log for the start error, then the ctrld home dir `ctrld.log`. Often permissions or a binary quarantined by security tooling. |
 | `SERVICE_SELFCHECK_FAILED` | service | 53 | The service started but never became healthy: no fresher failure was reported by the daemon, and the post-install DNS self-check failed. On a fresh install or an upgrade, the just-installed service is rolled back (uninstalled). A restart of an already installed service keeps that service installed. If the daemon itself recorded a more specific failure (e.g. a listener code), that code is reported instead of this one. | Ask for the drained service log printed by `ctrld start` and the result file. If the service was running but unreachable, check host firewall rules intercepting DNS to the listener. |
-| `UNCLASSIFIED` | service | 59 | This code covers terminal failures on the provisioning boundary that predate a dedicated code. Examples include a config unmarshal, and a file-system or environment failure such as writing the config file, reading `socketDir`, or respawning as a daemon. Other examples are a service-argument update failing mid-upgrade, and a router pre-run or configuration failure. A further example is a DNS-intercept failure the interface-DNS fallback cannot safely take over from. Every one of these used to be a bare crash with nothing to read. Now they all persist a result file. | Read the result file `message`: it names the specific operation that failed and the underlying OS error. When you report it, treat this the same as any other stage-scoped failure. |
+| `UNCLASSIFIED` | service | 59 | This code covers terminal failures on the provisioning boundary that predate a dedicated code. Examples include a config unmarshal, a config with no listener or with a listener key that is not a number, and a file-system or environment failure such as writing the config file, reading `socketDir`, or respawning as a daemon. Other examples are a service-argument update failing mid-upgrade, and a router pre-run or configuration failure. A further example is a DNS-intercept failure the interface-DNS fallback cannot safely take over from. In the mobile library, a config file in `HomeDir` that ctrld cannot read or parse also gives this code, and the app gets the `stage=service` line in `AppCallback.Exit`. Every one of these used to be a bare crash with nothing to read. Now they all persist a result file. A start with no config file does not get this code, because it writes a default config with one listener. The mobile library writes that file into `HomeDir`. | Read the result file `message`: it names the specific operation that failed and the underlying OS error. When you report it, treat this the same as any other stage-scoped failure. For a config file that ctrld cannot read or parse, the message gives the line and the column of the TOML error. Each start fails the same way until the app replaces or deletes the file. |
 
 The macOS installer script (`scripts/pkg/postinstall`) emits the package rows
 below, not ctrld itself, before ctrld ever runs. They only ever exit 1 (the
@@ -107,11 +109,47 @@ provision token, the resolver/device ID, or config contents.
   above quotes this line verbatim, because the script has no separate
   result file to carry it.
 
+## API preflight errors in the mobile library
+
+The mobile library (`cmd/ctrld_library`) runs in the process of the app, so
+ctrld does not exit. When the API preflight gives an error, ctrld sends one
+line to `AppCallback.Exit`:
+
+`provisioning failed: stage=api code=<CODE> (exit <N>) http_status=<status>`
+
+- The stage is `api`. This stage is only in the `Exit` text. The code and the
+  exit number are the bootstrap values from the table above.
+- `http_status` is the HTTP status of the API answer. The line has no
+  `http_status` when no answer came. A non-200 answer whose body is not
+  valid JSON, such as the HTML page of a proxy, an empty body, or a body
+  that was cut off, also has `http_status`. Such an answer does not count
+  as a permanent rejection, even with a 4xx status, because a captive
+  portal can send it. A non-200 answer whose body is valid JSON counts as
+  an answer of the API, even when it has no `error` object. An answer with
+  status 200 and a body that does not decode has no `http_status`.
+- The code is `API_REJECTED`, `API_DEVICE_INVALID`, or a `TOKEN_*` code for a
+  permanent rejection. It is `API_RATE_LIMITED` for HTTP 429, and
+  `API_MAINTENANCE` or `API_UNAVAILABLE` when the API is down. It is
+  `API_UNREACHABLE` for all other errors.
+- The line never contains the error text, the resolver UID, or the
+  provisioning token. The API can echo these values in its error text.
+
+ctrld also sends this line with `API_DEVICE_INVALID` during a run, when the
+API answers that the device does not exist. Two checks can get this answer:
+the device check after more than 32 REFUSED answers, and the reload of the
+configuration, which runs every hour by default. The run continues until the
+app stops it. ctrld calls
+`Exit` before the run ends, so `Exit` must not wait for the run to end. The
+comment of `AppCallback.Exit` in `cmd/ctrld_library` gives the details.
+
 ## Where each code surfaces
 
 - **Every ctrld-native code** (every row above except `package`): the CLI
   output / persisted `ctrld.log`, `provision_result.json`, and `ctrld diag`
   (which reads that same file).
+- **The two mobile codes** (`API_RATE_LIMITED` and `API_UNAVAILABLE`): only
+  the `Exit` text of the mobile library. ctrld does not write them to
+  `provision_result.json`, so `ctrld diag` does not show them.
 - **Package-stage codes** (`PROFILE_PREFS_MISSING`, `SERVICE_RELOAD_FAILED`,
   `TEMP_FILE_UNAVAILABLE`, the package's own `INTERCEPT_MODE_INVALID` check
   on the managed-prefs value, and the package pre-flight's reused

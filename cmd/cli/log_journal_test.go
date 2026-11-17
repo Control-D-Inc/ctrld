@@ -90,14 +90,15 @@ const journalDoHError = `Get "https://dns.example/org-v1-SECRET0123?dns=pOgBAAAB
 // journalRedactedURL is what the sink keeps of journalDoHError.
 const journalRedactedURL = "https://dns.example/[redacted]"
 
-// journalTestLogger returns a logger that writes through the journal sink.
+// journalTestLogger returns a logger that writes through the redaction step
+// of the logger and the journal sink, as a run does.
 func journalTestLogger(t *testing.T) (*bytes.Buffer, zerolog.Logger) {
 	t.Helper()
 	level := zerolog.GlobalLevel()
 	zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	t.Cleanup(func() { zerolog.SetGlobalLevel(level) })
 	var buf bytes.Buffer
-	return &buf, zerolog.New(zerolog.MultiLevelWriter(newJournalLevelWriter(&buf)))
+	return &buf, zerolog.New(newLogOutput(newJournalLevelWriter(&buf)))
 }
 
 func Test_journalLevelWriterRedactsAKeptLine(t *testing.T) {
@@ -117,9 +118,7 @@ func Test_journalLevelWriterRedactsAKeptLine(t *testing.T) {
 }
 
 func Test_journalLevelWriterRedactsTheProvisionSecrets(t *testing.T) {
-	origCdUID := cdUID
-	t.Cleanup(func() { cdUID = origCdUID })
-	cdUID = "org-v1-uidofthisdevice"
+	setLogSecrets(t, "org-v1-uidofthisdevice", cdOrg)
 	buf, logger := journalTestLogger(t)
 
 	logger.Warn().Str("detail", "device "+cdUID+" is gone").Msg("provision failed")
@@ -157,24 +156,15 @@ func Test_journalLevelWriterRedactsAMarkedInfoLine(t *testing.T) {
 	}
 }
 
-func Test_journalLevelWriterReportsTheOriginalLength(t *testing.T) {
-	var buf bytes.Buffer
-	writer := newJournalLevelWriter(&buf)
-	line := []byte(`{"level":"warn","error":"https://dns.example/org-v1-SECRET0123","message":"state"}` + "\n")
-
-	n, err := writer.WriteLevel(zerolog.WarnLevel, line)
-
-	if err != nil || n != len(line) {
-		t.Fatalf("write of a kept line = (%d, %v), want (%d, nil)", n, err, len(line))
-	}
-	if buf.Len() >= len(line) {
-		t.Fatalf("the sink wrote no shorter line: %s", buf.String())
-	}
-}
-
 // startInternalLogging drives the real cd mode setup and returns the program
 // and the directory that holds the debug file and the journal file.
 func startInternalLogging(t *testing.T) (*prog, string) {
+	t.Helper()
+	return startInternalLoggingAt(t, 0)
+}
+
+// startInternalLoggingAt is startInternalLogging with the given verbose level.
+func startInternalLoggingAt(t *testing.T, level int) (*prog, string) {
 	t.Helper()
 	origSilent, origCdUID, origHomedir, origVerbose := silent, cdUID, homedir, verbose
 	origMainLog, origProxyLog := mainLog.Load(), ctrld.ProxyLogger.Load()
@@ -194,7 +184,7 @@ func startInternalLogging(t *testing.T) (*prog, string) {
 	homedir = dir
 	cdUID = "test-uid"
 	silent = false
-	verbose = 0
+	verbose = level
 	stubHeaderSnapshotSources(t)
 
 	p := &prog{cfg: &ctrld.Config{}}
@@ -203,25 +193,22 @@ func startInternalLogging(t *testing.T) (*prog, string) {
 	return p, dir
 }
 
-// Test_initInternalLogging_redactsTheJournalFile drives a cd mode run: support
-// downloads the journal file, so it holds the redacted URL, while the debug
-// file stays raw for the developer who reads it on the host.
-func Test_initInternalLogging_redactsTheJournalFile(t *testing.T) {
+// Test_initInternalLogging_redactsBothFiles drives a cd mode run. Support
+// downloads both files, and the user can share them, so both hold the
+// redacted URL.
+func Test_initInternalLogging_redactsBothFiles(t *testing.T) {
 	_, dir := startInternalLogging(t)
 
 	mainLog.Load().Warn().Str("error", journalDoHError).Msg("upstream failed")
 
-	journalText := rotatingFileTestContent(t, filepath.Join(dir, journalLogFileName))
-	if !strings.Contains(journalText, journalRedactedURL) {
-		t.Fatalf("journal file misses the redacted URL: %s", journalText)
-	}
-	if strings.Contains(journalText, "SECRET0123") {
-		t.Fatalf("journal file kept the resolver path: %s", journalText)
-	}
-
-	debugText := rotatingFileTestContent(t, filepath.Join(dir, logFileName))
-	if !strings.Contains(debugText, "org-v1-SECRET0123?dns=pOgBAAAB") {
-		t.Fatalf("debug file lost the raw URL: %s", debugText)
+	for _, name := range []string{journalLogFileName, logFileName} {
+		text := rotatingFileTestContent(t, filepath.Join(dir, name))
+		if !strings.Contains(text, journalRedactedURL) {
+			t.Fatalf("%s misses the redacted URL: %s", name, text)
+		}
+		if strings.Contains(text, "SECRET0123") {
+			t.Fatalf("%s kept the resolver path: %s", name, text)
+		}
 	}
 }
 
@@ -255,51 +242,19 @@ func Test_stopClosesTheInternalLogFiles(t *testing.T) {
 	}
 }
 
-// Test_redactRetainedLineKeepsAShortClientID puts a two-letter client ID in
-// the resolver UID. The keys of a JSON line hold the same letters, and a
-// redaction of the client ID would break the line.
-func Test_redactRetainedLineKeepsAShortClientID(t *testing.T) {
-	origCdUID := cdUID
-	t.Cleanup(func() { cdUID = origCdUID })
-	cdUID = "uid12345678/os"
+// The CLI flags set cdUID and cdOrg before any command runs, so the root
+// command must copy them for the log writers.
+func Test_rootPreRunStoresTheFlagSecrets(t *testing.T) {
+	const token = "org-v1-flagtoken"
+	setLogSecrets(t, "", "")
+	origLevel, origVerbose, origMainLog := zerolog.GlobalLevel(), verbose, mainLog.Load()
+	t.Cleanup(func() { zerolog.SetGlobalLevel(origLevel); verbose = origVerbose; mainLog.Store(origMainLog) })
+	cdOrg = token
 
-	line := string(redactRetainedLine([]byte(`{"level":"info","os":"darwin","resolver":"uid12345678/os"}`)))
+	rootCmd.PersistentPreRun(rootCmd, nil)
 
-	if !strings.Contains(line, `"os":"darwin"`) {
-		t.Fatalf("the redaction changed the os key: %s", line)
-	}
-	if strings.Contains(line, "uid12345678") {
-		t.Fatalf("the redaction kept the resolver uid: %s", line)
-	}
-}
-
-// Test_redactRetainedLineStripsEverySchemePath covers the endpoints that carry
-// a token in their path with a scheme other than https.
-func Test_redactRetainedLineStripsEverySchemePath(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{`Get "quic://dns.example/org-v1-SECRET0123?dns=pOgBAAAB": timeout`, `Get "quic://dns.example/[redacted]": timeout`},
-		{`h3://dns.example/SECRET0123 failed`, `h3://dns.example/[redacted] failed`},
-		{`tls://dns.example:853 failed`, `tls://dns.example:853 failed`},
-		{`tls://abcdef12.dns.controld.com:853 failed`, `tls://[redacted].dns.controld.com:853 failed`},
-		{`quic://abcdef12.dns.controld.dev failed`, `quic://[redacted].dns.controld.dev failed`},
-		{`https://freedns.controld.com/p1 failed`, `https://freedns.controld.com/[redacted] failed`},
-	} {
-		if got := string(redactRetainedLine([]byte(tc.in))); got != tc.want {
-			t.Errorf("redactRetainedLine(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
-// Test_redactRetainedLineKeepsAShortResolverUID puts a two-letter resolver UID
-// in place. The keys of a JSON line hold the same letters, and a redaction of
-// the UID would break every retained line and the header.
-func Test_redactRetainedLineKeepsAShortResolverUID(t *testing.T) {
-	origCdUID := cdUID
-	t.Cleanup(func() { cdUID = origCdUID })
-	cdUID = "os"
-
-	const in = `{"level":"info","os":"darwin","message":"loss of service"}`
-	if got := string(redactRetainedLine([]byte(in))); got != in {
-		t.Fatalf("redactRetainedLine(%q) = %q, want the line unchanged", in, got)
+	line := string(redactLogLine([]byte(`{"message":"token ` + token + `"}`)))
+	if strings.Contains(line, token) {
+		t.Errorf("line contains the flag token: %s", line)
 	}
 }

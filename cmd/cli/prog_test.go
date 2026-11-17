@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/url"
+	"os/exec"
 	"runtime"
 	"syscall"
 	"testing"
@@ -302,4 +303,20 @@ func Test_performUpgrade(t *testing.T) {
 			assert.Equal(t, tc.expectedResult, result, tc.description)
 		})
 	}
+}
+
+// On mobile the app store updates ctrld with the app, and the sandbox does not
+// let ctrld start the upgrade command.
+func Test_selfUpgradeCheckSkipsMobile(t *testing.T) {
+	oldIsMobile, oldUpgradeCmd := isMobile, newUpgradeCmd
+	t.Cleanup(func() { isMobile, newUpgradeCmd = oldIsMobile, oldUpgradeCmd })
+	isMobile = func() bool { return true }
+	started := false
+	newUpgradeCmd = func(string) *exec.Cmd { started = true; return exec.Command("true") }
+	logger := zerolog.Nop()
+
+	upgraded := selfUpgradeCheck("v1.0.1", semver.MustParse("v1.0.0"), &logger)
+
+	assert.False(t, upgraded)
+	assert.False(t, started, "the upgrade command was made on mobile")
 }

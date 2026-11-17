@@ -9,7 +9,7 @@ import (
 
 func Test_ubiosDiscover_refreshDevices_skipsUnavailableMongo(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
-		ud := &ubiosDiscover{mongoPath: filepath.Join(t.TempDir(), "mongo")}
+		ud := &ubiosDiscover{mongoPath: filepath.Join(t.TempDir(), "mongo"), postgresSocket: filepath.Join(t.TempDir(), "missing-socket")}
 		if err := ud.refreshDevices(); err != nil {
 			t.Fatalf("refreshDevices() error = %v", err)
 		}
@@ -20,7 +20,7 @@ func Test_ubiosDiscover_refreshDevices_skipsUnavailableMongo(t *testing.T) {
 		if err := os.WriteFile(path, nil, 0600); err != nil {
 			t.Fatal(err)
 		}
-		ud := &ubiosDiscover{mongoPath: path}
+		ud := &ubiosDiscover{mongoPath: path, postgresSocket: filepath.Join(t.TempDir(), "missing-socket")}
 		if err := ud.refreshDevices(); err != nil {
 			t.Fatalf("refreshDevices() error = %v", err)
 		}

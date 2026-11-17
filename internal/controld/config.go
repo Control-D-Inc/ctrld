@@ -189,17 +189,39 @@ func (u ErrorResponse) Error() string {
 	return u.ErrorField.Message
 }
 
+// HTTPStatusError is a non-200 answer whose body does not decode, such as the
+// HTML page of a proxy, an empty body, or a body that was cut off. It keeps the
+// HTTP status, so that a caller can still tell a rate limit or an outage from a
+// network failure.
+//
+// It is not an *ErrorResponse on purpose. Nothing proves that the API sent the
+// body, so the status alone must not make it a permanent rejection: a captive
+// portal can answer 403 with its own page.
+type HTTPStatusError struct {
+	StatusCode int
+	Err        error
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("API answered HTTP %d and the error body could not be decoded: %v", e.StatusCode, e.Err)
+}
+
+func (e *HTTPStatusError) Unwrap() error {
+	return e.Err
+}
+
 // apiErrorFromResponse builds the error for a non-200 API answer, recording the HTTP
 // status alongside the decoded body.
 //
 // The status is what tells a caller whether the answer will change on a retry: this type
 // is built for every non-200 whose body decodes, so a 502 from a load balancer and a 404
 // for a deleted device are otherwise indistinguishable. Both response paths go through
-// here so neither can decode a body and forget to record it.
+// here so neither can decode a body and forget to record it. A body that does not
+// decode still keeps its status, in an *HTTPStatusError.
 func apiErrorFromResponse(statusCode int, d *json.Decoder) (*ErrorResponse, error) {
 	errResp := &ErrorResponse{StatusCode: statusCode}
 	if err := d.Decode(errResp); err != nil {
-		return nil, err
+		return nil, &HTTPStatusError{StatusCode: statusCode, Err: err}
 	}
 	// Decode fills exported fields from the body; StatusCode is json:"-", so it survives.
 	errResp.StatusCode = statusCode
@@ -488,6 +510,10 @@ func doWithFallback(client *http.Client, req *http.Request, apiIp string) (*http
 	resp, err := client.Do(req)
 	if err == nil {
 		return resp, nil
+	}
+	// A request that was cancelled fails at the direct IP too.
+	if req.Context().Err() != nil {
+		return nil, err
 	}
 	ctrld.ProxyLogger.Load().Warn().Err(err).Msgf("failed to send request, fallback to direct IP: %s", apiIp)
 	ipReq := req.Clone(req.Context())

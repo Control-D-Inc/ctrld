@@ -2,9 +2,15 @@ package ctrld
 
 import (
 	"context"
+	"errors"
 	"os"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/Control-D-Inc/ctrld/internal/system"
 )
 
 func Test_metadata(t *testing.T) {
@@ -68,4 +74,108 @@ func TestSystemMetadataUsernameScope(t *testing.T) {
 			t.Errorf("startup %v and runtime %v differ beyond username", s, r)
 		}
 	})
+}
+
+func TestChassisValuesIsSafeForConcurrentCalls(t *testing.T) {
+	oldType, oldVendor, oldLookup := chassisType, chassisVendor, getChassisInfoFn
+	t.Cleanup(func() { chassisType, chassisVendor, getChassisInfoFn = oldType, oldVendor, oldLookup })
+
+	chassisType, chassisVendor = "", ""
+	var lookups atomic.Int32
+	getChassisInfoFn = func() (*system.ChassisInfo, error) {
+		lookups.Add(1)
+		time.Sleep(10 * time.Millisecond)
+		return &system.ChassisInfo{Type: "Laptop", Vendor: "Acme"}, nil
+	}
+
+	const callers = 16
+	var ready, done sync.WaitGroup
+	start := make(chan struct{})
+	ready.Add(callers)
+	done.Add(callers)
+	kinds, vendors := make([]string, callers), make([]string, callers)
+	for i := range callers {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			kinds[i], vendors[i] = chassisValues()
+		}()
+	}
+	ready.Wait()
+	close(start)
+	done.Wait()
+
+	if got := lookups.Load(); got != 1 {
+		t.Errorf("chassis lookup ran %d times, want 1", got)
+	}
+	for i := range callers {
+		if kinds[i] != "Laptop" || vendors[i] != "Acme" {
+			t.Errorf("caller %d got chassis %q/%q, want Laptop/Acme", i, kinds[i], vendors[i])
+		}
+	}
+}
+
+func TestChassisValuesRetriesAfterFailedLookup(t *testing.T) {
+	oldType, oldVendor, oldLookup := chassisType, chassisVendor, getChassisInfoFn
+	t.Cleanup(func() { chassisType, chassisVendor, getChassisInfoFn = oldType, oldVendor, oldLookup })
+
+	chassisType, chassisVendor = "", ""
+	fail := true
+	getChassisInfoFn = func() (*system.ChassisInfo, error) {
+		if fail {
+			return nil, errors.New("no chassis")
+		}
+		return &system.ChassisInfo{Type: "Desktop", Vendor: "Acme"}, nil
+	}
+	if kind, vendor := chassisValues(); kind != "" || vendor != "" {
+		t.Fatalf("failed lookup returned %q/%q, want empty", kind, vendor)
+	}
+	fail = false
+	if kind, vendor := chassisValues(); kind != "Desktop" || vendor != "Acme" {
+		t.Errorf("retry returned %q/%q, want Desktop/Acme", kind, vendor)
+	}
+}
+
+func TestChassisValuesKeepsResultWithOneEmptyValue(t *testing.T) {
+	oldType, oldVendor, oldLookup := chassisType, chassisVendor, getChassisInfoFn
+	t.Cleanup(func() { chassisType, chassisVendor, getChassisInfoFn = oldType, oldVendor, oldLookup })
+
+	chassisType, chassisVendor = "", ""
+	var lookups int
+	getChassisInfoFn = func() (*system.ChassisInfo, error) {
+		lookups++
+		return &system.ChassisInfo{Type: "", Vendor: "Acme"}, nil
+	}
+	chassisValues()
+	if kind, vendor := chassisValues(); kind != "" || vendor != "Acme" {
+		t.Errorf("chassisValues = %q/%q, want empty/Acme", kind, vendor)
+	}
+	if lookups != 1 {
+		t.Errorf("chassis lookup ran %d times, want 1", lookups)
+	}
+}
+
+func TestSystemMetadataSkipsChassisLookupOnMobile(t *testing.T) {
+	oldType, oldVendor, oldLookup, oldMobile := chassisType, chassisVendor, getChassisInfoFn, isMobile
+	t.Cleanup(func() {
+		chassisType, chassisVendor, getChassisInfoFn, isMobile = oldType, oldVendor, oldLookup, oldMobile
+	})
+
+	chassisType, chassisVendor = "", ""
+	isMobile = func() bool { return true }
+	getChassisInfoFn = func() (*system.ChassisInfo, error) {
+		t.Error("chassis lookup ran on mobile")
+		return &system.ChassisInfo{Type: "Laptop", Vendor: "Acme"}, nil
+	}
+	for name, collect := range map[string]func(context.Context) map[string]string{
+		"provisioning": SystemMetadata,
+		"startup":      SystemMetadataStartup,
+		"runtime":      SystemMetadataRuntime,
+	} {
+		m := collect(context.Background())
+		if m[metadataChassisTypeKey] != "" || m[metadataChassisVendorKey] != "" {
+			t.Errorf("%s metadata sent chassis %q/%q on mobile", name, m[metadataChassisTypeKey], m[metadataChassisVendorKey])
+		}
+	}
 }

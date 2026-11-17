@@ -124,6 +124,14 @@ var provisionBoundaryFatalAllowlist = map[string]string{
 
 	"commands.go:initUpgradeCmd": `the "ctrld upgrade" command. Outside the --cd-org ` +
 		`provisioning boundary this lane hardened.`,
+	"commands.go:initRollbackCmd": `the "ctrld rollback" command. Outside the --cd-org ` +
+		`provisioning boundary this lane hardened.`,
+	"commands.go:runUpgrade": `download and install shared by "ctrld upgrade" and "ctrld rollback". ` +
+		`Outside the --cd-org provisioning boundary this lane hardened.`,
+	"commands.go:newBinarySwitch": `setup shared by "ctrld upgrade" and "ctrld rollback". ` +
+		`Outside the --cd-org provisioning boundary this lane hardened.`,
+	"commands.go:binarySwitch.install": `binary replacement shared by "ctrld upgrade" and ` +
+		`"ctrld rollback". Outside the --cd-org provisioning boundary this lane hardened.`,
 
 	"prog.go:prog.Stop": `the deactivation pin check's os.Exit(126). Out of scope for this ` +
 		`lane by contract ("pin-check 126 untouched").`,

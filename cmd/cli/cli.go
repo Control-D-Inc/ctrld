@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -19,6 +21,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +43,7 @@ import (
 
 	"github.com/Control-D-Inc/ctrld"
 	"github.com/Control-D-Inc/ctrld/internal/controld"
+	"github.com/Control-D-Inc/ctrld/internal/mobile"
 	ctrldnet "github.com/Control-D-Inc/ctrld/internal/net"
 	"github.com/Control-D-Inc/ctrld/internal/router"
 )
@@ -61,9 +65,13 @@ var (
 	commit  = "none"
 )
 
+// defaultConfigFileName is the name of the config file that a start writes
+// when it finds none.
+const defaultConfigFileName = "ctrld.toml"
+
 var (
 	v                    = viper.NewWithOptions(viper.KeyDelimiter("::"))
-	defaultConfigFile    = "ctrld.toml"
+	defaultConfigFile    = defaultConfigFileName
 	rootCertPool         *x509.CertPool
 	errSelfCheckNoAnswer = errors.New("no response from ctrld listener. You can try to re-launch with flag --skip_self_checks")
 )
@@ -93,6 +101,7 @@ var rootCmd = &cobra.Command{
 	Short:   strings.TrimLeft(rootShortDesc, "\n"),
 	Version: curVersion(),
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		storeLogSecrets()
 		initConsoleLogging()
 	},
 }
@@ -143,6 +152,7 @@ func initCLI() {
 	initServicesCmd(startCmd, stopCmd, restartCmd, reloadCmd, statusCmd, uninstallCmd, interfacesCmd)
 	initClientsCmd()
 	initUpgradeCmd()
+	initRollbackCmd()
 	initLogCmd()
 	initDiagCmd()
 }
@@ -162,11 +172,15 @@ func abortOnProvisionFailure(appCallback *AppCallback) bool {
 
 // isMobile reports whether the current OS is a mobile platform.
 var isMobile = func() bool {
-	return runtime.GOOS == "android" || runtime.GOOS == "ios"
+	return runtime.GOOS == "android" || mobile.IsIOS()
 }
 
+// errNoHostTools is the error of a system tool that ctrld does not start on
+// mobile. The iOS sandbox does not let an app start a process.
+var errNoHostTools = errors.New("system network tools are not available on mobile")
+
 var (
-	networkUp = ctrldnet.Up
+	networkUp = ctrldnet.UpUntil
 	newRouter = router.New
 )
 
@@ -220,22 +234,35 @@ func RunMobile(appConfig *AppConfig, appCallback *AppCallback, stopCh chan struc
 	if appConfig == nil {
 		panic("appConfig is nil")
 	}
+	resetStartConfig()
+	closeStartLogFile()
+	// initConsoleLogging reads verbose for the lines before the log files
+	// open, so the configuration of this start goes first.
+	applyAppConfig(appConfig)
 	initConsoleLogging()
-	noConfigStart = false
-	homedir = appConfig.HomeDir
-	verbose = appConfig.Verbose
-	if appConfig.ProvisionID != "" {
-		cdOrg = appConfig.ProvisionID
-	}
-	if appConfig.CustomHostname != "" {
-		customHostname = appConfig.CustomHostname
-	}
-	if appConfig.CdUID != "" {
-		cdUID = appConfig.CdUID
-	}
-	cdUpstreamProto = appConfig.UpstreamProto
-	logPath = appConfig.LogPath
 	run(appCallback, stopCh)
+}
+
+// resetStartConfig drops the configuration of the start before this one.
+// The run puts the [service] values in v with v.Set, and v.Set wins over a
+// new configuration file. v.Unmarshal also keeps each field of cfg that the
+// new values do not name. So both must start empty.
+func resetStartConfig() {
+	v = viper.NewWithOptions(viper.KeyDelimiter("::"))
+	cfg = ctrld.Config{}
+	lastConfigLogValues.Store(nil)
+}
+
+// closeStartLogFile closes the log file of the start before this one. A
+// start with no log path must not write to it, and a start with the same log
+// path opens it again, in case the app removed it.
+func closeStartLogFile() {
+	if old := logPathFile.Swap(nil); old != nil {
+		if err := old.close(); err != nil {
+			mainLog.Load().Warn().Err(err).Msg("could not close the log file of the earlier start")
+		}
+	}
+	pendingLogPathRotation.Store(nil)
 }
 
 // CheckDeactivationPin checks if deactivation pin is valid
@@ -263,7 +290,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 		stopCh:           stopCh,
 		pinCodeValidCh:   make(chan struct{}, 1),
 		reloadCh:         make(chan struct{}),
-		reloadDoneCh:     make(chan struct{}),
+		reloadDoneCh:     make(chan reloadDone),
 		dnsWatcherStopCh: make(chan struct{}),
 		apiReloadCh:      make(chan *ctrld.Config),
 		apiForceReloadCh: make(chan struct{}),
@@ -330,6 +357,9 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	}
 	writeDefaultConfig := !noConfigStart && configBase64 == ""
 	tryReadingConfig(writeDefaultConfig)
+	if abortOnProvisionFailure(appCallback) {
+		return
+	}
 
 	if err := readBase64Config(configBase64); err != nil {
 		failRunUnclassified(mainLog.Load().Error().Err(err), fmt.Sprintf("failed to read base64 config: %v", err), p.notifyExitToLogServer)
@@ -357,7 +387,12 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	mainLog.Load().Info().Msgf("os: %s", osVersion())
 
 	// Wait for network up.
-	if !networkUp() {
+	if !networkUp(p.stopCh) {
+		if stopRequested(p.stopCh) {
+			mainLog.Load().Notice().Msg("stop requested while waiting for the network, shutting down")
+			p.notifyExitToLogServer()
+			return
+		}
 		failRunUnclassified(mainLog.Load().Error(), "network is not up yet", p.notifyExitToLogServer)
 		return
 	}
@@ -382,7 +417,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 	// managed-config marker may claim once the configuration is on disk.
 	managedConfigFetched := false
 	if uid := cdUIDFromProvToken(); uid != "" {
-		cdUID = uid
+		setCdUID(uid)
 		p.initLoggingAfterProvisioning()
 	}
 	if abortOnProvisionFailure(appCallback) {
@@ -412,7 +447,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			return
 		case pf.err != nil:
 			if isMobile() {
-				appCallback.Exit(pf.err.Error())
+				appCallback.Exit(mobileAPIFailureLine(pf.err))
 				return
 			}
 
@@ -554,11 +589,7 @@ func run(appCallback *AppCallback, stopCh chan struct{}) {
 			})
 		}
 	}
-	p.onStopped = append(p.onStopped, func() {
-		// restore static DNS settings or DHCP
-		p.resetDNS(false, true)
-		restoreSavedStaticDNS("", false)
-	})
+	p.onStopped = append(p.onStopped, p.restoreDeviceDNSOnStop)
 
 	close(waitCh)
 	<-stopCh
@@ -603,6 +634,9 @@ func configFileForWrite() string {
 
 // renderConfigFile returns the exact bytes writeConfigFile writes for cfg.
 func renderConfigFile(cfg *ctrld.Config) ([]byte, error) {
+	if isMobile() {
+		cfg = withConfigLogValues(cfg)
+	}
 	var buf bytes.Buffer
 	if cdUID != "" {
 		buf.WriteString("# AUTO-GENERATED VIA CD FLAG - DO NOT MODIFY\n\n")
@@ -612,6 +646,22 @@ func renderConfigFile(cfg *ctrld.Config) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// withConfigLogValues returns a copy of cfg with the log values of its
+// configuration source. The mobile app passes its log path at each start, so
+// a log path in the file would carry into a later start that passes none.
+// The desktop service also passes it at each start, but other readers of the
+// file need it there.
+func withConfigLogValues(cfg *ctrld.Config) *ctrld.Config {
+	source := lastConfigLogValues.Load()
+	if source == nil {
+		return cfg
+	}
+	out := *cfg
+	out.Service.LogPath = source.logPath
+	out.Service.LogLevel = source.logLevel
+	return &out
 }
 
 // configFileDiffers reports whether the config file on disk is not what
@@ -634,15 +684,7 @@ func writeConfigFile(cfg *ctrld.Config) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(defaultConfigFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(0o644))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(data); err != nil {
-		return err
-	}
-	return f.Close()
+	return replaceFile(defaultConfigFile, data, 0o644)
 }
 
 // readConfigFile reads in config file.
@@ -664,6 +706,13 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		return true
 	}
 
+	// On mobile, the process is the app, so a config file that ctrld cannot
+	// read must fail the start, not end the process.
+	if isMobile() && !configFileMissing(err) {
+		failRunUnclassified(mainLog.Load().Error().Err(err), configFileErrorMessage(err), nil)
+		return false
+	}
+
 	if !writeDefaultConfig {
 		return false
 	}
@@ -673,11 +722,20 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		if err := v.Unmarshal(&cfg); err != nil {
 			mainLog.Load().Fatal().Msgf("failed to unmarshal default config: %v", err)
 		}
+		// The mobile viper has no defaults, so the config can have no listener.
+		setListenerDefaultValue(&cfg)
 		nop := zerolog.Nop()
 		_, _ = tryUpdateListenerConfig(&cfg, &nop, func() {}, true)
 		addExtraSplitDnsRule(&cfg)
 		if err := writeConfigFile(&cfg); err != nil {
-			mainLog.Load().Fatal().Msgf("failed to write default config file: %v", err)
+			msg := fmt.Sprintf("failed to write default config file: %v", err)
+			// On mobile, the process is the app, so a failed write must fail
+			// the start, not end the process.
+			if isMobile() {
+				failRunUnclassified(mainLog.Load().Error().Err(err), msg, nil)
+				return false
+			}
+			mainLog.Load().Fatal().Msg(msg)
 		} else {
 			fp, err := filepath.Abs(defaultConfigFile)
 			if err != nil {
@@ -691,17 +749,27 @@ func readConfigFile(writeDefaultConfig, notice bool) bool {
 		return false
 	}
 
-	// If error is viper.ConfigParseError, emit details line and column number.
+	mainLog.Load().Fatal().Msg(configFileErrorMessage(err))
+	return false
+}
+
+// configFileMissing reports whether err of v.ReadInConfig says that there is
+// no config file. A path set with SetConfigFile gives an error of the file
+// system, not viper.ConfigFileNotFoundError.
+func configFileMissing(err error) bool {
+	return errors.As(err, &viper.ConfigFileNotFoundError{}) || errors.Is(err, fs.ErrNotExist)
+}
+
+// configFileErrorMessage describes err of v.ReadInConfig. For a TOML error,
+// it gives the line and column.
+func configFileErrorMessage(err error) string {
 	if errors.As(err, &viper.ConfigParseError{}) {
 		if de := decoderErrorFromTomlFile(v.ConfigFileUsed()); de != nil {
 			row, col := de.Position()
-			mainLog.Load().Fatal().Msgf("failed to decode config file at line: %d, column: %d, error: %v", row, col, err)
+			return fmt.Sprintf("failed to decode config file at line: %d, column: %d, error: %v", row, col, err)
 		}
 	}
-
-	// Otherwise, report fatal error and exit.
-	mainLog.Load().Fatal().Msgf("failed to decode config file: %v", err)
-	return false
+	return fmt.Sprintf("failed to decode config file: %v", err)
 }
 
 // decoderErrorFromTomlFile parses the invalid toml file, returning the details decoder error.
@@ -799,6 +867,20 @@ var deactivationPinKnown atomic.Bool
 
 // cdDeactivationPin is used in cd mode to decide whether stop and uninstall commands can be run.
 var cdDeactivationPin atomic.Int64
+
+// cdVersionTarget is the version target the Control D API last returned for
+// this device, nil before the first answer. Each config refresh upgrades the
+// device towards it, so "ctrld upgrade" and "ctrld rollback" read it through
+// the control server to warn before installing an older release.
+var cdVersionTarget atomic.Pointer[string]
+
+// versionTarget returns cdVersionTarget, or "" when no target is known.
+func versionTarget() string {
+	if vt := cdVersionTarget.Load(); vt != nil {
+		return *vt
+	}
+	return ""
+}
 
 // Brute-force protection for the deactivation PIN endpoint on the control socket.
 // After deactivationMaxFailedAttempts consecutive wrong PINs, further attempts are
@@ -910,6 +992,48 @@ func apiFailureCode(err error) (provisionFailureCode, bool) {
 		return provisionCodeAPIRejected, true
 	}
 	return provisionCodeAPIUnreachable, true
+}
+
+// mobileAPIFailureLine is the Exit text of the mobile library for an API
+// preflight error. The app reads the code to select a retry or an error
+// screen. The text has no error message, because the API can echo the UID or
+// the token in it.
+func mobileAPIFailureLine(err error) string {
+	code, ok := apiFailureCode(err)
+	if !ok {
+		code = provisionCodeUnclassified
+	}
+	status := apiHTTPStatus(err)
+	// On a desktop the service manager retries all of these alike. The app
+	// waits longer for a rate limit than for an API that is down.
+	if code == provisionCodeAPIUnreachable {
+		switch {
+		case status == http.StatusTooManyRequests:
+			code = provisionCodeAPIRateLimited
+		case status >= http.StatusInternalServerError:
+			code = provisionCodeAPIUnavailable
+		}
+	}
+	r := &provisionResult{Stage: string(provisionStageAPI), Code: string(code), ExitCode: provisionExitCodeForCode[code]}
+	if status == 0 {
+		return r.failureLine()
+	}
+	return fmt.Sprintf("%s http_status=%d", r.failureLine(), status)
+}
+
+// apiHTTPStatus returns the HTTP status of the API answer in err, or 0 when no
+// answer came. An answer whose body does not decode, such as a proxy page, still
+// has a status.
+func apiHTTPStatus(err error) int {
+	var uer *controld.ErrorResponse
+	if errors.As(err, &uer) {
+		return uer.StatusCode
+	}
+	var statusErr *controld.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode
+	}
+	return 0
 }
 
 // tokenFailureCodeForReason maps error.metadata.reason on a provisioning-token
@@ -1170,7 +1294,11 @@ func processCDFlagsWithMetadata(
 	if resolverConfig.DeactivationPin != nil {
 		logger.Debug().Msg("saving deactivation pin")
 		cdDeactivationPin.Store(*resolverConfig.DeactivationPin)
+	} else {
+		cdDeactivationPin.Store(defaultDeactivationPin)
 	}
+	vt := resolverConfig.Ctrld.VersionTarget
+	cdVersionTarget.Store(&vt)
 
 	logger.Info().Msg("generating ctrld config from Control-D configuration")
 
@@ -1190,6 +1318,9 @@ func processCDFlagsWithMetadata(
 		// nil on every path that reaches here, so logging it said nothing about why the
 		// custom config was rejected.
 		mainLog.Load().Warn().Err(cfgErr).Msg("disregarding invalid custom config")
+		// The generated config below sets only some sections, so the others
+		// would keep the values of the rejected config.
+		*cfg = ctrld.Config{}
 	}
 
 	bootstrapIP := func(endpoint string) string {
@@ -1315,8 +1446,17 @@ func processListenFlag() {
 	})
 }
 
+// configLogValues are the log values of the last configuration source,
+// before processLogAndCacheFlags puts the flag values over them.
+type configLogValues struct {
+	logPath, logLevel string
+}
+
+var lastConfigLogValues atomic.Pointer[configLogValues]
+
 // processLogAndCacheFlags processes log and cache related flags
 func processLogAndCacheFlags(v *viper.Viper, cfg *ctrld.Config) {
+	lastConfigLogValues.Store(&configLogValues{logPath: cfg.Service.LogPath, logLevel: cfg.Service.LogLevel})
 	if logPath != "" {
 		cfg.Service.LogPath = logPath
 	}
@@ -1435,8 +1575,8 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 		return false, status, err
 	}
 
-	selfCheckExternalDomain := cfg.FirstUpstream().VerifyDomain()
-	if selfCheckExternalDomain == "" {
+	externalDomain := selfCheckExternalDomain(&cfg)
+	if externalDomain == "" {
 		// Nothing to do, return the status as-is.
 		return true, status, nil
 	}
@@ -1444,6 +1584,9 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 	mainLog.Load().Debug().Msg("ctrld listener is ready")
 
 	lc := cfg.FirstListener()
+	if lc == nil {
+		return false, status, errors.New("no listener key in the config is a number")
+	}
 	addr := net.JoinHostPort(lc.IP, strconv.Itoa(lc.Port))
 
 	mainLog.Load().Debug().Msgf("performing listener test, sending queries to %s", addr)
@@ -1451,10 +1594,20 @@ func selfCheckStatus(ctx context.Context, s service.Service, sockDir string) (bo
 	if err := selfCheckResolveDomain(context.TODO(), addr, "internal", selfCheckInternalTestDomain); err != nil {
 		return false, status, err
 	}
-	if err := selfCheckResolveDomain(context.TODO(), addr, "external", selfCheckExternalDomain); err != nil {
+	if err := selfCheckResolveDomain(context.TODO(), addr, "external", externalDomain); err != nil {
 		return false, status, err
 	}
 	return true, status, nil
+}
+
+// selfCheckExternalDomain returns the domain that the self-check resolves
+// through the first upstream, or "" if there is nothing to check.
+func selfCheckExternalDomain(cfg *ctrld.Config) string {
+	uc := cfg.FirstUpstream()
+	if uc == nil {
+		return ""
+	}
+	return uc.VerifyDomain()
 }
 
 // selfCheckResolveDomain performs DNS test query against ctrld listener.
@@ -1639,7 +1792,9 @@ func readConfigWithNotice(writeDefaultConfig, notice bool) {
 	for _, config := range configs {
 		ctrld.SetConfigNameWithPath(v, config.name, dir)
 		v.SetConfigFile(configPath)
-		if readConfigFile(config.written, notice) {
+		// A failure recorded on mobile ends the search. The next name would
+		// find no file and write a default config in place of the bad file.
+		if readConfigFile(config.written, notice) || pendingProvisionFailure.Load() != nil {
 			break
 		}
 	}
@@ -1677,6 +1832,16 @@ func uninstall(p *prog, s service.Service) {
 		mainLog.Load().Notice().Msg("Service uninstalled")
 		return
 	}
+}
+
+// restoreDeviceDNSOnStop gives the device back its static DNS settings or
+// DHCP when the run stops.
+func (p *prog) restoreDeviceDNSOnStop() {
+	if !p.ownsDeviceDNS() {
+		return
+	}
+	resetDNSFn(p, false, true)
+	restoreSavedStaticDNS("", false)
 }
 
 var restoreSavedStaticDNSInterfacesFn = withEachPhysicalInterfaces
@@ -1752,6 +1917,8 @@ func fieldErrorMsg(fe validator.FieldError) string {
 	case "ipstack":
 		ipStacks := []string{ctrld.IpStackV4, ctrld.IpStackV6, ctrld.IpStackSplit, ctrld.IpStackBoth}
 		return fmt.Sprintf("must be one of: %q", strings.Join(ipStacks, " "))
+	case "listenerkey":
+		return fmt.Sprintf("listener key must be %s: %q", ctrld.ListenerKeyRule, fe.Value())
 	case "iporempty":
 		return fmt.Sprintf("invalid IP format: %s", fe.Value())
 	case "file":
@@ -1783,8 +1950,9 @@ type listenerConfigCheck struct {
 	Port bool
 }
 
-// mobileListenerPort returns hardcoded port for mobile platforms.
-func mobileListenerPort() int {
+// mobileListenerPort returns hardcoded port for mobile platforms. Tests
+// replace it, because a host can hold port 53.
+var mobileListenerPort = func() int {
 	if isAndroid() {
 		return 5354
 	}
@@ -1919,10 +2087,33 @@ func listenerInterceptMode(cfg *ctrld.Config) string {
 	return mode
 }
 
+// unusableListenerConfig returns why the listener code cannot use the
+// listeners of cfg, or nil. validateConfig rejects the same config, but a
+// start runs it only after the listeners are set up.
+func unusableListenerConfig(cfg *ctrld.Config) error {
+	if len(cfg.Listener) == 0 {
+		return errors.New("no listener is configured")
+	}
+	for _, key := range slices.Sorted(maps.Keys(cfg.Listener)) {
+		if !ctrld.IsListenerKey(key) {
+			return fmt.Errorf("listener key %q must be %s", key, ctrld.ListenerKeyRule)
+		}
+		if cfg.Listener[key] == nil {
+			return fmt.Errorf("listener.%s has no settings", key)
+		}
+	}
+	return nil
+}
+
 // tryUpdateListenerConfig tries updating listener config with a working one.
 // If fatal is true, and there's listen address conflicted, the function do
-// fatal error.
+// fatal error. A listener config that it cannot use fails the start for any
+// value of fatal.
 func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, notifyFunc func(), fatal bool) (updated, ok bool) {
+	if err := unusableListenerConfig(cfg); err != nil {
+		failRunUnclassified(mainLog.Load().Error(), fmt.Sprintf("invalid listener config: %v", err), notifyFunc)
+		return false, false
+	}
 	// In intercept mode (macOS), pf redirects all port-53 traffic to ctrld's listener,
 	// so ctrld can safely listen on a non-standard port. Use a simple two-attempt flow:
 	// 1. If config has explicit non-default IP:port, use exactly that
@@ -1992,7 +2183,11 @@ func tryUpdateListenerConfig(cfg *ctrld.Config, infoLogger *zerolog.Logger, noti
 		if cdMode {
 			firstLn.IP = mobileListenerIp()
 			firstLn.Port = mobileListenerPort()
-			clear(lcc)
+			// The address is fixed, so a failed bind must not try another
+			// one. It fails with the listener code.
+			for k := range lcc {
+				lcc[k] = &listenerConfigCheck{}
+			}
 			updated = true
 		}
 	}
@@ -2233,13 +2428,13 @@ func dirWritable(dir string) (bool, error) {
 }
 
 func osVersion() string {
-	oi := osinfo.New()
+	version := ctrld.OSVersion()
 	if runtime.GOOS == "freebsd" {
-		if ver, _, found := strings.Cut(oi.String(), ":"); found {
+		if ver, _, found := strings.Cut(version, ":"); found {
 			return ver
 		}
 	}
-	return oi.String()
+	return version
 }
 
 // provisionTokenMinLen, provisionTokenMaxLen, and provisionTokenExpectedPrefix
@@ -2849,11 +3044,11 @@ func doValidateCdRemoteConfig(cdUID string, fatal bool) error {
 				}
 			}
 		} else {
-			mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", err)
+			mainLog.Load().Error().Msgf("failed to unmarshal custom config: %v", cfgErr)
 		}
 	}
 	if cfgErr != nil {
-		mainLog.Load().Warn().Msg("disregarding invalid custom config")
+		mainLog.Load().Warn().Err(cfgErr).Msg("disregarding invalid custom config")
 	}
 	v = oldV
 	return nil
