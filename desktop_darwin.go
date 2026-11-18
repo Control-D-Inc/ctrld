@@ -5,3 +5,6 @@ package ctrld
 func IsDesktopPlatform() bool {
 	return true
 }
+
+// SelfDiscover reports whether ctrld should only do self discover.
+func SelfDiscover() bool { return true }

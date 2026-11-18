@@ -67,6 +67,27 @@ func TestLoadDefaultConfig(t *testing.T) {
 	assert.Len(t, cfg.Upstream, 2)
 }
 
+func TestAllowUnprivilegedLogSendConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"absent", "[service]\n", false},
+		{"disabled", "[service]\nallow_unprivileged_log_send = false\n", false},
+		{"enabled", "[service]\nallow_unprivileged_log_send = true\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := viper.New()
+			v.SetConfigType("toml")
+			require.NoError(t, v.ReadConfig(strings.NewReader(tc.body)))
+			var cfg ctrld.Config
+			require.NoError(t, v.Unmarshal(&cfg))
+			assert.Equal(t, tc.want, cfg.Service.AllowUnprivilegedLogSend)
+		})
+	}
+}
+
 func TestConfigOverride(t *testing.T) {
 	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
 	ctrld.InitConfig(v, "test_load_config")
@@ -97,6 +118,12 @@ func TestConfigValidation(t *testing.T) {
 		{"invalid upstream missing endpoint", invalidUpstreamMissingEndpoind(t), true},
 		{"invalid listener ip", invalidListenerIP(t), true},
 		{"invalid listener port", invalidListenerPort(t), true},
+		{"listener key with a leading zero", configWithListenerKey(t, "01"), true},
+		{"listener key that is a name", configWithListenerKey(t, "main"), true},
+		{"listener key with a sign", configWithListenerKey(t, "+1"), true},
+		{"negative listener key", configWithListenerKey(t, "-1"), true},
+		{"listener key with two digits", configWithListenerKey(t, "10"), false},
+		{"listener with no settings", configWithNilListener(t), true},
 		{"os upstream", configWithOsUpstream(t), false},
 		{"invalid rules", configWithInvalidRules(t), true},
 		{"invalid dns rcodes", configWithInvalidRcodes(t), true},
@@ -169,6 +196,72 @@ discover_ptr = false
 	require.False(t, *cfg.Service.DiscoverPtr)
 }
 
+func TestLogMaxKeys(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceKeys string
+		wantSize    int
+		wantBackups *int
+	}{
+		{"size and backups set", "log_max_size_mb = 20\nlog_max_backups = 1", 20, intPtr(1)},
+		{"size zero, backups absent", "log_max_size_mb = 0", 0, nil},
+		{"backups zero", "log_max_backups = 0", 0, intPtr(0)},
+		{"the largest values the keys take", "log_max_size_mb = 1024\nlog_max_backups = 64", 1024, intPtr(64)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := configWithServiceKeys(t, tc.serviceKeys)
+			validate := validator.New()
+			require.NoError(t, ctrld.ValidateConfig(validate, cfg))
+			require.Equal(t, tc.wantSize, cfg.Service.LogMaxSizeMB)
+			if tc.wantBackups == nil {
+				require.Nil(t, cfg.Service.LogMaxBackups)
+				return
+			}
+			require.NotNil(t, cfg.Service.LogMaxBackups)
+			require.Equal(t, *tc.wantBackups, *cfg.Service.LogMaxBackups)
+		})
+	}
+}
+
+func TestLogMaxKeysOutOfRange(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceKeys string
+		wantField   string
+	}{
+		{"negative size", "log_max_size_mb = -1", "LogMaxSizeMB"},
+		{"negative backups", "log_max_backups = -1", "LogMaxBackups"},
+		{"size above the limit", "log_max_size_mb = 1025", "LogMaxSizeMB"},
+		{"backups above the limit", "log_max_backups = 65", "LogMaxBackups"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := configWithServiceKeys(t, tc.serviceKeys)
+			validate := validator.New()
+			err := ctrld.ValidateConfig(validate, cfg)
+			require.ErrorContains(t, err, tc.wantField)
+		})
+	}
+}
+
+func configWithServiceKeys(t *testing.T, serviceKeys string) *ctrld.Config {
+	t.Helper()
+	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
+	ctrld.InitConfig(v, "test_log_max_keys")
+	v.SetConfigType("toml")
+	require.NoError(t, v.ReadConfig(strings.NewReader("[service]\n"+serviceKeys+"\n")))
+	var cfg ctrld.Config
+	require.NoError(t, v.Unmarshal(&cfg))
+	return &cfg
+}
+
+func intPtr(n int) *int {
+	return &n
+}
+
 func defaultConfig(t *testing.T) *ctrld.Config {
 	v := viper.New()
 	ctrld.InitConfig(v, "test_load_default_config")
@@ -234,6 +327,19 @@ func invalidUpstreamMissingEndpoind(t *testing.T) *ctrld.Config {
 func invalidListenerIP(t *testing.T) *ctrld.Config {
 	cfg := defaultConfig(t)
 	cfg.Listener["0"].IP = "invalid ip"
+	return cfg
+}
+
+// configWithListenerKey moves the default listener to the given key.
+func configWithListenerKey(t *testing.T, key string) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Listener = map[string]*ctrld.ListenerConfig{key: cfg.Listener["0"]}
+	return cfg
+}
+
+func configWithNilListener(t *testing.T) *ctrld.Config {
+	cfg := defaultConfig(t)
+	cfg.Listener["0"] = nil
 	return cfg
 }
 
@@ -334,4 +440,32 @@ func configWithInvalidFlushCacheDomain(t *testing.T) *ctrld.Config {
 		cfg.Service.CacheFlushDomains[i] = fmt.Sprintf("%d.com", i)
 	}
 	return cfg
+}
+
+// FirstListenerKey returns the key of the lowest number, as it is in the
+// config, so a key such as "01" finds its own listener.
+func TestConfigFirstListenerKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		keys   []string
+		want   string
+		wantOK bool
+	}{
+		{"lowest number", []string{"abc", "10", "2"}, "2", true},
+		{"leading zero", []string{"01", "2"}, "01", true},
+		{"negative number", []string{"0", "-1"}, "-1", true},
+		{"no number", []string{"abc"}, "", false},
+		{"no listener", nil, "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &ctrld.Config{Listener: map[string]*ctrld.ListenerConfig{}}
+			for _, key := range tc.keys {
+				cfg.Listener[key] = &ctrld.ListenerConfig{}
+			}
+			key, ok := cfg.FirstListenerKey()
+			require.Equal(t, tc.wantOK, ok)
+			require.Equal(t, tc.want, key)
+		})
+	}
 }

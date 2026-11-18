@@ -18,19 +18,17 @@ The config file allows for advanced configuration of the `ctrld` utility to cove
 
  - `/etc/controld` on *nix.
  - User's home directory on Windows.
- - Same directory with `ctrld` binary on these routers:
-   - `ddwrt`
-   - `merlin`
-   - `freshtomato`
  - Current directory.
 
 The user can choose to override default value using command line `--config` or `-c`:
 
 ```shell
-ctrld run --config /path/to/myconfig.toml
+ctrld-client run --config /path/to/myconfig.toml
 ```
 
 If no configuration files found, a default `ctrld.toml` file will be created in the current directory.
+
+The mobile library (iOS and Android) looks for the configuration file in `HomeDir`, the folder that the app gives at start. If it finds no file, it creates the default `ctrld.toml` in `HomeDir`.
 
 In pre v1.1.0, `config.toml` file was used, so for compatibility, `ctrld` will still read `config.toml`
 if it's existed.
@@ -109,6 +107,45 @@ The `[service]` section controls general behaviors.
     log_path = "log.txt"
 ```
 
+### allow_unprivileged_log_send
+
+macOS only. Default: `false`. The configuration that ctrld generates from the
+Control D API never enables it. An administrator opts in through the device's
+custom ctrld configuration in the Control D dashboard, which ctrld writes to its
+root-owned configuration file:
+
+```toml
+[service]
+    allow_unprivileged_log_send = true
+```
+
+Restart the service as administrator after enabling, on a new or an existing
+install. At startup ctrld rewrites the configuration file whenever the API answer
+differs from it, so a custom config added, changed or removed after installation
+reaches the file. Standard users can then run
+`ctrld log send` without `sudo`. **Every local-user process can trigger a
+machine-wide diagnostic upload to Control D**, not just the interactive user.
+This grants upload permission, not permission to read logs or administer ctrld.
+`--full`, `log view`, `log tail`, and other privileged commands remain restricted.
+Other platforms retain their existing behavior.
+
+This requires Control D mode (`--cd`) with a custom configuration, and file-backed logs.
+The config, log files, rotated logs, and every parent directory must be root-owned,
+not group/world writable, and free of extended ACLs. Symlinks and hard-linked log
+files are refused; only the standard macOS `/var`, `/etc`, and `/tmp` aliases are
+canonicalized. A user-owned home directory is not a safe service log location.
+Do not loosen log permissions or the administrative control socket to enable this
+feature. The service does not repair unsafe directories automatically.
+
+The setting and source paths are captured at startup. Reload does not activate a
+previously disabled socket or change its sources. Removing the setting or setting
+it to `false` in the protected config causes the next upload to be refused even
+before restart; an upload already in progress may finish. Restart after disabling
+to remove the socket. Service stop cancels and joins active delegated requests.
+
+See [Standard-user uploads on macOS](runtime-internal-logging.md#standard-user-uploads-on-macos)
+for bounds, refusal messages, and the native QA release gate.
+
 ### log_level
 Logging level you wish to enable.
 
@@ -121,9 +158,29 @@ Logging level you wish to enable.
 ### log_path
 Relative or absolute path of the log file. 
 
+Point `log_path` at a file that no other program rotates. ctrld renames `<log_path>.1` to `<log_path>.N` and uploads these files. A lower `log_max_backups` leaves the older numbered `log_path` files in place, but ctrld removes the extra numbered files of its internal logs.
+
+ctrld removes the secrets, the URL paths, and the resolver IDs from each line of this file, as [Redaction](runtime-internal-logging.md#redaction) describes.
+
 - Type: string
 - Required: no
 - Default: ""
+
+### log_max_size_mb
+Maximum size of the debug log file in MB. When the file reaches this size, ctrld rotates it. This limit also applies to the `log_path` file.
+
+- Type: integer
+- Required: no
+- Valid values: 1 to 1024
+- Default: 10
+
+### log_max_backups
+Number of rotated debug log files that ctrld keeps. If the value is 0, ctrld keeps no rotated file. This number also applies to the `log_path` file.
+
+- Type: integer
+- Required: no
+- Valid values: 0 to 64
+- Default: 4
 
 ### cache_enable
 When `cache_enable = true`, all resolved DNS query responses will be cached for duration of the upstream record TTLs.
@@ -261,6 +318,21 @@ Specifying the `ip` and `port` of the Prometheus metrics server. The Prometheus 
 - Required: no
 - Default: ""
 
+### intercept_mode
+How ctrld captures the host's DNS traffic. `dns` intercepts it in the OS packet filter (WFP on Windows, pf on macOS) and
+forwards VPN internal domains to the VPN's DNS server; `hard` intercepts it with no VPN split routing; `off` uses interface
+DNS mode, setting ctrld's listener as the DNS server of the network interfaces.
+
+The `--intercept-mode` flag takes precedence over this value. When neither is set, the default applies: `dns` on macOS and
+Windows desktop editions, interface DNS mode elsewhere, Windows Server included. An installed service that predates the
+default keeps interface DNS mode. `ctrld-client start --intercept-mode off` writes `off` here, because an unset value means the
+default. See [Intercept Mode Default](intercept-mode-default.md).
+
+- Type: string
+- Required: no
+- Valid values: `off`, `dns`, `hard`
+- Default: `dns` for new installations on macOS and Windows desktop editions; interface DNS mode elsewhere, Windows Server included, and for services installed before this default
+
 ### dns_watchdog_enabled
 Watches all physical interfaces for DNS changes and reverts them to ctrld's settings.The DNS watchdog process only runs on Windows and MacOS.
 
@@ -293,7 +365,23 @@ If a remote upstream fails to resolve a query or is unreachable, `ctrld` will fo
 
 - Type: boolean
 - Required: no
-- Default: true on Windows, MacOS and non-router Linux.
+- Default: true on Windows, MacOS and Linux.
+
+### nrpt_recovery_max_attempts
+Windows DNS intercept mode uses NRPT health probes and recovery when Windows stops routing queries to the local `ctrld` listener. This limits how many consecutive recovery flows can run before `ctrld` enters a cooldown and stops making policy/Dnscache changes.
+
+Set to `0` to disable this circuit breaker and keep retrying indefinitely.
+
+- Type: integer
+- Required: no
+- Default: 0 (unlimited, current behavior)
+
+### nrpt_recovery_cooldown
+Cooldown duration after `nrpt_recovery_max_attempts` consecutive Windows NRPT recovery flows. During cooldown, `ctrld` logs the suppressed recovery and avoids additional `RefreshPolicyEx`, Dnscache `paramchange`, and DNS cache flush calls.
+
+- Type: time duration string
+- Required: no
+- Default: 30m
 
 ## Upstream
 The `[upstream]` section specifies the DNS upstream servers that `ctrld` will forward DNS requests to.
@@ -448,6 +536,10 @@ Specifies the network addresses that the `listener` will accept requests from. Y
 ## listener
 The `[listener]` section specifies the ip and port of the local DNS server. You can have multiple listeners, and attached policies.
 
+A reload does not start, stop, or move a listener. If the new configuration adds a listener, removes a listener, or changes the address of a listener, `ctrld reload` restarts the service. A reload from the Control D API or from the `SIGUSR1` signal refuses a configuration that removes a running listener. ctrld then keeps the running configuration and logs the listener that is missing.
+
+On iOS and Android in Control D mode, ctrld serves only the first listener of the configuration, which is the listener with the lowest number, at a fixed address. A reload there keeps that address and serves the first listener of the new configuration, with its settings and its default upstream. For example, if the new configuration has only `listener.1`, the running DNS server serves `listener.1`, and requests that match no policy rule go to `upstream.1`. So a reload on mobile gives the same listener as a restart, and it does not refuse a configuration for a missing listener.
+
 ```toml
 [listener.0]
   ip = "127.0.0.1"
@@ -458,6 +550,21 @@ The `[listener]` section specifies the ip and port of the local DNS server. You 
   port = 53
   restricted = true
 ```
+
+Each listener key is a number: `0`, `1`, `2`, and so on. A key has no sign and no leading zero. The number also selects the default upstream of the listener. For example, `listener.1` sends a request that matches no policy rule to `upstream.1`.
+
+ctrld rejects a configuration that has any other listener key, such as `[listener.main]`, `[listener.01]`, or `[listener.-1]`. A valid key such as `[listener.0]` next to the bad key does not change this. Earlier versions of ctrld started with some of these configurations. Now a bad key has these results:
+
+- On desktop, ctrld does not start. It exits with code 59 (`UNCLASSIFIED`). The log and `provision_result.json` in the home directory of ctrld name the bad key. See [Provisioning failure codes](provisioning-failure-codes.md).
+- A reload of the configuration file does not apply it. ctrld keeps the running configuration, and the log names the bad key.
+- A custom configuration from the Control D API with a bad key does not apply. At start, and at a reload from `ctrld reload` or the `SIGUSR1` signal, ctrld uses the configuration that it generates for the resolver. The periodic check of the API keeps the running configuration.
+
+To fix the configuration file:
+
+1. Change each listener key that is not a number to a number that no other listener uses. For example, change `[listener.main]` to `[listener.1]`.
+2. Change the tables of that listener too. For example, change `[listener.main.policy]` to `[listener.1.policy]`.
+3. Make sure that an upstream with the same number exists, for example `[upstream.1]`. A policy rule can also send the requests of the listener to other upstreams.
+4. Start ctrld again, for example with `ctrld-client start`.
 
 ### ip
 IP address that serves the incoming requests. If `ip` is empty, ctrld will listen on all available addresses.

@@ -6,7 +6,7 @@ import (
 )
 
 // setResolvConf sets the content of resolv.conf file using the given nameservers list.
-func setResolvConf(_ *net.Interface, _ []netip.Addr) error {
+func (p *prog) setResolvConf(_ *net.Interface, _ []netip.Addr) error {
 	return nil
 }
 

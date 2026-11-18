@@ -1,16 +1,46 @@
 package cli
 
 import (
-	"runtime"
+	"context"
+	"net"
+	"net/url"
+	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
 
 	"github.com/Control-D-Inc/ctrld"
 )
+
+func TestErrNetworkErrorTreatsNoRouteAsNetworkError(t *testing.T) {
+	err := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH}
+	assert.True(t, errNetworkError(err))
+	assert.True(t, errUrlNetworkError(&url.Error{Op: "Get", URL: "https://dns.controld.com", Err: err}))
+}
+
+func TestSleepWithContext(t *testing.T) {
+	assert.True(t, sleepWithContext(context.Background(), time.Millisecond))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	assert.False(t, sleepWithContext(ctx, time.Minute))
+	assert.Less(t, time.Since(start), 100*time.Millisecond)
+}
+
+func TestUnreachableRecoveryBackoff(t *testing.T) {
+	// Streak starts at the base cadence and doubles each attempt, capped at the max.
+	assert.Equal(t, checkUpstreamBackoffSleep, unreachableRecoveryBackoff(0))
+	assert.Equal(t, checkUpstreamBackoffSleep, unreachableRecoveryBackoff(1))
+	assert.Equal(t, 2*checkUpstreamBackoffSleep, unreachableRecoveryBackoff(2))
+	assert.Equal(t, 4*checkUpstreamBackoffSleep, unreachableRecoveryBackoff(3))
+	assert.Equal(t, checkUpstreamUnreachableBackoffMax, unreachableRecoveryBackoff(100))
+}
 
 func Test_prog_dnsWatchdogEnabled(t *testing.T) {
 	p := &prog{cfg: &ctrld.Config{}}
@@ -174,10 +204,10 @@ func Test_shouldUpgrade(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			// Create test logger
-			testLogger := zerolog.New(zerolog.NewTestWriter(t)).With().Logger()
+			testLogger := &ctrld.Logger{Logger: zap.NewNop()}
 
 			// Call the function and capture the result
-			result := shouldUpgrade(tc.versionTarget, tc.currentVersion, &testLogger)
+			result := shouldUpgrade(tc.versionTarget, tc.currentVersion, testLogger)
 
 			// Assert the expected result
 			assert.Equal(t, tc.shouldUpgrade, result, tc.description)
@@ -186,10 +216,6 @@ func Test_shouldUpgrade(t *testing.T) {
 }
 
 func Test_selfUpgradeCheck(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipped due to Windows file locking issue on Github Action runners")
-	}
-
 	// Helper function to create a version
 	makeVersion := func(v string) *semver.Version {
 		ver, err := semver.NewVersion(v)
@@ -226,10 +252,10 @@ func Test_selfUpgradeCheck(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			// Create test logger
-			testLogger := zerolog.New(zerolog.NewTestWriter(t)).With().Logger()
+			testLogger := &ctrld.Logger{Logger: zap.NewNop()}
 
 			// Call the function and capture the result
-			result := selfUpgradeCheck(tc.versionTarget, tc.currentVersion, &testLogger)
+			result := selfUpgradeCheck(tc.versionTarget, tc.currentVersion, testLogger)
 
 			// Assert the expected result
 			assert.Equal(t, tc.shouldUpgrade, result, tc.description)
@@ -238,10 +264,6 @@ func Test_selfUpgradeCheck(t *testing.T) {
 }
 
 func Test_performUpgrade(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipped due to Windows file locking issue on Github Action runners")
-	}
-
 	tests := []struct {
 		name           string
 		versionTarget  string
@@ -262,12 +284,34 @@ func Test_performUpgrade(t *testing.T) {
 		},
 	}
 
+	// newUpgradeCmd is stubbed in TestMain so performUpgrade does not re-exec
+	// (and fork-bomb) the test binary; see the comment there.
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			// Create test logger
+			testLogger := &ctrld.Logger{Logger: zap.NewNop()}
 			// Call the function and capture the result
-			result := performUpgrade(tc.versionTarget)
+			result := performUpgrade(tc.versionTarget, testLogger)
 			assert.Equal(t, tc.expectedResult, result, tc.description)
 		})
 	}
+}
+
+// On mobile the app store updates ctrld with the app, and the sandbox does not
+// let ctrld start the upgrade command.
+func Test_selfUpgradeCheckSkipsMobile(t *testing.T) {
+	oldIsMobile, oldUpgradeCmd := isMobile, newUpgradeCmd
+	t.Cleanup(func() { isMobile, newUpgradeCmd = oldIsMobile, oldUpgradeCmd })
+	isMobile = func() bool { return true }
+	started := false
+	newUpgradeCmd = func(exe string) *exec.Cmd {
+		started = true
+		return exec.Command(exe, "-test.run=^$")
+	}
+
+	upgraded := selfUpgradeCheck("v2.0.1", semver.MustParse("v2.0.0"), &ctrld.Logger{Logger: zap.NewNop()})
+
+	assert.False(t, upgraded)
+	assert.False(t, started, "the upgrade command was made on mobile")
 }

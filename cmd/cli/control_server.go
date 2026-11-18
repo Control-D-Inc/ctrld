@@ -10,9 +10,10 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
+	"sync/atomic"
 	"time"
 
-	"github.com/kardianos/service"
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/Control-D-Inc/ctrld"
@@ -20,34 +21,50 @@ import (
 )
 
 const (
-	contentTypeJson  = "application/json"
-	listClientsPath  = "/clients"
-	startedPath      = "/started"
-	reloadPath       = "/reload"
-	deactivationPath = "/deactivation"
-	cdPath           = "/cd"
-	ifacePath        = "/iface"
-	viewLogsPath     = "/log/view"
-	sendLogsPath     = "/log/send"
+	contentTypeJson   = "application/json"
+	listClientsPath   = "/clients"
+	startedPath       = "/started"
+	reloadPath        = "/reload"
+	deactivationPath  = "/deactivation"
+	cdPath            = "/cd"
+	versionTargetPath = "/version_target"
+	ifacePath         = "/iface"
+	viewLogsPath      = "/log/view"
+	sendLogsPath      = "/log/send"
+	tailLogsPath      = "/log/tail"
 )
 
 type ifaceResponse struct {
-	Name string `json:"name"`
-	All  bool   `json:"all"`
-	OK   bool   `json:"ok"`
+	Name          string `json:"name"`
+	All           bool   `json:"all"`
+	OK            bool   `json:"ok"`
+	InterceptMode string `json:"intercept_mode,omitempty"` // "dns", "hard", or "" (not intercepting)
+	// InterceptModeSource is where InterceptMode came from: "flag", "config",
+	// or "default" (the platform default). Empty from a service that predates it.
+	InterceptModeSource string `json:"intercept_mode_source,omitempty"`
 }
 
+// controlServer represents an HTTP server for handling control requests
 type controlServer struct {
 	server *http.Server
 	mux    *http.ServeMux
 	addr   string
+	// cancel ends the context of every request, so a handler that watches its
+	// context stops with the server. Shutdown does not end the context.
+	cancel context.CancelFunc
 }
 
+// newControlServer creates a new control server instance
 func newControlServer(addr string) (*controlServer, error) {
 	mux := http.NewServeMux()
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &controlServer{
-		server: &http.Server{Handler: mux},
+		server: &http.Server{
+			Handler:     mux,
+			BaseContext: func(net.Listener) context.Context { return ctx },
+		},
 		mux:    mux,
+		cancel: cancel,
 	}
 	s.addr = addr
 	return s, nil
@@ -56,18 +73,24 @@ func newControlServer(addr string) (*controlServer, error) {
 func (s *controlServer) start() error {
 	_ = os.Remove(s.addr)
 	unixListener, err := net.Listen("unix", s.addr)
-	if l, ok := unixListener.(*net.UnixListener); ok {
-		l.SetUnlinkOnClose(true)
-	}
 	if err != nil {
 		return err
+	}
+	// Restrict socket permissions to owner-only (0600) so that only the
+	// process owner (typically root) can connect. Defense-in-depth since
+	// the control server endpoints carry no authentication of their own.
+	if err := os.Chmod(s.addr, 0600); err != nil {
+		return err
+	}
+	if l, ok := unixListener.(*net.UnixListener); ok {
+		l.SetUnlinkOnClose(true)
 	}
 	go s.server.Serve(unixListener)
 	return nil
 }
 
 func (s *controlServer) stop() error {
-	_ = os.Remove(s.addr)
+	s.cancel()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
 	defer cancel()
 	return s.server.Shutdown(ctx)
@@ -77,36 +100,90 @@ func (s *controlServer) register(pattern string, handler http.Handler) {
 	s.mux.Handle(pattern, jsonResponse(handler))
 }
 
+// abortStoppedRequest ends a request whose context ended with no answer. The
+// context ends when the control server stops or the client goes away. A
+// handler that only returns still sends 200, and a stopping process must not
+// answer /started: upgrade and restart take a 200 as "the new binary is
+// ready", and the start check takes any answer as "the service is up".
+func abortStoppedRequest() {
+	panic(http.ErrAbortHandler)
+}
+
+// refreshDeactivationPin fetches the deactivation PIN from the API and stores
+// it. It does not store an answer that comes after ctx ended, and then returns
+// the error of ctx. ctx ends when the control server stops. On mobile, the next
+// run may already be active then, and the PIN globals belong to it.
+//
+// A client that gives up does not end ctx while the handler has not read the
+// request body, because net/http sees a closed connection only after the body.
+// That answer still belongs to the run that is active, so it can be stored.
+func (p *prog) refreshDeactivationPin(ctx context.Context) error {
+	rcReq := &controld.ResolverConfigRequest{
+		RawUID:   cdUID,
+		Version:  appVersion,
+		Metadata: ctrld.SystemMetadataRuntime(ctx),
+	}
+	rc, err := fetchResolverConfig(ctx, rcReq, cdDev)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		p.Warn().Err(ctxErr).Msg("Deactivation request ended before the pin code answer, not storing it")
+		return ctxErr
+	}
+	if rc == nil {
+		p.Warn().Err(err).Msg("Could not re-fetch deactivation pin code")
+		return nil
+	}
+	deactivationPinKnown.Store(true)
+	if rc.DeactivationPin != nil {
+		cdDeactivationPin.Store(*rc.DeactivationPin)
+	} else {
+		cdDeactivationPin.Store(defaultDeactivationPin)
+	}
+	// Every resolver-config response carries the organization's allowed
+	// destinations, including this one, so apply them rather than discarding
+	// a fresher list until the next scheduled refresh converges.
+	//
+	// Only the destinations: p.rc is deliberately left alone. The scheduled
+	// refresh decides whether to reload ctrld by comparing the response
+	// against p.rc, so storing this one here would let an exclude-list change
+	// be compared away and never reloaded. The destination set needs no
+	// reload - it is enforced directly and applying it is idempotent.
+	p.applyAllowedDestinations(p.firewallAllowList(), rc.DestinationIPs)
+	return nil
+}
+
+// sendLogsToAPI uploads a log. It is a variable so tests can hold an upload.
+var sendLogsToAPI = controld.SendLogs
+
 func (p *prog) registerControlServerHandler() {
 	p.cs.register(listClientsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		mainLog.Load().Debug().Msg("handling list clients request")
+		p.Debug().Msg("Handling list clients request")
 
 		clients := p.ciTable.ListClients()
-		mainLog.Load().Debug().Int("client_count", len(clients)).Msg("retrieved clients list")
+		p.Debug().Int("client_count", len(clients)).Msg("Retrieved clients list")
 
 		sort.Slice(clients, func(i, j int) bool {
 			return clients[i].IP.Less(clients[j].IP)
 		})
-		mainLog.Load().Debug().Msg("sorted clients by IP address")
+		p.Debug().Msg("Sorted clients by IP address")
 
 		if p.metricsQueryStats.Load() {
-			mainLog.Load().Debug().Msg("metrics query stats enabled, collecting query counts")
+			p.Debug().Msg("Metrics query stats enabled, collecting query counts")
 
 			for idx, client := range clients {
-				mainLog.Load().Debug().
+				p.Debug().
 					Int("index", idx).
 					Str("ip", client.IP.String()).
 					Str("mac", client.Mac).
 					Str("hostname", client.Hostname).
-					Msg("processing client metrics")
+					Msg("Processing client metrics")
 
 				client.IncludeQueryCount = true
 				dm := &dto.Metric{}
 
 				if statsClientQueriesCount.MetricVec == nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Str("client_ip", client.IP.String()).
-						Msg("skipping metrics collection: MetricVec is nil")
+						Msg("Skipping metrics collection: MetricVec is nil")
 					continue
 				}
 
@@ -116,52 +193,58 @@ func (p *prog) registerControlServerHandler() {
 					client.Hostname,
 				)
 				if err != nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Err(err).
 						Str("client_ip", client.IP.String()).
 						Str("mac", client.Mac).
 						Str("hostname", client.Hostname).
-						Msg("failed to get metrics for client")
+						Msg("Failed to get metrics for client")
 					continue
 				}
 
 				if err := m.Write(dm); err == nil && dm.Counter != nil {
 					client.QueryCount = int64(dm.Counter.GetValue())
-					mainLog.Load().Debug().
+					p.Debug().
 						Str("client_ip", client.IP.String()).
 						Int64("query_count", client.QueryCount).
-						Msg("successfully collected query count")
+						Msg("Successfully collected query count")
 				} else if err != nil {
-					mainLog.Load().Debug().
+					p.Debug().
 						Err(err).
 						Str("client_ip", client.IP.String()).
-						Msg("failed to write metric")
+						Msg("Failed to write metric")
 				}
 			}
 		} else {
-			mainLog.Load().Debug().Msg("metrics query stats disabled, skipping query counts")
+			p.Debug().Msg("Metrics query stats disabled, skipping query counts")
 		}
 
 		if err := json.NewEncoder(w).Encode(&clients); err != nil {
-			mainLog.Load().Error().
+			p.Error().
 				Err(err).
 				Int("client_count", len(clients)).
-				Msg("failed to encode clients response")
+				Msg("Failed to encode clients response")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		mainLog.Load().Debug().
+		p.Debug().
 			Int("client_count", len(clients)).
-			Msg("successfully sent clients list response")
+			Msg("Successfully sent clients list response")
 	}))
 	p.cs.register(startedPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		status := http.StatusOK
 		select {
 		case <-p.onStartedDone:
-			w.WriteHeader(http.StatusOK)
 		case <-time.After(10 * time.Second):
-			w.WriteHeader(http.StatusRequestTimeout)
+			status = http.StatusRequestTimeout
+		case <-request.Context().Done():
 		}
+		// The wait can end as the server stops. The stop wins over any answer.
+		if request.Context().Err() != nil {
+			abortStoppedRequest()
+		}
+		w.WriteHeader(status)
 	}))
 	p.cs.register(reloadPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		listeners := make(map[string]*ctrld.ListenerConfig)
@@ -174,16 +257,25 @@ func (p *prog) registerControlServerHandler() {
 		}
 		oldSvc := p.cfg.Service
 		p.mu.Unlock()
-		if err := p.sendReloadSignal(); err != nil {
-			mainLog.Load().Err(err).Msg("could not send reload signal")
+		if err := p.sendReloadSignal(request.Context()); err != nil {
+			if request.Context().Err() != nil {
+				abortStoppedRequest()
+			}
+			p.Error().Err(err).Msg("Could not send reload signal")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		select {
-		case <-p.reloadDoneCh:
+		case done := <-p.reloadDoneCh:
+			if done.restartNeeded {
+				w.WriteHeader(http.StatusCreated)
+				return
+			}
 		case <-time.After(5 * time.Second):
-			http.Error(w, "timeout waiting for ctrld reload", http.StatusInternalServerError)
+			http.Error(w, "Timeout waiting for ctrld reload", http.StatusInternalServerError)
 			return
+		case <-request.Context().Done():
+			abortStoppedRequest()
 		}
 
 		p.mu.Lock()
@@ -216,19 +308,30 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 
-		// Re-fetch pin code from API.
-		if rc, err := controld.FetchResolverConfig(cdUID, rootCmd.Version, cdDev); rc != nil {
-			if rc.DeactivationPin != nil {
-				cdDeactivationPin.Store(*rc.DeactivationPin)
-			} else {
-				cdDeactivationPin.Store(defaultDeactivationPin)
-			}
-		} else {
-			mainLog.Load().Warn().Err(err).Msg("could not re-fetch deactivation pin code")
+		// Reject further attempts while locked out due to repeated wrong PINs.
+		if now := time.Now().Unix(); now < deactivationLockedUntil.Load() {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
 		}
 
-		// If pin code not set, allowing deactivation.
+		// A request that ended must not be checked: on mobile, the PIN and the
+		// lockout counters may belong to the next run already.
+		if err := p.refreshDeactivationPin(ctrld.LoggerCtx(request.Context(), p.logger.Load())); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+
+		// If pin code not set, allowing deactivation - but only when the API
+		// actually said so. A run that started on the configuration on disk
+		// during maintenance never asked, and the re-fetch above leaves the
+		// default untouched while the API stays away, so an unknown PIN would
+		// otherwise read as no PIN and authorize the deactivation it protects.
 		if !deactivationPinSet() {
+			if !deactivationPinKnown.Load() {
+				p.Warn().Msg("Cannot verify deactivation pin: no answer from the Control D API this run")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -236,7 +339,7 @@ func (p *prog) registerControlServerHandler() {
 		var req deactivationRequest
 		if err := json.NewDecoder(request.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusPreconditionFailed)
-			mainLog.Load().Err(err).Msg("invalid deactivation request")
+			p.Error().Err(err).Msg("Invalid deactivation request")
 			return
 		}
 
@@ -244,6 +347,7 @@ func (p *prog) registerControlServerHandler() {
 		switch req.Pin {
 		case cdDeactivationPin.Load():
 			code = http.StatusOK
+			deactivationFailedAttempts.Store(0)
 			select {
 			case p.pinCodeValidCh <- struct{}{}:
 			default:
@@ -251,6 +355,11 @@ func (p *prog) registerControlServerHandler() {
 		case defaultDeactivationPin:
 			// If the pin code was set, but users do not provide --pin, return proper code to client.
 			code = http.StatusBadRequest
+		default:
+			if deactivationFailedAttempts.Add(1) >= deactivationMaxFailedAttempts {
+				deactivationLockedUntil.Store(time.Now().Unix() + deactivationLockoutSeconds)
+				deactivationFailedAttempts.Store(0)
+			}
 		}
 		w.WriteHeader(code)
 	}))
@@ -262,15 +371,28 @@ func (p *prog) registerControlServerHandler() {
 		}
 		w.WriteHeader(http.StatusBadRequest)
 	}))
+	p.cs.register(versionTargetPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(versionTarget()))
+	}))
 	p.cs.register(ifacePath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		res := &ifaceResponse{Name: iface}
 		// p.setDNS is only called when running as a service
-		if !service.Interactive() {
-			<-p.csSetDnsDone
+		if runningAsService() {
+			select {
+			case <-p.csSetDnsDone:
+			case <-request.Context().Done():
+				abortStoppedRequest()
+			}
 			if p.csSetDnsOk {
 				res.Name = p.runningIface
 				res.All = p.requiredMultiNICsConfig
 				res.OK = true
+				// Report intercept mode to the start command for proper log output.
+				if interceptMode == "dns" || interceptMode == "hard" {
+					res.InterceptMode = interceptMode
+					res.InterceptModeSource = interceptModeSource
+				}
 			}
 		}
 		if err := json.NewEncoder(w).Encode(res); err != nil {
@@ -279,63 +401,303 @@ func (p *prog) registerControlServerHandler() {
 			return
 		}
 	}))
-	p.cs.register(viewLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		lr, err := p.logReader()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		defer lr.r.Close()
-		if lr.size == 0 {
-			w.WriteHeader(http.StatusMovedPermanently)
-			return
-		}
-		data, err := io.ReadAll(lr.r)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("could not read log: %v", err), http.StatusInternalServerError)
-			return
-		}
-		if err := json.NewEncoder(w).Encode(&logViewResponse{Data: string(data)}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			http.Error(w, fmt.Sprintf("could not marshal log data: %v", err), http.StatusInternalServerError)
-			return
-		}
-	}))
+	p.cs.register(viewLogsPath, http.HandlerFunc(p.handleLogView))
 	p.cs.register(sendLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if time.Since(p.internalLogSent) < logWriterSentInterval {
+		if !p.logUpload.reserve() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		r, err := p.logReader()
+		defer p.logUpload.release()
+		r, err := p.logReader(wantFullLogs(request), true)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if r.size == 0 {
+			r.r.Close()
 			w.WriteHeader(http.StatusMovedPermanently)
 			return
 		}
+		// The upload loses its color codes on the way, so the answer reports
+		// the bytes that went out, not the bytes that the files hold.
+		upload := &countingReadCloser{rc: r.r}
 		req := &controld.LogsRequest{
 			UID:  cdUID,
-			Data: r.r,
+			Data: upload,
 		}
-		mainLog.Load().Debug().Msg("sending log file to ControlD server")
-		resp := logSentResponse{Size: r.size}
-		if err := controld.SendLogs(req, cdDev); err != nil {
-			mainLog.Load().Error().Msgf("could not send log file to ControlD server: %v", err)
-			resp.Error = err.Error()
+		p.Debug().Msg("Sending log file to ControlD server")
+		resp := logSentResponse{}
+		loggerCtx := ctrld.LoggerCtx(request.Context(), p.logger.Load())
+		if err := sendLogsToAPI(loggerCtx, req, cdDev); err != nil {
+			p.Error().Msgf("Could not send log file to ControlD server: %v", err)
+			// The CLI prints the answer, and it may not know the secrets
+			// that the service knows.
+			resp.Error = string(redactLogLine([]byte(err.Error())))
 			w.WriteHeader(http.StatusInternalServerError)
 		} else {
-			mainLog.Load().Debug().Msg("sending log file successfully")
+			p.Debug().Msg("Sending log file successfully")
 			w.WriteHeader(http.StatusOK)
 		}
+		resp.Size = upload.count()
 		if err := json.NewEncoder(w).Encode(&resp); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
-		p.internalLogSent = time.Now()
+	}))
+	p.cs.register(tailLogsPath, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		// Determine logging mode and validate before starting the stream.
+		var lw *logWriter
+		useInternalLog := p.needInternalLogging()
+		if useInternalLog {
+			p.mu.Lock()
+			lw = p.internalLogWriter
+			p.mu.Unlock()
+			if lw == nil {
+				w.WriteHeader(http.StatusMovedPermanently)
+				return
+			}
+		} else if p.cfg.Service.LogPath == "" {
+			// No logging configured at all.
+			w.WriteHeader(http.StatusMovedPermanently)
+			return
+		}
+
+		// Parse optional "lines" query param for initial context.
+		numLines := 10
+		if v := request.URL.Query().Get("lines"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				numLines = n
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+
+		if useInternalLog {
+			// Internal logging mode: subscribe to the logWriter.
+
+			// Send last N lines as initial context.
+			if numLines > 0 {
+				if tail := lw.tailLastLines(numLines); len(tail) > 0 {
+					w.Write(tail)
+					flusher.Flush()
+				}
+			}
+
+			ch, unsub := lw.Subscribe()
+			defer unsub()
+			for {
+				select {
+				case data, ok := <-ch:
+					if !ok {
+						return
+					}
+					if _, err := w.Write(data); err != nil {
+						return
+					}
+					flusher.Flush()
+				case <-request.Context().Done():
+					return
+				}
+			}
+		} else {
+			// File-based logging mode: tail the log file.
+			followLogFile(request.Context(), w, flusher, normalizeLogFilePath(p.cfg.Service.LogPath), numLines)
+		}
 	}))
 }
 
+// jsonStringChunkSize bounds the memory that one log view answer needs. A log
+// of tens of megabytes must not get a second copy in the answer.
+const jsonStringChunkSize = 32 * 1024
+
+// wantFullLogs reports whether the request asks for every log file instead of
+// the newest debug bytes.
+func wantFullLogs(r *http.Request) bool {
+	return r.URL.Query().Get("full") == "1"
+}
+
+// handleLogView answers with the log bytes in the data field. It writes the
+// body while it reads the log, so the answer needs no copy of the whole log.
+func (p *prog) handleLogView(w http.ResponseWriter, r *http.Request) {
+	lr, err := p.logReader(wantFullLogs(r), false)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer lr.r.Close()
+	if lr.size == 0 {
+		w.WriteHeader(http.StatusMovedPermanently)
+		return
+	}
+	w.Header().Set("Content-Type", contentTypeJson)
+	if _, err := io.WriteString(w, `{"data":`); err != nil {
+		return
+	}
+	if err := writeJSONString(w, lr.r); err != nil {
+		// The answer is on its way, so it can only end short. This line tells
+		// the operator why.
+		p.Error().Err(err).Msg("Could not send log view answer")
+		return
+	}
+	_, _ = io.WriteString(w, `}`)
+}
+
+// writeJSONString writes what r yields as one JSON string, in chunks.
+func writeJSONString(w io.Writer, r io.Reader) error {
+	if _, err := io.WriteString(w, `"`); err != nil {
+		return err
+	}
+	chunk := make([]byte, jsonStringChunkSize)
+	for {
+		n, readErr := r.Read(chunk)
+		if n > 0 {
+			if err := writeJSONStringChunk(w, chunk[:n]); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	_, err := io.WriteString(w, `"`)
+	return err
+}
+
+// writeJSONStringChunk writes one chunk and escapes the bytes that a JSON
+// string cannot carry. It writes the bytes between two escapes in one call.
+func writeJSONStringChunk(w io.Writer, chunk []byte) error {
+	start := 0
+	for i, b := range chunk {
+		escaped := jsonStringEscape(b)
+		if escaped == "" {
+			continue
+		}
+		if _, err := w.Write(chunk[start:i]); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, escaped); err != nil {
+			return err
+		}
+		start = i + 1
+	}
+	_, err := w.Write(chunk[start:])
+	return err
+}
+
+// jsonStringEscape returns the escape of one byte, or an empty string for a
+// byte that a JSON string carries as it is. Every byte of a multi-byte
+// character is above 0x1f, so a chunk that ends inside a character still
+// writes the character whole.
+func jsonStringEscape(b byte) string {
+	switch b {
+	case '"':
+		return `\"`
+	case '\\':
+		return `\\`
+	case '\n':
+		return `\n`
+	case '\r':
+		return `\r`
+	case '\t':
+		return `\t`
+	}
+	if b < 0x20 {
+		return fmt.Sprintf(`\u%04x`, b)
+	}
+	return ""
+}
+
+// countingReadCloser counts the bytes that the HTTP client reads from an
+// upload. It closes the log files behind the upload, because the client only
+// closes the body it was given.
+type countingReadCloser struct {
+	rc io.ReadCloser
+	n  atomic.Int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error {
+	return c.rc.Close()
+}
+
+// count reports the bytes read so far.
+func (c *countingReadCloser) count() int64 {
+	return c.n.Load()
+}
+
+// tailFileLastLines reads the last n lines from a file and returns them.
+// The file position is left at the end of the file after this call.
+func tailFileLastLines(f *os.File, n int) []byte {
+	stat, err := f.Stat()
+	if err != nil || stat.Size() == 0 {
+		return nil
+	}
+
+	// Read from the end in chunks to find the last n lines.
+	const chunkSize = 4096
+	fileSize := stat.Size()
+	var lines []byte
+	offset := fileSize
+	count := 0
+
+	for offset > 0 && count <= n {
+		readSize := int64(chunkSize)
+		if readSize > offset {
+			readSize = offset
+		}
+		offset -= readSize
+		buf := make([]byte, readSize)
+		nRead, err := f.ReadAt(buf, offset)
+		if err != nil && err != io.EOF {
+			break
+		}
+		buf = buf[:nRead]
+		lines = append(buf, lines...)
+
+		// Count newlines in this chunk.
+		for _, b := range buf {
+			if b == '\n' {
+				count++
+			}
+		}
+	}
+
+	// Trim to last n lines.
+	idx := 0
+	nlCount := 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i] == '\n' {
+			nlCount++
+			if nlCount == n+1 {
+				idx = i + 1
+				break
+			}
+		}
+	}
+	lines = lines[idx:]
+
+	// Seek to end of file for subsequent reads.
+	f.Seek(0, io.SeekEnd)
+	return lines
+}
+
+// jsonResponse wraps an HTTP handler to set JSON content type
 func jsonResponse(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
