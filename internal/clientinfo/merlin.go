@@ -60,7 +60,10 @@ func (m *merlinDiscover) parseMerlinCustomClientList(data string) {
 		if len(parts) < 2 || len(parts[0]) == 0 || len(parts[1]) == 0 {
 			continue
 		}
-		hostname := normalizeHostname(parts[0])
+		// custom_clientlist stores user-defined display names, not DNS hostnames.
+		// Preserve them verbatim so dots in friendly names (for example,
+		// "Device 2.5Gbps") are not mistaken for DNS suffix separators.
+		hostname := parts[0]
 		mac := strings.ToLower(parts[1])
 		m.hostname.Store(mac, hostname)
 	}
