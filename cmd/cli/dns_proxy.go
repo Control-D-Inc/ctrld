@@ -684,9 +684,12 @@ func (p *prog) isAdDomainQuery(msg *dns.Msg) bool {
 	return dns.IsSubDomain(p.adDomain, cDomainName)
 }
 
-// canonicalName returns canonical name from FQDN with "." trimmed.
+// canonicalName returns a canonical name from an FQDN, preserving the root zone ".".
 func canonicalName(fqdn string) string {
 	q := strings.TrimSpace(fqdn)
+	if q == "." {
+		return q
+	}
 	q = strings.TrimSuffix(q, ".")
 	// https://datatracker.ietf.org/doc/html/rfc4343
 	q = strings.ToLower(q)

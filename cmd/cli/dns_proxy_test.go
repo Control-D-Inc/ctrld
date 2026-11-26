@@ -73,6 +73,12 @@ func Test_canonicalName(t *testing.T) {
 	}
 }
 
+func Test_canonicalNameRootZone(t *testing.T) {
+	if got := canonicalName("."); got != "." {
+		t.Errorf("canonicalName(\".\") = %q, want \".\"", got)
+	}
+}
+
 func Test_prog_upstreamFor(t *testing.T) {
 	cfg := testhelper.SampleConfig(t)
 	cfg.Service.LeakOnUpstreamFailure = func(v bool) *bool { return &v }(false)
