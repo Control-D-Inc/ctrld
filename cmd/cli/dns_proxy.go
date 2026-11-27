@@ -199,6 +199,7 @@ func (p *prog) serveDNS(listenerNum string) error {
 	}
 
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
+		w = udpSizeResponseWriter{ResponseWriter: w, request: m}
 		// Before the semaphore: a returned query of ctrld's own must be answered
 		// even when every slot is held by the queries waiting for it.
 		if p.handleSelfQuery(w, m) {
@@ -3094,4 +3095,29 @@ func (p *prog) isAdOSResolverLookup(upstreams []string, msg *dns.Msg) bool {
 // Active Directory domain. A public answer for such a name is never correct.
 func (p *prog) isAdDomainLookup(msg *dns.Msg) bool {
 	return len(msg.Question) > 0 && p.isAdDomainQuery(msg)
+}
+
+type udpSizeResponseWriter struct {
+	dns.ResponseWriter
+	request *dns.Msg
+}
+
+func (w udpSizeResponseWriter) WriteMsg(answer *dns.Msg) error {
+	if _, ok := w.RemoteAddr().(*net.UDPAddr); !ok {
+		return w.ResponseWriter.WriteMsg(answer)
+	}
+
+	size := dns.MinMsgSize // 512 without EDNS
+	if opt := w.request.IsEdns0(); opt != nil {
+		size = int(opt.UDPSize())
+		if size < dns.MinMsgSize {
+			size = dns.MinMsgSize
+		}
+	}
+
+	// Never mutate the original upstream or cached message.
+	reply := answer.Copy()
+	reply.Truncate(size)
+
+	return w.ResponseWriter.WriteMsg(reply)
 }
